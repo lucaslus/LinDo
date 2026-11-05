@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -75,6 +76,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -435,7 +437,7 @@ private fun LinearPulseLoadingFooter(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        LinDoMascot(state = state, compact = true, size = 34.dp, animate = isLoadingMore || isError)
+        LinDoMascot(state = state, compact = true, size = 24.dp, animate = isLoadingMore || isError)
         Spacer(Modifier.width(8.dp))
         Text(text = when {
             isError -> errorText
@@ -476,7 +478,7 @@ private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 44.dp)
+            LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 28.dp)
             Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -3612,6 +3614,8 @@ private fun CommunityTopicReaderPane(
             itemsIndexed(posts, key = { _, post -> post.id }) { _, post ->
                 CommunityPostFloor(
                     post = post,
+                    onOpenWebUrl = onOpenWebUrl,
+                    originalUrl = "https://linux.do/t/topic/${summary.id}/${post.postNumber}",
                     opUsername = op.username,
                     fontScale = fontScale,
                     enableAnimations = enableAnimations,
@@ -4006,7 +4010,9 @@ private fun CommunityPostFloor(
     onDeletePost: (PostItemModel) -> Unit = {},
     onReplyFloor: (PostItemModel) -> Unit,
     onQuoteFloor: (PostItemModel) -> Unit,
-    onRequestLogin: () -> Unit
+    onRequestLogin: () -> Unit,
+    onOpenWebUrl: (String) -> Unit = {},
+    originalUrl: String? = null
 ) {
     val palette = LocalPalette.current
     val clipboardManager = LocalClipboardManager.current
@@ -4224,197 +4230,7 @@ private fun CommunityPostFloor(
 
         Spacer(modifier = Modifier.height(11.dp))
 
-        // 2. AST 正文块渲染（1:1 还原 Linux.do Web 段落、引用块、代码块与配图）
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            astNodes.forEach { node ->
-                when (node) {
-                    is PostBlockNode.Heading -> {
-                        Text(
-                            text = node.text,
-                            fontSize = (if (node.level <= 2) 17f else 15.5f).sp,
-                            fontWeight = FontWeight.SemiBold,
-                            lineHeight = 24f.sp,
-                            color = palette.inkPrimary
-                        )
-                    }
-
-                    is PostBlockNode.Paragraph -> {
-                        Text(
-                            text = node.text,
-                            fontSize = 15f.sp,
-                            lineHeight = 24f.sp,
-                            color = palette.inkPrimary
-                        )
-                    }
-
-                    is PostBlockNode.QuoteBlock -> {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.subtleSurface)
-                                .padding(12.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .width(3.dp)
-                                    .height(34.dp)
-                                    .clip(RoundedCornerShape(1.5.dp))
-                                    .background(palette.brandGold)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                if (!node.username.isNullOrBlank()) {
-                                    Text(
-                                        text = "${node.username}:",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = palette.inkSecondary
-                                    )
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                }
-                                Text(
-                                    text = node.quotedText,
-                                    fontSize = 13.8f.sp,
-                                    lineHeight = 21f.sp,
-                                    color = palette.inkSecondary
-                                )
-                            }
-                        }
-                    }
-
-                    is PostBlockNode.CodeBlock -> {
-                        var copied by remember { mutableStateOf(false) }
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(palette.subtleSurface.copy(alpha = 0.65f))
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(palette.subtleSurface)
-                                    .padding(horizontal = 12.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = node.language.ifBlank { "text" },
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = palette.inkSecondary,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Text(
-                                    text = if (copied) "已复制 ✓" else "复制",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = if (copied) palette.brandGold else palette.inkSecondary,
-                                    modifier = Modifier.clickable {
-                                        clipboardManager.setText(AnnotatedString(node.code))
-                                        copied = true
-                                    }
-                                )
-                            }
-                            Text(
-                                text = node.code,
-                                fontSize = 12.5f.sp,
-                                lineHeight = 19f.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = palette.inkPrimary,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState())
-                                    .padding(12.dp)
-                            )
-                        }
-                    }
-
-                    is PostBlockNode.BulletList -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            node.items.forEachIndexed { idx, item ->
-                                Row(verticalAlignment = Alignment.Top) {
-                                    Text(
-                                        text = if (node.ordered) "${idx + 1}." else "•",
-                                        fontSize = 14.5f.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = palette.inkPrimary,
-                                        modifier = Modifier.padding(end = 8.dp)
-                                    )
-                                    Text(
-                                        text = item,
-                                        fontSize = 14.5f.sp,
-                                        lineHeight = 22.5f.sp,
-                                        color = palette.inkPrimary
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    is PostBlockNode.DetailsSpoilerBlock -> {
-                        var expanded by remember { mutableStateOf(false) }
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.subtleSurface)
-                                .clickable { expanded = !expanded }
-                                .padding(11.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = "▸ ${node.title}",
-                                    fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.inkPrimary,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Text(
-                                    text = if (expanded) "收起" else "展开",
-                                    fontSize = 11.5.sp,
-                                    color = palette.inkTertiary
-                                )
-                            }
-                            AnimatedVisibility(visible = expanded && node.innerText.isNotBlank()) {
-                                Column {
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Text(
-                                        text = node.innerText,
-                                        fontSize = 13.5f.sp,
-                                        lineHeight = 20.5f.sp,
-                                        color = palette.inkSecondary
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    is PostBlockNode.ImageGallery -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            node.urls.forEach { imageUrl ->
-                                AsyncImage(
-                                    model = imageUrl,
-                                    contentDescription = "帖子配图",
-                                    contentScale = ContentScale.FillWidth,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(min = 110.dp, max = 380.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(palette.subtleSurface)
-                                )
-                            }
-                        }
-                    }
-
-                    PostBlockNode.Divider -> {
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                    }
-                }
-            }
-        }
+        PostRichContent(astNodes, palette, onOpenWebUrl, originalUrl)
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -5124,17 +4940,27 @@ private fun CommunityMessagesScreen(
     var categoryFilter by remember { mutableStateOf(0) } // 0=全部, 1=回复我的, 2=收到的赞, 3=@我的, 4=系统通知
     var notifications by remember { mutableStateOf<List<UserNotificationItem>>(emptyList()) }
     var privateMessages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
 
-    LaunchedEffect(isAuthorized, subTab, username) {
+    LaunchedEffect(isAuthorized, subTab, username, reloadToken) {
         if (!isAuthorized) return@LaunchedEffect
         isLoading = true
-        if (subTab == 0) {
-            notifications = LinuxDoRepository.fetchUserNotifications()
-        } else if (subTab == 1 && username.isNotBlank()) {
-            privateMessages = LinuxDoRepository.fetchPrivateMessages(username, sent = false)
+        loadError = null
+        try {
+            if (subTab == 0) {
+                notifications = LinuxDoRepository.fetchUserNotifications()
+            } else if (subTab == 1 && username.isNotBlank()) {
+                privateMessages = LinuxDoRepository.fetchPrivateMessages(username, sent = false)
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败，请重试"
+        } finally {
+            isLoading = false
         }
-        isLoading = false
     }
 
     val filteredNotifications = remember(notifications, categoryFilter) {
@@ -5153,6 +4979,7 @@ private fun CommunityMessagesScreen(
             .background(palette.canvas)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
         // 顶栏：消息 + 一键已读 ✓ + 二级 Tab (通知 | 私信 | 聊天)
         Column(
             modifier = Modifier
@@ -5331,7 +5158,7 @@ private fun CommunityMessagesScreen(
                     }
                 }
 
-                if (privateMessages.isEmpty() && !isLoading) {
+                if (privateMessages.isEmpty() && !isLoading && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier
@@ -5368,7 +5195,7 @@ private fun CommunityMessagesScreen(
                     .background(palette.cardSurface),
                 contentPadding = PaddingValues(vertical = 4.dp)
             ) {
-                if (filteredNotifications.isEmpty() && !isLoading) {
+                if (filteredNotifications.isEmpty() && !isLoading && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier
@@ -7233,7 +7060,7 @@ private fun LinDoMarkdownWorkbench(
             draftSeq = nextSeq
             draftStatus = "云端草稿已保存"
         } else {
-            draftStatus = "本地草稿已缓存"
+            draftStatus = "云端保存失败，内容仍保留在编辑器中"
         }
     }
 
@@ -7242,12 +7069,23 @@ private fun LinDoMarkdownWorkbench(
     var mentionCandidates by remember { mutableStateOf<List<MentionCandidate>>(emptyList()) }
     var isSearchingMentions by remember { mutableStateOf(false) }
 
-    LaunchedEffect(mentionSearchTerm, activeSubPanel) {
+    var mentionError by remember { mutableStateOf<String?>(null) }
+    var mentionReloadToken by remember { mutableIntStateOf(0) }
+    LaunchedEffect(mentionSearchTerm, activeSubPanel, mentionReloadToken) {
         if (activeSubPanel != WorkbenchSubPanel.MENTION) return@LaunchedEffect
         isSearchingMentions = true
-        delay(220L)
-        mentionCandidates = LinuxDoRepository.searchMentionCandidates(mentionSearchTerm.ifBlank { "linux" })
-        isSearchingMentions = false
+        mentionError = null
+        mentionCandidates = emptyList()
+        try {
+            delay(220L)
+            mentionCandidates = LinuxDoRepository.searchMentionCandidates(mentionSearchTerm.ifBlank { "linux" })
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            mentionError = error.message ?: "搜索失败，请重试"
+        } finally {
+            isSearchingMentions = false
+        }
     }
 
     Column(
@@ -7426,6 +7264,8 @@ private fun LinDoMarkdownWorkbench(
                 onMentionSearchTermChange = { mentionSearchTerm = it },
                 mentionCandidates = mentionCandidates,
                 isSearchingMentions = isSearchingMentions,
+                mentionError = mentionError,
+                onRetryMention = { mentionReloadToken++ },
                 onToggleLinePrefix = { prefix ->
                     toggleLinePrefix(prefix)
                     activeSubPanel = WorkbenchSubPanel.NONE
@@ -7692,8 +7532,10 @@ private fun WorkbenchAstLivePreviewBox(
     val previewHtml = remember(rawMarkdown) {
         compileMarkdownAndBbcodeToPreviewHtml(rawMarkdown)
     }
-    val astNodes = remember(previewHtml) {
-        DiscourseAstParser.parseOrGetCached(-999999, previewHtml)
+    val astNodes by androidx.compose.runtime.produceState<List<PostBlockNode>>(emptyList(), previewHtml) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            DiscourseAstParser.parseOrGetCached(-999999, previewHtml)
+        }
     }
 
     Column(
@@ -7728,125 +7570,8 @@ private fun WorkbenchAstLivePreviewBox(
         if (rawMarkdown.isBlank()) {
             LinDoEmptyState("还没有预览内容，试着写点什么吧")
         } else {
-            astNodes.forEach { node ->
-                when (node) {
-                    is PostBlockNode.Heading -> {
-                        Text(
-                            text = node.text,
-                            fontSize = if (node.level <= 2) 16.sp else 14.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary
-                        )
-                    }
-                    is PostBlockNode.Paragraph -> {
-                        Text(
-                            text = node.text,
-                            fontSize = 13.5.sp,
-                            lineHeight = 20.sp,
-                            color = palette.inkPrimary
-                        )
-                    }
-                    is PostBlockNode.QuoteBlock -> {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.subtleSurface)
-                                .padding(10.dp)
-                        ) {
-                            if (!node.username.isNullOrBlank()) {
-                                Text(
-                                    text = "@${node.username}",
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = palette.brandGold
-                                )
-                                Spacer(modifier = Modifier.height(3.dp))
-                            }
-                            Text(
-                                text = node.quotedText,
-                                fontSize = 12.5.sp,
-                                color = palette.inkSecondary
-                            )
-                        }
-                    }
-                    is PostBlockNode.CodeBlock -> {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(9.dp))
-                                .background(Color(0xFF1E222A))
-                                .padding(10.dp)
-                        ) {
-                            if (node.language.isNotBlank()) {
-                                Text(
-                                    text = node.language.uppercase(),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF9CA3AF)
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                            }
-                            Text(
-                                text = node.code,
-                                fontSize = 12.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = Color(0xFFE5E7EB)
-                            )
-                        }
-                    }
-                    is PostBlockNode.BulletList -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            node.items.forEachIndexed { idx, item ->
-                                Text(
-                                    text = if (node.ordered) "${idx + 1}. $item" else "• $item",
-                                    fontSize = 13.sp,
-                                    color = palette.inkPrimary
-                                )
-                            }
-                        }
-                    }
-                    is PostBlockNode.DetailsSpoilerBlock -> {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(9.dp))
-                                .background(palette.subtleSurface)
-                                .padding(10.dp)
-                        ) {
-                            Text(
-                                text = "▾ ${node.title}",
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.inkPrimary
-                            )
-                            if (node.innerText.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = node.innerText,
-                                    fontSize = 12.5.sp,
-                                    color = palette.inkSecondary
-                                )
-                            }
-                        }
-                    }
-                    is PostBlockNode.ImageGallery -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            node.urls.forEach { imageUrl ->
-                                Text(
-                                    text = "🖼 配图：$imageUrl",
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.brandGold
-                                )
-                            }
-                        }
-                    }
-                    PostBlockNode.Divider -> {
-                        HorizontalDivider(thickness = 0.8.dp, color = palette.hairline)
-                    }
-                }
-            }
+            val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+            PostRichContent(astNodes, palette, onOpenLink = { uriHandler.openUri(it) })
         }
     }
 }
@@ -7942,6 +7667,8 @@ private fun WorkbenchInteractiveSubPanel(
     onMentionSearchTermChange: (String) -> Unit,
     mentionCandidates: List<MentionCandidate>,
     isSearchingMentions: Boolean,
+    mentionError: String?,
+    onRetryMention: () -> Unit,
     onToggleLinePrefix: (String) -> Unit,
     onWrapSelection: (String, String, String) -> Unit,
     onInsertSnippet: (String) -> Unit,
@@ -8244,7 +7971,9 @@ private fun WorkbenchInteractiveSubPanel(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(8.dp)
                 )
-                if (isSearchingMentions) {
+                if (mentionError != null) {
+                    LinDoLoadFailure(mentionError, onRetryMention)
+                } else if (isSearchingMentions) {
                     LinDoLoadingIndicator(label = "零度娘正在寻找佬友")
                 } else if (mentionCandidates.isNotEmpty()) {
                     Row(
@@ -8393,22 +8122,24 @@ private fun GlobalSearchModalSheet(
     var query by remember { mutableStateOf(initialQuery) }
     var order by remember { mutableStateOf<String?>(null) } // null=相关性, "latest"=最新, "likes"=最多赞
     var results by remember { mutableStateOf<List<CommunitySearchResult>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isSearching by remember { mutableStateOf(false) }
 
+    var submittedQuery by remember { mutableStateOf(initialQuery) }
     fun performSearch() {
-        val q = query.trim()
-        if (q.isBlank()) return
-        scope.launch {
-            isSearching = true
-            results = LinuxDoRepository.searchCommunity(q, order)
-            isSearching = false
-        }
+        submittedQuery = query.trim()
+        reloadToken++
     }
-
-    LaunchedEffect(initialQuery) {
-        if (initialQuery.isNotBlank()) {
-            performSearch()
-        }
+    LaunchedEffect(submittedQuery, order, reloadToken) {
+        if (submittedQuery.isBlank()) return@LaunchedEffect
+        isSearching = true
+        loadError = null
+        results = emptyList()
+        try { results = LinuxDoRepository.searchCommunity(submittedQuery, order) }
+        catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (error: Exception) { loadError = error.message ?: "搜索失败，请重试" }
+        finally { isSearching = false }
     }
 
     ModalBottomSheet(
@@ -8421,6 +8152,7 @@ private fun GlobalSearchModalSheet(
                 .heightIn(min = 380.dp, max = 640.dp)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { performSearch() })
             Text(
                 text = "全站搜索 Linux.do",
                 fontSize = 17.5.sp,
@@ -8493,7 +8225,7 @@ private fun GlobalSearchModalSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 6.dp)
             ) {
-                if (results.isEmpty() && !isSearching) {
+                if (results.isEmpty() && !isSearching && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 36.dp),
@@ -8566,18 +8298,25 @@ private fun UserNotificationsSheet(
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     var notifications by remember { mutableStateOf<List<UserNotificationItem>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var filterTab by remember { mutableStateOf(0) } // 0=全部, 1=未读, 2=回复/@, 3=获赞
 
-    fun reload() {
-        scope.launch {
-            isLoading = true
+    fun reload() { reloadToken++ }
+    LaunchedEffect(reloadToken) {
+        isLoading = true
+        loadError = null
+        try {
             notifications = LinuxDoRepository.fetchUserNotifications()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败，请重试"
+        } finally {
             isLoading = false
         }
     }
-
-    LaunchedEffect(Unit) { reload() }
 
     val filtered = remember(notifications, filterTab) {
         when (filterTab) {
@@ -8598,6 +8337,7 @@ private fun UserNotificationsSheet(
                 .heightIn(min = 380.dp, max = 620.dp)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -8657,7 +8397,7 @@ private fun UserNotificationsSheet(
                 verticalArrangement = Arrangement.spacedBy(7.dp),
                 contentPadding = PaddingValues(vertical = 6.dp)
             ) {
-                if (filtered.isEmpty() && !isLoading) {
+                if (filtered.isEmpty() && !isLoading && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
@@ -8738,12 +8478,22 @@ private fun UserActivitiesSheet(
     val palette = LocalPalette.current
     var filterCode by remember { mutableStateOf<String?>(null) } // null=全部, "4"=主帖, "5"=回复, "1"=点赞
     var items by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
 
-    LaunchedEffect(username, filterCode) {
+    LaunchedEffect(username, filterCode, reloadToken) {
         isLoading = true
-        items = LinuxDoRepository.fetchUserActivities(username, filterCode)
-        isLoading = false
+        loadError = null
+        try {
+            items = LinuxDoRepository.fetchUserActivities(username, filterCode)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败，请重试"
+        } finally {
+            isLoading = false
+        }
     }
 
     ModalBottomSheet(
@@ -8756,6 +8506,7 @@ private fun UserActivitiesSheet(
                 .heightIn(min = 380.dp, max = 620.dp)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
             Text(
                 text = "我的动态与历史互动",
                 fontSize = 17.5.sp,
@@ -8790,7 +8541,7 @@ private fun UserActivitiesSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 6.dp)
             ) {
-                if (items.isEmpty() && !isLoading) {
+                if (items.isEmpty() && !isLoading && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
@@ -8870,12 +8621,22 @@ private fun UserBookmarksSheet(
 ) {
     val palette = LocalPalette.current
     var items by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
 
-    LaunchedEffect(username) {
+    LaunchedEffect(username, reloadToken) {
         isLoading = true
-        items = LinuxDoRepository.fetchUserBookmarks(username)
-        isLoading = false
+        loadError = null
+        try {
+            items = LinuxDoRepository.fetchUserBookmarks(username)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败，请重试"
+        } finally {
+            isLoading = false
+        }
     }
 
     ModalBottomSheet(
@@ -8888,6 +8649,7 @@ private fun UserBookmarksSheet(
                 .heightIn(min = 340.dp, max = 580.dp)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
             Text(
                 text = "我的书签与收藏",
                 fontSize = 17.5.sp,
@@ -8907,7 +8669,7 @@ private fun UserBookmarksSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                if (items.isEmpty() && !isLoading) {
+                if (items.isEmpty() && !isLoading && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
@@ -8974,6 +8736,8 @@ private fun UserPrivateMessagesSheet(
     val scope = rememberCoroutineScope()
     var tab by remember(initialRecipient) { mutableStateOf(if (!initialRecipient.isNullOrBlank()) 2 else 0) } // 0=收件箱, 1=已发送, 2=写私信
     var messages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
 
     var recipient by remember(initialRecipient) { mutableStateOf(initialRecipient.orEmpty()) }
@@ -8982,10 +8746,17 @@ private fun UserPrivateMessagesSheet(
     var isSending by remember { mutableStateOf(false) }
     var statusMsg by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(username, tab) {
-        if (tab == 0 || tab == 1) {
-            isLoading = true
+    LaunchedEffect(username, tab, reloadToken) {
+        if (tab >= 2) { loadError = null; return@LaunchedEffect }
+        isLoading = true
+        loadError = null
+        try {
             messages = LinuxDoRepository.fetchPrivateMessages(username, sent = (tab == 1))
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败，请重试"
+        } finally {
             isLoading = false
         }
     }
@@ -9000,6 +8771,7 @@ private fun UserPrivateMessagesSheet(
                 .heightIn(min = 380.dp, max = 620.dp)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
             Text(
                 text = "站内私信中心",
                 fontSize = 17.5.sp,
@@ -9088,7 +8860,7 @@ private fun UserPrivateMessagesSheet(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(vertical = 6.dp)
                 ) {
-                    if (messages.isEmpty() && !isLoading) {
+                    if (messages.isEmpty() && !isLoading && loadError == null) {
                         item {
                             Box(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
@@ -9127,13 +8899,24 @@ private fun PublicUserCardSheet(
     val palette = LocalPalette.current
     var cardProfile by remember { mutableStateOf<UserFullProfileSummary?>(null) }
     var recentActions by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
 
-    LaunchedEffect(username) {
+    LaunchedEffect(username, reloadToken) {
         isLoading = true
-        cardProfile = LinuxDoRepository.fetchPublicUserCard(username)
-        recentActions = LinuxDoRepository.fetchUserActivities(username).take(5)
-        isLoading = false
+        loadError = null
+        try {
+            cardProfile = LinuxDoRepository.fetchPublicUserCard(username)
+                ?: throw do_.linux.lindo.core.network.ApiReadException(do_.linux.lindo.core.network.ApiFailureKind.Connection)
+            recentActions = LinuxDoRepository.fetchUserActivities(username).take(5)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败，请重试"
+        } finally {
+            isLoading = false
+        }
     }
 
     ModalBottomSheet(
@@ -9145,6 +8928,7 @@ private fun PublicUserCardSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
             if (isLoading && cardProfile == null) {
                 LinDoLoadingIndicator(
                     modifier = Modifier.fillMaxWidth().height(44.dp)
@@ -9401,12 +9185,22 @@ private fun UserReadHistorySheet(
 ) {
     val palette = LocalPalette.current
     var items by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(Unit, reloadToken) {
         isLoading = true
-        items = LinuxDoRepository.fetchTopics(path = "/read.json", page = 0)
-        isLoading = false
+        loadError = null
+        try {
+            items = LinuxDoRepository.fetchReadHistoryTopics()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败，请重试"
+        } finally {
+            isLoading = false
+        }
     }
 
     ModalBottomSheet(
@@ -9419,6 +9213,7 @@ private fun UserReadHistorySheet(
                 .heightIn(min = 360.dp, max = 600.dp)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
             Text(
                 text = "阅读历史",
                 fontSize = 17.5.sp,
@@ -9438,7 +9233,7 @@ private fun UserReadHistorySheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                if (items.isEmpty() && !isLoading) {
+                if (items.isEmpty() && !isLoading && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
@@ -9475,12 +9270,22 @@ private fun UserCloudDraftsSheet(
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     var drafts by remember { mutableStateOf<List<CloudDraftItem>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(Unit, reloadToken) {
         isLoading = true
-        drafts = LinuxDoRepository.fetchCloudDrafts()
-        isLoading = false
+        loadError = null
+        try {
+            drafts = LinuxDoRepository.fetchCloudDrafts()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败，请重试"
+        } finally {
+            isLoading = false
+        }
     }
 
     ModalBottomSheet(
@@ -9493,6 +9298,7 @@ private fun UserCloudDraftsSheet(
                 .heightIn(min = 340.dp, max = 580.dp)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
+            if (loadError != null) LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
             Text(
                 text = "云端草稿箱",
                 fontSize = 17.5.sp,
@@ -9512,7 +9318,7 @@ private fun UserCloudDraftsSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                if (drafts.isEmpty() && !isLoading) {
+                if (drafts.isEmpty() && !isLoading && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
@@ -9586,6 +9392,30 @@ private fun UserCloudDraftsSheet(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Debug host uses production sheets and renderer without logging out the current account. */
+@Composable
+fun LinDoReadRegressionPreview(scene: String, cooked: String = "", onClose: () -> Unit, onOpenLink: (String) -> Unit) {
+    when (scene) {
+        "search" -> GlobalSearchModalSheet("linux", onClose, { _, _ -> })
+        "bookmarks" -> UserBookmarksSheet(UserApiKeyAuthManager.currentUser?.username.orEmpty(), onClose, { _, _ -> })
+        "notifications" -> UserNotificationsSheet(onClose, { _, _ -> })
+        "drafts" -> UserCloudDraftsSheet(onClose, { _, _ -> })
+        "history" -> UserReadHistorySheet(onClose, {})
+        "activity" -> UserActivitiesSheet(UserApiKeyAuthManager.currentUser?.username.orEmpty(), onClose, { _, _ -> })
+        "messages" -> UserPrivateMessagesSheet(UserApiKeyAuthManager.currentUser?.username.orEmpty(), null, onClose, {})
+        else -> {
+            val nodes by androidx.compose.runtime.produceState<List<PostBlockNode>>(emptyList(), cooked) {
+                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { DiscourseAstParser.parseCookedHtml(cooked) }
+            }
+            Column(Modifier.fillMaxSize().background(LightPalette.canvas).windowInsetsPadding(WindowInsets.safeDrawing)
+                .verticalScroll(rememberScrollState()).padding(16.dp)) {
+                Text("富文本展示回归", fontWeight = FontWeight.Bold)
+                PostRichContent(nodes, LightPalette, onOpenLink, "https://linux.do/")
             }
         }
     }

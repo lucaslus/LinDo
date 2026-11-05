@@ -811,7 +811,8 @@ object LinuxDoRepository {
         url: String,
         method: String = "GET",
         formParams: Map<String, String>? = null,
-        extraHeaders: Map<String, String> = emptyMap()
+        extraHeaders: Map<String, String> = emptyMap(),
+        preserveFailure: Boolean = false
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
         val hasWebCookie = CookieSentinel.resolveWinningCookies().containsKey("_t")
         val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || hasWebCookie
@@ -834,7 +835,7 @@ object LinuxDoRepository {
             val executor = UserApiKeyAuthManager.webViewHttpExecutor ?: return null
             return try {
                 executor(url, method, formParams, mergedHeaders)?.takeIf {
-                    isSuccessfulApiResponse(it.first, it.second)
+                    preserveFailure || isSuccessfulApiResponse(it.first, it.second)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -846,6 +847,7 @@ object LinuxDoRepository {
         if (!method.equals("GET", true) && !method.equals("HEAD", true) && UserApiKeyAuthManager.webViewHttpExecutor != null) {
             return@withContext viaWebView()
         }
+        var lastResponse: Pair<Int, String>? = null
         try {
             val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
             val requestHeaders = mergedHeaders.toMutableMap()
@@ -854,6 +856,7 @@ object LinuxDoRepository {
             val response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
             val status = response.status.value
             val text = response.bodyAsText()
+            lastResponse = status to text
             if (isSuccessfulApiResponse(status, text)) {
                 if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
                 return@withContext status to text
@@ -864,12 +867,12 @@ object LinuxDoRepository {
             // A read can safely fall back to the existing authenticated browser transport.
         }
         val browserResult = viaWebView()
-        if (browserResult != null) {
+        if (browserResult != null && browserResult.first != 0) {
             if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
             return@withContext browserResult
         }
 
-        null
+        if (preserveFailure) lastResponse ?: browserResult else null
     }
 
     /**
@@ -959,18 +962,10 @@ object LinuxDoRepository {
             queryParams.add("page=$page")
         }
         val sep = if (basePath.contains("?")) "&" else "?"
-        val url = "https://linux.do/$basePath$sep${queryParams.joinToString("&")}"
-        val res = executeHttp(url = url, method = "GET")
-        val text = res?.second ?: throw java.io.IOException("讨论加载失败，请检查网络连接")
-        if (text.trimStart().startsWith("{")) {
-            return@withContext try {
-                val root = json.parseToJsonElement(text).jsonObject
-                parseTopicListRoot(root)
-            } catch (_: Throwable) {
-                emptyList()
-            }
-        }
-        emptyList()
+        val url = "https://linux.do/${basePath.trimStart('/')}$sep${queryParams.joinToString("&")}"
+        val root = readApiObject(executeHttp(url = url, method = "GET", preserveFailure = true))
+        (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
+        parseTopicListRoot(root)
     }
 
     /**
@@ -1039,19 +1034,20 @@ object LinuxDoRepository {
         if (postIds.isEmpty()) return@withContext emptyList()
         val query = postIds.take(20).joinToString("&") { "post_ids[]=$it" }
         val url = "https://linux.do/t/$topicId/posts.json?$query"
-        val res = executeHttp(url = url, method = "GET") ?: return@withContext emptyList()
-        val text = res.second
-        if (!text.trimStart().startsWith("{")) return@withContext emptyList()
         try {
-            val root = json.parseToJsonElement(text).jsonObject
-            val postStream = root["post_stream"] as? JsonObject
-            val postsArr = postStream?.get("posts") as? JsonArray ?: return@withContext emptyList()
+            val root = readApiObject(executeHttp(url = url, method = "GET", preserveFailure = true))
+            val postStream = root["post_stream"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
+            val postsArr = postStream.requireArray("posts")
             val rawPosts = postsArr.mapIndexedNotNull { idx, elem ->
                 parseSinglePostObject(elem as? JsonObject ?: return@mapIndexedNotNull null, idx)
             }
             BadgeInjector.injectTopLevelUserBadges(rawPosts, root)
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
         }
     }
 
@@ -1357,12 +1353,11 @@ object LinuxDoRepository {
      * 拉取当前登录用户的通知列表 (`/notifications.json?recent=true&limit=30`)
      */
     suspend fun fetchUserNotifications(): List<UserNotificationItem> = withContext(Dispatchers.IO) {
-        val res = executeHttp("https://linux.do/notifications.json?recent=true&limit=30", method = "GET")
-            ?: return@withContext emptyList()
-        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        val res = executeHttp("https://linux.do/notifications.json?recent=true&limit=30", method = "GET", preserveFailure = true)
+            ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            val arr = root["notifications"] as? JsonArray ?: return@withContext emptyList()
+            val root = readApiObject(res)
+            val arr = root["notifications"] as? JsonArray ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
             arr.mapNotNull { elem ->
                 val obj = elem as? JsonObject ?: return@mapNotNull null
                 val id = obj["id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
@@ -1397,8 +1392,12 @@ object LinuxDoRepository {
                     excerpt = excerpt
                 )
             }
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
         }
     }
 
@@ -1406,14 +1405,13 @@ object LinuxDoRepository {
      * 拉取用户个人的历史发帖/回复/点赞动态 (`/user_actions.json?username={username}&Offset=0`)
      */
     suspend fun fetchUserActivities(username: String, filter: String? = null): List<UserActivityItem> = withContext(Dispatchers.IO) {
-        if (username.isBlank() || username == "linuxdo_user") return@withContext emptyList()
+        if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
         val filterParam = if (!filter.isNullOrBlank()) "&filter=$filter" else ""
         val url = "https://linux.do/user_actions.json?offset=0&username=$username$filterParam"
-        val res = executeHttp(url, method = "GET") ?: return@withContext emptyList()
-        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        val res = executeHttp(url, method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            val arr = root["user_actions"] as? JsonArray ?: return@withContext emptyList()
+            val root = readApiObject(res)
+            val arr = root["user_actions"] as? JsonArray ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
             arr.mapNotNull { elem ->
                 val obj = elem as? JsonObject ?: return@mapNotNull null
                 val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
@@ -1437,8 +1435,12 @@ object LinuxDoRepository {
                     actionType = actionType
                 )
             }
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
         }
     }
 
@@ -1446,14 +1448,13 @@ object LinuxDoRepository {
      * 拉取用户个人的书签列表 (`/u/{username}/bookmarks.json`)
      */
     suspend fun fetchUserBookmarks(username: String): List<UserActivityItem> = withContext(Dispatchers.IO) {
-        if (username.isBlank() || username == "linuxdo_user") return@withContext emptyList()
-        val res = executeHttp("https://linux.do/u/$username/bookmarks.json", method = "GET")
-            ?: return@withContext emptyList()
-        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
+        val res = executeHttp("https://linux.do/u/$username/bookmarks.json", method = "GET", preserveFailure = true)
+            ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
-            val root = json.parseToJsonElement(res.second).jsonObject
+            val root = readApiObject(res)
             val listObj = root["user_bookmark_list"] as? JsonObject ?: root
-            val arr = listObj["bookmarks"] as? JsonArray ?: return@withContext emptyList()
+            val arr = listObj["bookmarks"] as? JsonArray ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
             arr.mapNotNull { elem ->
                 val obj = elem as? JsonObject ?: return@mapNotNull null
                 val id = obj["id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
@@ -1479,8 +1480,12 @@ object LinuxDoRepository {
                     actionType = 88
                 )
             }
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
         }
     }
 
@@ -1589,18 +1594,17 @@ object LinuxDoRepository {
         if (cleanQ.isBlank()) return@withContext emptyList()
         val fullQuery = if (!order.isNullOrBlank()) "$cleanQ order:$order" else cleanQ
         val encoded = java.net.URLEncoder.encode(fullQuery, "UTF-8")
-        val res = executeHttp("https://linux.do/search.json?q=$encoded", method = "GET")
-            ?: return@withContext emptyList()
-        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        val res = executeHttp("https://linux.do/search.json?q=$encoded", method = "GET", preserveFailure = true)
+            ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
-            val root = json.parseToJsonElement(res.second).jsonObject
+            val root = readApiObject(res)
             val topicsMap = mutableMapOf<Int, JsonObject>()
             (root["topics"] as? JsonArray)?.forEach { tElem ->
                 val tObj = tElem as? JsonObject ?: return@forEach
                 val tid = tObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
                 topicsMap[tid] = tObj
             }
-            val postsArr = root["posts"] as? JsonArray ?: JsonArray(emptyList())
+            val postsArr = root.requireArray("posts")
             postsArr.mapNotNull { pElem ->
                 val pObj = pElem as? JsonObject ?: return@mapNotNull null
                 val tid = pObj["topic_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
@@ -1631,8 +1635,12 @@ object LinuxDoRepository {
                     postsCount = tObj?.get("posts_count")?.jsonPrimitive?.intOrNull ?: 1
                 )
             }
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
         }
     }
 
@@ -1676,19 +1684,23 @@ object LinuxDoRepository {
      * 拉取用户私信箱 (`/topics/private-messages/{username}.json` 或 `private-messages-sent`)
      */
     suspend fun fetchPrivateMessages(username: String, sent: Boolean = false): List<TopicSummary> = withContext(Dispatchers.IO) {
-        if (username.isBlank() || username == "linuxdo_user") return@withContext emptyList()
+        if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
         val path = if (sent) {
             "topics/private-messages-sent/$username.json"
         } else {
             "topics/private-messages/$username.json"
         }
-        val res = executeHttp("https://linux.do/$path", method = "GET") ?: return@withContext emptyList()
-        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        val res = executeHttp("https://linux.do/$path", method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
-            val root = json.parseToJsonElement(res.second).jsonObject
+            val root = readApiObject(res)
+            (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
             parseTopicListRoot(root)
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
         }
     }
 
@@ -2223,11 +2235,10 @@ object LinuxDoRepository {
      * 拉取云端草稿箱列表 (`GET /drafts.json`)
      */
     suspend fun fetchCloudDrafts(): List<CloudDraftItem> = withContext(Dispatchers.IO) {
-        val res = executeHttp("https://linux.do/drafts.json", method = "GET") ?: return@withContext emptyList()
-        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        val res = executeHttp("https://linux.do/drafts.json", method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            val arr = root["drafts"] as? JsonArray ?: return@withContext emptyList()
+            val root = readApiObject(res)
+            val arr = root["drafts"] as? JsonArray ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
             arr.mapNotNull { elem ->
                 val obj = elem as? JsonObject ?: return@mapNotNull null
                 val draftKey = obj["draft_key"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
@@ -2255,8 +2266,12 @@ object LinuxDoRepository {
                     createdAtText = createdAt
                 )
             }
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
         }
     }
 
@@ -2344,10 +2359,9 @@ object LinuxDoRepository {
         val cleanTerm = term.trim().removePrefix("@")
         val encoded = java.net.URLEncoder.encode(cleanTerm, "UTF-8")
         val url = "https://linux.do/u/search/users.json?term=$encoded&include_groups=true&limit=8"
-        val body = executeHttp(url, method = "GET")?.second ?: return@withContext emptyList()
-        if (!body.trimStart().startsWith("{")) return@withContext emptyList()
         try {
-            val root = json.parseToJsonElement(body).jsonObject
+            val root = readApiObject(executeHttp(url, method = "GET", preserveFailure = true))
+            root.requireArray("users")
             val results = mutableListOf<MentionCandidate>()
             val usersArr = root["users"] as? JsonArray
             usersArr?.forEach { elem ->
@@ -2384,8 +2398,12 @@ object LinuxDoRepository {
                 )
             }
             results
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
         }
     }
 

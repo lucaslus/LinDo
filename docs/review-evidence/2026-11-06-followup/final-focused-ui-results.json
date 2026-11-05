@@ -1,0 +1,43 @@
+{
+  "device": "emulator-5554",
+  "completed_at": "2026-11-06T04:21:43.598378",
+  "passed": 3,
+  "failed": 0,
+  "results": [
+    {
+      "name": "installed-launcher-icon",
+      "status": "passed",
+      "detail": {
+        "native_android_inflater": "AdaptiveIconDrawable",
+        "version": "0.1.1"
+      },
+      "duration_seconds": 3.39
+    },
+    {
+      "name": "rich-content-structure-and-expansion",
+      "status": "passed",
+      "detail": {
+        "visible_content_markers": [
+          "单元格一",
+          "在原网页查看完整内容",
+          "复制代码",
+          "打开视频或网页",
+          "投票选项测试",
+          "表头 A",
+          "配图测试"
+        ]
+      },
+      "duration_seconds": 24.27
+    },
+    {
+      "name": "rich-link-navigation",
+      "status": "passed",
+      "detail": {
+        "clicked_text_link": true,
+        "in_app_browser": true,
+        "back_to_post": true
+      },
+      "duration_seconds": 11.77
+    }
+  ]
+}

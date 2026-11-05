@@ -49,7 +49,7 @@ enum class LinDoMascotState(val asset: String, val title: String, val detail: St
 @Composable
 fun LinDoMascot(
     state: LinDoMascotState = LinDoMascotState.Loading,
-    size: Dp = 132.dp,
+    size: Dp = 80.dp,
     compact: Boolean = false,
     animate: Boolean = true,
     modifier: Modifier = Modifier
@@ -101,7 +101,7 @@ fun LinDoLoadingIndicator(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        LinDoMascot(state = state, compact = true, size = 36.dp)
+        LinDoMascot(state = state, compact = true, size = 24.dp)
         Spacer(Modifier.width(8.dp))
         Text(label, fontSize = 12.sp, color = color, maxLines = 2, lineHeight = 17.sp)
         progress?.invoke()?.takeIf { it.isFinite() }?.let { value ->
@@ -155,7 +155,7 @@ fun LinDoEmptyState(message: String, modifier: Modifier = Modifier) {
 fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifier = Modifier) {
     Row(modifier.heightIn(min = 36.dp).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         verticalAlignment = Alignment.CenterVertically) {
-        LinDoMascot(state = state, compact = true, size = 28.dp)
+        LinDoMascot(state = state, compact = true, size = 20.dp)
         Spacer(Modifier.width(6.dp))
         Text(message, modifier = Modifier.weight(1f), fontSize = 11.sp, lineHeight = 17.sp,
             color = if (LocalLinDoDarkTheme.current) Color(0xFFB8AFA2) else Color(0xFF746C61))
@@ -165,7 +165,7 @@ fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifie
 @Composable
 fun LinDoBusyButtonLabel(busy: Boolean, busyLabel: String, label: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (busy) LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 24.dp)
+        if (busy) LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 20.dp)
         Text(if (busy) busyLabel else label, color = color, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
     }
 }
@@ -202,7 +202,7 @@ fun LinDoMascotGallery(onClose: () -> Unit, onThemeChanged: (Boolean) -> Unit = 
                                 Column(Modifier.weight(1f).padding(bottom = 12.dp)
                                     .border(1.dp, if (dark) Color(0xFF3E372E) else Color(0xFFE9E0D3), RoundedCornerShape(20.dp))
                                     .padding(vertical = 12.dp, horizontal = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                                    LinDoMascot(state = state, size = 114.dp)
+                                    LinDoMascot(state = state, size = 72.dp)
                                     Text(state.title, fontSize = 11.sp, textAlign = TextAlign.Center)
                                 }
                             }
@@ -214,5 +214,17 @@ fun LinDoMascotGallery(onClose: () -> Unit, onThemeChanged: (Boolean) -> Unit = 
                 }
             }
         }
+    }
+}
+
+/** Inline failure is never represented by the successful-empty illustration. */
+@Composable
+fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        LinDoMascot(LinDoMascotState.NetworkError, size = 24.dp, compact = true, animate = false)
+        Spacer(Modifier.width(8.dp))
+        Text(message, Modifier.weight(1f), fontSize = 13.sp, lineHeight = 20.sp,
+            color = if (LocalLinDoDarkTheme.current) Color(0xFFF0D4B0) else Color(0xFF765020))
+        TextButton(onClick = onRetry, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
     }
 }

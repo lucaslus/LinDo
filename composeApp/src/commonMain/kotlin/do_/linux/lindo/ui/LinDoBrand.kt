@@ -138,7 +138,7 @@ fun LinDoMascotLoginTransitionView(
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(Modifier.widthIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(vertical = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    LinDoMascot(state = if (onRetry != null) LinDoMascotState.NetworkError else LinDoMascotState.Loading, size = 188.dp)
+                    LinDoMascot(state = if (onRetry != null) LinDoMascotState.NetworkError else LinDoMascotState.Loading, size = 88.dp)
                     Spacer(Modifier.height(24.dp))
                     Text(statusTitle.removeSuffix("..."), color = brandText(isDark), fontSize = 20.sp,
                         fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, lineHeight = 29.sp)

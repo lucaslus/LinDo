@@ -20,19 +20,21 @@ def build(source, launcher=False):
     vector = ET.Element("vector", {
         attribute("width"): "108dp" if launcher else f"{width:g}dp",
         attribute("height"): "108dp" if launcher else f"{height:g}dp",
-        attribute("viewportWidth"): "192" if launcher else f"{width:g}",
-        attribute("viewportHeight"): "192" if launcher else f"{height:g}",
+        attribute("viewportWidth"): "108" if launcher else f"{width:g}",
+        attribute("viewportHeight"): "108" if launcher else f"{height:g}",
     })
     destination = vector
     if launcher:
         destination = ET.SubElement(vector, "group", {
-            attribute("translateX"): "32", attribute("translateY"): "32",
-            attribute("scaleX"): f"{128 / width:.8f}", attribute("scaleY"): f"{128 / height:.8f}",
+            attribute("translateX"): "24", attribute("translateY"): "24",
+            attribute("scaleX"): f"{60 / width:.8f}", attribute("scaleY"): f"{60 / height:.8f}",
         })
     for contour in svg:
         if not contour.tag.endswith("path"):
             raise ValueError(f"{source}: flatten non-path shapes before export")
-        data = contour.get("d", "")
+        data = contour.get("d", "").strip()
+        if not data:
+            continue  # Android PathParser throws on empty paths; Compose can silently tolerate them.
         if len(data.encode("utf-8")) > PATH_BYTE_LIMIT:
             raise ValueError(f"{source}: optimize path data before Android export (AAPT string limit)")
         parent = destination

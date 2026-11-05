@@ -72,6 +72,7 @@ import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.BackNavigationBridge
+import do_.linux.lindo.ui.LinDoReadRegressionPreview
 import do_.linux.lindo.ui.LinDoApp
 import do_.linux.lindo.ui.LinDoBrandWordmark
 import do_.linux.lindo.ui.LinDoMascotLoginTransitionView
@@ -351,11 +352,18 @@ class MainActivity : ComponentActivity() {
                 intent.removeExtra("lindo.brand_preview")
                 debugPreviewGeneration++
             }
-            if (debugPreview == "welcome") {
+            if (debugPreview == "icon") {
+                InstalledIconPreview()
+            } else if (debugPreview == "welcome") {
                 var dark by remember { mutableStateOf(false) }
                 LaunchedEffect(dark) { updateSystemBars(dark) }
                 LinDoWelcomeScreen(isDark = dark, onPrimaryWebLogin = closePreview,
                     onBrowserOneClickAuth = closePreview, onToggleDark = { dark = !dark })
+            } else if (debugPreview in listOf("rich", "search", "bookmarks", "notifications", "drafts", "history", "activity", "messages")) {
+                var openedLink by remember { mutableStateOf<String?>(null) }
+                val cooked = remember { java.io.File(filesDir, "lindo-rich-preview.html").takeIf { it.isFile && it.length() < 262144 }?.readText().orEmpty() }
+                if (openedLink != null) AndroidWebLoginModal(openedLink!!, { openedLink = null }, { openedLink = null })
+                else LinDoReadRegressionPreview(debugPreview!!, cooked, closePreview, { openedLink = it })
             } else if (debugPreview in listOf("web", "web_crash", "connect")) {
                 AndroidWebLoginModal(initialUrl = when (debugPreview) {
                     "web_crash" -> "chrome://crash"
@@ -513,6 +521,7 @@ class MainActivity : ComponentActivity() {
                         method: method,
                         headers: hdrs,
                         credentials: 'include',
+                        cache: 'no-store',
                         signal: controller.signal
                     };
                     const bodyStr = ${JSONObject.quote(formBodyEncoded)};

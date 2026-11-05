@@ -15,6 +15,7 @@ PACKAGE = "do_.linux.lindo"
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--device", default="emulator-5554")
 parser.add_argument("--output", type=Path, default=ROOT / "build/ui-smoke")
+parser.add_argument("--case", action="append", help="Run only the named case (repeatable)")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 ADB = ["adb", "-s", args.device]
@@ -109,6 +110,8 @@ def memory():
 
 
 def case(name, function):
+    if args.case and name not in args.case:
+        return
     began = time.monotonic()
     row = {"name": name}
     try:
@@ -277,6 +280,107 @@ def renderer_recovery():
             "pid_before": process_before, "pid_after": adb("shell", "pidof", PACKAGE).strip()}
 
 
+
+def installed_icon():
+    start("icon")
+    wait_for("系统图标加载成功：AdaptiveIconDrawable")
+    screen("installed-icon")
+    return {"native_android_inflater": "AdaptiveIconDrawable", "version": "0.1.1"}
+
+
+def rich_content():
+    fixture = ROOT / "composeApp/src/commonTest/resources/rich-content.html"
+    subprocess.run(ADB + ["shell", f"run-as {PACKAGE} sh -c 'cat > files/lindo-rich-preview.html'"],
+                   input=fixture.read_bytes(), capture_output=True, check=True)
+    start("rich")
+    wait_for("富文本回归标题")
+    tap("▸ 折叠测试")
+    root = tree()
+    text = " ".join(n.get("text", "") for n in root.iter("node"))
+    assert "格式文本" in text, "Expanded rich content is missing"
+    assert "二级列表" in text, "Nested list is missing"
+    screen("rich-content-top")
+    found = set()
+    for _ in range(7):
+        text = " ".join(n.get("text", "") for n in tree().iter("node"))
+        for marker in ("表头 A", "单元格一", "配图测试", "复制代码", "投票选项测试", "在原网页查看完整内容", "打开视频或网页"):
+            if marker in text:
+                found.add(marker)
+        adb("shell", "input", "swipe", "360", "1260", "360", "550", "280")
+    screen("rich-content-bottom")
+    assert len(found) == 7, f"Missing rendered content: {found}"
+    return {"visible_content_markers": sorted(found)}
+
+
+def rich_link_navigation():
+    fixture = ROOT / "composeApp/src/commonTest/resources/rich-content.html"
+    subprocess.run(ADB + ["shell", f"run-as {PACKAGE} sh -c 'cat > files/lindo-rich-preview.html'"],
+                   input=fixture.read_bytes(), capture_output=True, check=True)
+    start("rich")
+    wait_for("链接点击测试")
+    tap("链接点击测试")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if any(n.get("class") == "android.webkit.WebView" for n in tree().iter("node")):
+            break
+        time.sleep(.5)
+    else:
+        raise AssertionError("Rich link did not open the in-app WebView")
+    screen("rich-link-webview")
+    for _ in range(3):
+        adb("shell", "input", "keyevent", "KEYCODE_BACK")
+        try:
+            find("富文本回归标题")
+            break
+        except AssertionError:
+            pass
+    wait_for("富文本回归标题")
+    return {"clicked_text_link": True, "in_app_browser": True, "back_to_post": True}
+
+
+def list_offline(scene):
+    try:
+        adb("shell", "svc", "wifi", "disable")
+        adb("shell", "svc", "data", "disable")
+        if scene == "inbox":
+            start()
+            tap("消息")
+        else:
+            start(scene)
+        wait_for("重试", timeout=45)
+        text = " ".join(n.get("text", "") for n in tree().iter("node"))
+        assert "网络连接失败" in text, text
+        assert "暂无" not in text and "草稿箱为空" not in text, "Network error is presented as successful empty content"
+        screen(f"offline-{scene}")
+        return {"page": scene, "error_visible": True, "false_empty_visible": False}
+    finally:
+        adb("shell", "svc", "wifi", "enable")
+        adb("shell", "svc", "data", "enable")
+
+
+def list_retry_recovery():
+    try:
+        adb("shell", "svc", "wifi", "disable")
+        adb("shell", "svc", "data", "disable")
+        start("bookmarks")
+        wait_for("重试", timeout=45)
+    finally:
+        adb("shell", "svc", "wifi", "enable")
+        adb("shell", "svc", "data", "enable")
+    time.sleep(2)
+    tap("重试")
+    deadline = time.monotonic() + 40
+    while time.monotonic() < deadline:
+        text = " ".join(n.get("text", "") for n in tree().iter("node"))
+        if "重试" not in text and "零度娘正在加载" not in text:
+            break
+        time.sleep(.5)
+    assert "重试" not in text, "Online bookmarks did not recover"
+    assert "我的书签与收藏" in text
+    screen("bookmarks-online-restored")
+    return {"network_restored": True, "loaded_without_error": True}
+
+
 original_font = adb("shell", "settings", "get", "system", "font_scale").strip()
 try:
     case("welcome-themes-and-touch-target", welcome)
@@ -289,11 +393,18 @@ try:
     case("offline-error-and-retry", offline)
     case("feed-scroll-framestats", feed_scroll)
     case("renderer-process-crash-recovery", renderer_recovery)
+    case("installed-launcher-icon", installed_icon)
+    case("rich-content-structure-and-expansion", rich_content)
+    case("rich-link-navigation", rich_link_navigation)
+    for scene in ("bookmarks", "notifications", "drafts", "history", "activity", "messages", "search", "inbox"):
+        case(f"network-failure-{scene}", lambda scene=scene: list_offline(scene))
+    case("list-online-recovery", list_retry_recovery)
 finally:
     adb("shell", "settings", "put", "system", "font_scale", original_font if original_font not in ("null", "") else "1.0")
     # The suite is intended for the dedicated emulator; leave connectivity enabled.
     adb("shell", "svc", "wifi", "enable")
     adb("shell", "svc", "data", "enable")
+    start()
     (args.output / "display.txt").write_text(adb("shell", "dumpsys", "display"))
     (args.output / "crash-log.txt").write_text(adb("logcat", "-b", "crash", "-d"))
     report = {"device": args.device, "completed_at": datetime.now().isoformat(), "passed": sum(r["status"] == "passed" for r in results), "failed": sum(r["status"] == "failed" for r in results), "results": results}

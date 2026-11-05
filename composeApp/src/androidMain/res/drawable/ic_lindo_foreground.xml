@@ -1,5 +1,5 @@
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="192" android:viewportHeight="192">
-  <group android:translateX="32" android:translateY="32" android:scaleX="0.10207337" android:scaleY="0.10207337">
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+  <group android:translateX="24" android:translateY="24" android:scaleX="0.04784689" android:scaleY="0.04784689">
     <path android:fillColor="#24130C" android:pathData="M466.1 74.6H793c8.4 0 17 .4 25 3.4l2 4 2.6.3c7.8 1.6 14.1 9 19.4 14.7l1 3 2.4 2.4c2.6 2.6 3.3 4.3 4.6 7.6l4 3 1 4 2 1 .4 2.2c.8 3.6 2.3 5.9 4.6 8.8l4 2c1.2 3 1.2 3 2 6 1 2 1 2 3 3.6 2 2.4 2 2.4 3 6.5l1 3.9 4 2c1.3 3.6 1.3 3.6 2 7h2l.4 2.2a26 26 0 0 0 2.7 7.3c3.5 8.7 3 17.8-.6 26.5q-6.2 12-14.3 22.8c-2.2 3.2-2.2 3.2-2 6l.8 2.2v3c.4 5.4 2.3 8 6 12l2 1 3.2 6q6 9.7 12.8 19a43 43 0 0 0 13-5c4-1.8 5.4-2 10-2v-2l10.6-5 3-1.4c5.3-2.5 9.4-4.3 15.4-3.6v-2q19.1-8 39-14l4.6-1.4c23.8-6.8 52.6-14.5 75.8-2 3.6 2.4 3.6 2.4 5.6 5.4l4 2 2 4 2.4 1c7.7 3 12.4 14.8 15.6 22v3h2c12 26.4 12 26.4 12 34.7a67 67 0 0 0 3.2 18.9l1.8 7.4h2a361 361 0 0 1 5 35.5l.4 3.6.3 3.1c.3 2.8.3 2.8 1.3 6.8q2.3 13.6-1 27l-.4 7c-.5 9.7-2 19.1-3.6 28.7l-.8 5.1c-2.7 16.3-2.7 16.3-4.5 23.4l-.8 3-.8 3.1-2.4 9-2 7.3c-.7 3.4-.7 3.4.6 6.1l1.7 2.3 1 4 2 2c1.7 12.1-2.6 20.5-9.6 30-13.1 17.2-13.1 17.2-20.4 19 1 6.6 1 6.6 1.6 9.3 1.4 9 0 17.3-3.6 25.7h-2c-.5 5.3-.5 5.3 1.5 8 3.5 2.8 7 3.6 11.4 4.7l4.7 1.2a69 69 0 0 0 27.4 1.1v2c19-3.4 19-3.4 27.7-6.8 5.5-2 9.5-2.9 15.3-2.2l4 2c.7 2.2.7 2.2 1 5l.6 3.5c.6 4.7.5 8.9-.6 13.5h-2l1 3h-2l-1.1 3.7c-3 9-7.7 17.4-12.9 25.3h2v4q-4.4.9-9 1c-2 3-2 3-4 7l-4 2 1 5c-4 3-4 3-6 3l-1-2c-4 2-4 2-6 6l-5 4-2-2-3 3c-3 3-3 3-7 5l-1 2h-2c.3 3.6.4 5.5 3.1 8l2.7 1.7 2.6 1.7 5.4 3.1c2.2 1.5 2.2 1.5 3.2 4.5 2.3 1.6 2.3 1.6 5.2 3.1l2.8 1.6c3 1.3 5.7 1.9 9 2.3 2.8.4 2.8.4 5 1l1 2q5.4 2.2 11 4l4.1 1.6c12.2 3.9 24.4 4.7 37 4.3 3.9.1 3.9.1 6.9 2.1h-5l4.3.7c4.7 1.3 4.7 1.3 7.3 3.2 2.7 5.8 2 12 .4 18.1h-2l-.8 2.6a60 60 0 0 1-6.2 12.8c-2.2 2.9-3.6 3.6-7 4.6v4l-2.5 1a28 28 0 0 0-13.5 15l-1 2-4 1-5.2 3.6C1154 812 1154 812 1146 812l2 7h2c3 4.3 5.1 7.8 6 13 3 4 3 4 6 7a219 219 0 0 1 6.2 12.5c15.7 33.9 17 71.4 4.8 106.5l-1 3.2c-1 2.8-1 2.8-4 5.8l-1.4 3c-1.6 3-3 4.7-5.6 7l-2.6 2.6-4.4 4.4-2 4c-8 9.5-18.6 18-31 20-3.6-.6-6.6-1.7-10-3l.5-2.8q.8-7.5.6-15.1v-3l-.1-7.1-3.4.6c-3.6.4-3.6.4-5.6-.6l-.8 2.1-5.2 11.7-1 2.2h-2l-1 4q-2.8 4.1-6 8l1 2-5.9 4.2c-3.5 3-5.9 5.2-6.6 10q.5 13.9 1.8 27.8c2.2 25.3 2.2 25.3-2.3 36l-.2 3.4-.8 2.6-7 3a44 44 0 0 0-7 7l1 4-1 2h-5l-1 2-2-2-2.6 2q-11 8.9-22.7 17c-2.7 2-2.7 2-3.7 5l-7 2c-7.6 4-7.6 4-9 8l-2.9.2-3.1.8-2 4-4 3-1 2c-4 1-4 1-8.6 1.7a52 52 0 0 0-15.4 6.3v2l-6 3v4h-4l1 2-4-1 1-2-3.5 1.4c-4.3 1.5-8 2.4-12.5 2.6l-4-2-4-1c-3.4-2.3-3.9-3.1-5-7-.3-5.7.5-11 1.5-16.6q1.4-7.2 1.5-14.4l-2-1v-3l4 1 1-24-10 8.7a117 117 0 0 1-81 30.3c-3-.8-3-.8-5-2-1-4-.8-6 0-10h2l1-7 3-1 1-4h2l1-10-2.3.7-5.9 1.7c-2.8.6-2.8.6-6.8-.4q-4 .8-8 2v2l-2.7 1.2a36 36 0 0 0-8.2 6.1 79 79 0 0 1-9.7 8l-3.4 2.7v5l-3 1-1 2h-3q-4 1.8-8 3.9l-4.4 2.2c-3.6 1.9-3.6 1.9-5.6 3.9q-4.1 1.5-8.4 2.7l-6.6 2.3-1 2-7 2.1-9.6 3-3 1c-2.4.9-2.4.9-3.4 2.9l-8 1q-5 1.4-10 3v2l-4-1c-4.4 1.1-7 2.8-10.7 5.4a38 38 0 0 1-16.3 6.6l-1 3v-2a106 106 0 0 0-12.7 3.7c-4.3 1.3-4.3 1.3-8.3-.7l-1-2-7-2.8q-6-2.6-11.6-5.8a34 34 0 0 0-11.4-4.4v2h-23l-2 4-6 2-1 2-4 .8c-4 1.2-4 1.2-5.4 3.8l-.6 2.4c-1.8 1.8-4.2 1.2-6.6 1.2-4.8 0-9-.2-13.4-2.2-1.4-2.6-1.4-2.6-2-5l-3-.3c-4.2-.7-7-2-10.6-4l-3.2-1.7c-3.2-2-3.2-2-5.9-4.6-4.7-3.4-9.4-4.2-15-5.3-13.4-3-26.7-6.5-39.3-12.1v-2c-6.4-2.8-12-5-19-6-4.4-1.9-4.4-1.9-8-4l-1-3-2.8-.3c-4-.9-5.4-2.8-8-5.8-4-3.6-6.8-3.9-12.2-3.9v-3h-5v-2l-4-2c-2-4-2-4-3-8-4.4-2.4-8-3.4-13-3v1c-4.5.2-7.8-.4-12-2l1 5h2l1 6h2l1 4h2c2.7 8.4 2.7 8.4 2 13-4.3 5-7.2 6.3-13.8 7a85 85 0 0 1-29.3-5.1q-5.8-1.6-11.9-1.9l-1-3-5-3v-2l-2.7-1.5c-5.8-3.2-11.3-6.3-16.4-10.4-3.9-3.1-3.9-3.1-7.9-4.1l-5-4q.5 13.5 2 26.9l.5 4.8 1 7.7c.9 6.4 0 10.2-3.5 15.6-5.1 3.8-9.3 4.5-15.7 3.6q-5.7-1.2-11.3-2.6v-2l-5 1 1-4-11.1-5.4c-3.9-1.6-3.9-1.6-7.2-2.1-2.7-.5-2.7-.5-5.7-3.5-4-2-4-2-7-2.4-4.3-.9-6-3.6-9-6.6l-4-1c-7.8-4.4-7.8-4.4-9-8q-3.7-1.7-7.7-2.9c-2.3-1.1-2.3-1.1-4.3-5.1-2.3-1.8-2.3-1.8-5.2-3.6A238 238 0 0 1 179 1085c-3.5-13.9-5-30.9-2-45l2-3-1-2 .6-13.6c-.7-5.4-2.5-6.9-6.6-10.4v-2l-4-2-1-4-2-1c-5.5-3.4-7.4-8.3-10-14l-2.2-4.4C151 980 151 980 150 976l-2 1-.9-2.8C146 971 146 971 144 967h-2l1 3-1 2 2 1-.4 7.8-.3 4.4c-.3 3.8-.3 3.8-1.3 6.8v2l-1 9h-2v2a18 18 0 0 1-11 1 67 67 0 0 1-7.8-4c-2.2-1-2.2-1-5.2-1v-2h-2v-3l-4-2-2-3c-2-3-2-3-4.3-4.4-3.1-1.8-5-4-7.4-6.7l-2.3-2.6-2-2.3-2-2h-2v-2l-3-1-.6-4q-1.5-7-4.3-13.4C67 920.5 70.6 887 83 855.5l1-2.5q3.5-8.3 8-16h2c1.8-2.5 3-4.5 3.5-7.6.5-2.4.5-2.4 3.5-5.4l1-4c1.9-2.2 3.4-3.7 6-5v-4l-9-1v-2l-4.7-1.4c-3.4-1-6.1-2-9.3-3.6v-2l-2-.7a98 98 0 0 1-9.8-5q-3-1.8-6.2-3.3v-5c-3.2-3-3.2-3-7-6l-2.7-2.3C55 777 55 777 51 776c-1-3-1-3-1-5l-6-11.8a36 36 0 0 1-4-19.2c2-4 3.8-6.8 7-10 3.3-.8 5.7-1.1 9-1.2a111 111 0 0 0 40-6.4c4-1.4 4-1.4 8-1.8 4.8-.7 8.4-2.6 12.6-5l2.3-1.4C140 702 140 702 143 696l1-2h2v-4c-3.9-3.9-8.3-6.3-13-9-6.5-3.9-12-8.2-17.4-13.5q-4.8-4.5-10.2-8.4a31 31 0 0 1-6.1-7.5l-1.8-2.8c-1.6-3-2.1-5.5-2.5-8.8h-2l-3-6.4-1.7-3.6c-1.3-3-1.3-3-1.3-5l-4-2v-7h2l-.5-4.2C84 607 84 607 84 602h2l1-4c5-2.5 7.5-1.8 13-1l3.9.4c3.1.6 3.1.6 6.1 3.6 11 4.5 27.5 6.8 39 3l4.1-.2c8-.7 15.5-4 22.9-6.8l1-7-2.3-1.2c-3.1-2-4.1-3.4-5.7-6.8-.3-3.7-.3-3.7-.1-7.6.2-7.1.2-7.1-.9-10.4l2-4v-4q-2.8-2.6-5.7-5-4.5-4.1-8.6-8.5C154 541 154 541 152 541v-2h-4c-2-4.5-3-9.2-4-14l-1.1-3.3q-2.8-13 1.1-25.7l1.7-2.7c1.8-3 1.2-5 .3-8.3h-2c-10.7-37.5-16-77-13-116q0-1.9.3-3.8 1.9-25.4 7.7-50.2h2l2.5-9 .7-2.5c1.2-4.3 1.8-7.7 1.8-12.3 0-4.4.5-5.7 3-9.2l2.3-6c3.7-10 8.6-21 16.3-28.5a26 26 0 0 0 5.4-8.5h2l1-3c8.3-6 16.8-10.5 27-12l2.5-.4c16.7-2 16.7-2 21.5.4l6 .2c9 .6 17.4 3.1 26 5.8l16.5 5.2 7.6 2.4q17.2 5.6 33.6 13l10.5 4.5q6.2 2.5 12.3 5.4 8.7 4 17.5 7.5c15.1-19.5 15.1-19.5 20.3-27.6 1.7-2.4 1.7-2.4 4.7-3.4v-3l3-2c1.1-3.6 1.3-5.4-.2-8.9L383 221h-3v-2l-2.2-.8a13 13 0 0 1-6.8-5.2q-.8-5-1-10l-2.4-.8C365 201 365 201 363 197c1-3 1-3 2-4l-1-3.6c-3.3-14 3.3-24.3 10.4-36l4.6-7.4 4.4-7.1 5.4-8.8 1.6-2.7 1.5-2.3c1.1-2.1 1.1-2.1 2.1-6.1a115 115 0 0 1 5.3-8.7l1.7-2.3h2l1-6h3l2-4 4-2 8.1-9.6c12.7-10.7 29.1-11.9 45-11.8M459 76v1h5v-1zm6 0v1h5v-1zm10 0v1h6v-1zm38 0v1h9v-1zm18 0v1h37v-1zm43 0v1h33v-1zm37 0v1h11v-1zm30 0v1h6v-1zm29 0v1h85v-1zm90 0v1h8v-1zm12 0v1h5v-1zm14 0v1h8v-1zm-340 1v1h8v-1zm354 0v1h6v-1zm-359 1v1h5v-1zm366 0v1h5v-1zm64 66 1 2Zm-505 52 1 2Zm1 2 1 2Zm-162 27v1h7v-1zm-7 1 4 1Zm824 0v1h5v-1zm-7 1 4 1Zm-858 39-1 4 2-4zm-2 4 1 2Zm944 6 1 2Zm-947 1 1 2Zm948 1 1 3Zm1 3 1 2Zm-951 1 1 2Zm952 2 1 2Zm-953 1 1 2Zm954 1 1 3Zm-955 2 1 2Zm-1 2 1 2Zm957 0 1 2Zm1 3 1 2Zm1 3 1 2Zm-967 23 1 4Zm-1 5c-1 3.9-1 7-1 11h1l1-11zm977 10v6h1v-6zm-979 1v6h1v-6zm-1 6v7h1v-7zm981 0v6h1v-6zm1 7v9h1v-9zm-983 1v9h1v-9zm-1 9v15h1v-15zm985 0 1 51h1v-22.1c.1-9.7.1-19.3-1-28.9zm-986 15v28h1v-28zm1 31v15h1v-15zm985 6v13h1v-13zm-984 9v10h1v-10zm983 4v9h1v-9zm-982 6v8h1v-8zm981 3v7h1v-7zm-980 5c0 4.2 0 8 1 12h1l-1-12zm979 2v6h1v-6zm-1 7v5h1v-5zm-976 4v5h1v-5zm975 1v5h1v-5zm-974 4v5h1v-5zm973 1v6h1v-6zm-972 4 1 4Zm971 2 1 4Zm-970 3 1 4Zm969 1v5h1v-5zm-968 4 1 3Zm967 1 1 4Zm-966 3 1 4Zm965 1 1 4Zm-964 3 1 3Zm963 1 1 3Zm-1 4 1 2Zm-1 3 1 3Zm-1 3 1 3Zm6 18v9h1v-9zm-1 9 1 3Zm-1 4 1 2Zm-1 2 1 2Zm-25 42 1 2Zm-911 18 1 2Zm-85 23v12h1v-12zm1083 0v9h1v-9zm-1 10 1 4ZM87 617v5h1v-5zm1080 2 1 3ZM88 622l1 3Zm1078 1 1 2ZM89 625l1 3Zm1076 0 1 2ZM90 628l1 3Zm1074 0 1 2Zm-1 2 1 2ZM91 631l1 2Zm1071 1 1 2ZM92 633l1 2Zm1064 11 1 2ZM99 647l1 2Zm1005 41-3 2 6-1zM86 727l4 1Zm-4 1 4 1Zm-6 1v1h5v-1zm-25 1v1h25v-1zm1119 0 4 1Zm4 1v1h6v-1zm7 1v1h18v-1zm31 9v5h1v-5zM41 742l1 3Zm1 5 1 3Zm1169 1 1 2ZM44 754l1 2Zm1115 84 1 2ZM92 839l1 2Zm-1 2 1 2Zm-1 2 1 2Zm-1 2 1 2Zm-1 2 1 2Zm-1 2 1 2Zm-2 5 1 2Zm1086 10 1 2ZM80 867l1 2Zm1092 0 1 2ZM78 873l1 2Zm1096 0 1 2ZM77 877l1 4Zm1098 0 1 4Zm1 5 1 4ZM75 886v5h1v-5zm1102 1v5h1v-5zM74 892v8h1v-8zm1104 1v8h1v-8zM73 901v20h1v-20zm1106 2v16h1v-16zm-1 18v7h1v-7zM74 922v7h1v-7zm1 8 1 4Zm1102 0 1 4Zm-1 5 1 4ZM76 937l1 2Zm1 3 1 3Zm1 4 1 2Zm1 3 1 2Zm1094 1 1 2ZM80 950l1 2Zm1092 1 1 2Zm-1025 2v7h1v-7zm-3 2 1 2Zm4 5 1 4Zm957 2 1 3Zm-956 3 1 3Zm955 0 1 2ZM86 968v2l2-1zm64 0 1 3Zm953 0 1 3Zm-964 2v5h1v-5zm963 1 1 2Zm-961 1 1 2Zm10 0 1 3Zm950 2 1 2Zm-949 1 1 2Zm-14 1v6h1v-6zm975 1 1 3Zm-973 5 1 2Zm15 1 1 2Zm959 0v18h1v-18zm-977 1v7h1v-7zm19 1 1 2Zm939 2 1 2Zm-957 5v9h1v-9zm980 13v1h6v-1zm-937 13 1 2Zm893 2v6h1v-6zm-894 1v7h1v-7zm-3 26 1 2Zm0 3v9h1v-9zm760 51v12h1v-12zm-533 2 2 2v-2zm-82 4v16h1v-16zm100 2 4 1Zm514 5v9h1v-9zm-613 10v9h1v-9zm612 0v6h1v-6zm-1 7v6h1v-6zm-94 1 1 3Zm-424 1v5h1v-5zm-92 1v7h1v-7zm609 4v5h1v-5zm-554 2 4 1Zm4 1 4 1Zm-58 1v6h1v-6zm62 0v1h5v-1zm6 1v1h17v-1zm539 1v5h1v-5zm-606 5v5h1v-5zm605 1v5h1v-5zm-1 5v5h1v-5zm-604 2 1 3Zm192 4 4 1Zm213 2 4 1Zm-201 1 4 1Zm4 1v1h5v-1zm190 0 4 1Zm-419 1 4 1Zm234 0v1h6v-1zm83 0v1h14v-1zm97 0 4 1Zm-410 1v1h5v-1zm7 0 4 1Zm397 0v1h6v-1zm-144 14 4 1Zm94 0 4 1Zm24 0 4 1Zm-113 1v1h10v-1zm11 0v1h9v-1zm83 0v1h18v-1zm7 3 1 2Z" android:fillType="nonZero" />
     <path android:fillColor="#FBE2D9" android:pathData="M777 627q5.9 11.4 11.3 23a559 559 0 0 0 24 45.3c3.7 6.5 3.7 6.5 3.7 8.7a38 38 0 0 1-24.7 10.5c-31.3 4.6-62.8 17.4-84.3 41.5l-2 4 11-8 2 1-3.4 3.6c-5.3 5.9-13.6 15.2-13.6 23.4l3.6-2.4 4.6-3 2.4-1.6a32 32 0 0 1 10.4-5l-3 6.8c-6 17.8-4.9 39.1 2.8 56.1 6.3 12.6 12.8 21 26.2 26.1h3l-3.4-2.2c-14-10.5-19.7-26.7-22.1-43.3-.2-3.4-.3-6.2.5-9.5 3.8-4.4 8.4-6 14-7v-2l3-.8 4-1.1 3.8-1.1c3.2-1 3.2-1 4.2-2l-2.3-1.2C750 785 750 785 747 781c-.7-5.7-.8-9.5 2.5-14.4 4.3-5 9-7.3 15.6-8.2 4.9.7 6.7 2 9.9 5.6 1.5 4.5 1.2 6.5-.4 11a18 18 0 0 1-6.9 7c-3.2 2.5-3.7 3.8-4.3 8 0 9.6.6 17.2 6.6 25 3.1 2.6 4.4 3 8.5 2.9 5.4-1.4 7.7-2.6 10.8-7.3a32 32 0 0 0 2.8-16.4v-4.6l-.1-3.6c14 1.3 33 4 43 15 2.2 13.6-5.2 28.6-12 40-5.4 7.1-12 14-20 18a40 40 0 0 0 27.2-15.5 80 80 0 0 0 15-53c0-15-3.6-28.6-12.8-40.5-1.4-2-1.4-2-1.4-5 14.3 2 25.9 6.1 38 14l3.3 2c4 2.8 7.1 5.3 8.2 10.3 2.7 23.6-6.5 47-18.5 66.7l-1 2a135 135 0 0 0 36-42c1 3.9 1 5.3.3 9l-.6 3-.7 3.3-.7 3.4c-6.9 32.6-19.5 66.7-47.3 87.3q-11 7-23 12c2.6 5.1 4.8 5.8 10 8q13.8 4 28 5c-5.8 21-22 32.7-40.1 43-13.5 7.4-27.5 13-42 18l-6.9 2.5c-20.6 7.4-42.6 11-64.1 14.4l-3 .5c-16 2.6-16 2.6-20.9 2.6v14l-3 1a92 92 0 0 0-54 47c-3-3-4.5-5.4-6.5-9-12.2-20-29.9-30.9-51.5-39v-14l-4.5-.5c-41.8-4.6-89-12.3-125.5-34.5l-3.2-1.3A84 84 0 0 1 397 938a87 87 0 0 1-3-10h2.5a67 67 0 0 0 34.5-10l1-3-3.8-1c-23.6-8-40.5-30.7-51.4-52a264 264 0 0 1-9.8-23l-1.7-4.4q-2.3-8.3-3.6-16.7c-.7-3.9-.7-3.9-1.8-7.6-1-3.6-1-6.6-.9-10.3 3.3 3 5.6 6.3 8 10 7.5 10.8 17 23 29 29l-1.8-3.1c-11.3-19.7-20.5-43.7-17.2-66.9 2.3-4.1 5.2-6.4 9-9l2.8-2.1A76 76 0 0 1 429 745c-2 4-2 4-4.8 8-8.7 12.9-10.3 26.9-10.5 42v3.1a62 62 0 0 0 4.4 23.4 62 62 0 0 0 29.3 35.4q4.6 2 9.6 2.1l-2-1.4a71 71 0 0 1-29.2-43.2c-1-5.2-1.5-9-.8-14.4 3.6-3 3.6-3 8-5l3.4-1.7c4.2-1.5 8.2-1.8 12.6-2.3l7-3 6-1 6-1-.1 3.2c-.3 10.1.3 16.3 6.1 24.7 2 2.1 2 2.1 6 4.1 4.4 0 7.1-.4 10.8-3 6.4-8.7 7-17.4 7.2-28l5-1-2-2.4c-2.8-5-2.7-7.8-2-13.6 2.4-3 2.4-3 5-5l1-1a32 32 0 0 1 13.8 1c4.4 4 7.8 7.7 8.9 13.6-.9 4.4-2.6 6.3-5.7 9.4-4 2-4 2-8 3l3.4 1.6 4.4 2.2 4.3 2.2c3.9 2 3.9 2 7.9 5 2.7 13.8-4 30-11.2 41.6A120 120 0 0 1 512 856c8.2-1.2 13.5-7 18.8-13a71 71 0 0 0 12.5-42.2v-3.2c0-10.5-2.4-20-6.3-29.6q6.7 2.6 12.8 6.6l4 2.5 3.2 1.9c0-8.7-9.3-18-15-24 3.6 0 4.8 1 7.7 3l2.4 1.7 1.9 1.3c-12-16.6-27.8-25.2-46-34l-2.7-1.4c-9.3-4.6-19.4-7-29.3-9.6l-4.2-1.1q-5.4-1.2-11-1.5c-8.2-1-13.5-4.4-19.8-9.4 1.5-5 3.7-9.2 6.3-13.7q15.6-27.8 28.7-56.9c2-4.4 2-4.4 3-5.4 7.6-.5 14.5.9 22 2.6l3.4.7c8.1 2 8.1 2 10.2 5.2l.4 3.5 1.1 5.5 1.2 6.4q2.9 14.8 7.7 29.1l1.5 5.3c2.8 8.9 7.1 17 11.4 25.3 1.1 2.4 1.1 2.4 1.1 4.4l-4-2a161 161 0 0 0-30-10.6 53 53 0 0 0-15-1.4l4.2 1.5c22.8 8 43.2 18.3 62.8 32.5l-4-8 18 1-.7-6.3-.8-8.3-.4-4.1-.4-4-.4-3.7q-.4-5.3-.3-10.6c2.8 2.8 3.3 5.8 4.6 9.6 2.8 8.2 6.4 15.5 10.6 23 1.8 3.4 1.8 3.4 1.8 5.4l87-1a265 265 0 0 0 16-38h1c.6 12.8-1.2 25.3-3 38l6.7-.4 3.8-.3q4.3-.3 8.5-1.3l-1 2.4c-1 2.6-1 2.6-1 4.6l4-2.8c18.2-12.4 39-25.3 61-29.2-17.5.8-33.3 5.5-49 13q4.3-13.4 10.5-26.2 2.9-7.6 4.9-15.7l.9-3.4q4.5-17.7 7.7-35.7c11.3-3.8 22-7 34-7" android:fillType="nonZero" />
     <path android:fillColor="#6E423B" android:pathData="m577 370-.5 2.6A54 54 0 0 0 585 412a52 52 0 0 0 33 21c16.2 1.3 29.5-2 42.3-12.2A51 51 0 0 0 676 390v-20a75 75 0 0 1 21.7-2.4 89 89 0 0 1 28.2 5.2c2.1 1.2 2.1 1.2 3 3.7l.3 3 .4 3.4.4 3.1a49 49 0 0 0 15.5 28.1c7.4 5.4 17.1 11.2 26.5 10.7l4.6-.2 4.6-.2c3.7.6 4.8 1.6 7.3 4.4a260 260 0 0 1 19.8 35.8 949 949 0 0 1 45.5 104.6 537 537 0 0 1 15.2 45l5.5 17q5 15.3 9 30.8 1.7 7.1 3.9 14.3c3 10.7 5.4 21.5 8 32.3l1.3 6L900 729l-2 1c-25.4-8.9-25.4-8.9-30-17-.2-3.3-.2-3.3.3-6.8q0-1.7.3-3.5l.4-2.7-2 1.8c-12.1 10.3-20.2 12-35.7 10.7l-5.3-.5 1-16-7 4-1-2.7-6.8-14a1020 1020 0 0 1-22.5-46.8l-1.6-3.6C787 630 787 630 787 627c9.8-.3 18.7 0 28.2 2.4 2.8.6 2.8.6 5.8-.4a69 69 0 0 0-35.1-11c-3.9-1-3.9-1-5.4-3.1q-2.5-5.4-4.5-10.9l-2.3-5.7a677 677 0 0 1-15.3-41c-1.4-4.3-1.4-4.3-3-8-1.4-3.3-1.4-3.3-1.8-6.7-.6-3.6-.6-3.6-2.5-7.5-2-4.3-2.6-8.3-3-13-.8-8-2.6-15.3-4.9-23q-1.4-5-2.6-10A167 167 0 0 0 723 445c0 3.8 1.6 7.5 2.8 11 6 20.1 9.4 40.3 12.2 61l.6 4a240 240 0 0 1 1.6 39.6c-.1 14.5-.2 29-1.2 43.4l-.2 3.3-.8 10-.2 3c-.4 4-.9 6.7-3.8 9.8l-4.7 3.4c-3.5 2.3-5.7 5.3-8.3 8.5l6.6-3.1c2.4-.9 2.4-.9 6.4-.9-2 22.1-7.6 43.2-15.8 63.8l-1 2.6q-4.1 10-9.2 19.6c4.7-1.2 5.3-2.2 8-6l2-4q3-1.1 6-2l5.3-2.4A90 90 0 0 1 769 701c-1 2-1 2-3.2 2.8l-2.9.6a172 172 0 0 0-56.7 28.4C703 735 703 735 701 736c1.9-5.7 1.9-5.7 3-8l-4 1a195 195 0 0 1-14 0c.9-13.8.9-13.8 1.6-19.7q.6-8 .4-16.3l-1.2 4.8c-2.8 10.1-7.2 24.6-14.8 32.2l-8.1.1h-48L585 730l-4.8-8.9-1.3-2.5c-4.2-8-7.2-16-9.9-24.6l.2 2.2 1 13.8q1 9.4.8 19h-17l3 5v2q-5.3-2.7-10.2-6a240 240 0 0 0-51.4-25c-2.4-1-2.4-1-6.4-3v-1a86 86 0 0 1 50 15l-1.5-2.7a165 165 0 0 1-13.8-33c-5.2-14.8-8-30-10.7-45.3l-12-3-3.3-.9-3.3-.8-3-.7q-6.2-.9-12.4-.6l-1.4 3c-23 49.3-23 49.3-36.6 71a27 27 0 0 1-8-6h-2l1 15c-28 2.1-28 2.1-34-2v-2l-2.1-.7c-3.5-1.6-6-3.8-8.9-6.3l.1 2.4.1 3.2.2 3.2a14 14 0 0 1-4.4 9.2 72 72 0 0 1-10 4.8l-5.4 2.3-2.4 1-6.2 2.9h-3q.8-8.9 3.1-17.6 1.3-5.1 2.3-10.4a380 380 0 0 1 6.4-26.9l2.1-8.1 3-11.3c2.6-9.9 5.2-19.6 8.9-29.1q2.9-8.4 5-17 3.7-12.8 8.2-25.2l1.5-4.2L401 568l1.8-4.8a444 444 0 0 1 11.6-28.4q1.9-4.4 3.4-9a259 259 0 0 1 10-23.2l3.5-7.8 4.9-10.8a379 379 0 0 1 16.6-33.2l4.3-8q2.3-4.8 5.6-9.1c2-2.7 3.3-4.6 4.3-7.7h3.3c9-.4 16.6-1.1 24.7-5l2.4-1a50 50 0 0 0 24.6-28c1.8-6 2.5-11.8 3-18a84 84 0 0 1 52-4" android:fillType="nonZero" />
@@ -203,51 +203,26 @@
     <path android:fillColor="#000000" android:pathData="m889 1134 3 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m816 1121 1 2-2-1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1070 1092 1 2-2-1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m63 784 2 2h-2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1126 604 3 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1161 596 3 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1083 553 1 2-2-1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#1C0000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#1C0000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#150000" android:pathData="m943 248 3 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M925 106h2l-1 2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m926 100 1 2-2-1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M929 97h2l-1 2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m411 95 2 1-2 1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m417 89 2 1-2 1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m613 1174 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m103 1173 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m955 1168 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m936 1168 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m524 1166 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m521 1165 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m481 1148 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m252 1141 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m465 1140 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#2A2A00" android:pathData="m1008 1138 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m887 1135 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m355 1131 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#4A2A00" android:pathData="m236 1131 2 1Z" android:fillType="nonZero" />
@@ -261,19 +236,8 @@
     <path android:fillColor="#000000" android:pathData="m1047 1111 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1051 1108 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1065 1096 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m118 1002 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m141 1000 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#190000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m103 720 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#190000" android:pathData="m1135 715 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m113 715 2 1Z" android:fillType="nonZero" />
@@ -298,309 +262,15 @@
     <path android:fillColor="#000000" android:pathData="m108 599 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1080 597 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m103 597 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1168 264 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m915 260 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1142 200 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1148 194 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m91 174 2 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m961 170 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m95 170 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m957 168 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m969 154 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m820 81 2 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#7F0000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#550000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#240000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#2A0000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#3F0000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#3F0000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#7F0000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#550000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#550000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="" android:fillType="nonZero" />
   </group>
 </vector>

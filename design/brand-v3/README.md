@@ -28,3 +28,9 @@ python3 scripts/generate-brand-vectors.py
 工具：会话内置 imagegen。欢迎图与连接图基于用户提供的零度娘形象生成透明独立插画，经过视觉核对与矢量化；图标在精细头像稿基础上移除金色底板，保留人物特征。
 
 图标最后一次编辑的完整提示词见 `sources/mark-prompt.txt`。欢迎/连接原始调用提示词未在工作区留存，不能保证从文字重生成完全相同的原稿；已保留实际原稿与最终 SVG，可直接重导出。
+
+## Android 原生图标修复
+
+导出器跳过 SVG 的空 path，避免 Android PathParser 抛出异常并让 Launcher 回退到机器人默认图标。原生前景使用 108 dp 画布与居中 60 dp 区域；所有密度的 legacy 图标已同步重导出。系统图标回归入口为 Debug 专属 `lindo.preview=icon`，会直接调用 Android 资源 inflater 并绘制结果，而非使用 Compose 的宽容解析器。
+
+通用状态已缩小：行内 20–28 dp、空/错误页 80 dp、网页错误页 88 dp；不缩小按钮的 48 dp 点击范围。
