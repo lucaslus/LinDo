@@ -70,6 +70,8 @@ import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.LinDoApp
+import do_.linux.lindo.ui.LinDoBrandWordmark
+import do_.linux.lindo.ui.LinDoMascotLoginTransitionView
 import do_.linux.lindo.ui.PlatformWebLoginHost
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -829,6 +831,16 @@ private fun AndroidWebLoginModal(
     var progress by remember { mutableStateOf(0.1f) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember { mutableStateOf(false) }
+    var pageReady by remember { mutableStateOf(false) }
+    var minSplashDone by remember { mutableStateOf(false) }
+    var isVerifyingSession by remember { mutableStateOf(false) }
+    val isDark = remember { UserApiKeyAuthManager.uiDarkTheme }
+
+    LaunchedEffect(initialUrl) {
+        minSplashDone = false
+        delay(1250L)
+        minSplashDone = true
+    }
 
     fun completeWithUserObject(u: JSONObject) {
         if (completed) return
@@ -888,6 +900,7 @@ private fun AndroidWebLoginModal(
         if (!rawCookies.contains("_t=")) {
             return
         }
+        isVerifyingSession = true
 
         // 已检测到 `_t=` 会话 Cookie：通过单次无副作用 evaluateJavascript 提取当前用户资料
         val probeJs = """
@@ -961,182 +974,213 @@ private fun AndroidWebLoginModal(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color(0xFFFFFFFF))
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.navigationBars)
-    ) {
-        // 顶部 Linear 风格极简安全顶栏
-        Row(
+    val showMascotTransition = isLoginFlow && (!minSplashDone || (!pageReady && progress < 0.85f) || isVerifyingSession)
+    val barBg = if (isDark) androidx.compose.ui.graphics.Color(0xFF1C1815) else androidx.compose.ui.graphics.Color(0xFFFFFBF4)
+    val barInk = if (isDark) androidx.compose.ui.graphics.Color(0xFFF8F5F0) else androidx.compose.ui.graphics.Color(0xFF201D19)
+    val barSubInk = if (isDark) androidx.compose.ui.graphics.Color(0xFF9E9689) else androidx.compose.ui.graphics.Color(0xFF7A736A)
+    val btnSurface = if (isDark) androidx.compose.ui.graphics.Color(0xFF2A2520) else androidx.compose.ui.graphics.Color(0xFFF3ECE0)
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .fillMaxSize()
+                .background(barBg)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(androidx.compose.ui.graphics.Color(0xFFF4F4F5))
-                    .clickable(onClick = onDismiss),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "关闭",
-                    modifier = Modifier.size(17.dp),
-                    tint = androidx.compose.ui.graphics.Color(0xFF09090B)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = null,
-                        modifier = Modifier.size(12.dp),
-                        tint = androidx.compose.ui.graphics.Color(0xFF09090B)
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = pageTitle,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = androidx.compose.ui.graphics.Color(0xFF09090B),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Text(
-                    text = if (isLoginFlow) {
-                        "linux.do 官方安全会话 · 登录成功后自动同步真实等级与资料"
-                    } else {
-                        "已共享当前账号登录态 · 支持应用广场 / 聊天 / 看板 / 生态免登直达"
-                    },
-                    fontSize = 11.sp,
-                    color = androidx.compose.ui.graphics.Color(0xFF71717A),
-                    maxLines = 1
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(androidx.compose.ui.graphics.Color(0xFFF4F4F5))
-                    .clickable { webViewRef?.reload() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = "刷新",
-                    modifier = Modifier.size(17.dp),
-                    tint = androidx.compose.ui.graphics.Color(0xFF09090B)
-                )
-            }
-        }
-
-        if (progress in 0.01f..0.98f) {
-            LinearProgressIndicator(
-                progress = { progress },
+            // 顶部零度娘黑金安全顶栏
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(2.dp),
-                color = androidx.compose.ui.graphics.Color(0xFFFFB003),
-                trackColor = androidx.compose.ui.graphics.Color(0xFFE4E4E7)
+                    .height(54.dp)
+                    .padding(horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(btnSurface)
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "关闭",
+                        modifier = Modifier.size(17.dp),
+                        tint = barInk
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(12.dp),
+                            tint = androidx.compose.ui.graphics.Color(0xFFF6B73C)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = pageTitle,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = barInk,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        text = if (isLoginFlow) {
+                            "LINUX DO 官方安全登录 · 登录成功后自动同步 Connect"
+                        } else {
+                            "已共享当前账号登录态 · 支持社区生态免登直达"
+                        },
+                        fontSize = 11.sp,
+                        color = barSubInk,
+                        maxLines = 1
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(btnSurface)
+                        .clickable {
+                            pageReady = false
+                            webViewRef?.reload()
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "刷新",
+                        modifier = Modifier.size(17.dp),
+                        tint = barInk
+                    )
+                }
+            }
+
+            if (progress in 0.01f..0.98f) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.5.dp),
+                    color = androidx.compose.ui.graphics.Color(0xFFF6B73C),
+                    trackColor = btnSurface
+                )
+            }
+
+            // 内置安全 WebView 容器
+            AndroidView(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)),
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        val cleanUa = settings.userAgentString.replace("; wv", "")
+                        UserApiKeyAuthManager.customUserAgent = cleanUa
+
+                        settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            databaseEnabled = true
+                            // 保持 WebView 原生 User-Agent 与 Sec-CH-UA Client Hints 完全一致，不暴露任何 window.LinDoJsBridge 全局变量
+                            useWideViewPort = true
+                            loadWithOverviewMode = true
+                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        }
+
+                        val cookieManager = CookieManager.getInstance()
+                        cookieManager.setAcceptCookie(true)
+                        cookieManager.setAcceptThirdPartyCookies(this, true)
+                        // 预注入当前会话 Cookie，确保打开主站子页面或 Connect/Credit/CDK/Lottery 生态时 100% 携带登录态
+                        CookieSentinel.resolveWinningCookies(targetHost = "linux.do").forEach { (k, rec) ->
+                            cookieManager.setCookie("https://linux.do", "$k=${rec.value}; Domain=.linux.do; Path=/; Secure")
+                        }
+                        cookieManager.flush()
+
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                progress = (newProgress / 100f).coerceIn(0.05f, 1f)
+                                if (newProgress >= 85) {
+                                    pageReady = true
+                                }
+                            }
+
+                            override fun onReceivedTitle(view: WebView?, title: String?) {
+                                if (!title.isNullOrBlank()) {
+                                    pageTitle = title
+                                }
+                            }
+                        }
+
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): Boolean {
+                                val target = request?.url?.toString() ?: return false
+                                if (target.startsWith("discourse://auth_redirect") ||
+                                    target.startsWith("lindo://auth_redirect")
+                                ) {
+                                    isVerifyingSession = true
+                                    val ok = UserApiKeyAuthManager.handleAuthRedirectUri(target)
+                                    if (ok) {
+                                        val otp = UserApiKeyAuthManager.consumePendingOtpToken()
+                                        if (!otp.isNullOrBlank()) {
+                                            view?.loadUrl("https://linux.do/session/otp/$otp")
+                                        } else {
+                                            tryExtractSessionAndComplete(view)
+                                        }
+                                    }
+                                    return true
+                                }
+                                return false
+                            }
+
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                super.onPageStarted(view, url, favicon)
+                                tryExtractSessionAndComplete(view)
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                pageReady = true
+                                tryExtractSessionAndComplete(view)
+                            }
+                        }
+
+                        webViewRef = this
+                        loadUrl(initialUrl)
+                    }
+                }
             )
         }
 
-        // 内置安全 WebView 容器
-        AndroidView(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)),
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    val cleanUa = settings.userAgentString.replace("; wv", "")
-                    UserApiKeyAuthManager.customUserAgent = cleanUa
-
-                    settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        databaseEnabled = true
-                        // 保持 WebView 原生 User-Agent 与 Sec-CH-UA Client Hints 完全一致，不暴露任何 window.LinDoJsBridge 全局变量
-                        useWideViewPort = true
-                        loadWithOverviewMode = true
-                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                    }
-
-                    val cookieManager = CookieManager.getInstance()
-                    cookieManager.setAcceptCookie(true)
-                    cookieManager.setAcceptThirdPartyCookies(this, true)
-                    // 预注入当前会话 Cookie，确保打开主站子页面或 Connect/Credit/CDK/Lottery 生态时 100% 携带登录态
-                    CookieSentinel.resolveWinningCookies(targetHost = "linux.do").forEach { (k, rec) ->
-                        cookieManager.setCookie("https://linux.do", "$k=${rec.value}; Domain=.linux.do; Path=/; Secure")
-                    }
-                    cookieManager.flush()
-
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                            progress = (newProgress / 100f).coerceIn(0.05f, 1f)
-                        }
-
-                        override fun onReceivedTitle(view: WebView?, title: String?) {
-                            if (!title.isNullOrBlank()) {
-                                pageTitle = title
-                            }
-                        }
-                    }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): Boolean {
-                            val target = request?.url?.toString() ?: return false
-                            if (target.startsWith("discourse://auth_redirect") ||
-                                target.startsWith("lindo://auth_redirect")
-                            ) {
-                                val ok = UserApiKeyAuthManager.handleAuthRedirectUri(target)
-                                if (ok) {
-                                    val otp = UserApiKeyAuthManager.consumePendingOtpToken()
-                                    if (!otp.isNullOrBlank()) {
-                                        view?.loadUrl("https://linux.do/session/otp/$otp")
-                                    } else {
-                                        tryExtractSessionAndComplete(view)
-                                    }
-                                }
-                                return true
-                            }
-                            return false
-                        }
-
-                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                            super.onPageStarted(view, url, favicon)
-                            tryExtractSessionAndComplete(view)
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            tryExtractSessionAndComplete(view)
-                        }
-                    }
-
-                    webViewRef = this
-                    loadUrl(initialUrl)
-                }
-            }
-        )
+        // 登录加载与核验身份过渡层：零度娘「我要验牌」全屏过渡页
+        if (showMascotTransition) {
+            LinDoMascotLoginTransitionView(
+                isDark = isDark,
+                progress = progress,
+                statusTitle = if (isVerifyingSession) "正在核验佬友身份牌..." else "正在连接 LINUX DO...",
+                statusSubtitle = if (isVerifyingSession) {
+                    "零度娘正在同步你的等级、徽章与 Connect 数据"
+                } else {
+                    "零度娘正在为你建立安全加密登录通道"
+                },
+                onCancel = onDismiss
+            )
+        }
     }
 }
 

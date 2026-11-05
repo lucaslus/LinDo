@@ -8,6 +8,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -138,6 +139,8 @@ import do_.linux.lindo.core.render.PostBlockNode
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
 import do_.linux.lindo.ui.components.PostGrantedBadgeIcon
+import lindo.composeapp.generated.resources.*
+import org.jetbrains.compose.resources.painterResource
 import do_.linux.lindo.ui.components.SmartAvatar
 import do_.linux.lindo.ui.components.UniversalBadgeChip
 import do_.linux.lindo.ui.components.UserTitleTag
@@ -590,7 +593,39 @@ private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
             .padding(horizontal = 12.dp, vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(if (isCompact) 5.dp else 8.dp)
     ) {
-        repeat(if (isCompact) 7 else 5) { idx ->
+        // 顶部零度娘暖心加载提示卡
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(palette.cardSurface)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Image(
+                painter = painterResource(Res.drawable.lingdu_bushaoxin),
+                contentDescription = "零度娘加载中",
+                modifier = Modifier.size(48.dp),
+                contentScale = ContentScale.Fit
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "零度娘正在同步最新讨论...",
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "连接 LINUX DO 理想型社区 · 不烧心流畅阅读",
+                    fontSize = 11.5.sp,
+                    color = palette.inkSecondary
+                )
+            }
+        }
+
+        repeat(if (isCompact) 6 else 4) { idx ->
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -741,137 +776,208 @@ private fun GeminiSparkleIcon(
 }
 
 /**
- * 明亮玻璃拟态立体社区图标（通透白底圆角方砖 + 立体黑/白/琥珀金三色球体徽章 + 暖金底光）
+ * 零度娘 · 品牌应用图标（#F6B73C 暖金底 + 零度娘冕冠头像）
  */
 @Composable
 private fun LinDoGlassAppIcon(
     tileSize: Dp = 84.dp,
+    isCircle: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val cornerRadius = tileSize * 0.26f
+    val shape = if (isCircle) CircleShape else RoundedCornerShape(tileSize * 0.25f)
     Box(
         modifier = modifier
             .size(tileSize)
-            .clip(RoundedCornerShape(cornerRadius))
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFFFFFFF),
-                        Color(0xFFF6F7F9)
-                    )
-                )
-            )
-            .border(
-                width = 1.dp,
-                color = Color(0xFFE4E4E7),
-                shape = RoundedCornerShape(cornerRadius)
-            ),
+            .clip(shape)
+            .background(Color(0xFFF6B73C)),
         contentAlignment = Alignment.Center
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            val cx = w / 2f
-            val cy = h / 2f
-            val emblemR = w * 0.32f
+        Image(
+            painter = painterResource(Res.drawable.lindo_mascot_icon),
+            contentDescription = "LinDo 零度娘应用图标",
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+    }
+}
 
-            // 1. 底部琥珀金环境投影光晕
-            drawOval(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        Color(0x55FFB003),
-                        Color(0x00FFB003)
-                    ),
-                    center = Offset(cx, cy + emblemR * 0.72f),
-                    radius = emblemR * 0.95f
-                ),
-                topLeft = Offset(cx - emblemR * 0.9f, cy + emblemR * 0.1f),
-                size = Size(emblemR * 1.8f, emblemR * 1.15f)
-            )
+/**
+ * DESIGN CONCEPT / 01：`LinDo` 品牌字标（含 `Lin` 下方标志性 #F6B73C 暖金短横线）
+ */
+@Composable
+fun LinDoBrandWordmark(
+    isDark: Boolean = false,
+    fontSizeSp: Float = 24f,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        Text(
+            text = "LinDo",
+            fontSize = fontSizeSp.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = (-0.7).sp,
+            color = if (isDark) Color(0xFFF8F5F0) else Color(0xFF201D19),
+            maxLines = 1
+        )
+        Spacer(modifier = Modifier.height(1.5.dp))
+        Box(
+            modifier = Modifier
+                .width((fontSizeSp * 0.78f).dp)
+                .height(3.2.dp)
+                .clip(RoundedCornerShape(99.dp))
+                .background(Color(0xFFF6B73C))
+        )
+    }
+}
 
-            // 2. 磨砂玻璃外环
-            val outerR = emblemR * 1.10f
-            drawCircle(
-                brush = Brush.linearGradient(
-                    colors = listOf(
-                        Color(0xFFFFFFFF),
-                        Color(0xFFECECEE)
-                    ),
-                    start = Offset(cx - outerR, cy - outerR),
-                    end = Offset(cx + outerR, cy + outerR)
-                ),
-                radius = outerR,
-                center = Offset(cx, cy)
-            )
-            drawCircle(
-                color = Color(0xFFD4D4D8),
-                radius = outerR,
-                center = Offset(cx, cy),
-                style = Stroke(width = 1.dp.toPx())
-            )
+/**
+ * 零度娘 · 登录加载与身份核验过渡页 (`我要验牌` 贴纸 + 暖金胶囊进度条 + 黑金亲切轻盈留白)
+ */
+@Composable
+fun LinDoMascotLoginTransitionView(
+    isDark: Boolean,
+    progress: Float,
+    statusTitle: String = "正在连接 LINUX DO...",
+    statusSubtitle: String = "零度娘正在核验佬友身份牌与安全会话",
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val bgColor = if (isDark) Color(0xFF1C1815) else Color(0xFFFFFBF4)
+    val inkPrimary = if (isDark) Color(0xFFF8F5F0) else Color(0xFF201D19)
+    val inkSecondary = if (isDark) Color(0xFF9E9689) else Color(0xFF7A736A)
+    val trackColor = if (isDark) Color(0xFF2E2924) else Color(0xFFF0E6D6)
+    val closeBtnBg = if (isDark) Color(0xFF2A2520) else Color(0xFFF3ECE0)
 
-            // 3. 内部黑·白·琥珀金三色立体徽标
-            val innerR = emblemR * 0.96f
-            val clipPath = Path().apply {
-                addOval(
-                    androidx.compose.ui.geometry.Rect(
-                        left = cx - innerR,
-                        top = cy - innerR,
-                        right = cx + innerR,
-                        bottom = cy + innerR
+    val infiniteTransition = rememberInfiniteTransition(label = "mascot_login_float")
+    val floatOffsetY by infiniteTransition.animateFloat(
+        initialValue = -4f,
+        targetValue = 5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1350, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "float_y"
+    )
+    val animatedProgress by infiniteTransition.animateFloat(
+        initialValue = 0.22f,
+        targetValue = 0.88f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "indeterminate_gold_bar"
+    )
+    val effectiveProgress = if (progress in 0.15f..0.95f) {
+        maxOf(progress, animatedProgress * 0.75f)
+    } else {
+        animatedProgress
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(bgColor)
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(horizontal = 24.dp, vertical = 14.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // 顶栏：左侧 LinDo 品牌字标 + 右侧取消按钮
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LinDoBrandWordmark(
+                isDark = isDark,
+                fontSizeSp = 22f
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(closeBtnBg)
+                    .clickable(onClick = onCancel),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.Close,
+                    contentDescription = "取消登录",
+                    modifier = Modifier.size(16.dp),
+                    tint = inkPrimary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(0.85f))
+
+        // 核心视觉：零度娘「我要验牌」贴纸 + 柔和暖金背景光晕
+        Box(
+            modifier = Modifier.size(216.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            Color(0xFFF6B73C).copy(alpha = if (isDark) 0.22f else 0.26f),
+                            Color(0xFFF6B73C).copy(alpha = 0f)
+                        ),
+                        radius = size.minDimension * 0.48f
                     )
                 )
             }
-            val d = innerR * 2f
-            val topY = cy - innerR
-            val b1 = d * 0.315f
-            val b2 = d * 0.37f
-            val b3 = d - b1 - b2
-
-            drawContext.canvas.save()
-            drawContext.canvas.clipPath(clipPath)
-
-            // 顶层曜石黑
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(Color(0xFF27272A), Color(0xFF09090B)),
-                    startY = topY,
-                    endY = topY + b1
-                ),
-                topLeft = Offset(cx - innerR, topY),
-                size = Size(d, b1)
+            Image(
+                painter = painterResource(Res.drawable.lingdu_yanpai),
+                contentDescription = "零度娘正在验牌",
+                modifier = Modifier
+                    .size(188.dp)
+                    .offset(y = floatOffsetY.dp),
+                contentScale = ContentScale.Fit
             )
-            // 中层晶透瓷白
-            drawRect(
-                color = Color(0xFFFAFAFA),
-                topLeft = Offset(cx - innerR, topY + b1),
-                size = Size(d, b2)
-            )
-            // 底层流光琥珀金
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(Color(0xFFFFC11C), Color(0xFFFFB003), Color(0xFFEA8A00)),
-                    startY = topY + b1 + b2,
-                    endY = topY + d
-                ),
-                topLeft = Offset(cx - innerR, topY + b1 + b2),
-                size = Size(d, b3)
-            )
-            // 顶部玻璃高光反射弧
-            drawOval(
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0x66FFFFFF),
-                        Color(0x00FFFFFF)
-                    ),
-                    startY = topY,
-                    endY = cy
-                ),
-                topLeft = Offset(cx - innerR * 0.8f, topY - innerR * 0.1f),
-                size = Size(innerR * 1.6f, innerR * 0.95f)
-            )
-            drawContext.canvas.restore()
         }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        Text(
+            text = statusTitle,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = (-0.4).sp,
+            color = inkPrimary,
+            maxLines = 1
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Text(
+            text = statusSubtitle,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            color = inkSecondary,
+            maxLines = 1
+        )
+
+        Spacer(modifier = Modifier.height(22.dp))
+
+        // 暖金胶囊进度条 (#F6B73C)
+        Box(
+            modifier = Modifier
+                .width(196.dp)
+                .height(6.dp)
+                .clip(RoundedCornerShape(99.dp))
+                .background(trackColor)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(effectiveProgress.coerceIn(0.18f, 1f))
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(99.dp))
+                    .background(Color(0xFFF6B73C))
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(1.15f))
     }
 }
 
@@ -1392,7 +1498,8 @@ fun LinDoApp() {
                                 if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
                                     activeWebLoginUrl = url
                                 }
-                            }
+                            },
+                            onToggleDark = { updateThemePref(!isDarkTheme) }
                         )
                     } else if (isDesktop) {
                         Row(modifier = Modifier.fillMaxSize()) {
@@ -2453,39 +2560,46 @@ private fun CommunityHomeFeedPane(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null
                             ) { onRefresh() },
-                        verticalAlignment = Alignment.Bottom
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "LINUX ",
-                            fontSize = 20.5.sp,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = (-0.6).sp,
-                            color = palette.inkPrimary,
-                            maxLines = 1,
-                            softWrap = false,
-                            modifier = Modifier.alignByBaseline()
+                        LinDoGlassAppIcon(
+                            tileSize = 26.dp,
+                            isCircle = true
                         )
-                        Text(
-                            text = "DO",
-                            fontSize = 20.5.sp,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = (-0.6).sp,
-                            color = palette.logoDoColor,
-                            maxLines = 1,
-                            softWrap = false,
-                            modifier = Modifier.alignByBaseline()
-                        )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text(
-                            text = "新的理想型社区",
-                            fontSize = 9.2.sp,
-                            fontWeight = FontWeight.Medium,
-                            letterSpacing = 0.2.sp,
-                            color = palette.inkTertiary,
-                            maxLines = 1,
-                            softWrap = false,
-                            modifier = Modifier.alignByBaseline()
-                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(
+                                text = "LINUX ",
+                                fontSize = 20.5.sp,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = (-0.6).sp,
+                                color = palette.inkPrimary,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.alignByBaseline()
+                            )
+                            Text(
+                                text = "DO",
+                                fontSize = 20.5.sp,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = (-0.6).sp,
+                                color = palette.logoDoColor,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.alignByBaseline()
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "新的理想型社区",
+                                fontSize = 9.2.sp,
+                                fontWeight = FontWeight.Medium,
+                                letterSpacing = 0.2.sp,
+                                color = palette.inkTertiary,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.alignByBaseline()
+                            )
+                        }
                     }
 
                     // 顶部快捷刷新
@@ -2863,24 +2977,34 @@ private fun CommunityHomeFeedPane(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Image(
+                            painter = painterResource(
+                                if (errorMessage != null) Res.drawable.lingdu_baocuo else Res.drawable.lingdu_moyu
+                            ),
+                            contentDescription = null,
+                            modifier = Modifier.size(136.dp),
+                            contentScale = ContentScale.Fit
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = errorMessage ?: "暂无相关话题",
+                            text = errorMessage ?: "暂时没有匹配的话题，陪零度娘摸会儿鱼吧~",
                             fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
                             color = palette.inkSecondary
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
                         Box(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(palette.activeChipBg)
+                                .clip(RoundedCornerShape(99.dp))
+                                .background(Color(0xFFF6B73C))
                                 .clickable { onRefresh() }
-                                .padding(horizontal = 18.dp, vertical = 8.dp)
+                                .padding(horizontal = 22.dp, vertical = 9.dp)
                         ) {
                             Text(
                                 text = "重新加载",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.activeChipText
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF201D19)
                             )
                         }
                     }
@@ -6988,125 +7112,168 @@ private fun UserApiKeyAuthSheet(
 }
 
 /**
- * QQ音乐 12.x/13.x 级臻品极简登录欢迎页 (`GoogleWelcomeLoginScreen`)：
- * - 摒弃厚重方框与生硬分割线，采用高定留白 + 柔和品牌标识
- * - 底部采用 QQ音乐 标志性全圆角胶囊双通道按钮 (`RoundedCornerShape(99.dp)`)
- * - 彻底移除游客预览入口，强制登录保障社区完整鉴权与 Connect 保级追踪
+ * DESIGN CONCEPT / 01 · 零度娘品牌与登录体验 (`GoogleWelcomeLoginScreen`)：
+ * - 配色体系：`#F6B73C` (暖金) · `#201D19` (黑金墨色) · `#FFFBF4` (浅色暖米画布) / `#1C1815` (深色黑金画布)
+ * - 左上角 `LinDo` 字标（带 `Lin` 下方暖金短横线）
+ * - 中央零度娘挥手迎宾主视觉插画 (`lindo_login_hero_light` / `lindo_login_hero_dark`)
+ * - 左对齐亲切问候文案：`你好，佬友。` + `欢迎来到 LinDo` + `连接 LINUX DO，发现有趣的讨论`
+ * - 主力 `#F6B73C` 暖金全圆角胶囊按钮：`使用 LINUX DO 登录  →`
+ * - 彻底移除游客预览入口，保留轻量级次要入口 `通过系统浏览器免密授权`
  */
 @Composable
 private fun GoogleWelcomeLoginScreen(
     onPrimaryWebLogin: () -> Unit,
-    onBrowserOneClickAuth: () -> Unit
+    onBrowserOneClickAuth: () -> Unit,
+    onToggleDark: () -> Unit = {}
 ) {
     val palette = LocalPalette.current
-    val primaryCapsuleBg = if (palette.isDark) palette.publishBtnBg else Color(0xFF111827)
-    val primaryCapsuleFg = if (palette.isDark) palette.publishBtnContent else Color.White
+    val isDark = palette.isDark
+    val canvasColor = if (isDark) Color(0xFF1C1815) else Color(0xFFFFFBF4)
+    val inkPrimary = if (isDark) Color(0xFFF8F5F0) else Color(0xFF201D19)
+    val inkSubTitle = if (isDark) Color(0xFFEDE7DF) else Color(0xFF201D19)
+    val inkSecondary = if (isDark) Color(0xFF9E9689) else Color(0xFF8C857B)
+    val goldAccent = Color(0xFFF6B73C)
+    val goldButtonText = Color(0xFF201D19)
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(palette.cardSurface)
+            .background(canvasColor)
             .windowInsetsPadding(WindowInsets.statusBars)
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 28.dp, vertical = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(horizontal = 26.dp, vertical = 14.dp)
     ) {
-        Spacer(modifier = Modifier.weight(0.82f))
-
-        // 1. 核心品牌视觉：立体玻璃图标 + LINUX DO 标志性黑金/主题色双字重排版（黄金分割点居中留白，彻底去除累赘看板卡片与游客跳过入口）
-        LinDoGlassAppIcon(tileSize = 88.dp)
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "LINUX ",
-                fontSize = 30.sp,
-                fontWeight = FontWeight.Black,
-                letterSpacing = (-0.8).sp,
-                color = palette.inkPrimary
+        // 1. 顶部栏：左上角 LinDo 品牌字标（含暖金短下划线） + 右上角深浅主题切换
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LinDoBrandWordmark(
+                isDark = isDark,
+                fontSizeSp = 24f
             )
-            Text(
-                text = "DO",
-                fontSize = 30.sp,
-                fontWeight = FontWeight.Black,
-                letterSpacing = (-0.8).sp,
-                color = palette.logoDoColor
+            Spacer(modifier = Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onToggleDark),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
+                    contentDescription = "切换深浅模式",
+                    modifier = Modifier.size(18.dp),
+                    tint = inkSecondary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(0.45f))
+
+        // 2. 中央零度娘挥手迎宾插画（浅色 #FFFBF4 / 深色 #1C1815 原生无缝融合）
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(256.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = painterResource(
+                    if (isDark) Res.drawable.lindo_login_hero_dark else Res.drawable.lindo_login_hero_light
+                ),
+                contentDescription = "零度娘欢迎插画",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
             )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(14.dp))
 
-        Text(
-            text = "真诚 · 友善 · 团结 · 专业",
-            fontSize = 13.5.sp,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 2.sp,
-            color = palette.inkSecondary,
-            maxLines = 1
-        )
+        // 3. 左对齐亲切问候排版（你好，佬友。 / 欢迎来到 LinDo / 连接 LINUX DO，发现有趣的讨论）
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.Start
+        ) {
+            Text(
+                text = "你好，佬友。",
+                fontSize = 31.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = (-0.6).sp,
+                color = inkPrimary,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(5.dp))
+            Text(
+                text = "欢迎来到 LinDo",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = (-0.3).sp,
+                color = inkSubTitle,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "连接 LINUX DO，发现有趣的讨论",
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Normal,
+                color = inkSecondary,
+                maxLines = 1
+            )
+        }
 
-        Spacer(modifier = Modifier.weight(1.22f))
+        Spacer(modifier = Modifier.weight(0.55f))
 
-        // 3. 主力登录按钮：QQ音乐标志性全圆角胶囊 (`RoundedCornerShape(99.dp)`)
+        // 4. 主力登录按钮：#F6B73C 暖金全圆角胶囊按钮 (`使用 LINUX DO 登录  →`)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp)
+                .height(52.dp)
                 .clip(RoundedCornerShape(99.dp))
-                .background(primaryCapsuleBg)
+                .background(goldAccent)
                 .clickable(onClick = onPrimaryWebLogin)
-                .padding(horizontal = 22.dp),
+                .padding(horizontal = 24.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
-            Box(
-                modifier = Modifier
-                    .size(7.5.dp)
-                    .clip(CircleShape)
-                    .background(palette.brandGold)
-            )
-            Spacer(modifier = Modifier.width(9.dp))
             Text(
-                text = "账号一键登录",
-                fontSize = 15.5.sp,
+                text = "使用 LINUX DO 登录",
+                fontSize = 15.8.sp,
                 fontWeight = FontWeight.Bold,
-                color = primaryCapsuleFg,
+                color = goldButtonText,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "→",
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                color = goldButtonText,
                 maxLines = 1
             )
         }
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // 5. 次级登录按钮：全圆角无描边柔和胶囊 (`RoundedCornerShape(99.dp)`)
-        Row(
+        // 5. 次级免密授权轻量入口（无游客模式）
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(48.dp)
+                .height(40.dp)
                 .clip(RoundedCornerShape(99.dp))
-                .background(palette.subtleSurface)
-                .clickable(onClick = onBrowserOneClickAuth)
-                .padding(horizontal = 22.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
+                .clickable(onClick = onBrowserOneClickAuth),
+            contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = LinDoIcons.Globe,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = palette.inkPrimary
-            )
-            Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "通过系统浏览器免密授权",
-                fontSize = 14.5.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = palette.inkPrimary,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = inkSecondary,
                 maxLines = 1
             )
         }
 
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height(12.dp))
     }
 }
 
