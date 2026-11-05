@@ -1324,6 +1324,7 @@ fun LinDoApp() {
                                                 selectedTag = tag
                                                 loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
                                             },
+                                            onOpenWebUrl = { activeWebLoginUrl = it },
                                             onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" }
                                         )
                                     }
@@ -1341,7 +1342,8 @@ fun LinDoApp() {
                                             currentTab = MainTab.HOME
                                             openTopic(topic)
                                         },
-                                        onOpenGlobalSearch = { showGlobalSearchSheet = true }
+                                        onOpenGlobalSearch = { showGlobalSearchSheet = true },
+                                        onOpenWebUrl = { activeWebLoginUrl = it }
                                     )
                                 }
 
@@ -1369,6 +1371,7 @@ fun LinDoApp() {
                                         onOpenConnectSheet = { showConnectSheet = true },
                                         onOpenNetworkSheet = { showNetworkSheet = true },
                                         onOpenAuthSheet = { showAuthSheet = true },
+                                        onOpenWebUrl = { activeWebLoginUrl = it },
                                         onPrimaryWebLogin = {
                                             activeWebLoginUrl = "https://linux.do/login"
                                         },
@@ -1400,6 +1403,7 @@ fun LinDoApp() {
                                     selectedTag = tag
                                     loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
                                 },
+                                onOpenWebUrl = { activeWebLoginUrl = it },
                                 onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" }
                             )
                         } else {
@@ -1481,7 +1485,8 @@ fun LinDoApp() {
                                                     currentTab = MainTab.HOME
                                                     openTopic(topic)
                                                 },
-                                                onOpenGlobalSearch = { showGlobalSearchSheet = true }
+                                                onOpenGlobalSearch = { showGlobalSearchSheet = true },
+                                                onOpenWebUrl = { activeWebLoginUrl = it }
                                             )
                                         }
 
@@ -1509,6 +1514,7 @@ fun LinDoApp() {
                                                 onOpenConnectSheet = { showConnectSheet = true },
                                                 onOpenNetworkSheet = { showNetworkSheet = true },
                                                 onOpenAuthSheet = { showAuthSheet = true },
+                                                onOpenWebUrl = { activeWebLoginUrl = it },
                                                 onPrimaryWebLogin = {
                                                     activeWebLoginUrl = "https://linux.do/login"
                                                 },
@@ -2689,6 +2695,7 @@ private fun CommunityTopicReaderPane(
     onInspectBadge: (GrantedBadge) -> Unit,
     onInspectUser: (String) -> Unit,
     onSelectTag: (String) -> Unit = {},
+    onOpenWebUrl: (String) -> Unit = {},
     onRequestLogin: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -2955,6 +2962,29 @@ private fun CommunityTopicReaderPane(
                     fontSize = 11.2.sp,
                     fontWeight = FontWeight.Medium,
                     color = if (notificationLevel == 3) palette.brandGold else palette.inkSecondary,
+                    maxLines = 1
+                )
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
+
+            // 快捷操作 2.5：内置登录态原帖容器（覆盖投票 Poll / Boost / 采纳解答 Solved / AI 总结 / 树形浏览 / 举报管理）
+            Box(
+                modifier = Modifier
+                    .height(30.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(palette.subtleSurface)
+                    .clickable {
+                        onOpenWebUrl("https://linux.do/t/topic/${summary.id}")
+                    }
+                    .padding(horizontal = 7.5.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "原帖",
+                    fontSize = 11.2.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.inkSecondary,
                     maxLines = 1
                 )
             }
@@ -4073,10 +4103,37 @@ private fun CommunityDiscoverScreen(
     hotTopics: List<TopicSummary>,
     onSelectCategory: (Int) -> Unit,
     onSelectTopic: (TopicSummary) -> Unit,
-    onOpenGlobalSearch: () -> Unit = {}
+    onOpenGlobalSearch: () -> Unit = {},
+    onOpenWebUrl: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
     val categoryPairs = remember { LinuxDoRepository.categories.chunked(2) }
+    val mainPortalPairs = remember {
+        listOf(
+            Triple("即时聊天", "频道 / 群聊 / 消息串", "https://linux.do/chat"),
+            Triple("AI 机器人", "对话 / 总结 / 制品", "https://linux.do/discourse-ai/ai-bot/conversations"),
+            Triple("应用广场", "微应用运行与评分", "https://linux.do/apps"),
+            Triple("话题看板", "指定话题与看板列", "https://linux.do/boards"),
+            Triple("近期活动", "社区日历与提醒", "https://linux.do/upcoming-events"),
+            Triple("积分排行", "Leaderboard 社区榜", "https://linux.do/leaderboard"),
+            Triple("独立筛选器", "多条件表达式过滤", "https://linux.do/filter"),
+            Triple("群组与虫洞", "兴趣版块与申请", "https://linux.do/g"),
+            Triple("全站徽章", "荣誉徽章与获取条件", "https://linux.do/badges"),
+            Triple("生日与周年", "今日寿星与入站纪念", "https://linux.do/cakeday/birthdays/today")
+        ).chunked(2)
+    }
+    val ecoPortalPairs = remember {
+        listOf(
+            Triple("Connect 中心", "保级 / 邮箱 / DeepLX", "https://connect.linux.do/"),
+            Triple("Credit 积分", "积分流转与服务认证", "https://credit.linux.do/"),
+            Triple("CDK 分发", "社区福利领取与发布", "https://cdk.linux.do/"),
+            Triple("Lottery 抽奖", "官方楼层开奖工具", "https://lottery.linux.do/"),
+            Triple("LD Hub", "生态 AI 与聚合中心", "https://hub.linux.do/"),
+            Triple("社区 Wiki", "共建指南与文档库", "https://wiki.linux.do/"),
+            Triple("IDC Flare", "官方云与主机生态站", "https://idcflare.com/"),
+            Triple("关于与准则", "管理人员 / 条款 / 统计", "https://linux.do/about")
+        ).chunked(2)
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -4249,6 +4306,109 @@ private fun CommunityDiscoverScreen(
                 }
             }
         }
+
+        // 3. 主站全功能工作台快捷矩阵（即时聊天 / AI 机器人 / 应用广场 / 看板 / 活动日历 / 积分排行 / 筛选器 / 群组虫洞）
+        item {
+            Text(
+                text = "主站全功能工作台",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = palette.inkPrimary,
+                modifier = Modifier.padding(start = 2.dp, top = 6.dp)
+            )
+        }
+
+        itemsIndexed(mainPortalPairs) { _, pair ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                pair.forEach { (title, subtitle, url) ->
+                    DiscoverPortalCard(
+                        title = title,
+                        subtitle = subtitle,
+                        modifier = Modifier.weight(1f),
+                        onClick = { onOpenWebUrl(url) }
+                    )
+                }
+                if (pair.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+
+        // 4. Linux.do 官方生态矩阵（Connect / Credit / CDK / Lottery / LD Hub / Wiki / IDC Flare / 关于准则）
+        item {
+            Text(
+                text = "Linux.do 官方生态与服务",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = palette.inkPrimary,
+                modifier = Modifier.padding(start = 2.dp, top = 6.dp)
+            )
+        }
+
+        itemsIndexed(ecoPortalPairs) { _, pair ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                pair.forEach { (title, subtitle, url) ->
+                    DiscoverPortalCard(
+                        title = title,
+                        subtitle = subtitle,
+                        modifier = Modifier.weight(1f),
+                        onClick = { onOpenWebUrl(url) }
+                    )
+                }
+                if (pair.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoverPortalCard(
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val palette = LocalPalette.current
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(palette.cardSurface)
+            .border(0.5.dp, palette.hairline, RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Bold,
+                color = palette.inkPrimary,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                fontSize = 11.sp,
+                color = palette.inkSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Icon(
+            imageVector = Icons.Default.ChevronRight,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp),
+            tint = palette.inkTertiary
+        )
     }
 }
 
@@ -4359,6 +4519,7 @@ private fun CommunityProfileScreen(
     onOpenConnectSheet: () -> Unit,
     onOpenNetworkSheet: () -> Unit,
     onOpenAuthSheet: () -> Unit,
+    onOpenWebUrl: (String) -> Unit = {},
     onPrimaryWebLogin: () -> Unit,
     onLogout: () -> Unit
 ) {
@@ -4858,6 +5019,52 @@ private fun CommunityProfileScreen(
                     shape = RoundedCornerShape(14.dp),
                     onCheckedChange = { onToggleAnimations() }
                 )
+            }
+        }
+
+        // 6. 云端账户与官方 12 项完整偏好设置矩阵（对齐 SETACC / SETSEC / SETPRO / SETMAIL / SETNOT / SETTRACK / SETUSER / SETUI / SETNAV / SETCAL / SETSEARCH / SETCHAT / BILLING / DRAFT）
+        item {
+            val prefRows = remember {
+                listOf(
+                    Triple("我的草稿箱", "跨端同步未发布主帖与回复", "https://linux.do/my/activity/drafts"),
+                    Triple("账号与关联", "邮箱 / 第三方登录 / 归档", "https://linux.do/my/preferences/account"),
+                    Triple("安全与验证", "Passkey / 2FA / 登录设备", "https://linux.do/my/preferences/security"),
+                    Triple("资料与签名", "背景 / 精选话题 / TG 通知", "https://linux.do/my/preferences/profile"),
+                    Triple("类别与标签跟踪", "关注 / 跟踪 / 免打扰清单", "https://linux.do/my/preferences/tracking"),
+                    Triple("忽略与联系权限", "忽略名单 / 免打扰 / 私信白名单", "https://linux.do/my/preferences/users"),
+                    Triple("通知与邮件偏好", "推送时间表 / Boost 聚合 / 邮件", "https://linux.do/my/preferences/notifications"),
+                    Triple("聊天与保存搜索", "聊天快捷回应 / 保存搜索上限", "https://linux.do/my/preferences/chat"),
+                    Triple("界面与导航菜单", "默认首页 / 侧栏 / 日历订阅", "https://linux.do/my/preferences/interface"),
+                    Triple("订阅与社区准则", "个人结算 / 作品集 / 社区条款", "https://linux.do/my/activity")
+                ).chunked(2)
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "云端账户与完整偏好设置",
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkSecondary,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+
+                prefRows.forEach { pair ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        pair.forEach { (title, subtitle, url) ->
+                            DiscoverPortalCard(
+                                title = title,
+                                subtitle = subtitle,
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    if (isAuthorized) onOpenWebUrl(url) else onPrimaryWebLogin()
+                                }
+                            )
+                        }
+                    }
+                }
             }
         }
     }

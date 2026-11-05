@@ -596,7 +596,14 @@ private fun AndroidWebLoginModal(
     onDismiss: () -> Unit,
     onLoginSuccess: () -> Unit
 ) {
-    var pageTitle by remember { mutableStateOf("安全登录 linux.do") }
+    val isLoginFlow = remember(initialUrl) {
+        initialUrl.contains("/login") ||
+            initialUrl.contains("/session/otp/") ||
+            initialUrl.contains("/user-api-key/")
+    }
+    var pageTitle by remember(initialUrl) {
+        mutableStateOf(if (isLoginFlow) "安全登录 linux.do" else "Linux.do 官方容器")
+    }
     var progress by remember { mutableStateOf(0.1f) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember { mutableStateOf(false) }
@@ -645,6 +652,12 @@ private fun AndroidWebLoginModal(
         // 若当前在 /session/otp/ 兑换页，仅在此路径下自动触发表单 POST 提交
         if (webView.url?.contains("/session/otp/") == true) {
             webView.evaluateJavascript(AUTO_SUBMIT_OTP_FORM_JS, null)
+        }
+
+        // 非登录流（如应用广场、聊天、看板、AI 机器人、Connect/Credit/CDK/Lottery、偏好设置等内置容器模式）：
+        // 仅保持 Cookie 同步，不自动关闭窗口
+        if (!isLoginFlow) {
+            return
         }
 
         // 关键防风控守卫：在原生 CookieManager 尚未检测到 Discourse `_t=` 登录凭证前，
@@ -778,7 +791,11 @@ private fun AndroidWebLoginModal(
                     )
                 }
                 Text(
-                    text = "linux.do 官方安全会话 · 登录成功后自动同步真实等级与资料",
+                    text = if (isLoginFlow) {
+                        "linux.do 官方安全会话 · 登录成功后自动同步真实等级与资料"
+                    } else {
+                        "已共享当前账号登录态 · 支持应用广场 / 聊天 / 看板 / 生态免登直达"
+                    },
                     fontSize = 11.sp,
                     color = androidx.compose.ui.graphics.Color(0xFF71717A),
                     maxLines = 1
@@ -841,6 +858,11 @@ private fun AndroidWebLoginModal(
                     val cookieManager = CookieManager.getInstance()
                     cookieManager.setAcceptCookie(true)
                     cookieManager.setAcceptThirdPartyCookies(this, true)
+                    // 预注入当前会话 Cookie，确保打开主站子页面或 Connect/Credit/CDK/Lottery 生态时 100% 携带登录态
+                    CookieSentinel.resolveWinningCookies(targetHost = "linux.do").forEach { (k, rec) ->
+                        cookieManager.setCookie("https://linux.do", "$k=${rec.value}; Domain=.linux.do; Path=/; Secure")
+                    }
+                    cookieManager.flush()
 
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
