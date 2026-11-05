@@ -253,6 +253,7 @@ object UserApiKeyAuthManager {
     var openExternalUrlLauncher: ((String) -> Unit)? = null
     var onLogoutPlatformClear: (() -> Unit)? = null
     var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
+    var onPersistPendingKey: ((String?, String?) -> Unit)? = null
     var webViewJsonFetcher: (suspend (String) -> String?)? = null
     var webViewHttpExecutor: (suspend (
         url: String,
@@ -260,6 +261,42 @@ object UserApiKeyAuthManager {
         formParams: Map<String, String>?,
         headers: Map<String, String>
     ) -> Pair<Int, String>?)? = null
+
+    fun getClientId(): String = clientId
+
+    fun restoreClientId(saved: String?) {
+        if (!saved.isNullOrBlank()) {
+            clientId = saved.trim()
+        }
+    }
+
+    fun exportPendingPrivateKeyBase64(): String? {
+        val pk = pendingPrivateKey?.encoded ?: return null
+        return Base64.getEncoder().encodeToString(pk)
+    }
+
+    fun restorePendingPrivateKeyBase64(pkcs8B64: String?, nonce: String?) {
+        if (pkcs8B64.isNullOrBlank()) return
+        runCatching {
+            val bytes = Base64.getMimeDecoder().decode(pkcs8B64.trim())
+            val spec = java.security.spec.PKCS8EncodedKeySpec(bytes)
+            val kf = java.security.KeyFactory.getInstance("RSA")
+            pendingPrivateKey = kf.generatePrivate(spec)
+            if (!nonce.isNullOrBlank()) {
+                pendingNonce = nonce
+            }
+            println("LinDoAuth: Restored pendingPrivateKey from disk")
+        }.onFailure {
+            println("LinDoAuth: Failed to restore pendingPrivateKey: ${it.message}")
+        }
+    }
+
+    @Synchronized
+    fun consumePendingOtpToken(): String? {
+        val token = pendingOtpToken
+        pendingOtpToken = null
+        return token
+    }
 
     fun setApiKey(apiKey: String?) {
         activeUserApiKey = apiKey?.trim()?.takeIf { it.isNotEmpty() }
@@ -356,6 +393,8 @@ object UserApiKeyAuthManager {
         }
         val nonce = UUID.randomUUID().toString().replace("-", "")
         pendingNonce = nonce
+        // 立即持久化待回调 RSA 私钥与 nonce，防止切换到 Chrome 期间进程或 Activity 被系统回收
+        onPersistPendingKey?.invoke(exportPendingPrivateKeyBase64(), nonce)
         val encodedPub = java.net.URLEncoder.encode(publicPem, "UTF-8")
         val encodedApp = java.net.URLEncoder.encode(applicationName, "UTF-8")
         val encodedRedirect = java.net.URLEncoder.encode("discourse://auth_redirect", "UTF-8")
@@ -379,11 +418,32 @@ object UserApiKeyAuthManager {
         return url
     }
 
+    private fun decryptRsaBase64(rawB64: String, privKey: java.security.PrivateKey): String? {
+        return try {
+            val normalized = rawB64
+                .trim()
+                .replace(" ", "+")
+                .replace("-", "+")
+                .replace("_", "/")
+            val encryptedBytes = Base64.getMimeDecoder().decode(normalized)
+            val cipher = javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding")
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, privKey)
+            String(cipher.doFinal(encryptedBytes), Charsets.UTF_8)
+        } catch (t: Throwable) {
+            println("LinDoAuth: decryptRsaBase64 failed: ${t.message}")
+            null
+        }
+    }
+
     /**
-     * 处理 `discourse://auth_redirect?payload=...&one_time_password=...` 深链回调，RSA/ECB/PKCS1Padding 解密
+     * 处理 `discourse://auth_redirect?payload=...&oneTimePassword=...` 深链回调，RSA/ECB/PKCS1Padding 解密
      */
     fun handleAuthRedirectUri(uriString: String): Boolean {
-        val privKey = pendingPrivateKey ?: return false
+        val privKey = pendingPrivateKey
+        if (privKey == null) {
+            println("LinDoAuth: handleAuthRedirectUri aborted because pendingPrivateKey is null")
+            return false
+        }
         return try {
             val query = uriString.substringAfter('?', "")
             if (query.isEmpty()) return false
@@ -397,26 +457,43 @@ object UserApiKeyAuthManager {
                     part to ""
                 }
             }
-            val payloadB64 = params["payload"]?.replace(" ", "+") ?: return false
-            val cipher = javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding")
-            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, privKey)
-            val decryptedBytes = cipher.doFinal(Base64.getMimeDecoder().decode(payloadB64))
-            val decryptedJson = String(decryptedBytes, Charsets.UTF_8)
+            println("LinDoAuth: handleAuthRedirectUri query keys=${params.keys}")
 
-            val jsonObj = Json { ignoreUnknownKeys = true }.parseToJsonElement(decryptedJson).jsonObject
-            val key = jsonObj["key"]?.jsonPrimitive?.contentOrNull
-            val otpInPayload = jsonObj["one_time_password"]?.jsonPrimitive?.contentOrNull
+            var key: String? = null
+            var otpInPayload: String? = null
 
-            // Discourse 在 query 参数中以 `one_time_password` 或 `otp` 携带 RSA 加密的一次性令牌
-            val otpParamB64 = (params["one_time_password"] ?: params["otp"])?.replace(" ", "+")
-            val decryptedOtp = if (!otpParamB64.isNullOrBlank()) {
-                try {
-                    String(cipher.doFinal(Base64.getMimeDecoder().decode(otpParamB64)), Charsets.UTF_8).trim()
-                } catch (_: Throwable) {
-                    otpInPayload
+            val payloadB64 = params["payload"]
+            if (!payloadB64.isNullOrBlank()) {
+                val decryptedJson = decryptRsaBase64(payloadB64, privKey)
+                if (!decryptedJson.isNullOrBlank()) {
+                    runCatching {
+                        val jsonObj = Json { ignoreUnknownKeys = true }.parseToJsonElement(decryptedJson).jsonObject
+                        key = jsonObj["key"]?.jsonPrimitive?.contentOrNull
+                        otpInPayload = jsonObj["one_time_password"]?.jsonPrimitive?.contentOrNull
+                            ?: jsonObj["oneTimePassword"]?.jsonPrimitive?.contentOrNull
+                    }
                 }
+            }
+
+            // Discourse UserApiKeysController 在 query 参数中以 `oneTimePassword` (camelCase) 或 `one_time_password` 携带 RSA 加密的一次性令牌
+            val otpParamB64 = params["oneTimePassword"]
+                ?: params["one_time_password"]
+                ?: params["otp"]
+                ?: params.entries.firstOrNull {
+                    it.key.equals("oneTimePassword", ignoreCase = true) ||
+                        it.key.equals("one_time_password", ignoreCase = true)
+                }?.value
+
+            val decryptedOtp = if (!otpParamB64.isNullOrBlank()) {
+                decryptRsaBase64(otpParamB64, privKey)?.trim()?.takeIf { it.isNotEmpty() } ?: otpInPayload
             } else {
                 otpInPayload
+            }
+
+            println("LinDoAuth: Decrypted keyPresent=${!key.isNullOrBlank()}, otpPresent=${!decryptedOtp.isNullOrBlank()}")
+
+            if (key.isNullOrBlank() && decryptedOtp.isNullOrBlank()) {
+                return false
             }
 
             if (!key.isNullOrBlank()) {
@@ -428,7 +505,8 @@ object UserApiKeyAuthManager {
             onPersistSession?.invoke(currentUser, activeUserApiKey)
             onAuthStateChanged?.invoke()
             true
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            println("LinDoAuth: handleAuthRedirectUri exception: ${t.message}")
             false
         }
     }

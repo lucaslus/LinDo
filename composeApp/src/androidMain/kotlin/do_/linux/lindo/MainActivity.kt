@@ -149,7 +149,16 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
 
-        // 1. 恢复持久化的登录状态与 WebView Cookie
+        // 1. 注册待授权 RSA 私钥同步持久化钩子，并恢复持久化的登录状态与 WebView Cookie
+        UserApiKeyAuthManager.onPersistPendingKey = { pkB64, nonce ->
+            runCatching {
+                prefs.edit()
+                    .putString("pending_rsa_priv_b64", pkB64)
+                    .putString("pending_rsa_nonce", nonce)
+                    .putString("client_id", UserApiKeyAuthManager.getClientId())
+                    .commit()
+            }
+        }
         restoreSessionFromDisk()
 
         // 2. 初始化常驻同源 WebView API 桥接引擎
@@ -371,18 +380,12 @@ class MainActivity : ComponentActivity() {
         if (dataUri.startsWith("discourse://auth_redirect") ||
             dataUri.startsWith("lindo://auth_redirect")
         ) {
+            println("LinDoAuth: handleIncomingAuthIntent received auth_redirect URI")
             val handled = UserApiKeyAuthManager.handleAuthRedirectUri(dataUri)
+            // 清空 intent.data 防止旋转或重建重复消费一次性 OTP
+            intent.data = null
             if (handled) {
-                val otp = UserApiKeyAuthManager.pendingOtpToken
-                if (!otp.isNullOrBlank()) {
-                    UserApiKeyAuthManager.pendingOtpToken = null
-                    apiWebView?.loadUrl("https://linux.do/session/otp/$otp")
-                }
-                activityScope.launch {
-                    delay(800L)
-                    LinuxDoRepository.fetchCurrentUserProfile()
-                    persistSessionToDisk()
-                }
+                persistSessionToDisk()
             }
         }
     }
@@ -392,6 +395,18 @@ class MainActivity : ComponentActivity() {
             val defaultUa = WebSettings.getDefaultUserAgent(this)
                 .replace("; wv", "")
             UserApiKeyAuthManager.customUserAgent = prefs.getString("user_agent", defaultUa) ?: defaultUa
+
+            val savedClientId = prefs.getString("client_id", null)
+            if (!savedClientId.isNullOrBlank()) {
+                UserApiKeyAuthManager.restoreClientId(savedClientId)
+            } else {
+                prefs.edit().putString("client_id", UserApiKeyAuthManager.getClientId()).apply()
+            }
+
+            // 恢复跳转到系统浏览器前生成的 RSA 私钥与 nonce
+            val savedPendingPrivKey = prefs.getString("pending_rsa_priv_b64", null)
+            val savedPendingNonce = prefs.getString("pending_rsa_nonce", null)
+            UserApiKeyAuthManager.restorePendingPrivateKeyBase64(savedPendingPrivKey, savedPendingNonce)
 
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)
@@ -438,17 +453,20 @@ class MainActivity : ComponentActivity() {
                 CookieSentinel.ingestRawCookieString(latestWebKitCookies)
             }
 
-            val isAuth = UserApiKeyAuthManager.isAuthorized()
             val editor = prefs.edit()
-            if (!isAuth) {
-                cookieManager.removeAllCookies(null)
-                cookieManager.flush()
-                editor.clear().apply()
-                return
+            val mergedCookieHeader = CookieSentinel.buildCookieHeader().ifBlank { latestWebKitCookies }
+            if (mergedCookieHeader.isNotBlank()) {
+                editor.putString("raw_cookies", mergedCookieHeader)
             }
-
-            editor.putString("raw_cookies", CookieSentinel.buildCookieHeader().ifBlank { latestWebKitCookies })
-            editor.putString("api_key", UserApiKeyAuthManager.getApiKey())
+            val apiKey = UserApiKeyAuthManager.getApiKey()
+            if (!apiKey.isNullOrBlank()) {
+                editor.putString("api_key", apiKey)
+            }
+            val pendingPrivKey = UserApiKeyAuthManager.exportPendingPrivateKeyBase64()
+            if (!pendingPrivKey.isNullOrBlank()) {
+                editor.putString("pending_rsa_priv_b64", pendingPrivKey)
+            }
+            editor.putString("client_id", UserApiKeyAuthManager.getClientId())
             editor.putString("user_agent", UserApiKeyAuthManager.customUserAgent)
             val user = UserApiKeyAuthManager.currentUser
             if (user != null && user.username != "linuxdo_user") {
@@ -471,6 +489,30 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
+ * 在 `/session/otp/<token>` 页面自动提交 Discourse OTP POST 确认表单以立即完成会话兑换
+ */
+private val AUTO_SUBMIT_OTP_FORM_JS = """
+    (function() {
+        try {
+            if (window.location.pathname.indexOf('/session/otp/') === 0) {
+                var form = document.querySelector('form[action*="/session/otp/"]')
+                    || document.querySelector('form[method="post"]')
+                    || document.querySelector('form');
+                if (form && !window.__lindoOtpSubmitted) {
+                    window.__lindoOtpSubmitted = true;
+                    var btn = form.querySelector('input[type="submit"], button[type="submit"], .btn-primary, button');
+                    if (btn) {
+                        btn.click();
+                    } else {
+                        form.submit();
+                    }
+                }
+            }
+        } catch (e) {}
+    })();
+""".trimIndent()
+
+/**
  * 从 Discourse `<data id="data-preloaded">` 或 `/session/current.json` 提取 100% 真实的 `currentUser` JSON
  */
 private val EXTRACT_PRELOADED_USER_JS = """
@@ -486,6 +528,10 @@ private val EXTRACT_PRELOADED_USER_JS = """
                         return;
                     }
                 }
+            }
+            if (window.location.pathname.indexOf('/session/otp/') === 0 ||
+                window.location.pathname.indexOf('/user-api-key/') === 0) {
+                return;
             }
             var resp = await fetch('/session/current.json', {
                 headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
@@ -513,6 +559,39 @@ private fun AndroidWebLoginModal(
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember { mutableStateOf(false) }
 
+    fun completeWithUserObject(u: JSONObject) {
+        if (completed) return
+        val username = u.optString("username").trim()
+        if (username.isBlank() || username == "linuxdo_user") return
+        val userId = u.optInt("id", 0)
+        val displayName = u.optString("name").ifBlank { username }
+        val rawTpl = u.optString("avatar_template").ifBlank { u.optString("avatar") }
+        val avatarUrl = if (rawTpl.isNotBlank()) {
+            if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "240")
+            else "https://linux.do${rawTpl.replace("{size}", "240")}"
+        } else ""
+        val title = u.optString("title", "")
+        val trust = if (u.has("trust_level")) u.optInt("trust_level", 1) else u.optInt("trust", 1)
+
+        completed = true
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.flush()
+        val rawCookies = cookieManager.getCookie("https://linux.do").orEmpty()
+        println("LinDoAuth: Modal authenticated user=$username, trustLevel=$trust")
+        UserApiKeyAuthManager.onSessionAuthenticated(
+            profile = AuthenticatedUserProfile(
+                userId = userId,
+                username = username,
+                displayName = displayName,
+                avatarTemplate = avatarUrl,
+                userTitle = title,
+                trustLevel = trust
+            ),
+            rawCookies = rawCookies
+        )
+        onLoginSuccess()
+    }
+
     fun tryExtractSessionAndComplete(webView: WebView?) {
         if (completed || webView == null) return
         val cookieManager = CookieManager.getInstance()
@@ -521,7 +600,12 @@ private fun AndroidWebLoginModal(
             CookieSentinel.ingestRawCookieString(rawCookies)
         }
 
-        // 直接从 DOM `<data id="data-preloaded">` 同步读取 Discourse 注入的 currentUser（包含真实 username、trust_level=3、avatar_template）
+        // 若当前在 /session/otp/ 兑换页，自动触发表单 POST 提交
+        webView.evaluateJavascript(AUTO_SUBMIT_OTP_FORM_JS, null)
+        // 触发同步 data-preloaded + 异步 /session/current.json 双通道探测
+        webView.evaluateJavascript(EXTRACT_PRELOADED_USER_JS, null)
+
+        // 同步兜底探测
         val probeJs = """
             (function() {
                 try {
@@ -531,15 +615,7 @@ private fun AndroidWebLoginModal(
                         if (p && p.currentUser) {
                             var u = JSON.parse(p.currentUser);
                             if (u && u.username) {
-                                return JSON.stringify({
-                                    loggedIn: true,
-                                    id: u.id || 0,
-                                    username: u.username || '',
-                                    name: u.name || u.username || '',
-                                    avatar: u.avatar_template || '',
-                                    title: u.title || '',
-                                    trust: typeof u.trust_level === 'number' ? u.trust_level : 1
-                                });
+                                return JSON.stringify(u);
                             }
                         }
                     }
@@ -547,62 +623,41 @@ private fun AndroidWebLoginModal(
                         var du = Discourse.User.current();
                         if (du && du.username) {
                             return JSON.stringify({
-                                loggedIn: true,
                                 id: du.id || 0,
                                 username: du.username || '',
                                 name: du.name || du.username || '',
-                                avatar: du.avatar_template || '',
+                                avatar_template: du.avatar_template || '',
                                 title: du.title || '',
-                                trust: typeof du.trust_level === 'number' ? du.trust_level : 1
+                                trust_level: typeof du.trust_level === 'number' ? du.trust_level : 1
                             });
                         }
                     }
                 } catch (e) {}
-                return JSON.stringify({ loggedIn: false });
+                return '';
             })();
         """.trimIndent()
 
         webView.evaluateJavascript(probeJs) { rawJson ->
             if (completed) return@evaluateJavascript
-            val decoded = decodeJsStringResult(rawJson) ?: return@evaluateJavascript
+            val decoded = decodeJsStringResult(rawJson)?.takeIf { it.isNotBlank() } ?: return@evaluateJavascript
             runCatching {
-                val obj = JSONObject(decoded)
-                val jsLoggedIn = obj.optBoolean("loggedIn", false)
-                val username = obj.optString("username").trim()
-                // 必须拿到真实非空 username（绝不使用 linuxdo_user 假占位符）
-                if (jsLoggedIn && username.isNotBlank() && username != "linuxdo_user") {
-                    val userId = obj.optInt("id", 0)
-                    val displayName = obj.optString("name").ifBlank { username }
-                    val rawTpl = obj.optString("avatar")
-                    val avatarUrl = if (rawTpl.isNotBlank()) {
-                        if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "240")
-                        else "https://linux.do${rawTpl.replace("{size}", "240")}"
-                    } else ""
-                    val title = obj.optString("title", "")
-                    val trust = obj.optInt("trust", 1)
-                    completed = true
-                    cookieManager.flush()
-                    UserApiKeyAuthManager.onSessionAuthenticated(
-                        profile = AuthenticatedUserProfile(
-                            userId = userId,
-                            username = username,
-                            displayName = displayName,
-                            avatarTemplate = avatarUrl,
-                            userTitle = title,
-                            trustLevel = trust
-                        ),
-                        rawCookies = rawCookies
-                    )
-                    onLoginSuccess()
-                }
+                completeWithUserObject(JSONObject(decoded))
             }
         }
     }
 
-    // 轮询探测登录完成状态（处理 SPA 无刷新跳转或 Passkey/GitHub 登录完成）
+    // 当 initialUrl 变化（例如外部浏览器回调后注入 /session/otp/$otp）时立即加载
+    LaunchedEffect(initialUrl, webViewRef) {
+        val wv = webViewRef ?: return@LaunchedEffect
+        if (initialUrl.isNotBlank() && wv.url != initialUrl) {
+            wv.loadUrl(initialUrl)
+        }
+    }
+
+    // 轮询探测登录完成状态（处理 SPA 无刷新跳转或 Passkey/GitHub/OTP 登录完成）
     LaunchedEffect(webViewRef, completed) {
         while (!completed && webViewRef != null) {
-            delay(900L)
+            delay(800L)
             tryExtractSessionAndComplete(webViewRef)
         }
     }
@@ -729,6 +784,21 @@ private fun AndroidWebLoginModal(
                     cookieManager.setAcceptCookie(true)
                     cookieManager.setAcceptThirdPartyCookies(this, true)
 
+                    addJavascriptInterface(
+                        object {
+                            @JavascriptInterface
+                            fun onPreloadedUserDetected(userJson: String) {
+                                if (userJson.isBlank() || completed) return
+                                post {
+                                    runCatching {
+                                        completeWithUserObject(JSONObject(userJson))
+                                    }
+                                }
+                            }
+                        },
+                        "LinDoJsBridge"
+                    )
+
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
                             progress = (newProgress / 100f).coerceIn(0.05f, 1f)
@@ -752,9 +822,8 @@ private fun AndroidWebLoginModal(
                             ) {
                                 val ok = UserApiKeyAuthManager.handleAuthRedirectUri(target)
                                 if (ok) {
-                                    val otp = UserApiKeyAuthManager.pendingOtpToken
+                                    val otp = UserApiKeyAuthManager.consumePendingOtpToken()
                                     if (!otp.isNullOrBlank()) {
-                                        UserApiKeyAuthManager.pendingOtpToken = null
                                         view?.loadUrl("https://linux.do/session/otp/$otp")
                                     } else {
                                         tryExtractSessionAndComplete(view)

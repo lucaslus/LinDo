@@ -660,20 +660,23 @@ fun LinDoApp() {
         UserApiKeyAuthManager.onAuthStateChanged = {
             prevCallback?.invoke()
             authVersion++
-            val otp = UserApiKeyAuthManager.pendingOtpToken
-            if (!otp.isNullOrBlank()) {
-                UserApiKeyAuthManager.pendingOtpToken = null
-                activeWebLoginUrl = "https://linux.do/session/otp/$otp"
-            }
-            if (UserApiKeyAuthManager.isAuthorized()) {
-                activeWebLoginUrl = null
-                showAuthSheet = false
-                loadTopics(currentSort, selectedCategoryId)
-                syncUserProfile()
-            }
         }
         onDispose {
             UserApiKeyAuthManager.onAuthStateChanged = prevCallback
+        }
+    }
+
+    LaunchedEffect(authVersion) {
+        val otp = UserApiKeyAuthManager.consumePendingOtpToken()
+        if (!otp.isNullOrBlank()) {
+            activeWebLoginUrl = "https://linux.do/session/otp/$otp"
+            return@LaunchedEffect
+        }
+        if (UserApiKeyAuthManager.isAuthorized()) {
+            activeWebLoginUrl = null
+            showAuthSheet = false
+            loadTopics(currentSort, selectedCategoryId)
+            syncUserProfile()
         }
     }
 
