@@ -17,11 +17,13 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -64,6 +66,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.LinuxDoRepository
+import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.LinDoApp
@@ -93,6 +96,35 @@ class MainActivity : ComponentActivity() {
     private var apiWebView: WebView? = null
     private val apiWebViewReady = CompletableDeferred<Boolean>()
     private val pendingHttpCallbacks = ConcurrentHashMap<String, CompletableDeferred<Pair<Int, String>>>()
+    private var pendingMediaPickCallback: ((fileName: String, mimeType: String, bytes: ByteArray) -> Unit)? = null
+
+    private val mediaPickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        val callback = pendingMediaPickCallback
+        pendingMediaPickCallback = null
+        if (uri == null || callback == null) return@registerForActivityResult
+        activityScope.launch(Dispatchers.IO) {
+            runCatching {
+                val cr = contentResolver
+                val mime = cr.getType(uri) ?: "image/png"
+                var displayName = "upload_${System.currentTimeMillis()}"
+                cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) {
+                            val name = cursor.getString(idx)
+                            if (!name.isNullOrBlank()) displayName = name
+                        }
+                    }
+                }
+                val bytes = cr.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+                if (bytes.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        callback(displayName, mime, bytes)
+                    }
+                }
+            }
+        }
+    }
 
     inner class LinDoJsBridge {
         @JavascriptInterface
@@ -187,6 +219,14 @@ class MainActivity : ComponentActivity() {
                     .apply()
             }
         }
+        UserApiKeyAuthManager.onPersistThemeAndDensity = { themeAccent, compactFeed ->
+            runCatching {
+                prefs.edit()
+                    .putString("ui_theme_accent", themeAccent)
+                    .putBoolean("ui_compact_feed", compactFeed)
+                    .apply()
+            }
+        }
         UserApiKeyAuthManager.onSyncCookieToPlatform = { rawSetCookie ->
             runCatching {
                 val cm = CookieManager.getInstance()
@@ -232,12 +272,24 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        // 6. 注册异步 Promise 级 WebView HTTP 执行器与 JSON 兜底器
+        // 6. 注册异步 Promise 级 WebView HTTP 执行器与 JSON 兜底器 + 媒体文件选择器与 Multipart 上传器
         UserApiKeyAuthManager.webViewHttpExecutor = { url, method, formParams, headers ->
             executeHttpViaWebViewBridge(url, method, formParams, headers)
         }
         UserApiKeyAuthManager.webViewJsonFetcher = { targetUrl ->
             executeHttpViaWebViewBridge(targetUrl, "GET", null, emptyMap())?.second
+        }
+        UserApiKeyAuthManager.webViewConnectHtmlFetcher = {
+            fetchConnectHtmlViaWebView()
+        }
+        PlatformMediaPicker.launchPicker = { mimeType, onPicked ->
+            pendingMediaPickCallback = onPicked
+            runCatching {
+                mediaPickerLauncher.launch(mimeType.ifBlank { "*/*" })
+            }
+        }
+        PlatformMediaPicker.webViewUploadExecutor = { fileName, mimeType, base64Bytes ->
+            executeMultipartUploadViaWebViewBridge(fileName, mimeType, base64Bytes)
         }
 
         // 7. 检查冷启动是否由 discourse://auth_redirect 唤起
@@ -406,6 +458,174 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private suspend fun executeMultipartUploadViaWebViewBridge(
+        fileName: String,
+        mimeType: String,
+        base64Bytes: String
+    ): Pair<Int, String>? {
+        val wv = apiWebView ?: return null
+        withTimeoutOrNull(1500L) { apiWebViewReady.await() }
+
+        val reqId = UUID.randomUUID().toString()
+        val deferred = CompletableDeferred<Pair<Int, String>>()
+        pendingHttpCallbacks[reqId] = deferred
+
+        val jsCode = """
+            (async function() {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 14000);
+                try {
+                    const hdrs = {
+                        'Accept': 'application/json, text/javascript, */*; q=0.01',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    };
+                    const metaCsrf = document.querySelector('meta[name="csrf-token"]');
+                    if (metaCsrf && metaCsrf.content) {
+                        hdrs['X-CSRF-Token'] = metaCsrf.content;
+                    } else {
+                        try {
+                            const csrfResp = await fetch('https://linux.do/session/csrf.json', {
+                                headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                                credentials: 'include',
+                                signal: controller.signal
+                            });
+                            if (csrfResp.ok) {
+                                const csrfData = await csrfResp.json();
+                                if (csrfData && csrfData.csrf) hdrs['X-CSRF-Token'] = csrfData.csrf;
+                            }
+                        } catch (_) {}
+                    }
+                    const b64 = ${JSONObject.quote(base64Bytes)};
+                    const binStr = atob(b64);
+                    const len = binStr.length;
+                    const bytes = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) {
+                        bytes[i] = binStr.charCodeAt(i);
+                    }
+                    const blob = new Blob([bytes], { type: ${JSONObject.quote(mimeType)} });
+                    const fd = new FormData();
+                    fd.append('type', 'composer');
+                    fd.append('synchronous', 'true');
+                    fd.append('files[]', blob, ${JSONObject.quote(fileName)});
+                    const resp = await fetch('https://linux.do/uploads.json', {
+                        method: 'POST',
+                        headers: hdrs,
+                        body: fd,
+                        credentials: 'include',
+                        signal: controller.signal
+                    });
+                    const text = await resp.text();
+                    clearTimeout(timer);
+                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text);
+                } catch (err) {
+                    clearTimeout(timer);
+                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 0, '');
+                }
+            })();
+        """.trimIndent()
+
+        withContext(Dispatchers.Main) {
+            wv.evaluateJavascript(jsCode, null)
+        }
+
+        return try {
+            withTimeoutOrNull(15000L) {
+                deferred.await()
+            }
+        } finally {
+            pendingHttpCallbacks.remove(reqId)
+        }
+    }
+
+    /**
+     * 通过共享 CookieManager 的后台 WebView 拉取 `https://connect.linux.do/` HTML：
+     * - 若尚未建立 connect.linux.do 会话且页面出现 `/login`，自动跟随 `/login` -> `linux.do/oauth2/authorize` 静默换取会话并读取真实 Connect 表格
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun fetchConnectHtmlViaWebView(): String? {
+        val deferred = CompletableDeferred<String?>()
+        var tempWv: WebView? = null
+        var redirectedLogin = false
+
+        withContext(Dispatchers.Main) {
+            runCatching {
+                val wv = WebView(this@MainActivity)
+                tempWv = wv
+                val cm = CookieManager.getInstance()
+                cm.setAcceptCookie(true)
+                cm.setAcceptThirdPartyCookies(wv, true)
+                wv.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    UserApiKeyAuthManager.customUserAgent?.let { userAgentString = it }
+                }
+                wv.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        val currentUrl = url.orEmpty()
+                        view?.evaluateJavascript(
+                            "(function(){ return document.documentElement ? document.documentElement.outerHTML : ''; })()"
+                        ) { rawJsResult ->
+                            val unescaped = runCatching {
+                                if (!rawJsResult.isNullOrBlank() && rawJsResult != "null") {
+                                    org.json.JSONTokener(rawJsResult).nextValue()?.toString().orEmpty()
+                                } else ""
+                            }.getOrDefault("")
+
+                            if (
+                                unescaped.contains("tl3-ring") ||
+                                unescaped.contains("tl3-bar-item") ||
+                                unescaped.contains("<table", ignoreCase = true)
+                            ) {
+                                val syncCookies = cm.getCookie("https://connect.linux.do")
+                                if (!syncCookies.isNullOrBlank()) {
+                                    CookieSentinel.ingestRawCookieString(syncCookies, domain = "connect.linux.do", hostOnly = false)
+                                }
+                                if (!deferred.isCompleted) deferred.complete(unescaped)
+                            } else if (
+                                !redirectedLogin &&
+                                currentUrl.startsWith("https://connect.linux.do") &&
+                                (unescaped.contains("/login") || unescaped.contains("登录"))
+                            ) {
+                                redirectedLogin = true
+                                view.loadUrl("https://connect.linux.do/login")
+                            } else if (currentUrl.contains("/oauth2/authorize")) {
+                                // 若停留在 Discourse OAuth2 授权确认页，自动点击授权按钮
+                                view.evaluateJavascript(
+                                    """
+                                    (function(){
+                                        var btn = document.querySelector('form button[type="submit"], a.btn-primary, button.btn-primary');
+                                        if (btn) btn.click();
+                                    })();
+                                    """.trimIndent(),
+                                    null
+                                )
+                            } else if (redirectedLogin && currentUrl.startsWith("https://connect.linux.do")) {
+                                if (!deferred.isCompleted) deferred.complete(unescaped)
+                            }
+                        }
+                    }
+                }
+                wv.loadUrl("https://connect.linux.do/")
+            }.onFailure {
+                if (!deferred.isCompleted) deferred.complete(null)
+            }
+        }
+
+        return try {
+            withTimeoutOrNull(6500L) {
+                deferred.await()
+            }
+        } finally {
+            withContext(Dispatchers.Main) {
+                runCatching {
+                    tempWv?.stopLoading()
+                    tempWv?.destroy()
+                }
+            }
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -445,10 +665,12 @@ class MainActivity : ComponentActivity() {
             val savedPendingNonce = prefs.getString("pending_rsa_nonce", null)
             UserApiKeyAuthManager.restorePendingPrivateKeyBase64(savedPendingPrivKey, savedPendingNonce)
 
-            // 恢复用户的阅读密度/字号、深色模式与动效偏好
+            // 恢复用户的阅读密度/字号、深色模式、动效与主题色偏好（默认官方黑白黄）
             UserApiKeyAuthManager.uiFontScale = prefs.getFloat("ui_font_scale", 1.0f)
             UserApiKeyAuthManager.uiDarkTheme = prefs.getBoolean("ui_dark_theme", false)
             UserApiKeyAuthManager.uiEnableAnimations = prefs.getBoolean("ui_enable_animations", true)
+            UserApiKeyAuthManager.uiThemeAccent = prefs.getString("ui_theme_accent", "OFFICIAL_GOLD") ?: "OFFICIAL_GOLD"
+            UserApiKeyAuthManager.uiCompactFeed = prefs.getBoolean("ui_compact_feed", false)
 
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)

@@ -138,6 +138,16 @@ data class TopicSummary(
 )
 
 /**
+ * Discourse Reactions 插件单个表情统计项（如 `heart` ❤️, `+1` 👍, `confetti_ball` 🎉, `fire` 🔥, `laughing` 😂, `clap` 👏, `hugs` 🤗）
+ */
+@Serializable
+data class PostReactionItem(
+    val id: String,
+    val emoji: String,
+    val count: Int
+)
+
+/**
  * 话题详情中的单层楼 (Post)
  */
 @Serializable
@@ -169,6 +179,8 @@ data class PostItemModel(
     val replyCount: Int = 0,
     val readsCount: Int = 0,
     val likedByMe: Boolean = false,
+    val myReactionId: String? = null,
+    val reactions: List<PostReactionItem> = emptyList(),
     val bookmarkedByMe: Boolean = false,
     val isSmallAction: Boolean = false,
     val actionCode: String? = null
@@ -248,6 +260,7 @@ data class UserNotificationItem(
     val postNumber: Int = 1,
     val title: String,
     val actingUsername: String = "",
+    val actingAvatarTemplate: String? = null,
     val excerpt: String = ""
 ) {
     val typeLabel: String

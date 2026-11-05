@@ -74,7 +74,7 @@ fun SmartAvatar(
     modifier: Modifier = Modifier
 ) {
     val staticUrl = remember(avatarTemplate) {
-        LinuxDoSiteRules.resolveStaticAvatarUrl(avatarTemplate, sizePx = 120)
+        LinuxDoSiteRules.resolveStaticAvatarUrl(avatarTemplate, sizePx = 240)
     }
     val animatedUrl = remember(animatedAvatar, enableAnimations) {
         if (enableAnimations) LinuxDoSiteRules.resolveAnimatedAvatarUrl(animatedAvatar) else null
@@ -82,28 +82,7 @@ fun SmartAvatar(
     val isSquare = remember(username, staticUrl) {
         LinuxDoSiteRules.isSquareAvatar(username, staticUrl)
     }
-    val glowColor = remember(username, primaryGroupName) {
-        LinuxDoSiteRules.matchAvatarGlowColor(username, primaryGroupName)
-    }
     val shape: Shape = if (isSquare) RoundedCornerShape(percent = 12) else CircleShape
-
-    val pulseAlpha = if (glowColor != null && enableAnimations) {
-        val transition = rememberInfiniteTransition(label = "avatarGlow")
-        val anim by transition.animateFloat(
-            initialValue = 0.30f,
-            targetValue = 0.80f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 2200, easing = LinearEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "glowPulse"
-        )
-        anim
-    } else if (glowColor != null) {
-        0.50f
-    } else {
-        0f
-    }
 
     var animatedReady by remember(animatedUrl) { mutableStateOf(false) }
     var staticLoaded by remember(staticUrl) { mutableStateOf(false) }
@@ -112,35 +91,16 @@ fun SmartAvatar(
         modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        val outerMod = if (glowColor != null) {
-            Modifier
-                .fillMaxSize()
-                .drawBehind {
-                    drawCircle(
-                        color = glowColor.copy(alpha = pulseAlpha * 0.35f),
-                        radius = this.size.minDimension * 0.58f
-                    )
-                }
-                .border(
-                    width = 1.6.dp,
-                    color = glowColor.copy(alpha = pulseAlpha),
-                    shape = shape
-                )
-        } else {
-            Modifier
-                .fillMaxSize()
-                .border(
-                    width = 0.6.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
-                    shape = shape
-                )
-        }
-
         Box(
-            modifier = outerMod
-                .padding(if (glowColor != null) 1.6.dp else 0.6.dp)
+            modifier = Modifier
+                .fillMaxSize()
                 .clip(shape)
-                .background(avatarFallbackColor(username)),
+                .background(avatarFallbackColor(username))
+                .border(
+                    width = 0.5.dp,
+                    color = Color(0x14000000),
+                    shape = shape
+                ),
             contentAlignment = Alignment.Center
         ) {
             if (!staticLoaded && !animatedReady) {
@@ -174,88 +134,85 @@ fun SmartAvatar(
             }
         }
 
-        if (flair != null && flair.hasFlair) {
+        if (flair != null && flair.hasFlair && size >= 28.dp) {
             FlairBadgeOverlay(
                 flair = flair,
-                badgeSize = (size.value * 0.38f).coerceIn(13f, 18f).dp,
+                badgeSize = (size.value * 0.36f).coerceIn(13f, 16f).dp,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .offset(x = 2.dp, y = 1.dp)
+                    .offset(x = 1.dp, y = 1.dp)
             )
         }
     }
 }
 
 /**
- * 右下角 Flair 群组身份徽章组件
+ * 右下角 Flair 群组身份徽章组件（1:1 对齐 Linux.do Web `.avatar-flair`）
  */
 @Composable
 fun FlairBadgeOverlay(
     flair: FlairInfo,
-    badgeSize: Dp = 15.dp,
+    badgeSize: Dp = 14.dp,
     modifier: Modifier = Modifier
 ) {
-    val bgColor = LinuxDoSiteRules.parseHexColor(flair.bgColorHex, fallback = Color(0xFF1E293B))
+    val rawUrl = flair.url?.trim().orEmpty()
+    if (rawUrl.isEmpty()) return
+    val isImageUrl = rawUrl.contains("/") ||
+        rawUrl.endsWith(".png", ignoreCase = true) ||
+        rawUrl.endsWith(".webp", ignoreCase = true) ||
+        rawUrl.endsWith(".gif", ignoreCase = true) ||
+        rawUrl.endsWith(".jpg", ignoreCase = true) ||
+        rawUrl.endsWith(".svg", ignoreCase = true)
+
+    val hasCustomBg = !flair.bgColorHex.isNullOrBlank()
+    val bgColor = LinuxDoSiteRules.parseHexColor(flair.bgColorHex, fallback = Color.Transparent)
     val fgColor = LinuxDoSiteRules.parseHexColor(flair.fgColorHex, fallback = Color.White)
 
+    if (isImageUrl && !rawUrl.endsWith(".svg", ignoreCase = true)) {
+        val fullImgUrl = LinuxDoSiteRules.resolveUrl(rawUrl)
+        Box(
+            modifier = modifier
+                .size(badgeSize)
+                .clip(CircleShape)
+                .let { m -> if (hasCustomBg) m.background(bgColor) else m },
+            contentAlignment = Alignment.Center
+        ) {
+            AsyncImage(
+                model = fullImgUrl,
+                contentDescription = flair.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        return
+    }
+
+    // FontAwesome 矢量图标 Flair
     val tempBadge = remember(flair) {
         GrantedBadge(
             id = flair.groupId ?: 0,
             name = flair.name ?: "Flair",
             badgeTypeId = 1,
-            icon = flair.url
+            icon = rawUrl
         )
     }
     val visual = remember(tempBadge) {
         UniversalBadgeEngine.resolveBadgeVisual(tempBadge, isDark = true)
     }
-
-    Surface(
-        modifier = modifier.size(badgeSize),
-        shape = CircleShape,
-        color = bgColor,
-        shadowElevation = 1.dp
-    ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-            when (visual) {
-                is ResolvedBadgeVisual.VectorGlyph -> {
-                    Icon(
-                        imageVector = visual.icon,
-                        contentDescription = flair.name,
-                        tint = fgColor,
-                        modifier = Modifier.size(badgeSize * 0.62f)
-                    )
-                }
-                is ResolvedBadgeVisual.SvgImage -> {
-                    AsyncImage(
-                        model = visual.url,
-                        contentDescription = flair.name,
-                        modifier = Modifier.size(badgeSize * 0.72f)
-                    )
-                }
-                is ResolvedBadgeVisual.BitmapImage -> {
-                    AsyncImage(
-                        model = visual.url,
-                        contentDescription = flair.name,
-                        modifier = Modifier.size(badgeSize * 0.72f)
-                    )
-                }
-                is ResolvedBadgeVisual.DynamicSpriteSvg -> {
-                    Text(
-                        text = "✦",
-                        color = fgColor,
-                        fontSize = (badgeSize.value * 0.52f).sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                is ResolvedBadgeVisual.MedalFallback -> {
-                    Text(
-                        text = visual.badgeInitial,
-                        color = fgColor,
-                        fontSize = (badgeSize.value * 0.50f).sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+    if (visual is ResolvedBadgeVisual.VectorGlyph) {
+        Surface(
+            modifier = modifier.size(badgeSize),
+            shape = CircleShape,
+            color = if (hasCustomBg) bgColor else Color(0xFF334155),
+            shadowElevation = 0.5.dp
+        ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                Icon(
+                    imageVector = visual.icon,
+                    contentDescription = flair.name,
+                    tint = fgColor,
+                    modifier = Modifier.size(badgeSize * 0.64f)
+                )
             }
         }
     }
@@ -326,9 +283,7 @@ fun UserTitleTag(
 
 /**
  * 帖子楼层头部行内精巧徽章图标 (`PostGrantedBadgeIcon`)
- *
- * 对齐 Discourse 原生及 FluxDO `post_granted_badge.dart` 的 14dp 行内图标形态，
- * 同时具备 LinDo 五合一引擎（SVG / 动态 Sprite / FA6 / 位图 / 零丢失勋章兜底）。
+ * 1:1 还原 Linux.do Web `.user-badge-buttons .user-badge` 的 14dp 行内图标形态（位图或金/银/铜矢量勋章图标，绝不显示粗糙汉字圆圈）
  */
 @Composable
 fun PostGrantedBadgeIcon(
@@ -346,40 +301,13 @@ fun PostGrantedBadgeIcon(
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
-            .padding(start = 3.dp)
+            .padding(start = 2.dp)
             .size(15.dp)
             .let { mod ->
                 if (onClick != null) mod.clickable { onClick(badge) } else mod
             }
     ) {
         when (visual) {
-            is ResolvedBadgeVisual.VectorGlyph -> {
-                Icon(
-                    imageVector = visual.icon,
-                    contentDescription = badge.name,
-                    tint = tierColor,
-                    modifier = Modifier.size(13.dp)
-                )
-            }
-            is ResolvedBadgeVisual.SvgImage -> {
-                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    Icon(
-                        imageVector = UniversalBadgeEngine.resolveBadgeVisual(
-                            badge.copy(imageUrl = null, icon = "fa-certificate"),
-                            isDark = false
-                        ).let { (it as? ResolvedBadgeVisual.VectorGlyph)?.icon }
-                            ?: Icons.Default.Star,
-                        contentDescription = null,
-                        tint = tierColor,
-                        modifier = Modifier.size(12.dp)
-                    )
-                    AsyncImage(
-                        model = visual.url,
-                        contentDescription = badge.name,
-                        modifier = Modifier.size(14.dp)
-                    )
-                }
-            }
             is ResolvedBadgeVisual.BitmapImage -> {
                 AsyncImage(
                     model = visual.url,
@@ -387,35 +315,29 @@ fun PostGrantedBadgeIcon(
                     modifier = Modifier.size(14.dp)
                 )
             }
-            is ResolvedBadgeVisual.DynamicSpriteSvg -> {
+            is ResolvedBadgeVisual.VectorGlyph -> {
                 Icon(
-                    imageVector = Icons.Default.AutoAwesome,
+                    imageVector = visual.icon,
                     contentDescription = badge.name,
                     tint = tierColor,
-                    modifier = Modifier.size(13.dp)
+                    modifier = Modifier.size(13.5.dp)
                 )
             }
-            is ResolvedBadgeVisual.MedalFallback -> {
-                Box(
-                    modifier = Modifier
-                        .size(14.dp)
-                        .background(tierColor.copy(alpha = 0.22f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = visual.badgeInitial,
-                        color = tierColor,
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+            else -> {
+                Icon(
+                    imageVector = Icons.Default.Star,
+                    contentDescription = badge.name,
+                    tint = tierColor,
+                    modifier = Modifier.size(13.5.dp)
+                )
             }
         }
     }
 }
 
 /**
- * 徽章墙与用户资料卡使用的完整徽章胶囊组件 (`UniversalBadgeChip`)
+ * 徽章墙与用户资料卡使用的 Web 风格徽章组件 (`UniversalBadgeChip`)
+ * 对齐 Linux.do Web `.user-badge`：清爽细边框 + 金/银/铜勋章图标 + 徽章名称
  */
 @Composable
 fun UniversalBadgeChip(
@@ -423,37 +345,33 @@ fun UniversalBadgeChip(
     compact: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val visual = remember(badge) {
-        UniversalBadgeEngine.resolveBadgeVisual(badge, isDark = false)
-    }
     val tierColor = remember(badge) {
         UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = false)
     }
 
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(if (compact) 6.dp else 8.dp),
-        color = tierColor.copy(alpha = 0.10f),
-        border = BorderStroke(0.6.dp, tierColor.copy(alpha = 0.35f))
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .border(
+                width = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                shape = RoundedCornerShape(if (compact) 5.dp else 7.dp)
+            )
+            .padding(
                 horizontal = if (compact) 6.dp else 8.dp,
-                vertical = if (compact) 2.dp else 4.dp
+                vertical = if (compact) 2.5.dp else 4.dp
             )
-        ) {
-            PostGrantedBadgeIcon(badge = badge)
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = badge.name,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontSize = if (compact) 11.sp else 12.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
+    ) {
+        PostGrantedBadgeIcon(badge = badge)
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = badge.name,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = if (compact) 11.2.sp else 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

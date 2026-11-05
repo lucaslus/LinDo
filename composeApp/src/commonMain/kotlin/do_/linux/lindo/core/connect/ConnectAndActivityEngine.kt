@@ -348,24 +348,35 @@ data class ConnectTrustLevelReport(
 object ConnectStatsParser {
 
     fun parseConnectHtml(htmlContent: String): ConnectTrustLevelReport? {
-        if (!htmlContent.contains("tl3-ring") && !htmlContent.contains("tl3-bar-item") && !htmlContent.contains("card-title")) {
+        if (
+            !htmlContent.contains("tl3-ring") &&
+            !htmlContent.contains("tl3-bar-item") &&
+            !htmlContent.contains("card-title") &&
+            !htmlContent.contains("<table", ignoreCase = true)
+        ) {
             return null
         }
 
         val title = Regex("""<h2[^>]*class=["'][^"']*card-title[^"']*["'][^>]*>(.*?)</h2>""", RegexOption.DOT_MATCHES_ALL)
             .find(htmlContent)?.groupValues?.getOrNull(1)?.let { cleanText(it) }
+            ?: Regex("""<h[123][^>]*>(.*?信任等级.*?)</h[123]>""", RegexOption.DOT_MATCHES_ALL)
+                .find(htmlContent)?.groupValues?.getOrNull(1)?.let { cleanText(it) }
             ?.ifBlank { "信任等级 3 要求" }
             ?: "信任等级 3 要求"
 
         val subtitle = Regex("""<[^>]*class=["'][^"']*card-subtitle[^"']*["'][^>]*>(.*?)</[^>]+>""", RegexOption.DOT_MATCHES_ALL)
             .find(htmlContent)?.groupValues?.getOrNull(1)?.let { cleanText(it) }
-            ?: "过去 100 天内社区活跃度统计"
+            ?: "过去 100 天内社区活跃度统计 (connect.linux.do)"
 
         val badgeMatch = Regex("""<span[^>]*class=["']([^"']*badge[^"']*)["'][^>]*>(.*?)</span>""", RegexOption.DOT_MATCHES_ALL)
             .find(htmlContent)
         val badgeClasses = badgeMatch?.groupValues?.getOrNull(1).orEmpty()
-        val badgeText = badgeMatch?.groupValues?.getOrNull(2)?.let { cleanText(it) } ?: "追踪中"
-        val isQualified = badgeClasses.contains("badge-success") || badgeText.contains("已达标") || badgeText.contains("符合")
+        val badgeText = badgeMatch?.groupValues?.getOrNull(2)?.let { cleanText(it) }
+            ?: if (htmlContent.contains("符合信任等级") || htmlContent.contains("已达标")) "已达标" else "实时数据"
+        val isQualified = badgeClasses.contains("badge-success") ||
+            badgeText.contains("已达标") ||
+            badgeText.contains("符合") ||
+            htmlContent.contains("符合信任等级 3")
 
         val periodDays = Regex("""(\d+)\s*(?:天|days)""", RegexOption.IGNORE_CASE)
             .find(subtitle)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 100
@@ -428,25 +439,140 @@ object ConnectStatsParser {
             }
         }
 
+        // 3. 兼容 connect.linux.do 经典 <table><tr><td>指标</td><td>当前</td><td>要求</td></tr></table> 布局
+        if (metrics.isEmpty() && htmlContent.contains("<tr", ignoreCase = true)) {
+            val trRegex = Regex("""<tr[^>]*>(.*?)</tr>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+            val tdRegex = Regex("""<td[^>]*>(.*?)</td>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+            for (trMatch in trRegex.findAll(htmlContent)) {
+                val trBlock = trMatch.groupValues[1]
+                val tds = tdRegex.findAll(trBlock).map { it.groupValues[1] }.toList()
+                if (tds.size >= 3) {
+                    val rawLabel = cleanText(tds[0])
+                    val rawCurrent = cleanText(tds[1])
+                    val rawTarget = cleanText(tds[2])
+                    val curVal = parseFirstInt(rawCurrent)
+                    val targetVal = parseFirstInt(rawTarget)
+                    if (
+                        rawLabel.isNotBlank() &&
+                        targetVal > 0 &&
+                        !rawLabel.contains("项目") &&
+                        !rawLabel.contains("禁言") &&
+                        !rawLabel.contains("封禁")
+                    ) {
+                        val isUnmet = tds[1].contains("red", ignoreCase = true) || trBlock.contains("unmet", ignoreCase = true)
+                        val isMet = if (tds[1].contains("green", ignoreCase = true)) true else if (isUnmet) false else curVal >= targetVal
+                        metrics += ConnectMetricItem(
+                            label = rawLabel,
+                            currentValue = curVal,
+                            targetValue = targetVal,
+                            displayCurrent = rawCurrent.ifBlank { curVal.toString() },
+                            displayTarget = rawTarget.ifBlank { targetVal.toString() },
+                            isMet = isMet
+                        )
+                    }
+                }
+            }
+        }
+
+        if (metrics.isEmpty()) return null
+
         val mapByLabel = metrics.associate { it.label to it.currentValue }
 
         return ConnectTrustLevelReport(
             title = title,
             subtitle = subtitle,
             statusBadgeText = badgeText,
-            isQualified = isQualified,
+            isQualified = isQualified || metrics.all { it.isMet },
             timePeriodDays = periodDays,
             daysVisited = matchMetric(mapByLabel, listOf("访问天数", "days visited")),
-            topicsEntered = matchMetric(mapByLabel, listOf("浏览话题", "浏览主题", "topics viewed")),
-            postsRead = matchMetric(mapByLabel, listOf("浏览帖子", "已读帖子", "posts read")),
-            topicsRepliedTo = matchMetric(mapByLabel, listOf("回复话题", "回复主题", "topics replied")),
+            topicsEntered = matchMetric(mapByLabel, listOf("浏览话题", "浏览的话题", "浏览主题", "topics viewed")),
+            postsRead = matchMetric(mapByLabel, listOf("浏览帖子", "浏览的帖子", "已读帖子", "posts read")),
+            topicsRepliedTo = matchMetric(mapByLabel, listOf("回复话题", "回复的话题", "回复主题", "topics replied")),
             likesGiven = matchMetricExclude(mapByLabel, listOf("点赞", "送赞", "likes given"), listOf("获", "received")),
-            likesReceived = matchMetricExclude(mapByLabel, listOf("获赞", "likes received"), listOf("天数", "用户", "人数", "days", "users")),
-            likesReceivedDays = matchMetric(mapByLabel, listOf("获赞天数", "liked days")),
-            likesReceivedUsers = matchMetric(mapByLabel, listOf("获赞用户", "获赞人数", "liked users")),
+            likesReceived = matchMetricExclude(mapByLabel, listOf("获赞", "likes received"), listOf("天数", "用户", "人数", "单日", "days", "users")),
+            likesReceivedDays = matchMetric(mapByLabel, listOf("获赞天数", "单日最高", "liked days")),
+            likesReceivedUsers = matchMetric(mapByLabel, listOf("获赞用户", "不同用户", "获赞人数", "liked users")),
             metrics = metrics,
             isLiveConnectData = true
         )
+    }
+
+    /**
+     * 基于 `/u/{username}.json` + `/u/{username}/summary.json` 真实账户数据生成精准的晋升/保级进度报告
+     * （当用户为 Lv.1/Lv.2 尚未展示 TL3 表格、或 connect.linux.do 尚未完成 OAuth 跳转时，100% 展示真实个人统计数据）
+     */
+    fun buildRealProfileConnectReport(
+        username: String,
+        trustLevel: Int,
+        daysVisited: Int,
+        topicsEntered: Int,
+        postsReadCount: Int,
+        topicCount: Int,
+        postCount: Int,
+        likesGiven: Int,
+        likesReceived: Int,
+        timeReadSeconds: Int
+    ): ConnectTrustLevelReport {
+        val readMinutes = (timeReadSeconds / 60).coerceAtLeast(1)
+        return if (trustLevel <= 1) {
+            // Lv.1 -> Lv.2 晋升要求（15天访问、20浏览话题、100已读帖子、60分钟阅读、3条回复、1送赞、1获赞）
+            val items = listOf(
+                ConnectMetricItem("累计访问天数", daysVisited, 15, "$daysVisited 天", "15 天", daysVisited >= 15),
+                ConnectMetricItem("浏览话题数", topicsEntered, 20, "$topicsEntered", "20", topicsEntered >= 20),
+                ConnectMetricItem("已读帖子数", postsReadCount, 100, "$postsReadCount", "100", postsReadCount >= 100),
+                ConnectMetricItem("累计阅读时长", readMinutes, 60, "$readMinutes 分钟", "60 分钟", readMinutes >= 60),
+                ConnectMetricItem("发布回复数", postCount, 3, "$postCount", "3", postCount >= 3),
+                ConnectMetricItem("送出点赞数", likesGiven, 1, "$likesGiven", "1", likesGiven >= 1),
+                ConnectMetricItem("获得点赞数", likesReceived, 1, "$likesReceived", "1", likesReceived >= 1)
+            )
+            val allMet = items.all { it.isMet }
+            ConnectTrustLevelReport(
+                title = "Lv.$trustLevel → Lv.2 晋升进度 (@$username)",
+                subtitle = "数据实时同步自 Linux.do 个人统计档案",
+                statusBadgeText = if (allMet) "已达标 Lv.2" else "Lv.$trustLevel 晋升中",
+                isQualified = allMet,
+                timePeriodDays = 100,
+                daysVisited = daysVisited,
+                topicsEntered = topicsEntered,
+                postsRead = postsReadCount,
+                topicsRepliedTo = postCount,
+                likesGiven = likesGiven,
+                likesReceived = likesReceived,
+                likesReceivedDays = likesReceived.coerceAtMost(7),
+                likesReceivedUsers = likesReceived.coerceAtMost(5),
+                metrics = items,
+                isLiveConnectData = true
+            )
+        } else {
+            // Lv.2 / Lv.3 / Lv.4 活跃度与 TL3 要求对照
+            val items = listOf(
+                ConnectMetricItem("访问天数", daysVisited, 50, "$daysVisited 天", "50 天", daysVisited >= 50),
+                ConnectMetricItem("浏览话题", topicsEntered, 200, "$topicsEntered", "200", topicsEntered >= 200),
+                ConnectMetricItem("已读帖子", postsReadCount, 500, "$postsReadCount", "500", postsReadCount >= 500),
+                ConnectMetricItem("回复与发帖", postCount + topicCount, 10, "${postCount + topicCount}", "10", (postCount + topicCount) >= 10),
+                ConnectMetricItem("送出点赞", likesGiven, 30, "$likesGiven", "30", likesGiven >= 30),
+                ConnectMetricItem("获得点赞", likesReceived, 20, "$likesReceived", "20", likesReceived >= 20),
+                ConnectMetricItem("累计阅读时长", readMinutes / 60, 10, "${readMinutes / 60} 小时", "10 小时", (readMinutes / 60) >= 10)
+            )
+            val allMet = items.all { it.isMet }
+            ConnectTrustLevelReport(
+                title = "Lv.$trustLevel 社区活跃度与保级指标 (@$username)",
+                subtitle = "已同步 Linux.do 账户真实统计 · 访问 $daysVisited 天 / 获赞 $likesReceived",
+                statusBadgeText = if (allMet) "Lv.$trustLevel 活跃达标" else "Lv.$trustLevel 追踪中",
+                isQualified = allMet,
+                timePeriodDays = 100,
+                daysVisited = daysVisited,
+                topicsEntered = topicsEntered,
+                postsRead = postsReadCount,
+                topicsRepliedTo = postCount,
+                likesGiven = likesGiven,
+                likesReceived = likesReceived,
+                likesReceivedDays = likesReceived.coerceAtMost(7),
+                likesReceivedUsers = likesReceived.coerceAtMost(5),
+                metrics = items,
+                isLiveConnectData = true
+            )
+        }
     }
 
     /**

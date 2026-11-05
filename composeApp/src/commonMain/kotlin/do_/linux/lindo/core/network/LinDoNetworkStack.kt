@@ -11,6 +11,7 @@ import do_.linux.lindo.core.model.CommunitySearchResult
 import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.model.PostItemModel
+import do_.linux.lindo.core.model.PostReactionItem
 import do_.linux.lindo.core.model.TopicDetailModel
 import do_.linux.lindo.core.model.TopicSummary
 import do_.linux.lindo.core.model.TopicUser
@@ -19,10 +20,14 @@ import do_.linux.lindo.core.model.UserFullProfileSummary
 import do_.linux.lindo.core.model.UserNotificationItem
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitForm
+import io.ktor.client.request.forms.submitFormWithBinaryData
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.Headers
+import io.ktor.http.HttpHeaders
 import io.ktor.http.Parameters
 import java.net.InetAddress
 import java.security.KeyPairGenerator
@@ -267,12 +272,19 @@ object UserApiKeyAuthManager {
     @Volatile
     var uiEnableAnimations: Boolean = true
 
+    @Volatile
+    var uiThemeAccent: String = "OFFICIAL_GOLD"
+
+    @Volatile
+    var uiCompactFeed: Boolean = false
+
     var onAuthStateChanged: (() -> Unit)? = null
     var openExternalUrlLauncher: ((String) -> Unit)? = null
     var onLogoutPlatformClear: (() -> Unit)? = null
     var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
     var onPersistPendingKey: ((String?, String?) -> Unit)? = null
     var onPersistUiPrefs: ((Float, Boolean, Boolean) -> Unit)? = null
+    var onPersistThemeAndDensity: ((String, Boolean) -> Unit)? = null
     var onSyncCookieToPlatform: ((String) -> Unit)? = null
 
     fun updateUiPrefs(fontScale: Float, darkTheme: Boolean, enableAnimations: Boolean) {
@@ -281,7 +293,14 @@ object UserApiKeyAuthManager {
         uiEnableAnimations = enableAnimations
         onPersistUiPrefs?.invoke(fontScale, darkTheme, enableAnimations)
     }
+
+    fun updateThemeAndDensityPrefs(themeAccent: String, compactFeed: Boolean) {
+        uiThemeAccent = themeAccent
+        uiCompactFeed = compactFeed
+        onPersistThemeAndDensity?.invoke(themeAccent, compactFeed)
+    }
     var webViewJsonFetcher: (suspend (String) -> String?)? = null
+    var webViewConnectHtmlFetcher: (suspend () -> String?)? = null
     var webViewHttpExecutor: (suspend (
         url: String,
         method: String,
@@ -640,17 +659,17 @@ object LinuxDoRepository {
     }
 
     val categories: List<LinuxDoCategoryMeta> = listOf(
-        LinuxDoCategoryMeta(4, "开发调优", "develop", "0E76BD", "软件开发、系统调优与开源作品"),
-        LinuxDoCategoryMeta(14, "资源荟萃", "resource", "12A89D", "软件、工具、模型与数字资源分享"),
-        LinuxDoCategoryMeta(42, "文档共建", "wiki", "25AAE2", "技术沉淀、教程指南与知识库协作"),
-        LinuxDoCategoryMeta(11, "搞七捻三", "gossip", "9EB83B", "日常交流、职场故事与生活记录"),
-        LinuxDoCategoryMeta(36, "福利羊毛", "welfare", "F7941D", "社区福利、公益接口与优惠资讯"),
-        LinuxDoCategoryMeta(34, "前沿快讯", "news", "BF1E2E", "人工智能、科技动态与行业资讯"),
-        LinuxDoCategoryMeta(27, "非我莫属", "jobs", "652D90", "人才对接、远程协作与招聘求职"),
-        LinuxDoCategoryMeta(10, "跳蚤市场", "market", "F1592A", "闲置数码、算力流转与二手交易"),
-        LinuxDoCategoryMeta(32, "读书成诗", "reading", "0088CC", "书评笔记、阅读推荐与人文思考"),
-        LinuxDoCategoryMeta(46, "扬帆起航", "startup", "3AB54A", "独立开发、出海实践与产品孵化"),
-        LinuxDoCategoryMeta(2, "运营反馈", "feedback", "808281", "社区站务、功能建议与规则说明")
+        LinuxDoCategoryMeta(4, "开发调优", "develop", "0E76BD", "软件开发与开源实践"),
+        LinuxDoCategoryMeta(14, "资源荟萃", "resource", "12A89D", "软件工具与数字资源"),
+        LinuxDoCategoryMeta(42, "文档共建", "wiki", "25AAE2", "技术沉淀与教程指南"),
+        LinuxDoCategoryMeta(11, "搞七捻三", "gossip", "9EB83B", "日常交流与职场故事"),
+        LinuxDoCategoryMeta(36, "福利羊毛", "welfare", "F7941D", "社区福利与公益接口"),
+        LinuxDoCategoryMeta(34, "前沿快讯", "news", "BF1E2E", "AI 动态与前沿科技"),
+        LinuxDoCategoryMeta(27, "非我莫属", "jobs", "652D90", "人才对接与远程协作"),
+        LinuxDoCategoryMeta(10, "跳蚤市场", "market", "F1592A", "闲置数码与算力流转"),
+        LinuxDoCategoryMeta(32, "读书成诗", "reading", "0088CC", "书评笔记与阅读推荐"),
+        LinuxDoCategoryMeta(46, "扬帆起航", "startup", "3AB54A", "独立开发与产品出海"),
+        LinuxDoCategoryMeta(2, "运营反馈", "feedback", "808281", "社区站务与功能建议")
     )
 
     private val categoryLookup: Map<Int, Pair<String, String>> = buildMap {
@@ -1388,7 +1407,10 @@ object LinuxDoRepository {
                     ?: "社区互动通知"
                 val actor = dataObj?.get("display_username")?.jsonPrimitive?.contentOrNull
                     ?: dataObj?.get("original_username")?.jsonPrimitive?.contentOrNull
+                    ?: obj["acting_user_name"]?.jsonPrimitive?.contentOrNull
                     ?: "系统"
+                val actingAvatarTemplate = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull
+                    ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull
                 val excerpt = dataObj?.get("message")?.jsonPrimitive?.contentOrNull ?: ""
                 UserNotificationItem(
                     id = id,
@@ -1399,6 +1421,7 @@ object LinuxDoRepository {
                     postNumber = postNumber,
                     title = title,
                     actingUsername = actor,
+                    actingAvatarTemplate = actingAvatarTemplate,
                     excerpt = excerpt
                 )
             }
@@ -1836,17 +1859,56 @@ object LinuxDoRepository {
         val replyToUsername = replyToUserObj?.get("username")?.jsonPrimitive?.contentOrNull
         val reads = pObj["reads"]?.jsonPrimitive?.intOrNull ?: 0
 
-        val reactionsCount = (pObj["reactions"] as? JsonArray)?.sumOf { rElem ->
-            (rElem as? JsonObject)?.get("count")?.jsonPrimitive?.intOrNull ?: 0
-        } ?: (pObj["actions_summary"] as? JsonArray)?.firstOrNull { aElem ->
-            (aElem as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull == 2
-        }?.let { (it as? JsonObject)?.get("count")?.jsonPrimitive?.intOrNull } ?: 0
+        val emojiMap = mapOf(
+            "heart" to "❤️",
+            "+1" to "👍",
+            "thumbsup" to "👍",
+            "confetti_ball" to "🎉",
+            "tada" to "🎉",
+            "fire" to "🔥",
+            "laughing" to "😂",
+            "joy" to "😂",
+            "open_mouth" to "😮",
+            "clap" to "👏",
+            "hugs" to "🤗",
+            "thinking" to "🤔",
+            "cry" to "😢",
+            "sob" to "😭",
+            "rocket" to "🚀",
+            "eyes" to "👀",
+            "pray" to "🙏"
+        )
 
-        val likedByMe = (pObj["current_user_reaction"] != null && pObj["current_user_reaction"] !is kotlinx.serialization.json.JsonNull) ||
-            ((pObj["actions_summary"] as? JsonArray)?.any { aElem ->
-                val aObj = aElem as? JsonObject
-                aObj?.get("id")?.jsonPrimitive?.intOrNull == 2 && aObj["acted"]?.jsonPrimitive?.booleanOrNull == true
-            } == true)
+        val parsedReactions = (pObj["reactions"] as? JsonArray)?.mapNotNull { rElem ->
+            val rObj = rElem as? JsonObject ?: return@mapNotNull null
+            val rId = rObj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val cnt = rObj["count"]?.jsonPrimitive?.intOrNull ?: 0
+            if (cnt <= 0) return@mapNotNull null
+            PostReactionItem(
+                id = rId,
+                emoji = emojiMap[rId] ?: "❤️",
+                count = cnt
+            )
+        }.orEmpty()
+
+        val reactionsCount = if (parsedReactions.isNotEmpty()) {
+            parsedReactions.sumOf { it.count }
+        } else {
+            (pObj["actions_summary"] as? JsonArray)?.firstOrNull { aElem ->
+                (aElem as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull == 2
+            }?.let { (it as? JsonObject)?.get("count")?.jsonPrimitive?.intOrNull } ?: 0
+        }
+
+        val myReactionObj = pObj["current_user_reaction"] as? JsonObject
+        val myReactionId = myReactionObj?.get("id")?.jsonPrimitive?.contentOrNull
+            ?: if (
+                (pObj["actions_summary"] as? JsonArray)?.any { aElem ->
+                    val aObj = aElem as? JsonObject
+                    aObj?.get("id")?.jsonPrimitive?.intOrNull == 2 && aObj["acted"]?.jsonPrimitive?.booleanOrNull == true
+                } == true
+            ) "heart" else null
+
+        val likedByMe = !myReactionId.isNullOrBlank()
 
         val bookmarkedByMe = pObj["bookmarked"]?.jsonPrimitive?.booleanOrNull ?: false
         val inlineBadges = parseInlinePostBadges(pObj["user_badges"])
@@ -1882,6 +1944,8 @@ object LinuxDoRepository {
             likeCount = reactionsCount,
             readsCount = reads,
             likedByMe = likedByMe,
+            myReactionId = myReactionId,
+            reactions = parsedReactions,
             bookmarkedByMe = bookmarkedByMe
         )
     }
@@ -2081,12 +2145,32 @@ object LinuxDoRepository {
     }
 
     /**
-     * 获取 `connect.linux.do` 信任等级周期活跃度报告
+     * 获取 `connect.linux.do` 信任等级周期活跃度报告：
+     * 1. 优先通过同源 CookieManager WebView 通道拉取 `connect.linux.do`（支持自动跟随 `/login` -> `linux.do/oauth2/authorize` 静默换取 Connect 会话）；
+     * 2. 次选直连 `https://connect.linux.do/` 解析 `.tl3-ring` / `.tl3-bar-item` / `<table>` 100 天滚动周期数据；
+     * 3. 当用户为 Lv.1/Lv.2（Connect 页仅展示基础欢迎信息）或尚未完成 Connect OAuth 时，基于 `/u/{username}.json` + `/u/{username}/summary.json` 真实账户数据生成精准进度报告，绝不展示假数据。
      */
     suspend fun fetchConnectTrustLevelReport(): ConnectTrustLevelReport = withContext(Dispatchers.IO) {
+        if (!UserApiKeyAuthManager.isAuthorized()) {
+            return@withContext ConnectStatsParser.buildSessionBaselineReport(
+                sessionTopicsEntered = ScreenTrackEngine.sessionTopicsEntered,
+                sessionPostsRead = ScreenTrackEngine.sessionPostsRead
+            )
+        }
+        // 1. 优先尝试平台 WebView Connect 桥接（共享 CookieManager 与 OAuth2 自动登录态）
+        try {
+            val webHtml = UserApiKeyAuthManager.webViewConnectHtmlFetcher?.invoke()
+            if (!webHtml.isNullOrBlank()) {
+                ConnectStatsParser.parseConnectHtml(webHtml)?.let { return@withContext it }
+            }
+        } catch (_: Throwable) {
+        }
+
+        // 2. 尝试 Ktor 直连 connect.linux.do
         val client = sharedClient
         try {
             val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "connect.linux.do")
+                .ifEmpty { CookieSentinel.buildCookieHeader(targetHost = "linux.do") }
             val response = client.get("https://connect.linux.do/") {
                 header("Accept", "text/html,application/xhtml+xml")
                 UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
@@ -2097,9 +2181,381 @@ object LinuxDoRepository {
         } catch (_: Throwable) {
         }
 
+        // 3. 拉取当前登录用户的真实个人档案 (`/u/{username}.json` + `/u/{username}/summary.json`)
+        val realProfile = try {
+            fetchCurrentUserProfile() ?: UserApiKeyAuthManager.fullProfileCache
+        } catch (_: Throwable) {
+            UserApiKeyAuthManager.fullProfileCache
+        }
+
+        if (realProfile != null) {
+            return@withContext ConnectStatsParser.buildRealProfileConnectReport(
+                username = realProfile.username,
+                trustLevel = realProfile.trustLevel,
+                daysVisited = realProfile.daysVisited,
+                topicsEntered = realProfile.topicsEntered,
+                postsReadCount = realProfile.postsReadCount,
+                topicCount = realProfile.topicCount,
+                postCount = realProfile.postCount,
+                likesGiven = realProfile.likesGiven,
+                likesReceived = realProfile.likesReceived,
+                timeReadSeconds = realProfile.timeReadSeconds
+            )
+        }
+
         ConnectStatsParser.buildSessionBaselineReport(
             sessionTopicsEntered = ScreenTrackEngine.sessionTopicsEntered,
             sessionPostsRead = ScreenTrackEngine.sessionPostsRead
         )
     }
+
+    /**
+     * 拉取云端草稿箱列表 (`GET /drafts.json`)
+     */
+    suspend fun fetchCloudDrafts(): List<CloudDraftItem> = withContext(Dispatchers.IO) {
+        val res = executeHttp("https://linux.do/drafts.json", method = "GET") ?: return@withContext emptyList()
+        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        try {
+            val root = json.parseToJsonElement(res.second).jsonObject
+            val arr = root["drafts"] as? JsonArray ?: return@withContext emptyList()
+            arr.mapNotNull { elem ->
+                val obj = elem as? JsonObject ?: return@mapNotNull null
+                val draftKey = obj["draft_key"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                val seq = obj["sequence"]?.jsonPrimitive?.intOrNull ?: 0
+                val dataStr = obj["data"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                var title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                var rawReply = ""
+                if (dataStr.trimStart().startsWith("{")) {
+                    runCatching {
+                        val dObj = json.parseToJsonElement(dataStr).jsonObject
+                        if (title.isBlank()) {
+                            title = dObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                        }
+                        rawReply = dObj["reply"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    }
+                }
+                val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
+                val createdAt = formatRelativeTime(obj["created_at"]?.jsonPrimitive?.contentOrNull)
+                CloudDraftItem(
+                    draftKey = draftKey,
+                    sequence = seq,
+                    title = title.ifBlank { if (topicId > 0) "回复话题 #$topicId" else "未命名新话题草稿" },
+                    excerpt = rawReply.replace(Regex("<[^>]+>"), "").trim(),
+                    topicId = topicId,
+                    createdAtText = createdAt
+                )
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 删除指定云端草稿 (`DELETE /drafts/{draft_key}.json`)
+     */
+    suspend fun deleteCloudDraft(draftKey: String, sequence: Int): Boolean = withContext(Dispatchers.IO) {
+        val encoded = java.net.URLEncoder.encode(draftKey, "UTF-8")
+        val res = executeHttp(
+            url = "https://linux.do/drafts/$encoded.json?sequence=$sequence",
+            method = "DELETE"
+        )
+        res != null && res.first in 200..299
+    }
+
+    /**
+     * 关注 / 取消关注指定社区用户 (`PUT /follow/{username}.json` / `DELETE /follow/{username}.json`)
+     */
+    suspend fun toggleFollowUser(username: String, follow: Boolean = true): Boolean = withContext(Dispatchers.IO) {
+        if (username.isBlank()) return@withContext false
+        val res = executeHttp(
+            url = "https://linux.do/follow/${username.trim()}.json",
+            method = if (follow) "PUT" else "DELETE",
+            formParams = emptyMap()
+        )
+        res != null && res.first in 200..299
+    }
+
+    /**
+     * 帖内原生投票 (`PUT /polls/vote.json`)
+     */
+    suspend fun voteInPoll(postId: Int, pollName: String, options: List<String>): Boolean = withContext(Dispatchers.IO) {
+        val params = buildMap {
+            put("post_id", postId.toString())
+            put("poll_name", pollName)
+            options.forEachIndexed { idx, opt ->
+                put("options[$idx]", opt)
+            }
+        }
+        val res = executeHttp(
+            url = "https://linux.do/polls/vote.json",
+            method = "PUT",
+            formParams = params
+        )
+        res != null && res.first in 200..299
+    }
+
+    /**
+     * 采纳指定楼层为最佳解答 (`POST /solution/accept.json`)
+     */
+    suspend fun acceptPostSolution(postId: Int): Boolean = withContext(Dispatchers.IO) {
+        val res = executeHttp(
+            url = "https://linux.do/solution/accept.json",
+            method = "POST",
+            formParams = mapOf("id" to postId.toString())
+        )
+        res != null && res.first in 200..299
+    }
+
+    /**
+     * 举报违规楼层 (`POST /post_actions.json`)
+     * `flagTypeId`: 3=偏离主题(Off-Topic), 4=不当内容(Inappropriate), 8=垃圾广告(Spam)
+     */
+    suspend fun flagPost(postId: Int, flagTypeId: Int = 4, message: String = ""): Boolean = withContext(Dispatchers.IO) {
+        val params = buildMap {
+            put("id", postId.toString())
+            put("post_action_type_id", flagTypeId.toString())
+            if (message.isNotBlank()) {
+                put("message", message.trim())
+            }
+        }
+        val res = executeHttp(
+            url = "https://linux.do/post_actions.json",
+            method = "POST",
+            formParams = params
+        )
+        res != null && res.first in 200..299
+    }
+
+    /**
+     * 编辑器 `@用户 / @群组` 实时搜索自动补全 (`GET /u/search/users.json?term=...&include_groups=true`)
+     * 对齐 FluxDo `mention_autocomplete.dart` 与 `COMPOSE-028/029`
+     */
+    suspend fun searchMentionCandidates(term: String): List<MentionCandidate> = withContext(Dispatchers.IO) {
+        val cleanTerm = term.trim().removePrefix("@")
+        val encoded = java.net.URLEncoder.encode(cleanTerm, "UTF-8")
+        val url = "https://linux.do/u/search/users.json?term=$encoded&include_groups=true&limit=8"
+        val body = executeHttp(url, method = "GET")?.second ?: return@withContext emptyList()
+        if (!body.trimStart().startsWith("{")) return@withContext emptyList()
+        try {
+            val root = json.parseToJsonElement(body).jsonObject
+            val results = mutableListOf<MentionCandidate>()
+            val usersArr = root["users"] as? JsonArray
+            usersArr?.forEach { elem ->
+                val obj = elem as? JsonObject ?: return@forEach
+                val username = obj["username"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val rawTpl = obj["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val avatarUrl = if (rawTpl.startsWith("http")) {
+                    rawTpl.replace("{size}", "96")
+                } else if (rawTpl.isNotBlank()) {
+                    "https://linux.do${rawTpl.replace("{size}", "96")}"
+                } else ""
+                results.add(
+                    MentionCandidate(
+                        handle = username,
+                        displayName = name.ifBlank { username },
+                        avatarUrl = avatarUrl,
+                        isGroup = false
+                    )
+                )
+            }
+            val groupsArr = root["groups"] as? JsonArray
+            groupsArr?.forEach { elem ->
+                val obj = elem as? JsonObject ?: return@forEach
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                val fullName = obj["full_name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                results.add(
+                    MentionCandidate(
+                        handle = name,
+                        displayName = fullName.ifBlank { "群组 @$name" },
+                        avatarUrl = "",
+                        isGroup = true
+                    )
+                )
+            }
+            results
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 编辑器自动保存云端草稿 (`POST /drafts.json`)
+     * 对齐 FluxDo 与 Discourse `DRAFT-001~009`：
+     * - 新建话题：`draftKey = "new_topic"`
+     * - 话题回复：`draftKey = "topic_$topicId"`
+     * 返回更新后的 `draft_sequence`
+     */
+    suspend fun saveCloudDraft(
+        draftKey: String,
+        sequence: Int,
+        replyRaw: String,
+        title: String = "",
+        categoryId: Int? = null,
+        tags: List<String> = emptyList(),
+        replyToPostNumber: Int? = null,
+        action: String = if (draftKey == "new_topic") "createTopic" else "reply"
+    ): Int? = withContext(Dispatchers.IO) {
+        if (replyRaw.isBlank() && title.isBlank()) return@withContext null
+        val escapedReply = replyRaw
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "")
+        val escapedTitle = title
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", " ")
+        val tagsJson = tags.joinToString(",") { "\"${it.replace("\"", "")}\"" }
+        val dataJson = buildString {
+            append("{")
+            append("\"reply\":\"$escapedReply\",")
+            append("\"action\":\"$action\"")
+            if (escapedTitle.isNotBlank()) append(",\"title\":\"$escapedTitle\"")
+            if (categoryId != null && categoryId > 0) append(",\"categoryId\":$categoryId")
+            if (tags.isNotEmpty()) append(",\"tags\":[$tagsJson]")
+            if (replyToPostNumber != null && replyToPostNumber > 0) append(",\"postId\":$replyToPostNumber")
+            append("}")
+        }
+        val res = executeHttp(
+            url = "https://linux.do/drafts.json",
+            method = "POST",
+            formParams = mapOf(
+                "draft_key" to draftKey,
+                "sequence" to sequence.toString(),
+                "data" to dataJson
+            )
+        ) ?: return@withContext null
+        if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withContext null
+        try {
+            val root = json.parseToJsonElement(res.second).jsonObject
+            root["draft_sequence"]?.jsonPrimitive?.intOrNull ?: sequence
+        } catch (_: Throwable) {
+            sequence
+        }
+    }
+
+    /**
+     * 编辑器原生上传图片与附件 (`POST /uploads.json`)
+     * 对齐 FluxDo 与 Discourse `MEDIA-001~014`：
+     * - 自动生成标准 Discourse 图片 Markdown `![filename|WxH](short_url)` 或附件 `[filename|attachment](short_url) (size)`
+     */
+    suspend fun uploadMediaToLinuxDo(
+        fileName: String,
+        mimeType: String,
+        bytes: ByteArray
+    ): UploadedMediaResult? = withContext(Dispatchers.IO) {
+        if (bytes.isEmpty()) return@withContext null
+        val b64 = Base64.getEncoder().encodeToString(bytes)
+        val rawBody: String? = PlatformMediaPicker.webViewUploadExecutor?.invoke(fileName, mimeType, b64)?.let { (code, text) ->
+            if (code in 200..299 && text.trimStart().startsWith("{")) text else null
+        } ?: run {
+            try {
+                val csrfBody = executeHttp("https://linux.do/session/csrf.json", method = "GET")?.second.orEmpty()
+                val csrf = if (csrfBody.trimStart().startsWith("{")) {
+                    runCatching { json.parseToJsonElement(csrfBody).jsonObject["csrf"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                } else null
+                val cookieHeader = CookieSentinel.buildCookieHeader()
+                val resp = sharedClient.submitFormWithBinaryData(
+                    url = "https://linux.do/uploads.json",
+                    formData = formData {
+                        append("type", "composer")
+                        append("synchronous", "true")
+                        append(
+                            "files[]",
+                            bytes,
+                            Headers.build {
+                                append(HttpHeaders.ContentType, mimeType)
+                                append(HttpHeaders.ContentDisposition, "filename=\"${fileName.replace("\"", "")}\"")
+                            }
+                        )
+                    }
+                ) {
+                    header("Accept", "application/json")
+                    header("X-Requested-With", "XMLHttpRequest")
+                    UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
+                    UserApiKeyAuthManager.getApiKey()?.let {
+                        header("User-Api-Key", it)
+                        header("User-Api-Client-Id", UserApiKeyAuthManager.getClientId())
+                    }
+                    if (!csrf.isNullOrBlank()) header("X-CSRF-Token", csrf)
+                    if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+                }
+                val text = resp.bodyAsText()
+                if (resp.status.value in 200..299 && text.trimStart().startsWith("{")) text else null
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        if (rawBody.isNullOrBlank()) return@withContext null
+        try {
+            val obj = json.parseToJsonElement(rawBody).jsonObject
+            val shortUrl = obj["short_url"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val fullUrl = obj["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val targetUrl = shortUrl.ifBlank { fullUrl }
+            if (targetUrl.isBlank()) return@withContext null
+            val origName = obj["original_filename"]?.jsonPrimitive?.contentOrNull?.ifBlank { fileName } ?: fileName
+            val width = obj["width"]?.jsonPrimitive?.intOrNull ?: 0
+            val height = obj["height"]?.jsonPrimitive?.intOrNull ?: 0
+            val humanSize = obj["human_filesize"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val isImage = mimeType.startsWith("image/", ignoreCase = true) || (width > 0 && height > 0)
+            val markdown = if (isImage) {
+                if (width > 0 && height > 0) {
+                    "![${origName}|${width}x${height}]($targetUrl)"
+                } else {
+                    "![${origName}]($targetUrl)"
+                }
+            } else {
+                val sizeSuffix = if (humanSize.isNotBlank()) " ($humanSize)" else ""
+                "[${origName}|attachment]($targetUrl)$sizeSuffix"
+            }
+            UploadedMediaResult(
+                originalFilename = origName,
+                shortUrl = targetUrl,
+                fullUrl = fullUrl.ifBlank { targetUrl },
+                width = width,
+                height = height,
+                humanFilesize = humanSize,
+                isImage = isImage,
+                markdownSnippet = markdown
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
 }
+
+/**
+ * 跨平台媒体文件选择器与 WebView Multipart 桥接器
+ */
+object PlatformMediaPicker {
+    var launchPicker: ((mimeType: String, onPicked: (fileName: String, mimeType: String, bytes: ByteArray) -> Unit) -> Unit)? = null
+    var webViewUploadExecutor: (suspend (fileName: String, mimeType: String, base64Bytes: String) -> Pair<Int, String>?)? = null
+}
+
+data class UploadedMediaResult(
+    val originalFilename: String,
+    val shortUrl: String,
+    val fullUrl: String,
+    val width: Int,
+    val height: Int,
+    val humanFilesize: String,
+    val isImage: Boolean,
+    val markdownSnippet: String
+)
+
+data class MentionCandidate(
+    val handle: String,
+    val displayName: String,
+    val avatarUrl: String,
+    val isGroup: Boolean
+)
+
+data class CloudDraftItem(
+    val draftKey: String,
+    val sequence: Int,
+    val title: String,
+    val excerpt: String,
+    val topicId: Int,
+    val createdAtText: String
+)
