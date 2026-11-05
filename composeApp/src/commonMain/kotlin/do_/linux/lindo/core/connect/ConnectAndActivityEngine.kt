@@ -596,9 +596,9 @@ object ConnectStatsParser {
             ConnectMetricItem("获赞用户", 0, 5, "0 人", "5 人", false)
         )
         return ConnectTrustLevelReport(
-            title = "Connect 活跃度与保级指标",
-            subtitle = "过去 100 天周期要求 · 实时追踪",
-            statusBadgeText = "实时追踪中",
+            title = "Connect",
+            subtitle = "过去 100 天周期要求",
+            statusBadgeText = "",
             isQualified = false,
             timePeriodDays = 100,
             daysVisited = daysVisited,

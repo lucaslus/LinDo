@@ -2457,31 +2457,34 @@ private fun CommunityHomeFeedPane(
                     ) {
                         Text(
                             text = "LINUX ",
-                            fontSize = 19.sp,
+                            fontSize = 20.5.sp,
                             fontWeight = FontWeight.Black,
                             letterSpacing = (-0.6).sp,
                             color = palette.inkPrimary,
                             maxLines = 1,
-                            softWrap = false
+                            softWrap = false,
+                            modifier = Modifier.alignByBaseline()
                         )
                         Text(
                             text = "DO",
-                            fontSize = 19.sp,
+                            fontSize = 20.5.sp,
                             fontWeight = FontWeight.Black,
                             letterSpacing = (-0.6).sp,
                             color = palette.logoDoColor,
                             maxLines = 1,
-                            softWrap = false
+                            softWrap = false,
+                            modifier = Modifier.alignByBaseline()
                         )
-                        Spacer(modifier = Modifier.width(7.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Text(
                             text = "新的理想型社区",
-                            fontSize = 11.2.sp,
+                            fontSize = 9.2.sp,
                             fontWeight = FontWeight.Medium,
+                            letterSpacing = 0.2.sp,
                             color = palette.inkTertiary,
                             maxLines = 1,
                             softWrap = false,
-                            modifier = Modifier.padding(bottom = 2.dp)
+                            modifier = Modifier.alignByBaseline()
                         )
                     }
 
@@ -5128,24 +5131,17 @@ private fun CommunityDiscoverScreen(
                                     Column(
                                         modifier = Modifier
                                             .weight(1f)
-                                            .clickable { onOpenWebUrl(url) },
+                                            .clickable { onOpenWebUrl(url) }
+                                            .padding(vertical = 4.dp),
                                         horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(46.dp)
-                                                .clip(RoundedCornerShape(14.dp))
-                                                .background(palette.subtleSurface),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = iconVec,
-                                                contentDescription = label,
-                                                modifier = Modifier.size(21.dp),
-                                                tint = palette.inkPrimary
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Icon(
+                                            imageVector = iconVec,
+                                            contentDescription = label,
+                                            modifier = Modifier.size(22.dp),
+                                            tint = palette.inkPrimary
+                                        )
+                                        Spacer(modifier = Modifier.height(7.dp))
                                         Text(
                                             text = label,
                                             fontSize = 11.8.sp,
@@ -5368,22 +5364,14 @@ private fun CategoryBentoCard(
             .clickable(onClick = onClick)
             .padding(14.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(morandiBg),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = categoryIcon,
-                contentDescription = category.name,
-                modifier = Modifier.size(18.dp),
-                tint = morandiFg
-            )
-        }
+        Icon(
+            imageVector = categoryIcon,
+            contentDescription = category.name,
+            modifier = Modifier.size(22.dp),
+            tint = morandiFg
+        )
 
-        Spacer(modifier = Modifier.height(11.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         Text(
             text = category.name,
@@ -5570,24 +5558,17 @@ private fun CommunityMessagesScreen(
                         .clickable {
                             subTab = 0
                             categoryFilter = if (categoryFilter == code) 0 else code
-                        },
+                        }
+                        .padding(vertical = 4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(bg),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = iconVec,
-                            contentDescription = label,
-                            modifier = Modifier.size(21.dp),
-                            tint = fg
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Icon(
+                        imageVector = iconVec,
+                        contentDescription = label,
+                        modifier = Modifier.size(22.dp),
+                        tint = fg
+                    )
+                    Spacer(modifier = Modifier.height(7.dp))
                     Text(
                         text = label,
                         fontSize = 12.sp,
@@ -5983,7 +5964,7 @@ private fun CommunityProfileScreen(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Text(
-                                    text = if (displayUsername.isNotBlank()) "@$displayUsername" else "点击右侧登录 Linux.do 账号",
+                                    text = if (displayUsername.isNotBlank()) "@$displayUsername" else "@linux.do",
                                     fontSize = 12.2.sp,
                                     color = palette.inkSecondary,
                                     maxLines = 1
@@ -5994,41 +5975,24 @@ private fun CommunityProfileScreen(
                             }
                         }
 
-                        if (isAuthorized) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(palette.subtleSurface)
-                                        .clickable { onOpenEditProfile() }
-                                        .padding(horizontal = 9.dp, vertical = 5.dp)
-                                ) {
-                                    Text("编辑", fontSize = 11.5.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(palette.subtleSurface)
-                                        .clickable { onLogout() }
-                                        .padding(horizontal = 9.dp, vertical = 5.dp)
-                                ) {
-                                    Text("退出", fontSize = 11.5.sp, fontWeight = FontWeight.Medium, color = palette.inkSecondary)
-                                }
-                            }
-                        } else {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(9.dp))
-                                    .background(palette.publishBtnBg)
-                                    .clickable { onPrimaryWebLogin() }
-                                    .padding(horizontal = 13.dp, vertical = 6.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(palette.subtleSurface)
+                                    .clickable { onOpenEditProfile() }
+                                    .padding(horizontal = 9.dp, vertical = 5.dp)
                             ) {
-                                Text(
-                                    text = "立即登录",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = palette.publishBtnContent
-                                )
+                                Text("编辑", fontSize = 11.5.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(palette.subtleSurface)
+                                    .clickable { onLogout() }
+                                    .padding(horizontal = 9.dp, vertical = 5.dp)
+                            ) {
+                                Text("退出", fontSize = 11.5.sp, fontWeight = FontWeight.Medium, color = palette.inkSecondary)
                             }
                         }
                     }
@@ -6706,43 +6670,19 @@ private fun ConnectTrustLevelSheet(
                 .padding(horizontal = 24.dp, vertical = 12.dp)
         ) {
             val currentReport = report
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = currentReport?.title ?: "Connect 活跃度与保级指标",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.inkPrimary
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = currentReport?.subtitle ?: "过去 100 天周期要求",
-                        fontSize = 12.5.sp,
-                        color = palette.inkSecondary
-                    )
-                }
-
-                if (currentReport != null) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                if (currentReport.isQualified) palette.successContainer
-                                else palette.tonalPill
-                            )
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = currentReport.statusBadgeText,
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (currentReport.isQualified) palette.onSuccessContainer else palette.onTonalPill
-                        )
-                    }
-                }
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "Connect",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "过去 100 天周期要求",
+                    fontSize = 12.5.sp,
+                    color = palette.inkSecondary
+                )
             }
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -7404,24 +7344,34 @@ private fun CreateTopicModalSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var title by remember { mutableStateOf("") }
     var rawContent by remember { mutableStateOf("") }
+    var appliedTemplate by remember { mutableStateOf<String?>(null) }
     var selectedTags by remember { mutableStateOf(listOf<String>()) }
-    var customTagDraft by remember { mutableStateOf("") }
-    var showCustomTagInput by remember { mutableStateOf(false) }
+    var availableTags by remember {
+        mutableStateOf(listOf("人工智能", "快问快答", "纯水", "病友", "抽奖"))
+    }
     var categoryId by remember { mutableStateOf(initialCategoryId) }
     var isSubmitting by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
 
-    val quickPresetTags = remember {
-        listOf("人工智能", "开源项目", "Docker", "Claude", "Linux", "开发调优", "求助", "福利")
-    }
-
-    // 板块写作模板提示（对标 COMPOSE-006）
-    val categoryTemplateMap = remember {
-        mapOf(
-            4 to "## 背景与需求\n\n## 核心实现 / 代码配置\n```bash\n\n```\n\n## 遇到的问题或经验总结\n",
-            14 to "## 资源简介\n\n## 获取方式与亮点\n- \n\n> [!TIP]\n> 友善分享，转载请注明出处。\n",
-            36 to "## 福利内容\n\n## 参与规则 / 截止时间\n"
-        )
+    // 切换版块时：
+    // 1. 对齐 Discourse 官方逻辑，从 `/site.json` 自动拉取该版块真实 `topic_template`（若正文仍为空或为旧模板则自动填入，无需多余的手动「套用模板」按钮）
+    // 2. 调用 `/tags/filter/search.json?filterForInput=true&categoryId=...` 拉取该版块允许选择的官方标签（Linux.do 禁止普通用户自造不存在的自定义标签）
+    LaunchedEffect(categoryId) {
+        val fetchedTags = LinuxDoRepository.fetchCategoryAllowedTags(categoryId)
+        if (fetchedTags.isNotEmpty()) {
+            availableTags = fetchedTags
+        }
+        val serverTpl = LinuxDoRepository.fetchCategoryTopicTemplate(categoryId)
+        val trimmedCurrent = rawContent.trim()
+        if (trimmedCurrent.isEmpty() || (appliedTemplate != null && trimmedCurrent == appliedTemplate!!.trim())) {
+            if (!serverTpl.isNullOrBlank()) {
+                rawContent = serverTpl
+                appliedTemplate = serverTpl
+            } else if (appliedTemplate != null && trimmedCurrent == appliedTemplate!!.trim()) {
+                rawContent = ""
+                appliedTemplate = null
+            }
+        }
     }
 
     ModalBottomSheet(
@@ -7513,14 +7463,14 @@ private fun CreateTopicModalSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 2. 顶部元数据区（版块选择 + 模板套用 + #标签快选，全部集中在标题上方，遵循无底色纯文本区分设计语言）
+            // 2. 顶部元数据区（版块选择 + 官方允许标签横滑条，移除伪造的手动「套用模板」与「+自定义」标签入口）
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // 2.1 版块选择横滑条 + 右侧固定纯主题色「套用模板」（绝不滑出屏幕）
+                // 2.1 版块选择横滑条（切换版块后自动应用服务端 topic_template 并联动过滤可用标签）
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -7550,39 +7500,9 @@ private fun CreateTopicModalSheet(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    val tpl = categoryTemplateMap[categoryId] ?: "## 核心内容\n\n## 补充说明\n"
-                    Row(
-                        modifier = Modifier
-                            .clickable {
-                                if (rawContent.isBlank()) {
-                                    rawContent = tpl
-                                } else if (!rawContent.contains(tpl.lines().first())) {
-                                    rawContent = "$tpl\n$rawContent"
-                                }
-                            }
-                            .padding(vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.FileText,
-                            contentDescription = "套用模板",
-                            modifier = Modifier.size(13.dp),
-                            tint = palette.brandGold
-                        )
-                        Text(
-                            text = "套用模板",
-                            fontSize = 11.8.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.brandGold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
                 }
 
-                // 2.2 顶部标签快选与输入条（纯文本 #tag 风格，右侧固定 +自定义）
+                // 2.2 顶部官方标签选择条（由 `/tags/filter/search.json?filterForInput=true` 动态下发，移除不支持的自定义标签）
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -7598,7 +7518,7 @@ private fun CreateTopicModalSheet(
                         modifier = Modifier
                             .weight(1f)
                             .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         // 已选标签（纯文本主题色区分，点击移除）
@@ -7616,8 +7536,8 @@ private fun CreateTopicModalSheet(
                             )
                         }
 
-                        // 快捷热门标签（纯文字无底色/轻触即选）
-                        quickPresetTags.filter { it !in selectedTags }.forEach { preset ->
+                        // 当前版块官方可选标签（纯文字无底色/轻触即选）
+                        availableTags.filter { it !in selectedTags }.forEach { preset ->
                             Text(
                                 text = "#$preset",
                                 fontSize = 12.sp,
@@ -7632,97 +7552,6 @@ private fun CreateTopicModalSheet(
                                         }
                                     }
                                     .padding(vertical = 2.dp)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    // 自定义标签触发器（无底色纯文字 + 加号，固定在右侧）
-                    Row(
-                        modifier = Modifier
-                            .clickable { showCustomTagInput = !showCustomTagInput }
-                            .padding(vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.Plus,
-                            contentDescription = "自定义标签",
-                            modifier = Modifier.size(12.dp),
-                            tint = palette.brandGold
-                        )
-                        Text(
-                            text = "自定义",
-                            fontSize = 11.8.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.brandGold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
-
-                // 若展开自定义标签输入栏
-                if (showCustomTagInput) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(32.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.cardSurface)
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 10.dp),
-                            contentAlignment = Alignment.CenterStart
-                        ) {
-                            if (customTagDraft.isEmpty()) {
-                                Text(
-                                    text = "输入标签名（逗号或空格分隔多个，如 AI, Docker）",
-                                    fontSize = 11.5.sp,
-                                    color = palette.inkTertiary
-                                )
-                            }
-                            BasicTextField(
-                                value = customTagDraft,
-                                onValueChange = { customTagDraft = it },
-                                singleLine = true,
-                                textStyle = TextStyle(
-                                    fontSize = 12.sp,
-                                    color = palette.inkPrimary
-                                ),
-                                cursorBrush = SolidColor(palette.brandGold),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        Box(
-                            modifier = Modifier
-                                .height(32.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.publishBtnBg)
-                                .clickable {
-                                    val newItems = customTagDraft
-                                        .split(",", "，", " ")
-                                        .map { it.trim().removePrefix("#") }
-                                        .filter { it.isNotBlank() && it !in selectedTags }
-                                    if (newItems.isNotEmpty()) {
-                                        selectedTags = (selectedTags + newItems).take(5)
-                                    }
-                                    customTagDraft = ""
-                                    showCustomTagInput = false
-                                }
-                                .padding(horizontal = 11.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "添加",
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.publishBtnContent
                             )
                         }
                     }

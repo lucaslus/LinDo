@@ -1512,6 +1512,67 @@ object LinuxDoRepository {
         }
     }
 
+    @Volatile
+    private var cachedCategoryTemplates: Map<Int, String>? = null
+
+    /**
+     * 从 Discourse `/site.json` 拉取各版块真实的 `topic_template`（服务端配置的发帖模板）
+     */
+    suspend fun fetchCategoryTopicTemplate(categoryId: Int): String? = withContext(Dispatchers.IO) {
+        val existing = cachedCategoryTemplates
+        if (existing != null) {
+            return@withContext existing[categoryId]?.takeIf { it.isNotBlank() }
+        }
+        val res = executeHttp("https://linux.do/site.json", method = "GET")
+        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
+            try {
+                val root = json.parseToJsonElement(res.second).jsonObject
+                val map = mutableMapOf<Int, String>()
+                (root["categories"] as? JsonArray)?.forEach { cElem ->
+                    val cObj = cElem as? JsonObject ?: return@forEach
+                    val id = cObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                    val tpl = cObj["topic_template"]?.jsonPrimitive?.contentOrNull?.trim() ?: ""
+                    if (tpl.isNotEmpty()) {
+                        map[id] = tpl
+                    }
+                }
+                cachedCategoryTemplates = map
+                return@withContext map[categoryId]?.takeIf { it.isNotBlank() }
+            } catch (_: Throwable) {
+            }
+        }
+        null
+    }
+
+    /**
+     * 调用 Discourse 官方发帖标签过滤接口 (`/tags/filter/search.json?filterForInput=true&categoryId=...`)
+     * 获取当前版块允许使用的真实社区标签（Linux.do 普通用户不允许创建不存在的自定义标签）
+     */
+    suspend fun fetchCategoryAllowedTags(
+        categoryId: Int,
+        query: String = ""
+    ): List<String> = withContext(Dispatchers.IO) {
+        val encodedQ = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+        val url = "https://linux.do/tags/filter/search.json?q=$encodedQ&filterForInput=true&categoryId=$categoryId&limit=12"
+        val res = executeHttp(url, method = "GET")
+        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
+            try {
+                val root = json.parseToJsonElement(res.second).jsonObject
+                val list = (root["results"] as? JsonArray)?.mapNotNull { item ->
+                    val obj = item as? JsonObject ?: return@mapNotNull null
+                    obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        ?: obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        ?: obj["text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                }.orEmpty()
+                if (list.isNotEmpty()) {
+                    return@withContext list
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        listOf("人工智能", "快问快答", "纯水", "病友", "抽奖")
+    }
+
     /**
      * 发布全新社区话题 (`POST /posts.json`)，返回新话题的 `topic_id`
      */
