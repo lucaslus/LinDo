@@ -6077,20 +6077,12 @@ private fun CommunityProfileScreen(
                             .padding(horizontal = 14.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (palette.isDark) Color(0xFF3A2E16) else Color(0xFFFDF6E9)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = LinDoIcons.AwardBadge,
-                                contentDescription = "等级与徽章",
-                                modifier = Modifier.size(22.dp),
-                                tint = if (palette.isDark) Color(0xFFFBBF24) else Color(0xFFB88228)
-                            )
-                        }
+                        Icon(
+                            imageVector = LinDoIcons.AwardBadge,
+                            contentDescription = "等级与徽章",
+                            modifier = Modifier.size(24.dp),
+                            tint = if (palette.isDark) Color(0xFFFBBF24) else Color(0xFFB88228)
+                        )
 
                         Spacer(modifier = Modifier.width(13.dp))
 
@@ -6650,13 +6642,15 @@ private fun ConnectTrustLevelSheet(
 ) {
     val palette = LocalPalette.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var report by remember { mutableStateOf<ConnectTrustLevelReport?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
+    var report by remember {
+        mutableStateOf<ConnectTrustLevelReport?>(
+            do_.linux.lindo.core.connect.ConnectStatsParser.buildSessionBaselineReport(0, 0)
+        )
+    }
+    var isLoading by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        isLoading = true
         report = LinuxDoRepository.fetchConnectTrustLevelReport()
-        isLoading = false
     }
 
     ModalBottomSheet(
