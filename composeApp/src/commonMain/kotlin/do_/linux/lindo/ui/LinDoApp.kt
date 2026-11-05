@@ -2626,45 +2626,6 @@ private fun CommunityHomeFeedPane(
                     }
                 }
 
-                // 游客模式温和提示条（无框柔和底色）
-                if (!isAuthorized) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(99.dp))
-                            .background(palette.subtleSurface)
-                            .clickable(onClick = onRequestLogin)
-                            .padding(horizontal = 12.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(palette.tabIndicatorColor)
-                        )
-                        Spacer(modifier = Modifier.width(7.dp))
-                        Text(
-                            text = "游客预览模式 · 浏览不计入 Connect 连登",
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.inkSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = "立即登录 >",
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.brandGold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
-
                 Spacer(modifier = Modifier.height(10.dp))
 
                 // 3. QQ音乐级大小字阶频道 Tab（选中 18sp ExtraBold，未选中 14.5sp Medium，底部 11x3dp 胶囊横条）
@@ -7191,72 +7152,44 @@ private fun GoogleWelcomeLoginScreen(
             }
         }
 
-        Spacer(modifier = Modifier.weight(0.85f))
+        Spacer(modifier = Modifier.weight(0.78f))
 
-        // 2. 核心品牌视觉：立体玻璃图标 + LINUX DO 标志性黑金/主题色双字重排版
-        LinDoGlassAppIcon(tileSize = 84.dp)
+        // 2. 核心品牌视觉：立体玻璃图标 + LINUX DO 标志性黑金/主题色双字重排版（黄金分割点居中留白，彻底去除累赘看板卡片）
+        LinDoGlassAppIcon(tileSize = 88.dp)
 
-        Spacer(modifier = Modifier.height(22.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = "LINUX ",
-                fontSize = 28.sp,
+                fontSize = 30.sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = (-0.8).sp,
                 color = palette.inkPrimary
             )
             Text(
                 text = "DO",
-                fontSize = 28.sp,
+                fontSize = 30.sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = (-0.8).sp,
                 color = palette.logoDoColor
             )
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         Text(
             text = "真诚 · 友善 · 团结 · 专业",
-            fontSize = 13.2.sp,
+            fontSize = 13.5.sp,
             fontWeight = FontWeight.Medium,
-            letterSpacing = 1.6.sp,
+            letterSpacing = 2.sp,
             color = palette.inkSecondary,
             maxLines = 1
         )
 
-        Spacer(modifier = Modifier.height(34.dp))
+        Spacer(modifier = Modifier.weight(1.22f))
 
-        // 3. QQ音乐级无框极简三项核心权益展示（去除机械外框与分割线，纯线性矢量图标 + 留白呼吸）
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(20.dp))
-                .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.55f else 0.7f))
-                .padding(horizontal = 20.dp, vertical = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            WelcomeFeatureRow(
-                icon = LinDoIcons.Sparkles,
-                title = "Connect 保级与活跃度实时看板",
-                subtitle = "原生同步 100 天连登、浏览与获赞指标"
-            )
-            WelcomeFeatureRow(
-                icon = LinDoIcons.HistoryClock,
-                title = "阅读时长与楼层进度无缝漫游",
-                subtitle = "内置 Discourse Timings 协议自动记录已读"
-            )
-            WelcomeFeatureRow(
-                icon = LinDoIcons.AwardBadge,
-                title = "完整解锁 Lv.1 ~ Lv.3 专属版块",
-                subtitle = "访问权限专区、徽章体系与 Markdown 创作台"
-            )
-        }
-
-        Spacer(modifier = Modifier.weight(1.15f))
-
-        // 4. 主力登录按钮：QQ音乐标志性全圆角胶囊 (`RoundedCornerShape(99.dp)`)
+        // 3. 主力登录按钮：QQ音乐标志性全圆角胶囊 (`RoundedCornerShape(99.dp)`)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
