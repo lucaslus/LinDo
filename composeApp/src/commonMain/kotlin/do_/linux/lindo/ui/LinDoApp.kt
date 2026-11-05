@@ -990,25 +990,32 @@ private fun BadgesEngineScreen(modifier: Modifier = Modifier) {
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(12.dp)
-                ) {
-                    UniversalBadgeChip(badge = badge, compact = false)
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        UniversalBadgeChip(badge = badge, compact = false)
                         Text(
-                            text = badge.plainDescription,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "渲染管线: $modeLabel · 已授予 ${badge.grantCount} 人",
-                            fontSize = 10.sp,
-                            color = MaterialTheme.colorScheme.primary
+                            text = "已授予 ${badge.grantCount} 人",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = badge.plainDescription,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "渲染管线: $modeLabel",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
         }
