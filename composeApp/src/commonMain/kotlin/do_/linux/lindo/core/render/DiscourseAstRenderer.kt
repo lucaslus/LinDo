@@ -119,17 +119,34 @@ object DiscourseAstParser {
                     nodes += PostBlockNode.Divider
                 }
                 else -> {
-                    // 检查段落内是否包含图片
+                    // 检查段落内是否包含正文配图（过滤表情、头像、站点小图标）
                     val imgUrls = Regex("""<img[^>]+src=["']([^"']+)["'][^>]*>""")
                         .findAll(chunk)
-                        .map { it.groupValues[1] }
-                        .filterNot { it.contains("/images/emoji/") || it.contains("twemoji") }
+                        .map { it.groupValues[1].trim() }
+                        .filterNot {
+                            it.contains("/images/emoji/") ||
+                                it.contains("twemoji") ||
+                                it.contains("user_avatar") ||
+                                it.contains("favicon") ||
+                                it.contains("/svg-sprite/")
+                        }
+                        .map { rawUrl ->
+                            when {
+                                rawUrl.startsWith("http://") || rawUrl.startsWith("https://") -> rawUrl
+                                rawUrl.startsWith("//") -> "https:$rawUrl"
+                                rawUrl.startsWith("/") -> "https://linux.do$rawUrl"
+                                else -> "https://linux.do/$rawUrl"
+                            }
+                        }
+                        .distinct()
                         .toList()
                     val inlineCodes = Regex("""(?is)<code[^>]*>(.*?)</code>""")
                         .findAll(chunk)
                         .map { stripHtmlTags(it.groupValues[1]) }
                         .toList()
-                    val text = stripHtmlTags(chunk).trim()
+                    // 剔除 Discourse Lightbox 图片尺寸元信息 (<div class="meta">...</div>)
+                    val cleanedChunk = chunk.replace(Regex("""(?is)<div\s+class=["']meta["'][^>]*>.*?</div>"""), "")
+                    val text = stripHtmlTags(cleanedChunk).trim()
                     if (text.isNotEmpty()) {
                         nodes += PostBlockNode.Paragraph(text = text, inlineCodeSpans = inlineCodes)
                     }
