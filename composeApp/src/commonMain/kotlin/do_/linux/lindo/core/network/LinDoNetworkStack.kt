@@ -2,184 +2,208 @@ package do_.linux.lindo.core.network
 
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
 import do_.linux.lindo.core.model.BadgeInjector
-import do_.linux.lindo.core.model.BadgeType
 import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.TopicDetailModel
 import do_.linux.lindo.core.model.TopicSummary
 import do_.linux.lindo.core.model.TopicUser
-import do_.linux.lindo.core.model.UserStatus
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
+import java.net.InetAddress
+import java.security.KeyPairGenerator
+import java.time.Duration
+import java.time.Instant
+import java.util.Base64
+import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Dns
-import java.net.InetAddress
-import java.net.URLEncoder
-import java.security.KeyPairGenerator
-import java.util.Base64
-import java.util.UUID
-import java.util.concurrent.TimeUnit
-import javax.crypto.Cipher
 
 /**
- * RFC 6265bis 4 元组 Cookie 唯一身份：(name, domain, path, hostOnly)
- *
- * 解决痛点：
- * WebView 与网络层同步 `_t`（Session Cookie）时，若同时存在一条 `hostOnly=true`（无 Domain）
- * 与一条 `hostOnly=false`（`Domain=linux.do`），浏览器会把两条 `_t` 都发给服务端，旧值排前面就会造成“假掉登录”。
- * [CookieSentinel] 强制对关键 Cookie (`_t`, `cf_clearance`, `_forum_session`) 执行归一化单一保留。
+ * RFC 6265bis 4-元组 Cookie 实体 (`name`, `domain`, `path`, `hostOnly`)
  */
+data class CookieQuadrupleKey(
+    val name: String,
+    val domain: String,
+    val path: String = "/",
+    val hostOnly: Boolean = true
+)
+
+data class StoredCookieRecord(
+    val key: CookieQuadrupleKey,
+    val value: String,
+    val expiresAtEpochMs: Long? = null,
+    val updatedAtEpochMs: Long = System.currentTimeMillis()
+) {
+    fun isExpired(nowMs: Long = System.currentTimeMillis()): Boolean {
+        return expiresAtEpochMs != null && expiresAtEpochMs <= nowMs
+    }
+}
+
 data class CookieVariant(
     val name: String,
     val value: String,
-    val domain: String = "linux.do",
+    val domain: String,
     val path: String = "/",
     val hostOnly: Boolean = true,
+    val expiresAtEpochMs: Long? = null,
     val updatedAtEpochMs: Long = System.currentTimeMillis()
 )
 
+/**
+ * 防掉登录哨兵：`CookieSentinel`
+ */
 object CookieSentinel {
-    private val criticalCookieNames = setOf("_t", "cf_clearance", "_forum_session")
-    private val activeStore = linkedMapOf<String, CookieVariant>()
+    val criticalCookieNames = setOf("_t", "_forum_session", "cf_clearance")
+    private val store = LinkedHashMap<CookieQuadrupleKey, StoredCookieRecord>()
+    private val sessionRefreshMutex = Mutex()
 
-    /**
-     * 归一化并写入 Cookie：
-     * - 对关键 Cookie (`_t`, `cf_clearance`, `_forum_session`) 不论传入的是否带 `.linux.do` 或 `hostOnly` 差异，
-     *   一律收敛为单一 canonical 条目，彻底消灭多变体并存引发的假掉登录。
-     */
-    @Synchronized
-    fun ingestAndDeduplicate(variants: List<CookieVariant>): List<CookieVariant> {
-        for (variant in variants) {
-            val cleanName = variant.name.trim()
-            val cleanValue = variant.value.trim()
-            if (cleanName.isEmpty() || cleanValue.isEmpty()) continue
-
-            if (criticalCookieNames.contains(cleanName)) {
-                val existing = activeStore[cleanName]
-                if (existing == null || variant.updatedAtEpochMs >= existing.updatedAtEpochMs) {
-                    activeStore[cleanName] = CookieVariant(
-                        name = cleanName,
-                        value = cleanValue,
-                        domain = "linux.do",
-                        path = "/",
-                        hostOnly = true,
-                        updatedAtEpochMs = variant.updatedAtEpochMs
-                    )
-                }
-            } else {
-                val tupleKey = "$cleanName|${variant.domain.removePrefix(".")}|${variant.path}|${variant.hostOnly}"
-                activeStore[tupleKey] = variant
-            }
+    fun putCookie(record: StoredCookieRecord) {
+        if (record.key.name in criticalCookieNames && record.value.isBlank()) {
+            return
         }
-        return activeStore.values.toList()
+        store[record.key] = record
     }
 
-    @Synchronized
-    fun buildCookieHeader(): String {
-        return activeStore.values.joinToString("; ") { "${it.name}=${it.value}" }
+    fun ingestAndDeduplicate(variants: List<CookieVariant>, nowMs: Long = System.currentTimeMillis()): List<CookieVariant> {
+        variants.forEach { v ->
+            putCookie(
+                StoredCookieRecord(
+                    key = CookieQuadrupleKey(name = v.name, domain = v.domain, path = v.path, hostOnly = v.hostOnly),
+                    value = v.value,
+                    expiresAtEpochMs = v.expiresAtEpochMs,
+                    updatedAtEpochMs = v.updatedAtEpochMs
+                )
+            )
+        }
+        return resolveWinningCookies(nowMs).values.map { r ->
+            CookieVariant(
+                name = r.key.name,
+                value = r.value,
+                domain = r.key.domain,
+                path = r.key.path,
+                hostOnly = r.key.hostOnly,
+                expiresAtEpochMs = r.expiresAtEpochMs,
+                updatedAtEpochMs = r.updatedAtEpochMs
+            )
+        }
     }
 
-    @Synchronized
-    fun snapshot(): List<CookieVariant> = activeStore.values.toList()
+    fun resolveWinningCookies(nowMs: Long = System.currentTimeMillis()): Map<String, StoredCookieRecord> {
+        val grouped = store.values
+            .filter { !it.isExpired(nowMs) && it.value.isNotBlank() }
+            .groupBy { it.key.name }
 
-    @Synchronized
-    fun clear() = activeStore.clear()
+        val winners = LinkedHashMap<String, StoredCookieRecord>()
+        for ((name, candidates) in grouped) {
+            val winner = candidates.sortedWith(
+                compareByDescending<StoredCookieRecord> { it.key.hostOnly }
+                    .thenByDescending { it.key.path.length }
+                    .thenByDescending { it.updatedAtEpochMs }
+            ).first()
+            winners[name] = winner
+        }
+        return winners
+    }
+
+    fun buildCookieHeader(nowMs: Long = System.currentTimeMillis()): String {
+        return resolveWinningCookies(nowMs)
+            .entries
+            .joinToString("; ") { "${it.key}=${it.value.value}" }
+    }
+
+    suspend fun <T> withSingleFlightRefresh(block: suspend () -> T): T {
+        return sessionRefreshMutex.withLock {
+            block()
+        }
+    }
+
+    fun clear() {
+        store.clear()
+    }
+
+    fun clearAll() {
+        store.clear()
+    }
 }
 
 /**
- * Discourse User API Key (RSA 2048) 免掉登录授权管理器
- *
- * 优势：
- * - 使用 `User-Api-Key` 请求头通信，完全不依赖易被 WebView 覆盖的 `_t` Session Cookie；
- * - 即使 WebView 清理缓存或重过 CF 盾，登录态也 100% 持久有效。
+ * Discourse 官方 `User API Key` 授权管理器
  */
 object UserApiKeyAuthManager {
-    private var currentApiKey: String? = null
-    private var currentClientId: String = "lindo-${UUID.randomUUID()}"
-    private var rsaPrivateKeyPem: String? = null
-    private var rsaPublicKeyPem: String? = null
+    private var activeUserApiKey: String? = null
+    private var clientId: String = "lindo-kmp-${UUID.randomUUID()}"
 
-    fun getApiKey(): String? = currentApiKey
-    fun setApiKey(key: String?) {
-        currentApiKey = key?.trim()?.takeIf { it.isNotEmpty() }
+    fun setApiKey(apiKey: String?) {
+        activeUserApiKey = apiKey?.trim()?.takeIf { it.isNotEmpty() }
     }
 
-    /**
-     * 生成 2048-bit RSA 密钥对并构建 Linux.do 官方 `/user-api-key/new` 授权跳转 URL
-     */
-    fun generateAuthRequestUrl(applicationName: String = "LinDo (Linux.do Native Client)"): String {
-        val generator = KeyPairGenerator.getInstance("RSA")
-        generator.initialize(2048)
-        val keyPair = generator.generateKeyPair()
+    fun getApiKey(): String? = activeUserApiKey
 
-        val pubBase64 = Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(keyPair.public.encoded)
-        val privBase64 = Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(keyPair.private.encoded)
+    fun isAuthorized(): Boolean = !activeUserApiKey.isNullOrBlank()
 
-        rsaPublicKeyPem = "-----BEGIN PUBLIC KEY-----\n$pubBase64\n-----END PUBLIC KEY-----"
-        rsaPrivateKeyPem = "-----BEGIN PRIVATE KEY-----\n$privBase64\n-----END PRIVATE KEY-----"
-
-        val nonce = UUID.randomUUID().toString().replace("-", "")
-        val params = mapOf(
-            "application_name" to applicationName,
-            "client_id" to currentClientId,
-            "scopes" to "read,write,message_bus,push,notifications,session_info",
-            "public_key" to rsaPublicKeyPem!!,
-            "nonce" to nonce,
-            "auth_redirect" to "lindo://auth_redirect"
-        )
-        val query = params.entries.joinToString("&") { (k, v) ->
-            "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
+    fun generateAuthorizationUrl(
+        applicationName: String = "LinDo",
+        scopes: String = "read,write,notifications,session_info"
+    ): Pair<String, String> {
+        val kpg = KeyPairGenerator.getInstance("RSA")
+        kpg.initialize(2048)
+        val kp = kpg.generateKeyPair()
+        val publicPem = buildString {
+            appendLine("-----BEGIN PUBLIC KEY-----")
+            appendLine(Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(kp.public.encoded))
+            append("-----END PUBLIC KEY-----")
         }
-        return "https://linux.do/user-api-key/new?$query"
+        val nonce = UUID.randomUUID().toString().replace("-", "")
+        val encodedPub = java.net.URLEncoder.encode(publicPem, "UTF-8")
+        val encodedApp = java.net.URLEncoder.encode(applicationName, "UTF-8")
+        val url = "https://linux.do/user-api-key/new" +
+            "?application_name=$encodedApp" +
+            "&client_id=$clientId" +
+            "&scopes=$scopes" +
+            "&public_key=$encodedPub" +
+            "&nonce=$nonce"
+        return url to nonce
     }
-
-    fun hasGeneratedKeyPair(): Boolean = rsaPublicKeyPem != null && rsaPrivateKeyPem != null
 }
 
-/**
- * Cloudflare 边缘节点竞速结果
- */
-@Serializable
 data class EdgeCandidateResult(
     val ip: String,
     val providerLabel: String,
     val rttMs: Long,
     val traceVerified: Boolean,
-    val colo: String = "HKG"
+    val colo: String
 )
 
 /**
- * Cloudflare 共享池并发竞速与固定出口网关 (`CloudflareEdgeRacer`)
- *
- * 复刻并升级 CFluxDo 核心思路：
- * 1. 绝不向明文 UDP DNS 查询 `linux.do`；
- * 2. 对候选 Cloudflare Anycast 边缘节点并发测量 `/cdn-cgi/trace` 握手耗时；
- * 3. 锁定最快单一赢家 IP 并固定给 OkHttp `Dns`，保证出口 IP 恒定，不触发 Cloudflare 频繁弹盾。
+ * Cloudflare 边缘节点并发竞速与单一出口固定器 (`CloudflareEdgeRacer`)
  */
 object CloudflareEdgeRacer {
     val defaultCandidates = listOf(
-        "104.21.48.1" to "Cloudflare Anycast #1 (104.21.48.1)",
-        "172.67.182.1" to "Cloudflare Anycast #2 (172.67.182.1)",
-        "104.16.132.229" to "Cloudflare Edge Pool A (104.16.132.229)",
-        "104.18.32.7" to "Cloudflare Edge Pool B (104.18.32.7)"
+        "104.21.48.1" to "Cloudflare Primary",
+        "172.67.182.1" to "Cloudflare Secondary",
+        "104.16.132.229" to "Cloudflare APAC-1",
+        "104.17.112.1" to "Cloudflare APAC-2"
     )
 
     @Volatile
@@ -190,11 +214,7 @@ object CloudflareEdgeRacer {
     var lastRaceResults: List<EdgeCandidateResult> = emptyList()
         private set
 
-    fun selectPinnedIp(ip: String?) {
-        pinnedEdgeIp = ip?.trim()?.takeIf { it.isNotEmpty() }
-    }
-
-    suspend fun raceCandidates(): List<EdgeCandidateResult> = withContext(Dispatchers.IO) {
+    suspend fun raceAndPinBestNode(): List<EdgeCandidateResult> = withContext(Dispatchers.IO) {
         val probeClient = HttpClient(OkHttp) {
             engine {
                 config {
@@ -224,14 +244,13 @@ object CloudflareEdgeRacer {
                             colo = colo
                         )
                     } catch (_: Throwable) {
-                        // 若当前网络直连该 IP 超时，给出真实兜底延迟指标供排序展示
                         val elapsedMs = ((System.nanoTime() - start) / 1_000_000L).coerceAtLeast(180L)
                         EdgeCandidateResult(
                             ip = ip,
                             providerLabel = label,
                             rttMs = elapsedMs,
                             traceVerified = false,
-                            colo = "FALLBACK"
+                            colo = "AUTO"
                         )
                     }
                 }
@@ -248,13 +267,54 @@ object CloudflareEdgeRacer {
 }
 
 /**
- * Linux.do 核心数据仓库（支持在线直连 API + 内置全特性压力验证数据集）
+ * Linux.do 板块元数据定义
+ */
+data class LinuxDoCategoryMeta(
+    val id: Int,
+    val name: String,
+    val slug: String,
+    val colorHex: String,
+    val description: String
+)
+
+/**
+ * Linux.do 核心数据仓库（100% 纯净线上社区内容）
  */
 object LinuxDoRepository {
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
         coerceInputValues = true
+    }
+
+    val categories: List<LinuxDoCategoryMeta> = listOf(
+        LinuxDoCategoryMeta(4, "开发调优", "develop", "0E76BD", "软件开发、系统调优与开源作品"),
+        LinuxDoCategoryMeta(14, "资源荟萃", "resource", "12A89D", "软件、工具、模型与数字资源分享"),
+        LinuxDoCategoryMeta(42, "文档共建", "wiki", "25AAE2", "技术沉淀、教程指南与知识库协作"),
+        LinuxDoCategoryMeta(11, "搞七捻三", "gossip", "9EB83B", "日常交流、职场故事与生活记录"),
+        LinuxDoCategoryMeta(36, "福利羊毛", "welfare", "F7941D", "社区福利、公益接口与优惠资讯"),
+        LinuxDoCategoryMeta(34, "前沿快讯", "news", "BF1E2E", "人工智能、科技动态与行业资讯"),
+        LinuxDoCategoryMeta(27, "非我莫属", "jobs", "652D90", "人才对接、远程协作与招聘求职"),
+        LinuxDoCategoryMeta(10, "跳蚤市场", "market", "F1592A", "闲置数码、算力流转与二手交易"),
+        LinuxDoCategoryMeta(32, "读书成诗", "reading", "0088CC", "书评笔记、阅读推荐与人文思考"),
+        LinuxDoCategoryMeta(46, "扬帆起航", "startup", "3AB54A", "独立开发、出海实践与产品孵化"),
+        LinuxDoCategoryMeta(2, "运营反馈", "feedback", "808281", "社区站务、功能建议与规则说明")
+    )
+
+    private val categoryLookup: Map<Int, Pair<String, String>> = buildMap {
+        categories.forEach { put(it.id, it.name to it.colorHex) }
+        put(20, "开发调优" to "0E76BD")
+        put(21, "资源荟萃" to "12A89D")
+        put(30, "搞七捻三" to "9EB83B")
+        put(45, "福利羊毛" to "F7941D")
+        put(52, "前沿快讯" to "BF1E2E")
+        put(64, "开发调优" to "0E76BD")
+        put(72, "前沿快讯" to "BF1E2E")
+        put(88, "资源荟萃" to "12A89D")
+    }
+
+    fun resolveCategoryMeta(categoryId: Int): Pair<String, String> {
+        return categoryLookup[categoryId] ?: ("技术讨论" to "0E76BD")
     }
 
     private fun createClient(): HttpClient {
@@ -282,22 +342,31 @@ object LinuxDoRepository {
     }
 
     init {
-        // 预注册 Linux.do 站点动态 SVG Sprite 示例符号（验证新自定义图标徽章零发版动态渲染）
         UniversalBadgeEngine.registerDiscourseSpriteBundle(
             """
-            <symbol id="linuxdo-cyber- lotus" viewBox="0 0 24 24"><path d="M12 2L15 8L22 9L17 14L18 21L12 18L6 21L7 14L2 9L9 8Z"/></symbol>
+            <symbol id="linuxdo-cyber-lotus" viewBox="0 0 24 24"><path d="M12 2L15 8L22 9L17 14L18 21L12 18L6 21L7 14L2 9L9 8Z"/></symbol>
             <symbol id="d-icon-ld-pioneer-2026" viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></symbol>
             """.trimIndent()
         )
     }
 
     /**
-     * 拉取最新话题列表（若遇未授权 403 CF 盾则平滑合并展示高保真社区实况与特效验收流）
+     * 拉取线上话题列表（支持 `latest.json`、`top.json`、`new.json` 以及 `/c/{slug}/{id}.json`）
      */
-    suspend fun fetchLatestTopics(): Pair<List<TopicSummary>, String> = withContext(Dispatchers.IO) {
+    suspend fun fetchTopics(
+        path: String = "latest.json",
+        categoryId: Int? = null
+    ): List<TopicSummary> = withContext(Dispatchers.IO) {
+        val targetPath = if (categoryId != null) {
+            val cat = categories.firstOrNull { it.id == categoryId }
+            if (cat != null) "c/${cat.slug}/${cat.id}.json" else "c/$categoryId.json"
+        } else {
+            path
+        }
+
         val client = createClient()
         try {
-            val response = client.get("https://linux.do/latest.json") {
+            val response = client.get("https://linux.do/$targetPath") {
                 header("Accept", "application/json")
                 UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
                 val cookieHeader = CookieSentinel.buildCookieHeader()
@@ -308,15 +377,191 @@ object LinuxDoRepository {
                 val root = json.parseToJsonElement(text).jsonObject
                 val parsed = parseTopicListRoot(root)
                 if (parsed.isNotEmpty()) {
-                    return@withContext parsed to "已直连 linux.do 实时数据 (${parsed.size} 条话题)"
+                    return@withContext parsed
                 }
             }
         } catch (_: Throwable) {
-            // 离线或被 CF 盾拦截时回退至内置全特性验收数据流
         } finally {
             client.close()
         }
-        showcaseTopics to "本地高保真特性验收流（配置 User API Key 后自动切换实时流）"
+        emptyList()
+    }
+
+    /**
+     * 实时拉取指定话题详情 (`/t/{id}.json`)
+     */
+    suspend fun fetchTopicDetail(topicId: Int, summaryFallback: TopicSummary? = null): TopicDetailModel = withContext(Dispatchers.IO) {
+        val client = createClient()
+        try {
+            val response = client.get("https://linux.do/t/$topicId.json") {
+                header("Accept", "application/json")
+                UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
+                val cookieHeader = CookieSentinel.buildCookieHeader()
+                if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+            }
+            val text = response.bodyAsText()
+            if (text.trimStart().startsWith("{")) {
+                val root = json.parseToJsonElement(text).jsonObject
+                val detail = parseLiveTopicDetail(root, summaryFallback)
+                if (detail.posts.isNotEmpty()) {
+                    return@withContext detail
+                }
+            }
+        } catch (_: Throwable) {
+        } finally {
+            client.close()
+        }
+
+        // 若某私密板块话题需登录查看，返回基于话题摘要的干净首楼
+        val s = summaryFallback
+        TopicDetailModel(
+            id = s?.id ?: topicId,
+            title = s?.title ?: "话题 #$topicId",
+            categoryName = s?.categoryName ?: "技术讨论",
+            categoryColorHex = s?.categoryColorHex ?: "0E76BD",
+            tags = s?.tags.orEmpty(),
+            views = s?.views ?: 0,
+            likeCount = s?.likeCount ?: 0,
+            postsCount = s?.postsCount ?: 1,
+            posts = if (s != null) {
+                listOf(
+                    PostItemModel(
+                        id = s.id * 10 + 1,
+                        postNumber = 1,
+                        userId = s.originalPoster.id,
+                        username = s.originalPoster.username,
+                        displayName = s.originalPoster.name,
+                        avatarTemplate = s.originalPoster.avatarTemplate,
+                        animatedAvatar = s.originalPoster.animatedAvatar,
+                        primaryGroupName = s.originalPoster.primaryGroupName,
+                        trustLevel = s.originalPoster.trustLevel,
+                        admin = s.originalPoster.admin,
+                        moderator = s.originalPoster.moderator,
+                        isTopicOwner = true,
+                        flair = FlairInfo(
+                            url = s.originalPoster.flairUrl,
+                            name = s.originalPoster.flairName,
+                            bgColorHex = s.originalPoster.flairBgColor,
+                            fgColorHex = s.originalPoster.flairColor
+                        ),
+                        createdAtText = s.lastPostedAt,
+                        likeCount = s.likeCount,
+                        replyCount = s.replyCount,
+                        cookedHtml = "<p>${s.excerpt ?: s.title}</p>"
+                    )
+                )
+            } else {
+                emptyList()
+            }
+        )
+    }
+
+    private fun parseLiveTopicDetail(root: JsonObject, summaryFallback: TopicSummary?): TopicDetailModel {
+        val id = root["id"]?.jsonPrimitive?.intOrNull ?: summaryFallback?.id ?: 0
+        val title = root["title"]?.jsonPrimitive?.contentOrNull ?: summaryFallback?.title ?: ""
+        val categoryId = root["category_id"]?.jsonPrimitive?.intOrNull ?: summaryFallback?.categoryId ?: 4
+        val (catName, catColor) = resolveCategoryMeta(categoryId)
+        val tags = parseTagsArray(root["tags"] as? JsonArray).ifEmpty { summaryFallback?.tags.orEmpty() }
+        val views = root["views"]?.jsonPrimitive?.intOrNull ?: summaryFallback?.views ?: 0
+        val likeCount = root["like_count"]?.jsonPrimitive?.intOrNull ?: summaryFallback?.likeCount ?: 0
+        val postsCount = root["posts_count"]?.jsonPrimitive?.intOrNull ?: summaryFallback?.postsCount ?: 1
+
+        val postStream = root["post_stream"] as? JsonObject
+        val postsArr = postStream?.get("posts") as? JsonArray ?: JsonArray(emptyList())
+
+        val rawPosts = postsArr.mapIndexedNotNull { idx, elem ->
+            val pObj = elem as? JsonObject ?: return@mapIndexedNotNull null
+            val pid = pObj["id"]?.jsonPrimitive?.intOrNull ?: return@mapIndexedNotNull null
+            val postNumber = pObj["post_number"]?.jsonPrimitive?.intOrNull ?: (idx + 1)
+            val userId = pObj["user_id"]?.jsonPrimitive?.intOrNull ?: 0
+            val username = pObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$userId"
+            val displayName = pObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            val avatarTemplate = pObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
+            val animatedAvatar = pObj["animated_avatar"]?.jsonPrimitive?.contentOrNull
+            val primaryGroupName = pObj["primary_group_name"]?.jsonPrimitive?.contentOrNull
+            val userTitle = pObj["user_title"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            val trustLevel = pObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1
+            val admin = pObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false
+            val moderator = pObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false
+            val cooked = pObj["cooked"]?.jsonPrimitive?.contentOrNull ?: "<p></p>"
+            val createdAtIso = pObj["created_at"]?.jsonPrimitive?.contentOrNull
+            val replyCount = pObj["reply_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val replyToPostNumber = pObj["reply_to_post_number"]?.jsonPrimitive?.intOrNull ?: 0
+            val replyToUserObj = pObj["reply_to_user"] as? JsonObject
+            val replyToUsername = replyToUserObj?.get("username")?.jsonPrimitive?.contentOrNull
+            val reads = pObj["reads"]?.jsonPrimitive?.intOrNull ?: 0
+
+            val reactionsCount = (pObj["reactions"] as? JsonArray)?.sumOf { rElem ->
+                (rElem as? JsonObject)?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+            } ?: (pObj["actions_summary"] as? JsonArray)?.firstOrNull { aElem ->
+                (aElem as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull == 2
+            }?.let { (it as? JsonObject)?.get("count")?.jsonPrimitive?.intOrNull } ?: 0
+
+            val inlineBadges = parseInlinePostBadges(pObj["user_badges"])
+
+            PostItemModel(
+                id = pid,
+                postNumber = postNumber,
+                userId = userId,
+                username = username,
+                displayName = displayName,
+                avatarTemplate = avatarTemplate,
+                animatedAvatar = animatedAvatar,
+                primaryGroupName = primaryGroupName,
+                userTitle = userTitle,
+                trustLevel = trustLevel,
+                admin = admin,
+                moderator = moderator,
+                isTopicOwner = postNumber == 1 || pObj["topic_owner"]?.jsonPrimitive?.booleanOrNull == true,
+                isTodayCakeday = pObj["user_cakedate"] != null && postNumber == 1,
+                flair = FlairInfo(
+                    url = pObj["flair_url"]?.jsonPrimitive?.contentOrNull,
+                    name = pObj["flair_name"]?.jsonPrimitive?.contentOrNull,
+                    bgColorHex = pObj["flair_bg_color"]?.jsonPrimitive?.contentOrNull,
+                    fgColorHex = pObj["flair_color"]?.jsonPrimitive?.contentOrNull,
+                    groupId = pObj["flair_group_id"]?.jsonPrimitive?.intOrNull
+                ),
+                badgesGranted = inlineBadges,
+                createdAtText = formatRelativeTime(createdAtIso),
+                cookedHtml = cooked,
+                replyCount = replyCount,
+                replyToPostNumber = replyToPostNumber,
+                replyToUsername = replyToUsername,
+                likeCount = reactionsCount,
+                readsCount = reads
+            )
+        }
+
+        val enrichedPosts = BadgeInjector.injectTopLevelUserBadges(rawPosts, root)
+        return TopicDetailModel(
+            id = id,
+            title = title,
+            categoryName = catName,
+            categoryColorHex = catColor,
+            tags = tags,
+            views = views,
+            likeCount = likeCount,
+            postsCount = postsCount,
+            posts = enrichedPosts
+        )
+    }
+
+    private fun parseInlinePostBadges(element: JsonElement?): List<GrantedBadge> {
+        val arr = element as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { item ->
+            val obj = item as? JsonObject ?: return@mapNotNull null
+            val id = obj["id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+            val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            GrantedBadge(
+                id = id,
+                name = name,
+                description = obj["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                badgeTypeId = obj["badge_type_id"]?.jsonPrimitive?.intOrNull ?: 3,
+                icon = obj["icon"]?.jsonPrimitive?.contentOrNull,
+                imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull ?: obj["image"]?.jsonPrimitive?.contentOrNull,
+                slug = obj["slug"]?.jsonPrimitive?.contentOrNull ?: ""
+            )
+        }
     }
 
     private fun parseTopicListRoot(root: JsonObject): List<TopicSummary> {
@@ -327,7 +572,7 @@ object LinuxDoRepository {
             usersMap[id] = TopicUser(
                 id = id,
                 username = uObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$id",
-                name = uObj["name"]?.jsonPrimitive?.contentOrNull,
+                name = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
                 avatarTemplate = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: "",
                 animatedAvatar = uObj["animated_avatar"]?.jsonPrimitive?.contentOrNull,
                 primaryGroupName = uObj["primary_group_name"]?.jsonPrimitive?.contentOrNull,
@@ -350,7 +595,17 @@ object LinuxDoRepository {
                 val uid = (pElem as? JsonObject)?.get("user_id")?.jsonPrimitive?.intOrNull
                 uid?.let { usersMap[it] }
             }.orEmpty()
-            val op = posters.firstOrNull() ?: TopicUser(id = 0, username = "linuxdo")
+            val op = posters.firstOrNull() ?: TopicUser(
+                id = 0,
+                username = tObj["last_poster_username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo"
+            )
+            val categoryId = tObj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
+            val (catName, catColor) = resolveCategoryMeta(categoryId)
+            val tags = parseTagsArray(tObj["tags"] as? JsonArray)
+            val lastPostedIso = tObj["last_posted_at"]?.jsonPrimitive?.contentOrNull
+                ?: tObj["bumped_at"]?.jsonPrimitive?.contentOrNull
+                ?: tObj["created_at"]?.jsonPrimitive?.contentOrNull
+
             TopicSummary(
                 id = id,
                 title = title,
@@ -358,306 +613,47 @@ object LinuxDoRepository {
                 replyCount = tObj["reply_count"]?.jsonPrimitive?.intOrNull ?: 0,
                 views = tObj["views"]?.jsonPrimitive?.intOrNull ?: 0,
                 likeCount = tObj["like_count"]?.jsonPrimitive?.intOrNull ?: 0,
-                categoryId = tObj["category_id"]?.jsonPrimitive?.intOrNull ?: 1,
-                excerpt = tObj["excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), ""),
+                categoryId = categoryId,
+                categoryName = catName,
+                categoryColorHex = catColor,
+                tags = tags,
+                lastPostedAt = formatRelativeTime(lastPostedIso),
+                excerpt = tObj["excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")?.trim(),
                 pinned = tObj["pinned"]?.jsonPrimitive?.booleanOrNull ?: false,
                 unseen = tObj["unseen"]?.jsonPrimitive?.booleanOrNull ?: false,
+                unreadPosts = tObj["unread_posts"]?.jsonPrimitive?.intOrNull ?: 0,
+                hasAcceptedAnswer = tObj["has_accepted_answer"]?.jsonPrimitive?.booleanOrNull ?: false,
                 originalPoster = op,
                 participantAvatars = posters
             )
         }
     }
 
-    fun getTopicDetail(topicId: Int): TopicDetailModel {
-        return showcaseTopicDetails[topicId] ?: showcaseTopicDetails.values.first()
+    private fun parseTagsArray(arr: JsonArray?): List<String> {
+        if (arr == null) return emptyList()
+        return arr.mapNotNull { elem ->
+            when (elem) {
+                is JsonPrimitive -> elem.contentOrNull
+                is JsonObject -> elem["name"]?.jsonPrimitive?.contentOrNull
+                else -> null
+            }?.takeIf { it.isNotBlank() }
+        }
     }
 
-    val showcaseBadges: List<GrantedBadge> = listOf(
-        GrantedBadge(
-            id = 101,
-            name = "2026 领航探索者 (SVG 新徽章)",
-            description = "授予参与 Linux.do 2026 社区技术共建的核心贡献者（测试 .svg 矢量徽章直出）",
-            badgeTypeId = 1,
-            imageUrl = "https://linux.do/images/emoji/twemoji/sparkles.svg",
-            slug = "pioneer-2026",
-            grantCount = 128,
-            allowTitle = true
-        ),
-        GrantedBadge(
-            id = 102,
-            name = "站点动态 Sprite 徽章",
-            description = "测试从 /svg-sprite/linux.do/ 动态解析自定义 <symbol id=\"d-icon-ld-pioneer-2026\"> 无需发版渲染",
-            badgeTypeId = 1,
-            icon = "d-icon-ld-pioneer-2026",
-            slug = "dynamic-sprite-badge",
-            grantCount = 64,
-            allowTitle = true
-        ),
-        GrantedBadge(
-            id = 1,
-            name = "迷恋 (Devotee)",
-            description = "连续 365 天访问社区（金徽章）",
-            badgeTypeId = 1,
-            icon = "fa-solid fa-crown",
-            slug = "devotee",
-            grantCount = 1420,
-            allowTitle = true
-        ),
-        GrantedBadge(
-            id = 2,
-            name = "狂热 (Aficionado)",
-            description = "连续 100 天访问社区（银徽章）",
-            badgeTypeId = 2,
-            icon = "fas fa-fire",
-            slug = "aficionado",
-            grantCount = 8930
-        ),
-        GrantedBadge(
-            id = 3,
-            name = "开源之星 (Open Source Star)",
-            description = "在开发调优分区发布获赞超过 100 的开源项目",
-            badgeTypeId = 1,
-            icon = "fa-solid fa-rocket",
-            slug = "open-source-star",
-            grantCount = 312,
-            allowTitle = true
-        ),
-        GrantedBadge(
-            id = 4,
-            name = "LDC 生态建设者",
-            description = "支持 Linux.do Credit 积分与 CDK 生态流转",
-            badgeTypeId = 2,
-            icon = "fa-solid fa-coins",
-            slug = "ldc-builder",
-            grantCount = 2150
-        ),
-        GrantedBadge(
-            id = 5,
-            name = "安全卫士 (Bug Hunter)",
-            description = "发现并协助修复社区客户端或站点安全漏洞",
-            badgeTypeId = 1,
-            icon = "fa-solid fa-shield-halved",
-            slug = "bug-hunter",
-            grantCount = 49
-        ),
-        GrantedBadge(
-            id = 6,
-            name = "未来未知新徽章 (零丢失兜底)",
-            description = "当服务端下发未知新 icon 名且无图时，自动合成等级首字勋章，绝不吞掉徽章",
-            badgeTypeId = 3,
-            icon = "fa-future-quantum-2099",
-            slug = "future-badge",
-            grantCount = 12
-        )
-    )
-
-    val showcaseTopics: List<TopicSummary> = listOf(
-        TopicSummary(
-            id = 9001,
-            title = "【开源发布】LinDo v0.1.0：基于 KMP 原生渲染的 Linux.do 极速客户端（解决新徽章隐身、动态头像重影与假掉登录）",
-            categoryName = "开发调优",
-            categoryColorHex = "0E76BD",
-            tags = listOf("精华神帖", "开源项目", "Kotlin", "Android", "macOS"),
-            postsCount = 48,
-            replyCount = 47,
-            views = 6840,
-            likeCount = 512,
-            pinned = true,
-            unseen = true,
-            unreadPosts = 5,
-            excerpt = "采用 Kotlin Multiplatform + Compose 原生 AST 渲染引擎，内置五合一全格式新徽章解析、双栈无闪烁动态头像、4元组 Cookie 哨兵与 Cloudflare ECH 竞速直连。",
-            originalPoster = TopicUser(
-                id = 1,
-                username = "neo",
-                name = "Neo (站长方形头像 + 冰蓝光晕)",
-                avatarTemplate = "https://linux.do/user_avatar/linux.do/neo/{size}/1_2.png",
-                animatedAvatar = "https://linux.do/user_avatar/linux.do/neo/120/1_2.gif",
-                primaryGroupName = "admins",
-                flairName = "Linux.do 创始人",
-                flairUrl = "fa-solid fa-bolt",
-                flairBgColor = "00AEFF",
-                flairColor = "FFFFFF",
-                trustLevel = 4,
-                admin = true,
-                moderator = true
-            )
-        ),
-        TopicSummary(
-            id = 9002,
-            title = "深入解析 FluxDO 与 CFluxDo 的架构优缺点：为什么 SVG 新徽章会消失？为什么透明 GIF 头像会有双影？",
-            categoryName = "技术荟萃",
-            categoryColorHex = "25AAE2",
-            tags = listOf("架构剖析", "性能优化", "Discourse"),
-            postsCount = 29,
-            replyCount = 28,
-            views = 3210,
-            likeCount = 268,
-            excerpt = "本文从源码级复盘 Discourse user_badges 顶层字典注入、SVG 字节魔数嗅探、AnimatedAvatarStack 首帧翻转以及 RFC 6265bis Cookie 4元组去重。",
-            originalPoster = TopicUser(
-                id = 2,
-                username = "merchant_pro",
-                name = "云端算力工坊 (认证商家鎏金光晕)",
-                avatarTemplate = "https://linux.do/user_avatar/linux.do/merchant_pro/{size}/2_2.png",
-                animatedAvatar = "https://linux.do/user_avatar/linux.do/merchant_pro/120/2_2.gif",
-                primaryGroupName = "g-merchant",
-                flairName = "认证商家",
-                flairUrl = "fa-solid fa-crown",
-                flairBgColor = "F5BF03",
-                flairColor = "1E1E1E",
-                trustLevel = 3
-            )
-        ),
-        TopicSummary(
-            id = 9003,
-            title = "【福利抽奖】庆祝 LinDo 双端（Android 模拟器 + macOS 原生桌面）首跑成功，抽 10 份 LDC 积分红包！",
-            categoryName = "福利羊毛",
-            categoryColorHex = "F7941D",
-            tags = listOf("抽奖", "LDC", "种子用户"),
-            postsCount = 186,
-            replyCount = 185,
-            views = 9420,
-            likeCount = 640,
-            unreadPosts = 12,
-            excerpt = "注意：本帖启用了 discourse-reply-cost（回复扣除 5 LDC 积分）与 discourse-warden（最少回复 15 字校验）。",
-            originalPoster = TopicUser(
-                id = 3,
-                username = "lucas_dev",
-                name = "Lucas (全息渐变头衔 + 动态头像)",
-                avatarTemplate = "https://linux.do/user_avatar/linux.do/lucas_dev/{size}/3_2.png",
-                animatedAvatar = "https://linux.do/user_avatar/linux.do/lucas_dev/120/3_2.gif",
-                primaryGroupName = "seed",
-                flairName = "种子用户",
-                flairUrl = "fa-solid fa-seedling",
-                flairBgColor = "10B981",
-                flairColor = "FFFFFF",
-                trustLevel = 4
-            )
-        )
-    )
-
-    private val showcaseTopicDetails: Map<Int, TopicDetailModel> = mapOf(
-        9001 to TopicDetailModel(
-            id = 9001,
-            title = "【开源发布】LinDo v0.1.0：基于 KMP 原生渲染的 Linux.do 极速客户端（解决新徽章隐身、动态头像重影与假掉登录）",
-            categoryName = "开发调优",
-            categoryColorHex = "0E76BD",
-            tags = listOf("精华神帖", "开源项目", "Kotlin", "Android", "macOS"),
-            views = 6840,
-            likeCount = 512,
-            postsCount = 3,
-            replyCostHint = "本帖已启用站点插件守护：代码块零阻塞高亮 + 跨分页徽章保持",
-            minWordCountRule = 10,
-            posts = listOf(
-                PostItemModel(
-                    id = 50001,
-                    postNumber = 1,
-                    userId = 1,
-                    username = "neo",
-                    displayName = "Neo",
-                    avatarTemplate = "https://linux.do/user_avatar/linux.do/neo/{size}/1_2.png",
-                    animatedAvatar = "https://linux.do/user_avatar/linux.do/neo/120/1_2.gif",
-                    primaryGroupName = "admins",
-                    userTitle = "种子用户",
-                    trustLevel = 4,
-                    admin = true,
-                    moderator = true,
-                    isTopicOwner = true,
-                    isTodayCakeday = true,
-                    flair = FlairInfo(
-                        url = "fa-solid fa-bolt",
-                        name = "Linux.do 创始人",
-                        bgColorHex = "00AEFF",
-                        fgColorHex = "FFFFFF"
-                    ),
-                    userStatus = UserStatus(description = "正在打磨社区体验", emoji = "🚀"),
-                    badgesGranted = listOf(showcaseBadges[0], showcaseBadges[1], showcaseBadges[2]),
-                    createdAtText = "10 分钟前",
-                    likeCount = 256,
-                    replyCount = 2,
-                    readsCount = 1890,
-                    cookedHtml = """
-                        <h2>为什么我们要从零设计 LinDo？</h2>
-                        <p>很多佬友反馈现有的第三方客户端在逛 L 站时经常遇到以下四个核心痛点，我们在 <code>LinDo</code> 中做了根治级重构：</p>
-                        <ul>
-                            <li><strong>新徽章与 SVG 徽章全兼容</strong>：不再因为 <code>.svg</code> 后缀或新增的 <code>/svg-sprite/</code> 自定义图标而变成空白。</li>
-                            <li><strong>动态头像双栈防闪烁/防重影</strong>：静态缩略图秒显打底，动图首帧就绪后自动收起静态层，支持视口离屏暂停省电。</li>
-                            <li><strong>原生 Compose AST 长帖渲染</strong>：后台协程一次性完成 HTML 到 BlockNode AST 转换，彻底告别主线程解析掉帧。</li>
-                            <li><strong>User API Key + 4元组 Cookie 哨兵</strong>：根除 WebView <code>_t</code> 多变体引发的“假掉登录”。</li>
-                        </ul>
-                        <pre><code class="lang-kotlin">// LinDo 全格式徽章决议：SVG / 动态 Sprite / FA6 / 兜底勋章 100% 可视
-val visual = UniversalBadgeEngine.resolveBadgeVisual(badge, isDark = true)
-when (visual) {
-    is ResolvedBadgeVisual.SvgImage -> renderVectorSvg(visual.url)
-    is ResolvedBadgeVisual.DynamicSpriteSvg -> renderInlineXml(visual.svgXml)
-    is ResolvedBadgeVisual.VectorGlyph -> Icon(visual.icon, tint = visual.tintColor)
-    is ResolvedBadgeVisual.BitmapImage -> AsyncImage(visual.url)
-    is ResolvedBadgeVisual.MedalFallback -> renderTierMedal(visual.badgeInitial)
-}</code></pre>
-                        <details>
-                            <summary>点击展开：查看本机 Codex_API30_x86 模拟器与 macOS 双端实测参数</summary>
-                            <p>本工程同时支持 Android (API 24~36，含 x86 软渲染模拟器) 与 macOS / Windows 桌面三栏分屏模式！</p>
-                        </details>
-                    """.trimIndent()
-                ),
-                PostItemModel(
-                    id = 50002,
-                    postNumber = 2,
-                    userId = 2,
-                    username = "merchant_pro",
-                    displayName = "云端算力工坊",
-                    avatarTemplate = "https://linux.do/user_avatar/linux.do/merchant_pro/{size}/2_2.png",
-                    animatedAvatar = "https://linux.do/user_avatar/linux.do/merchant_pro/120/2_2.gif",
-                    primaryGroupName = "g-merchant",
-                    userTitle = "Premium",
-                    trustLevel = 3,
-                    isTodayBirthday = true,
-                    flair = FlairInfo(
-                        url = "fa-solid fa-crown",
-                        name = "认证商家",
-                        bgColorHex = "F5BF03",
-                        fgColorHex = "1E1E1E"
-                    ),
-                    badgesGranted = listOf(showcaseBadges[3], showcaseBadges[4], showcaseBadges[7]),
-                    createdAtText = "6 分钟前",
-                    replyToPostNumber = 1,
-                    replyToUsername = "neo",
-                    likeCount = 88,
-                    readsCount = 1420,
-                    cookedHtml = """
-                        <aside class="quote" data-username="neo" data-post="1" data-topic="9001">
-                            <blockquote>动态头像双栈防闪烁/防重影：静态缩略图秒显打底，动图首帧就绪后自动收起静态层</blockquote>
-                        </aside>
-                        <p>前排支持！可以看到我楼层头部的 <code>g-merchant</code> 商家鎏金呼吸光晕、<code>Premium</code> 全息渐变头衔、生日小蛋糕图标以及刚发行的未知新徽章兜底勋章全部正常渲染了！</p>
-                    """.trimIndent()
-                ),
-                PostItemModel(
-                    id = 50003,
-                    postNumber = 3,
-                    userId = 3,
-                    username = "lucas_dev",
-                    displayName = "Lucas",
-                    avatarTemplate = "https://linux.do/user_avatar/linux.do/lucas_dev/{size}/3_2.png",
-                    animatedAvatar = "https://linux.do/user_avatar/linux.do/lucas_dev/120/3_2.gif",
-                    primaryGroupName = "seed",
-                    userTitle = "种子用户",
-                    trustLevel = 4,
-                    flair = FlairInfo(
-                        url = "fa-solid fa-seedling",
-                        name = "种子用户",
-                        bgColorHex = "10B981",
-                        fgColorHex = "FFFFFF"
-                    ),
-                    badgesGranted = listOf(showcaseBadges[0], showcaseBadges[2], showcaseBadges[5]),
-                    createdAtText = "刚刚",
-                    replyToPostNumber = 1,
-                    replyToUsername = "neo",
-                    likeCount = 64,
-                    readsCount = 980,
-                    cookedHtml = """
-                        <p>在 macOS 宽屏下自动切三栏 Master-Detail 布局，在 Android 模拟器下自动切紧凑单栏 + 底部导航，滑动丝滑无卡顿！</p>
-                    """.trimIndent()
-                )
-            )
-        )
-    )
+    private fun formatRelativeTime(isoString: String?): String {
+        if (isoString.isNullOrBlank()) return "刚刚"
+        return try {
+            val instant = Instant.parse(isoString)
+            val diffSec = Duration.between(instant, Instant.now()).seconds.coerceAtLeast(0L)
+            when {
+                diffSec < 60 -> "刚刚"
+                diffSec < 3600 -> "${diffSec / 60}m"
+                diffSec < 86400 -> "${diffSec / 3600}h"
+                diffSec < 86400 * 30 -> "${diffSec / 86400}d"
+                else -> "${diffSec / (86400 * 30)}mo"
+            }
+        } catch (_: Throwable) {
+            "刚刚"
+        }
+    }
 }

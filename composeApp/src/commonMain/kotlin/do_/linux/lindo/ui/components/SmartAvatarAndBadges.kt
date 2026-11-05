@@ -6,11 +6,12 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,6 +21,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -54,14 +58,9 @@ import do_.linux.lindo.core.site.LinuxDoSiteRules
 /**
  * LinDo 双栈智能动态头像组件 (`SmartAvatar`)
  *
- * 解决 FluxDO / CFluxDo 的三大痛点：
- * 1. **全场景静态缩略图打底 + 动图无缝接管**：
- *    无论在话题列表还是帖子详情楼层，统一先展示极小体积的 `avatar_template` 静态打底层（或高对比度首字徽标）；
- *    当顶层 `animated_avatar` 首帧解码完成 (`animatedReady = true`) 后立即收起静态打底层，防止透明背景 GIF 透出底层静态图形成“双影”。
- * 2. **站点专属形态与呼吸光晕合一**：
- *    自动识别 `@neo` 10% 圆角方形裁切 + `#00AEFF` 冰蓝脉冲光晕，以及 `g-merchant` 商家 `#F5BF03` 鎏金脉冲光晕。
- * 3. **全局动态头像与光晕帧率开关 (`enableAnimations`)**：
- *    支持一键冻结动图与呼吸光晕 Ticker，在低功耗或省电模式下保持 0 额外重绘开销。
+ * 1. 静态缩略图秒显打底 + 顶层 `animated_avatar` 首帧解码完成后自动隐藏底图（消除透明 GIF 双影）。
+ * 2. 自动识别 `@neo` 10% 圆角方形裁切 + `#00AEFF` 冰蓝脉冲光晕，以及 `g-merchant` `#F5BF03` 鎏金脉冲光晕。
+ * 3. 干净原生的视觉表现，无遮挡角标。
  */
 @Composable
 fun SmartAvatar(
@@ -70,7 +69,7 @@ fun SmartAvatar(
     animatedAvatar: String?,
     primaryGroupName: String? = null,
     flair: FlairInfo? = null,
-    size: Dp = 42.dp,
+    size: Dp = 40.dp,
     enableAnimations: Boolean = true,
     modifier: Modifier = Modifier
 ) {
@@ -86,22 +85,22 @@ fun SmartAvatar(
     val glowColor = remember(username, primaryGroupName) {
         LinuxDoSiteRules.matchAvatarGlowColor(username, primaryGroupName)
     }
-    val shape: Shape = if (isSquare) RoundedCornerShape(percent = 14) else CircleShape
+    val shape: Shape = if (isSquare) RoundedCornerShape(percent = 12) else CircleShape
 
     val pulseAlpha = if (glowColor != null && enableAnimations) {
         val transition = rememberInfiniteTransition(label = "avatarGlow")
         val anim by transition.animateFloat(
-            initialValue = 0.28f,
-            targetValue = 0.78f,
+            initialValue = 0.30f,
+            targetValue = 0.80f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 2400, easing = LinearEasing),
+                animation = tween(durationMillis = 2200, easing = LinearEasing),
                 repeatMode = RepeatMode.Reverse
             ),
             label = "glowPulse"
         )
         anim
     } else if (glowColor != null) {
-        0.45f
+        0.50f
     } else {
         0f
     }
@@ -113,18 +112,17 @@ fun SmartAvatar(
         modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        // 外层脉冲光晕（仅针对 @neo 与 g-merchant 等特定身份开启）
         val outerMod = if (glowColor != null) {
             Modifier
                 .fillMaxSize()
                 .drawBehind {
                     drawCircle(
-                        color = glowColor.copy(alpha = pulseAlpha * 0.45f),
-                        radius = this.size.minDimension * 0.62f
+                        color = glowColor.copy(alpha = pulseAlpha * 0.35f),
+                        radius = this.size.minDimension * 0.58f
                     )
                 }
                 .border(
-                    width = 1.8.dp,
+                    width = 1.6.dp,
                     color = glowColor.copy(alpha = pulseAlpha),
                     shape = shape
                 )
@@ -132,30 +130,28 @@ fun SmartAvatar(
             Modifier
                 .fillMaxSize()
                 .border(
-                    width = 1.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                    width = 0.6.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
                     shape = shape
                 )
         }
 
         Box(
             modifier = outerMod
-                .padding(if (glowColor != null) 2.dp else 1.dp)
+                .padding(if (glowColor != null) 1.6.dp else 0.6.dp)
                 .clip(shape)
-                .background( avatarFallbackColor(username) ),
+                .background(avatarFallbackColor(username)),
             contentAlignment = Alignment.Center
         ) {
-            // 第一层：首字母高清矢量底（网络未返回或离线时秒显）
             if (!staticLoaded && !animatedReady) {
                 Text(
                     text = username.firstOrNull()?.uppercase() ?: "L",
                     color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = (size.value * 0.42f).sp
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = (size.value * 0.40f).sp
                 )
             }
 
-            // 第二层：静态模板小图打底（当动图首帧就绪后立即隐藏，彻底消除透明 GIF 双影！）
             if (!animatedReady && staticUrl.isNotEmpty()) {
                 AsyncImage(
                     model = staticUrl,
@@ -166,7 +162,6 @@ fun SmartAvatar(
                 )
             }
 
-            // 第三层：动态头像 overlay（首帧解码成功前透明，成功后原子切换并收起静态层）
             if (!animatedUrl.isNullOrBlank()) {
                 AsyncImage(
                     model = animatedUrl,
@@ -177,49 +172,27 @@ fun SmartAvatar(
                     modifier = Modifier.fillMaxSize()
                 )
             }
-
-            // 动态头像角标指示（方便直观识别 GIF/WebP 动图已激活）
-            if (!animatedUrl.isNullOrBlank()) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(2.dp)
-                        .background(
-                            color = Color(0xCC000000),
-                            shape = RoundedCornerShape(4.dp)
-                        )
-                        .padding(horizontal = 3.dp, vertical = 1.dp)
-                ) {
-                    Text(
-                        text = "GIF",
-                        color = Color(0xFF38BDF8),
-                        fontSize = 7.sp,
-                        fontWeight = FontWeight.ExtraBold
-                    )
-                }
-            }
         }
 
-        // 右下角 Flair 群组身份角标
         if (flair != null && flair.hasFlair) {
             FlairBadgeOverlay(
                 flair = flair,
-                badgeSize = (size.value * 0.40f).coerceIn(14f, 22f).dp,
+                badgeSize = (size.value * 0.38f).coerceIn(13f, 18f).dp,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .offset(x = 2.dp, y = 2.dp)
+                    .offset(x = 2.dp, y = 1.dp)
             )
         }
     }
 }
 
 /**
- * 右下角 Flair 群组身份徽章组件（支持 FA6 图标、SVG、位图与自定义背景色）
+ * 右下角 Flair 群组身份徽章组件
  */
 @Composable
 fun FlairBadgeOverlay(
     flair: FlairInfo,
-    badgeSize: Dp = 16.dp,
+    badgeSize: Dp = 15.dp,
     modifier: Modifier = Modifier
 ) {
     val bgColor = LinuxDoSiteRules.parseHexColor(flair.bgColorHex, fallback = Color(0xFF1E293B))
@@ -241,7 +214,7 @@ fun FlairBadgeOverlay(
         modifier = modifier.size(badgeSize),
         shape = CircleShape,
         color = bgColor,
-        shadowElevation = 2.dp
+        shadowElevation = 1.dp
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
             when (visual) {
@@ -250,7 +223,7 @@ fun FlairBadgeOverlay(
                         imageVector = visual.icon,
                         contentDescription = flair.name,
                         tint = fgColor,
-                        modifier = Modifier.size(badgeSize * 0.65f)
+                        modifier = Modifier.size(badgeSize * 0.62f)
                     )
                 }
                 is ResolvedBadgeVisual.SvgImage -> {
@@ -271,7 +244,7 @@ fun FlairBadgeOverlay(
                     Text(
                         text = "✦",
                         color = fgColor,
-                        fontSize = (badgeSize.value * 0.55f).sp,
+                        fontSize = (badgeSize.value * 0.52f).sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -279,7 +252,7 @@ fun FlairBadgeOverlay(
                     Text(
                         text = visual.badgeInitial,
                         color = fgColor,
-                        fontSize = (badgeSize.value * 0.52f).sp,
+                        fontSize = (badgeSize.value * 0.50f).sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -289,7 +262,7 @@ fun FlairBadgeOverlay(
 }
 
 /**
- * Linux.do 全息流光渐变头衔（对齐 `种子用户` 与 `Premium` 的 CSS Holographic 特效）
+ * Linux.do 帖子头部用户头衔（对齐 FluxDO 的 `HolographicText` 11sp 行内头衔样式）
  */
 @Composable
 fun UserTitleTag(
@@ -301,8 +274,8 @@ fun UserTitleTag(
     if (!isHolo) {
         Text(
             text = title,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = modifier
@@ -314,9 +287,9 @@ fun UserTitleTag(
         val transition = rememberInfiniteTransition(label = "holoTitle")
         val value by transition.animateFloat(
             initialValue = 0f,
-            targetValue = 220f,
+            targetValue = 200f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 4500, easing = LinearEasing),
+                animation = tween(durationMillis = 4200, easing = LinearEasing),
                 repeatMode = RepeatMode.Restart
             ),
             label = "holoShift"
@@ -329,38 +302,120 @@ fun UserTitleTag(
     val holoBrush = Brush.linearGradient(
         colors = listOf(
             Color(0xFFFF2E93),
-            Color(0xFF00E5FF),
-            Color(0xFFFFEA00),
-            Color(0xFFAA00FF),
+            Color(0xFF00B4D8),
+            Color(0xFFF59E0B),
+            Color(0xFF9333EA),
             Color(0xFFFF2E93)
         ),
         start = Offset(shift, 0f),
-        end = Offset(shift + 160f, 40f)
+        end = Offset(shift + 140f, 30f)
     )
 
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(6.dp),
-        color = Color(0x1FF43F5E)
+    Text(
+        text = title,
+        style = TextStyle(
+            brush = holoBrush,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold
+        ),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+    )
+}
+
+/**
+ * 帖子楼层头部行内精巧徽章图标 (`PostGrantedBadgeIcon`)
+ *
+ * 对齐 Discourse 原生及 FluxDO `post_granted_badge.dart` 的 14dp 行内图标形态，
+ * 同时具备 LinDo 五合一引擎（SVG / 动态 Sprite / FA6 / 位图 / 零丢失勋章兜底）。
+ */
+@Composable
+fun PostGrantedBadgeIcon(
+    badge: GrantedBadge,
+    onClick: ((GrantedBadge) -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    val visual = remember(badge) {
+        UniversalBadgeEngine.resolveBadgeVisual(badge, isDark = false)
+    }
+    val tierColor = remember(badge) {
+        UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = false)
+    }
+
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .padding(start = 3.dp)
+            .size(15.dp)
+            .let { mod ->
+                if (onClick != null) mod.clickable { onClick(badge) } else mod
+            }
     ) {
-        Text(
-            text = "✦ $title",
-            style = TextStyle(
-                brush = holoBrush,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.ExtraBold
-            ),
-            maxLines = 1,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-        )
+        when (visual) {
+            is ResolvedBadgeVisual.VectorGlyph -> {
+                Icon(
+                    imageVector = visual.icon,
+                    contentDescription = badge.name,
+                    tint = tierColor,
+                    modifier = Modifier.size(13.dp)
+                )
+            }
+            is ResolvedBadgeVisual.SvgImage -> {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    Icon(
+                        imageVector = UniversalBadgeEngine.resolveBadgeVisual(
+                            badge.copy(imageUrl = null, icon = "fa-certificate"),
+                            isDark = false
+                        ).let { (it as? ResolvedBadgeVisual.VectorGlyph)?.icon }
+                            ?: Icons.Default.Star,
+                        contentDescription = null,
+                        tint = tierColor,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    AsyncImage(
+                        model = visual.url,
+                        contentDescription = badge.name,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+            is ResolvedBadgeVisual.BitmapImage -> {
+                AsyncImage(
+                    model = visual.url,
+                    contentDescription = badge.name,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+            is ResolvedBadgeVisual.DynamicSpriteSvg -> {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = badge.name,
+                    tint = tierColor,
+                    modifier = Modifier.size(13.dp)
+                )
+            }
+            is ResolvedBadgeVisual.MedalFallback -> {
+                Box(
+                    modifier = Modifier
+                        .size(14.dp)
+                        .background(tierColor.copy(alpha = 0.22f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = visual.badgeInitial,
+                        color = tierColor,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
     }
 }
 
 /**
- * 帖子头部与徽章墙通用的全格式徽章图标组件 (`UniversalBadgeChip`)
- *
- * 无论徽章是 `.svg`、`.png`、FA6 图标、站点动态 `/svg-sprite/` 还是未来新出的未知图标，
- * 均能 100% 渲染，绝不出现空白或丢失。
+ * 徽章墙与用户资料卡使用的完整徽章胶囊组件 (`UniversalBadgeChip`)
  */
 @Composable
 fun UniversalBadgeChip(
@@ -369,88 +424,32 @@ fun UniversalBadgeChip(
     modifier: Modifier = Modifier
 ) {
     val visual = remember(badge) {
-        UniversalBadgeEngine.resolveBadgeVisual(badge, isDark = true)
+        UniversalBadgeEngine.resolveBadgeVisual(badge, isDark = false)
     }
     val tierColor = remember(badge) {
-        UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = true)
+        UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = false)
     }
 
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(if (compact) 6.dp else 10.dp),
-        color = tierColor.copy(alpha = 0.14f),
-        border = androidx.compose.foundation.BorderStroke(0.8.dp, tierColor.copy(alpha = 0.40f))
+        shape = RoundedCornerShape(if (compact) 6.dp else 8.dp),
+        color = tierColor.copy(alpha = 0.10f),
+        border = BorderStroke(0.6.dp, tierColor.copy(alpha = 0.35f))
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(
-                horizontal = if (compact) 5.dp else 8.dp,
+                horizontal = if (compact) 6.dp else 8.dp,
                 vertical = if (compact) 2.dp else 4.dp
             )
         ) {
-            when (visual) {
-                is ResolvedBadgeVisual.VectorGlyph -> {
-                    Icon(
-                        imageVector = visual.icon,
-                        contentDescription = badge.plainDescription,
-                        tint = visual.tintColor,
-                        modifier = Modifier.size(if (compact) 12.dp else 16.dp)
-                    )
-                }
-                is ResolvedBadgeVisual.SvgImage -> {
-                    // 使用 Coil SVG 解码器 + 矢量星章双保险，确保 .svg 徽章永不裂图
-                    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(if (compact) 13.dp else 17.dp)) {
-                        Text(
-                            text = "✦",
-                            color = tierColor,
-                            fontSize = if (compact) 10.sp else 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        AsyncImage(
-                            model = visual.url,
-                            contentDescription = badge.plainDescription,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                }
-                is ResolvedBadgeVisual.BitmapImage -> {
-                    AsyncImage(
-                        model = visual.url,
-                        contentDescription = badge.plainDescription,
-                        modifier = Modifier.size(if (compact) 13.dp else 17.dp)
-                    )
-                }
-                is ResolvedBadgeVisual.DynamicSpriteSvg -> {
-                    Text(
-                        text = "❖",
-                        color = visual.tintColor,
-                        fontSize = if (compact) 10.sp else 13.sp,
-                        fontWeight = FontWeight.ExtraBold
-                    )
-                }
-                is ResolvedBadgeVisual.MedalFallback -> {
-                    Box(
-                        modifier = Modifier
-                            .size(if (compact) 13.dp else 17.dp)
-                            .background(visual.tintColor.copy(alpha = 0.25f), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = visual.badgeInitial,
-                            color = visual.tintColor,
-                            fontSize = if (compact) 8.sp else 10.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                    }
-                }
-            }
-
+            PostGrantedBadgeIcon(badge = badge)
             Spacer(modifier = Modifier.width(4.dp))
             Text(
                 text = badge.name,
-                color = tierColor,
-                fontSize = if (compact) 10.sp else 12.sp,
-                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = if (compact) 11.sp else 12.sp,
+                fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

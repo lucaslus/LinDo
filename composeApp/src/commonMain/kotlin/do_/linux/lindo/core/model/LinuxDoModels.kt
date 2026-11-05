@@ -129,6 +129,8 @@ data class TopicSummary(
     val pinned: Boolean = false,
     val unseen: Boolean = false,
     val unreadPosts: Int = 0,
+    val hasAcceptedAnswer: Boolean = false,
+    val lastPostedAt: String = "刚刚",
     val createdAtIso: String = "",
     val lastPostedAtIso: String = "",
     val originalPoster: TopicUser,
@@ -258,6 +260,18 @@ object BadgeInjector {
 
     fun getBadgesForUser(userId: Int): List<GrantedBadge> {
         return userBadgesMemoryCache[userId].orEmpty()
+    }
+
+    fun injectTopLevelUserBadges(posts: List<PostItemModel>, rootJson: JsonObject): List<PostItemModel> {
+        parseAndCacheUserBadges(rootJson)
+        return posts.map { post ->
+            if (post.badgesGranted.isNotEmpty()) {
+                post
+            } else {
+                val cached = getBadgesForUser(post.userId)
+                if (cached.isNotEmpty()) post.copy(badgesGranted = cached) else post
+            }
+        }
     }
 
     fun parseGrantedBadge(obj: JsonObject, fallbackId: Int = 0): GrantedBadge {
