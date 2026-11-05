@@ -129,10 +129,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Google Gemini & Google Account (Material 3 Expressive) Tonal Surface 色彩系统：
- * - 摒弃生硬的分割线与描边，采用 Google 标志性的冷瓷灰底 (`#F8FAFD`) 与纯白高阶容器 (`#FFFFFF`) 形成纯净的色阶层次
- * - 选中态胶囊统一采用 Google Tonal Blue (`#D3E3FD` / `#041E49`)
- * - 品牌主色采用 Google Primary Blue (`#0B57D0` / `#A8C7FA`)
+ * Linear / Threads / X 极简黑白现代风 + Linux.do 琥珀金 (`#FFB003`) 色彩系统：
+ * - 纯净高对比黑白灰表面 (`#FFFFFF` / `#FAFAFA` / `#F4F4F5` 与暗色 `#09090B` / `#121215` / `#18181B`)
+ * - 0.5dp 锋利微描边 (`#E4E4E7` / `#27272A`)
+ * - 曜石黑主行动色 (`#09090B`) 搭配 Linux.do 标志性琥珀金 (`#FFB003`) 点缀
  */
 data class LinDoThemePalette(
     val isDark: Boolean,
@@ -148,44 +148,47 @@ data class LinDoThemePalette(
     val inkTertiary: Color,
     val hairline: Color,
     val accent: Color,
+    val brandGold: Color,
     val successContainer: Color,
     val onSuccessContainer: Color
 )
 
 private val LightPalette = LinDoThemePalette(
     isDark = false,
-    canvas = Color(0xFFF8FAFD),
-    groupedCanvas = Color(0xFFF0F4F9),
+    canvas = Color(0xFFFAFAFA),
+    groupedCanvas = Color(0xFFF4F4F5),
     cardSurface = Color(0xFFFFFFFF),
-    subtleSurface = Color(0xFFEDF2FA),
-    navBarSurface = Color(0xFFF0F4F9),
-    tonalPill = Color(0xFFD3E3FD),
-    onTonalPill = Color(0xFF041E49),
-    inkPrimary = Color(0xFF1F1F1F),
-    inkSecondary = Color(0xFF444746),
-    inkTertiary = Color(0xFF747775),
-    hairline = Color(0xFFE1E6EF),
-    accent = Color(0xFF0B57D0),
-    successContainer = Color(0xFFE6F4EA),
-    onSuccessContainer = Color(0xFF137333)
+    subtleSurface = Color(0xFFF4F4F5),
+    navBarSurface = Color(0xFFFFFFFF),
+    tonalPill = Color(0xFF09090B),
+    onTonalPill = Color(0xFFFFFFFF),
+    inkPrimary = Color(0xFF09090B),
+    inkSecondary = Color(0xFF52525B),
+    inkTertiary = Color(0xFFA1A1AA),
+    hairline = Color(0xFFE4E4E7),
+    accent = Color(0xFF09090B),
+    brandGold = Color(0xFFFFB003),
+    successContainer = Color(0xFFFEF3C7),
+    onSuccessContainer = Color(0xFF92400E)
 )
 
 private val DarkPalette = LinDoThemePalette(
     isDark = true,
-    canvas = Color(0xFF131314),
-    groupedCanvas = Color(0xFF0E0E0F),
-    cardSurface = Color(0xFF1E1F20),
-    subtleSurface = Color(0xFF282A2C),
-    navBarSurface = Color(0xFF1E1F20),
-    tonalPill = Color(0xFF004A77),
-    onTonalPill = Color(0xFFC2E7FF),
-    inkPrimary = Color(0xFFE3E3E3),
-    inkSecondary = Color(0xFFC4C7C5),
-    inkTertiary = Color(0xFF8E918F),
-    hairline = Color(0xFF333537),
-    accent = Color(0xFFA8C7FA),
-    successContainer = Color(0xFF0F5223),
-    onSuccessContainer = Color(0xFF6DD58C)
+    canvas = Color(0xFF09090B),
+    groupedCanvas = Color(0xFF09090B),
+    cardSurface = Color(0xFF121215),
+    subtleSurface = Color(0xFF18181B),
+    navBarSurface = Color(0xFF09090B),
+    tonalPill = Color(0xFFFAFAFA),
+    onTonalPill = Color(0xFF09090B),
+    inkPrimary = Color(0xFFFAFAFA),
+    inkSecondary = Color(0xFFA1A1AA),
+    inkTertiary = Color(0xFF71717A),
+    hairline = Color(0xFF27272A),
+    accent = Color(0xFFFAFAFA),
+    brandGold = Color(0xFFFFB003),
+    successContainer = Color(0xFF3F2E05),
+    onSuccessContainer = Color(0xFFFCD34D)
 )
 
 private val LocalPalette = staticCompositionLocalOf { LightPalette }
@@ -206,7 +209,7 @@ private val LightMaterialScheme = lightColorScheme(
 
 private val DarkMaterialScheme = darkColorScheme(
     primary = DarkPalette.accent,
-    onPrimary = Color(0xFF062E6F),
+    onPrimary = Color(0xFF09090B),
     primaryContainer = DarkPalette.tonalPill,
     onPrimaryContainer = DarkPalette.onTonalPill,
     background = DarkPalette.canvas,
@@ -251,48 +254,206 @@ object PlatformWebLoginHost {
 }
 
 /**
- * Gemini 标志性四芒星矢量图标（纯 Canvas 渲染，无锯齿）
+ * Linux.do 标志性黑·白·琥珀金三色立体微徽章（与桌面玻璃拟态启动图标同源）
  */
 @Composable
 private fun GeminiSparkleIcon(
     size: Dp = 18.dp,
     modifier: Modifier = Modifier
 ) {
-    val brush = remember {
-        Brush.linearGradient(
-            colors = listOf(
-                Color(0xFF4285F4),
-                Color(0xFF9B72CB),
-                Color(0xFFD96570)
-            )
-        )
-    }
     Canvas(modifier = modifier.size(size)) {
-        val w = this.size.width
-        val h = this.size.height
-        val cx = w / 2f
-        val cy = h / 2f
-        val path = Path().apply {
-            moveTo(cx, 0f)
-            quadraticTo(cx, cy, w, cy)
-            quadraticTo(cx, cy, cx, h)
-            quadraticTo(cx, cy, 0f, cy)
-            quadraticTo(cx, cy, cx, 0f)
-            close()
+        val r = this.size.minDimension / 2f
+        val center = Offset(this.size.width / 2f, this.size.height / 2f)
+        // 外圈亮瓷白描边底
+        drawCircle(
+            color = Color(0xFFE4E4E7),
+            radius = r,
+            center = center
+        )
+        val innerR = r * 0.88f
+        val clipPath = Path().apply {
+            addOval(
+                androidx.compose.ui.geometry.Rect(
+                    left = center.x - innerR,
+                    top = center.y - innerR,
+                    right = center.x + innerR,
+                    bottom = center.y + innerR
+                )
+            )
         }
-        drawPath(path = path, brush = brush)
+        val d = innerR * 2f
+        val topY = center.y - innerR
+        val b1 = d * 0.32f
+        val b2 = d * 0.36f
+        val b3 = d - b1 - b2
+        drawContext.canvas.save()
+        drawContext.canvas.clipPath(clipPath)
+        // 顶部曜石黑
+        drawRect(
+            color = Color(0xFF141417),
+            topLeft = Offset(center.x - innerR, topY),
+            size = Size(d, b1)
+        )
+        // 中部晶透白
+        drawRect(
+            color = Color(0xFFFFFFFF),
+            topLeft = Offset(center.x - innerR, topY + b1),
+            size = Size(d, b2)
+        )
+        // 底部琥珀金
+        drawRect(
+            color = Color(0xFFFFB003),
+            topLeft = Offset(center.x - innerR, topY + b1 + b2),
+            size = Size(d, b3)
+        )
+        drawContext.canvas.restore()
     }
 }
 
 /**
- * Google Account / Google One 标志性四色环绕头像组件
+ * 明亮玻璃拟态立体社区图标（通透白底圆角方砖 + 立体黑/白/琥珀金三色球体徽章 + 暖金底光）
+ */
+@Composable
+private fun LinDoGlassAppIcon(
+    tileSize: Dp = 84.dp,
+    modifier: Modifier = Modifier
+) {
+    val cornerRadius = tileSize * 0.26f
+    Box(
+        modifier = modifier
+            .size(tileSize)
+            .clip(RoundedCornerShape(cornerRadius))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFFFFFFFF),
+                        Color(0xFFF6F7F9)
+                    )
+                )
+            )
+            .border(
+                width = 1.dp,
+                color = Color(0xFFE4E4E7),
+                shape = RoundedCornerShape(cornerRadius)
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val cx = w / 2f
+            val cy = h / 2f
+            val emblemR = w * 0.32f
+
+            // 1. 底部琥珀金环境投影光晕
+            drawOval(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        Color(0x55FFB003),
+                        Color(0x00FFB003)
+                    ),
+                    center = Offset(cx, cy + emblemR * 0.72f),
+                    radius = emblemR * 0.95f
+                ),
+                topLeft = Offset(cx - emblemR * 0.9f, cy + emblemR * 0.1f),
+                size = Size(emblemR * 1.8f, emblemR * 1.15f)
+            )
+
+            // 2. 磨砂玻璃外环
+            val outerR = emblemR * 1.10f
+            drawCircle(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color(0xFFFFFFFF),
+                        Color(0xFFECECEE)
+                    ),
+                    start = Offset(cx - outerR, cy - outerR),
+                    end = Offset(cx + outerR, cy + outerR)
+                ),
+                radius = outerR,
+                center = Offset(cx, cy)
+            )
+            drawCircle(
+                color = Color(0xFFD4D4D8),
+                radius = outerR,
+                center = Offset(cx, cy),
+                style = Stroke(width = 1.dp.toPx())
+            )
+
+            // 3. 内部黑·白·琥珀金三色立体徽标
+            val innerR = emblemR * 0.96f
+            val clipPath = Path().apply {
+                addOval(
+                    androidx.compose.ui.geometry.Rect(
+                        left = cx - innerR,
+                        top = cy - innerR,
+                        right = cx + innerR,
+                        bottom = cy + innerR
+                    )
+                )
+            }
+            val d = innerR * 2f
+            val topY = cy - innerR
+            val b1 = d * 0.315f
+            val b2 = d * 0.37f
+            val b3 = d - b1 - b2
+
+            drawContext.canvas.save()
+            drawContext.canvas.clipPath(clipPath)
+
+            // 顶层曜石黑
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color(0xFF27272A), Color(0xFF09090B)),
+                    startY = topY,
+                    endY = topY + b1
+                ),
+                topLeft = Offset(cx - innerR, topY),
+                size = Size(d, b1)
+            )
+            // 中层晶透瓷白
+            drawRect(
+                color = Color(0xFFFAFAFA),
+                topLeft = Offset(cx - innerR, topY + b1),
+                size = Size(d, b2)
+            )
+            // 底层流光琥珀金
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color(0xFFFFC11C), Color(0xFFFFB003), Color(0xFFEA8A00)),
+                    startY = topY + b1 + b2,
+                    endY = topY + d
+                ),
+                topLeft = Offset(cx - innerR, topY + b1 + b2),
+                size = Size(d, b3)
+            )
+            // 顶部玻璃高光反射弧
+            drawOval(
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0x66FFFFFF),
+                        Color(0x00FFFFFF)
+                    ),
+                    startY = topY,
+                    endY = cy
+                ),
+                topLeft = Offset(cx - innerR * 0.8f, topY - innerR * 0.1f),
+                size = Size(innerR * 1.6f, innerR * 0.95f)
+            )
+            drawContext.canvas.restore()
+        }
+    }
+}
+
+/**
+ * 极简黑白 + 琥珀金双色环绕用户头像
  */
 @Composable
 private fun GoogleAccountRingAvatar(
     letter: String = "L",
     avatarUrl: String? = null,
     avatarSize: Dp = 76.dp,
-    strokeWidth: Dp = 3.dp,
+    strokeWidth: Dp = 2.5.dp,
     onClick: (() -> Unit)? = null
 ) {
     val palette = LocalPalette.current
@@ -319,38 +480,20 @@ private fun GoogleAccountRingAvatar(
             val inset = strokePx / 2f
             val arcSize = Size(size.width - strokePx, size.height - strokePx)
             val topLeft = Offset(inset, inset)
-            // Google 经典四色分段圆弧
+            // 上半环：曜石黑/银白，下半环：Linux.do 琥珀金
             drawArc(
-                color = Color(0xFFEA4335),
-                startAngle = -135f,
-                sweepAngle = 90f,
+                color = if (palette.isDark) Color(0xFFFAFAFA) else Color(0xFF18181B),
+                startAngle = -165f,
+                sweepAngle = 195f,
                 useCenter = false,
                 topLeft = topLeft,
                 size = arcSize,
                 style = Stroke(width = strokePx, cap = StrokeCap.Round)
             )
             drawArc(
-                color = Color(0xFF4285F4),
-                startAngle = -45f,
-                sweepAngle = 110f,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokePx, cap = StrokeCap.Round)
-            )
-            drawArc(
-                color = Color(0xFF34A853),
-                startAngle = 65f,
-                sweepAngle = 95f,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokePx, cap = StrokeCap.Round)
-            )
-            drawArc(
-                color = Color(0xFFFBBC04),
-                startAngle = 160f,
-                sweepAngle = 65f,
+                color = Color(0xFFFFB003),
+                startAngle = 42f,
+                sweepAngle = 140f,
                 useCenter = false,
                 topLeft = topLeft,
                 size = arcSize,
@@ -360,9 +503,10 @@ private fun GoogleAccountRingAvatar(
 
         Box(
             modifier = Modifier
-                .size(avatarSize - strokeWidth * 4f)
+                .size(avatarSize - strokeWidth * 3.6f)
                 .clip(CircleShape)
-                .background(palette.tonalPill),
+                .background(palette.subtleSurface)
+                .border(0.5.dp, palette.hairline, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             if (resolvedAvatarUrl != null) {
@@ -379,7 +523,7 @@ private fun GoogleAccountRingAvatar(
                     text = letter.take(1).uppercase(),
                     fontSize = (avatarSize.value * 0.34f).sp,
                     fontWeight = FontWeight.Bold,
-                    color = palette.onTonalPill
+                    color = palette.inkPrimary
                 )
             }
         }
@@ -921,9 +1065,9 @@ private fun DesktopSideRail(
 }
 
 /**
- * Google Gemini / Google Account 标准 Material 3 底部导航栏：
- * - 采用 `#F0F4F9` Tonal Surface 底色，完全去除生硬的顶部分割线
- * - 选中态采用 `64x32dp` `#D3E3FD` 圆角胶囊指示器 + 实心图标
+ * Linear / Threads 极简黑白底部导航栏：
+ * - 顶部 0.5dp 锋利微分割线 (`#E4E4E7` / `#27272A`)
+ * - 选中态采用曜石黑胶囊 + 琥珀金微点指示
  */
 @Composable
 private fun GoogleM3NavigationBar(
@@ -938,10 +1082,11 @@ private fun GoogleM3NavigationBar(
             .background(palette.navBarSurface)
             .windowInsetsPadding(WindowInsets.navigationBars)
     ) {
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(66.dp),
+                .height(60.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             MainTab.entries.forEach { tab ->
@@ -959,25 +1104,26 @@ private fun GoogleM3NavigationBar(
                 ) {
                     Box(
                         modifier = Modifier
-                            .width(64.dp)
-                            .height(32.dp)
-                            .clip(RoundedCornerShape(16.dp))
+                            .width(52.dp)
+                            .height(28.dp)
+                            .clip(RoundedCornerShape(10.dp))
                             .background(if (selected) palette.tonalPill else Color.Transparent),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
                             contentDescription = tab.title,
-                            modifier = Modifier.size(21.dp),
+                            modifier = Modifier.size(19.dp),
                             tint = if (selected) palette.onTonalPill else palette.inkSecondary
                         )
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(3.dp))
                     Text(
                         text = tab.title,
-                        fontSize = 11.5.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        color = if (selected) palette.inkPrimary else palette.inkSecondary
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (selected) palette.inkPrimary else palette.inkTertiary,
+                        maxLines = 1
                     )
                 }
             }
@@ -986,11 +1132,11 @@ private fun GoogleM3NavigationBar(
 }
 
 /**
- * Gemini & Google Search 风格首页：
- * 1. 顶部 `52.dp` Google 搜索胶囊栏（内嵌 Gemini 四芒星、搜索输入、排序切换胶囊与 Google Account 环绕头像）
- * 2. Material 3 Tonal Filter Pills 频道筛选胶囊列（零下划线冲突，选中态 `#D3E3FD`）
- * 3. 柔和圆角置顶公告卡（`#EDF2FA`）
- * 4. 无边框纯白圆角社区卡片（`#FFFFFF` 悬浮于 `#F8FAFD` 瓷白画布之上）
+ * Linear / Threads / X 极简黑白现代风首页：
+ * 1. 顶部品牌与全局搜索栏（内嵌玻璃拟态立体微图标、搜索输入、曜石黑排序胶囊与头像）
+ * 2. 0.5dp 锋利描边频道胶囊列（选中态曜石黑 `#09090B`）
+ * 3. 琥珀金徽标置顶公告卡
+ * 4. 0.5dp 微描边高对比纯白社区卡片
  */
 @Composable
 private fun CommunityHomeFeedPane(
@@ -1031,27 +1177,28 @@ private fun CommunityHomeFeedPane(
             .background(palette.canvas)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        // 1. Google App Search Bar（内嵌 Gemini 四芒星 + 搜索框 + 排序快速切换 + Google Account 头像）
+        // 1. Linear / Threads 风格极简顶栏（玻璃立体图标 + 搜索框 + 曜石黑排序切换 + 头像）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 6.dp)
-                .height(50.dp)
-                .clip(RoundedCornerShape(25.dp))
-                .background(palette.subtleSurface)
-                .padding(start = 16.dp, end = 8.dp),
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 6.dp)
+                .height(46.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(palette.cardSurface)
+                .border(0.5.dp, palette.hairline, RoundedCornerShape(14.dp))
+                .padding(start = 10.dp, end = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            GeminiSparkleIcon(size = 18.dp)
+            LinDoGlassAppIcon(tileSize = 26.dp)
 
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.width(9.dp))
 
             Box(modifier = Modifier.weight(1f)) {
                 if (searchQuery.isEmpty()) {
                     Text(
-                        text = "搜索话题或标签",
-                        fontSize = 14.5.sp,
-                        color = palette.inkSecondary,
+                        text = "搜索话题或标签...",
+                        fontSize = 13.5.sp,
+                        color = palette.inkTertiary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1061,7 +1208,7 @@ private fun CommunityHomeFeedPane(
                     onValueChange = onSearchChange,
                     singleLine = true,
                     textStyle = TextStyle(
-                        fontSize = 14.5.sp,
+                        fontSize = 13.5.sp,
                         color = palette.inkPrimary
                     ),
                     cursorBrush = SolidColor(palette.accent),
@@ -1072,7 +1219,7 @@ private fun CommunityHomeFeedPane(
             if (searchQuery.isNotEmpty()) {
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
                         .clickable { onSearchChange("") },
                     contentAlignment = Alignment.Center
@@ -1080,18 +1227,18 @@ private fun CommunityHomeFeedPane(
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "清除",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(15.dp),
                         tint = palette.inkSecondary
                     )
                 }
             }
 
-            // 内嵌轻量排序切换器
+            // Linear 分段排序切换器
             Row(
                 modifier = Modifier
-                    .height(32.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(palette.cardSurface.copy(alpha = 0.85f))
+                    .height(30.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(palette.subtleSurface)
                     .padding(2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1100,7 +1247,7 @@ private fun CommunityHomeFeedPane(
                     Box(
                         modifier = Modifier
                             .fillMaxHeight()
-                            .clip(RoundedCornerShape(14.dp))
+                            .clip(RoundedCornerShape(7.dp))
                             .background(if (selected) palette.tonalPill else Color.Transparent)
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
@@ -1113,7 +1260,8 @@ private fun CommunityHomeFeedPane(
                             text = sort.label,
                             fontSize = 11.5.sp,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                            color = if (selected) palette.onTonalPill else palette.inkSecondary
+                            color = if (selected) palette.onTonalPill else palette.inkSecondary,
+                            maxLines = 1
                         )
                     }
                 }
@@ -1121,55 +1269,62 @@ private fun CommunityHomeFeedPane(
 
             Spacer(modifier = Modifier.width(6.dp))
 
-            // 右侧 Google Account 标志性四色环微缩头像（点击直达账号中心）
             GoogleAccountRingAvatar(
                 letter = currentUser?.displayName?.takeIf { it.isNotBlank() }
                     ?: currentUser?.username
                     ?: "L",
                 avatarUrl = currentUser?.avatarTemplate,
-                avatarSize = 34.dp,
+                avatarSize = 32.dp,
                 strokeWidth = 2.dp,
                 onClick = onAvatarClick
             )
         }
 
-        // 游客模式温馨提醒胶囊条
+        // 游客模式提醒条（曜石黑 + 琥珀金单行条）
         if (!isAuthorized) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 2.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(palette.tonalPill.copy(alpha = 0.65f))
+                    .padding(horizontal = 12.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(palette.tonalPill)
                     .clickable(onClick = onRequestLogin)
-                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                GeminiSparkleIcon(size = 14.dp)
+                Box(
+                    modifier = Modifier
+                        .size(6.5.dp)
+                        .clip(CircleShape)
+                        .background(palette.brandGold)
+                )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "当前为游客预览，浏览不计入 Connect 连登",
+                    text = "游客预览模式 · 浏览不计入 Connect 连登",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.onTonalPill,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
                 Text(
                     text = "立即登录",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    color = palette.accent
+                    color = palette.brandGold,
+                    maxLines = 1
                 )
             }
         }
 
-        // 2. Material 3 Tonal Filter Chips（无下划线，纯净胶囊筛选）
+        // 2. Linear 风格极简频道胶囊列
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             GoogleM3FilterPill(
@@ -1200,15 +1355,14 @@ private fun CommunityHomeFeedPane(
             LinearProgressIndicator(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 18.dp)
-                    .height(2.dp)
-                    .clip(RoundedCornerShape(1.dp)),
-                color = palette.accent,
+                    .padding(horizontal = 12.dp)
+                    .height(1.5.dp),
+                color = palette.brandGold,
                 trackColor = Color.Transparent
             )
         }
 
-        // 3. 话题流（圆角置顶胶囊卡 + Google Discover 风格无边框圆角卡片）
+        // 3. 话题流（Linear 0.5dp 描边高对比卡片）
         if (topics.isEmpty() && !isLoading) {
             Box(
                 modifier = Modifier
@@ -1219,20 +1373,20 @@ private fun CommunityHomeFeedPane(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
                         text = errorMessage ?: "暂无相关话题",
-                        fontSize = 14.5.sp,
+                        fontSize = 14.sp,
                         color = palette.inkSecondary
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
+                            .clip(RoundedCornerShape(10.dp))
                             .background(palette.tonalPill)
                             .clickable { onRefresh() }
                             .padding(horizontal = 18.dp, vertical = 8.dp)
                     ) {
                         Text(
                             text = "重新加载",
-                            fontSize = 13.5.sp,
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = palette.onTonalPill
                         )
@@ -1251,40 +1405,41 @@ private fun CommunityHomeFeedPane(
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // 置顶公告容器（Gemini Tonal Banner 风格）
+                // 置顶公告容器（Linear 微描边 + 琥珀金置顶徽标）
                 if (pinnedTopics.isNotEmpty()) {
                     item(key = "pinned_banner_group") {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(palette.subtleSurface)
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalArrangement = Arrangement.spacedBy(7.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(palette.cardSurface)
+                                .border(0.5.dp, palette.hairline, RoundedCornerShape(14.dp))
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             pinnedTopics.take(2).forEach { pinned ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clip(RoundedCornerShape(10.dp))
+                                        .clip(RoundedCornerShape(8.dp))
                                         .clickable { onSelectTopic(pinned) }
                                         .padding(vertical = 2.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Box(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(palette.tonalPill)
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            .clip(RoundedCornerShape(5.dp))
+                                            .background(palette.brandGold.copy(alpha = 0.2f))
+                                            .padding(horizontal = 6.dp, vertical = 1.5.dp)
                                     ) {
                                         Text(
                                             text = "置顶",
-                                            fontSize = 10.5.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = palette.onTonalPill
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.onSuccessContainer
                                         )
                                     }
-                                    Spacer(modifier = Modifier.width(9.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = pinned.title,
                                         fontSize = 13.sp,
@@ -1297,7 +1452,7 @@ private fun CommunityHomeFeedPane(
                                     Icon(
                                         imageVector = Icons.Default.ChevronRight,
                                         contentDescription = null,
-                                        modifier = Modifier.size(15.dp),
+                                        modifier = Modifier.size(14.dp),
                                         tint = palette.inkTertiary
                                     )
                                 }
@@ -1306,7 +1461,6 @@ private fun CommunityHomeFeedPane(
                     }
                 }
 
-                // 社区话题卡片流（无生硬分割线，采用纯白圆角卡片色阶对比）
                 itemsIndexed(regularTopics, key = { _, item -> item.id }) { _, topic ->
                     CommunityTopicItem(
                         topic = topic,
@@ -1331,17 +1485,22 @@ private fun GoogleM3FilterPill(
 
     Row(
         modifier = Modifier
-            .height(34.dp)
-            .clip(RoundedCornerShape(17.dp))
+            .height(31.dp)
+            .clip(RoundedCornerShape(10.dp))
             .background(if (selected) palette.tonalPill else palette.cardSurface)
+            .border(
+                width = 0.5.dp,
+                color = if (selected) palette.tonalPill else palette.hairline,
+                shape = RoundedCornerShape(10.dp)
+            )
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (dotColor != null) {
             Box(
                 modifier = Modifier
-                    .size(7.dp)
+                    .size(6.5.dp)
                     .clip(CircleShape)
                     .background(dotColor)
             )
@@ -1349,19 +1508,18 @@ private fun GoogleM3FilterPill(
         }
         Text(
             text = label,
-            fontSize = 13.sp,
+            fontSize = 12.5.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (selected) palette.onTonalPill else palette.inkSecondary
+            color = if (selected) palette.onTonalPill else palette.inkSecondary,
+            maxLines = 1
         )
     }
 }
 
 /**
- * Google Discover / Gemini 风格圆角话题卡片：
- * - 采用 `22.dp` 圆角纯白表面悬浮于 `#F8FAFD` 画布之上，零生硬描边
- * - 顶栏：24dp 头像 + 作者名 + 时间 ····· 右侧柔和频道胶囊
- * - 中栏：16.5sp 高可读标题 + 可选摘要
- * - 底栏：Tonal 标签胶囊 + 白色描边叠放参与者头像 + 评论/阅读统计
+ * Linear / Threads 风格极简高对比社区卡片：
+ * - `16.dp` 紧凑圆角 + `0.5.dp` `#E4E4E7` 锋利描边
+ * - 清晰的作者、板块、标题、标签与互动计数层级
  */
 @Composable
 private fun CommunityTopicItem(
@@ -1376,15 +1534,16 @@ private fun CommunityTopicItem(
     val catColor = remember(topic.categoryColorHex) {
         LinuxDoSiteRules.parseHexColor(topic.categoryColorHex)
     }
-    val cardBg = if (isSelected) palette.tonalPill.copy(alpha = 0.45f) else palette.cardSurface
+    val borderColor = if (isSelected) palette.inkPrimary else palette.hairline
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
-            .background(cardBg)
+            .clip(RoundedCornerShape(16.dp))
+            .background(palette.cardSurface)
+            .border(if (isSelected) 1.dp else 0.5.dp, borderColor, RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 15.dp)
+            .padding(horizontal = 15.dp, vertical = 14.dp)
     ) {
         // 第一行：作者信息 + 右侧板块柔色胶囊
         Row(
@@ -3286,7 +3445,7 @@ private fun NetworkDiagnosticsSheet(
 }
 
 /**
- * Google Account 风格账号登录与切换抽屉（支持双主通道一键登录）
+ * Linear / Threads 风格账号登录与切换抽屉（支持双主通道一键登录）
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -3307,47 +3466,67 @@ private fun UserApiKeyAuthSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 12.dp)
+                .padding(horizontal = 22.dp, vertical = 12.dp)
         ) {
-            Text(
-                text = if (isAuthorized) "Linux.do 账号会话" else "登录 Linux.do 账号",
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = if (isAuthorized && currentUser != null) {
-                    "当前已登录 @${currentUser.username}（Lv.${currentUser.trustLevel}），Connect 连登与阅读时长自动同步中。"
-                } else {
-                    "请选择最顺手的方式完成验证，登录后自动同步 Connect 连登、阅读进度与受保护分区。"
-                },
-                fontSize = 13.5.sp,
-                lineHeight = 20.sp,
-                color = palette.inkSecondary
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LinDoGlassAppIcon(tileSize = 36.dp)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (isAuthorized) "Linux.do 账号会话" else "登录 Linux.do 账号",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.inkPrimary,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = if (isAuthorized && currentUser != null) {
+                            "@${currentUser.username} · Lv.${currentUser.trustLevel} 连登自动同步中"
+                        } else {
+                            "同步 Connect 连登、阅读进度与专属分区"
+                        },
+                        fontSize = 12.5.sp,
+                        color = palette.inkSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // 方式一（主力推荐）：内置一键登录（支持密码 / GitHub / Passkey / 2FA）
+            // 方式一（主力推荐）：内置一键登录（支持密码 / GitHub / Passkey）
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
-                    .clip(RoundedCornerShape(26.dp))
-                    .background(palette.accent)
+                    .height(50.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(palette.tonalPill)
                     .clickable(onClick = onPrimaryWebLogin)
-                    .padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                GeminiSparkleIcon(size = 18.dp)
-                Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(palette.brandGold)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
                 Text(
-                    text = if (isAuthorized) "重新验证或切换账号" else "账号一键登录（密码 / GitHub / Passkey）",
+                    text = if (isAuthorized) "重新验证或切换账号" else "账号一键登录",
                     fontSize = 14.5.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color.White
+                    color = palette.onTonalPill,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "密码 / GitHub / Passkey",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.onTonalPill.copy(alpha = 0.68f),
+                    maxLines = 1
                 )
             }
 
@@ -3357,19 +3536,28 @@ private fun UserApiKeyAuthSheet(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(50.dp)
-                    .clip(RoundedCornerShape(25.dp))
-                    .background(palette.tonalPill)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(palette.cardSurface)
+                    .border(1.dp, palette.hairline, RoundedCornerShape(14.dp))
                     .clickable(onClick = onBrowserOneClickAuth)
-                    .padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = "通过系统浏览器一键授权",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = palette.onTonalPill
+                    color = palette.inkPrimary,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "免输密码",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.inkTertiary,
+                    maxLines = 1
                 )
             }
 
@@ -3379,34 +3567,33 @@ private fun UserApiKeyAuthSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(46.dp)
-                        .clip(RoundedCornerShape(23.dp))
+                        .clip(RoundedCornerShape(14.dp))
                         .background(palette.subtleSurface)
                         .clickable(onClick = onLogout)
-                        .padding(horizontal = 20.dp),
+                        .padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        text = "退出当前账号并返回登录页",
+                        text = "退出当前账号",
                         fontSize = 13.5.sp,
                         fontWeight = FontWeight.Medium,
-                        color = palette.inkSecondary
+                        color = palette.inkSecondary,
+                        maxLines = 1
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(26.dp))
+            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }
 
 /**
- * Google Account / Gemini 风格首屏欢迎与登录门禁页（Welcome & Login Gate）：
- * - 启动即达，确保用户先完成身份挂载再进入浏览，避免因未登录丢失 Connect 连续登录与阅读时长
- * - 仅保留最高频、最顺手的两种登录方式：
- *   1. 账号一键登录（内置安全登录，支持密码 / GitHub / Passkey / 2FA，自动接管 Cookie 会话）
- *   2. 通过系统浏览器一键授权（复用系统浏览器已登录状态，一键点击「批准」自动跳回）
- * - 底部提供轻量级「暂不登录，仅以游客身份预览公开内容」入口
+ * Linear / Threads / X 极简黑白现代风首屏欢迎与登录门禁页：
+ * - 顶部居中展示「明亮玻璃拟态立体社区徽章」(`LinDoGlassAppIcon`)
+ * - 高对比纯粹黑白灰层级 + Linux.do 琥珀金 (`#FFB003`) 点缀
+ * - 全文严格单行排版，彻底杜绝任何孤字折行或按钮双行挤压
  */
 @Composable
 private fun GoogleWelcomeLoginScreen(
@@ -3419,136 +3606,197 @@ private fun GoogleWelcomeLoginScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(palette.canvas)
+            .background(palette.cardSurface)
             .windowInsetsPadding(WindowInsets.statusBars)
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 24.dp, vertical = 20.dp),
+            .padding(horizontal = 24.dp, vertical = 18.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.weight(0.8f))
+        Spacer(modifier = Modifier.weight(0.65f))
 
-        // 1. 顶部 Google Account 四色环绕徽标 + Gemini 品牌标识
-        GoogleAccountRingAvatar(
-            letter = "L",
-            avatarSize = 86.dp,
-            strokeWidth = 3.5.dp
-        )
-
-        Spacer(modifier = Modifier.height(20.dp))
-
+        // 1. 顶部社区身份胶囊标签（曜石黑圆点 + 琥珀金徽记）
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
+            modifier = Modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(palette.subtleSurface)
+                .border(0.5.dp, palette.hairline, RoundedCornerShape(20.dp))
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            GeminiSparkleIcon(size = 20.dp)
-            Spacer(modifier = Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(6.5.dp)
+                    .clip(CircleShape)
+                    .background(palette.brandGold)
+            )
+            Spacer(modifier = Modifier.width(7.dp))
             Text(
-                text = "欢迎来到 LinDo",
-                fontSize = 26.sp,
+                text = "LINUX.DO COMMUNITY",
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = (-0.5).sp,
-                color = palette.inkPrimary
+                letterSpacing = 0.8.sp,
+                color = palette.inkSecondary,
+                maxLines = 1
             )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(22.dp))
 
+        // 2. 明亮玻璃拟态立体社区图标（通透白底方砖 + 黑/白/琥珀金三色立体球徽）
+        LinDoGlassAppIcon(tileSize = 88.dp)
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // 3. 极简高对比品牌主标题与单行社区格言
         Text(
-            text = "真诚、友善、团结、专业的 Linux.do 社区客户端",
-            fontSize = 14.sp,
-            color = palette.inkSecondary,
-            textAlign = TextAlign.Center
+            text = "LinDo",
+            fontSize = 32.sp,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = (-1.0).sp,
+            color = palette.inkPrimary,
+            maxLines = 1
         )
 
-        Spacer(modifier = Modifier.height(26.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
-        // 2. 登录后同步的 3 项核心权益卡片（Material 3 Tonal Card）
+        Text(
+            text = "真诚 · 友善 · 团结 · 专业",
+            fontSize = 13.5.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 1.2.sp,
+            color = palette.inkSecondary,
+            maxLines = 1
+        )
+
+        Spacer(modifier = Modifier.height(28.dp))
+
+        // 4. Linear 风格极简微描边特性卡片（纯矢量图标 + 严格单行文案，零折行）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(palette.cardSurface)
-                .padding(horizontal = 20.dp, vertical = 18.dp),
+                .clip(RoundedCornerShape(18.dp))
+                .background(palette.canvas)
+                .border(0.5.dp, palette.hairline, RoundedCornerShape(18.dp))
+                .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             WelcomeFeatureRow(
-                badgeText = "连登",
-                title = "Connect 100 天活跃与连登自动打卡",
-                subtitle = "每次打开自动上报在线心跳，防止断签掉级"
+                icon = Icons.Default.AutoAwesome,
+                title = "Connect 连登自动打卡",
+                subtitle = "启动即同步在线心跳，告别断签掉级"
             )
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
             WelcomeFeatureRow(
-                badgeText = "阅读",
-                title = "楼层阅读时长与进度精准同步",
-                subtitle = "基于 Discourse Timings 协议实时记录已读帖子"
+                icon = Icons.Default.Speed,
+                title = "阅读时长与进度实时同步",
+                subtitle = "原生接入 Timings 协议记录已读楼层"
             )
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
             WelcomeFeatureRow(
-                badgeText = "分区",
-                title = "解锁 Lv.1 ~ Lv.3 专属频道与福利专区",
-                subtitle = "完整访问受信任等级保护的话题、水龙与通知"
+                icon = Icons.Default.Bookmark,
+                title = "解锁信任等级专属分区",
+                subtitle = "完整访问 Lv.1 ~ Lv.3 隐藏频道与福利"
             )
         }
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // 3. 方式一（主力推荐）：内置一键安全登录胶囊按钮（Google Primary Blue `#0B57D0`）
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp)
-                .clip(RoundedCornerShape(27.dp))
-                .background(palette.accent)
-                .clickable(onClick = onPrimaryWebLogin)
-                .padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            GeminiSparkleIcon(size = 18.dp)
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = "账号一键登录（密码 / GitHub / Passkey）",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White
-            )
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // 4. 方式二（官方浏览器跳回）：系统浏览器一键授权胶囊按钮（Tonal Pill `#D3E3FD`）
+        // 5. 主力登录按钮：Linear 曜石黑高对比实心胶囊（左主文案 + 右支持方式微标签，严格单行）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
-                .clip(RoundedCornerShape(26.dp))
+                .clip(RoundedCornerShape(14.dp))
                 .background(palette.tonalPill)
+                .clickable(onClick = onPrimaryWebLogin)
+                .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.5.dp)
+                    .clip(CircleShape)
+                    .background(palette.brandGold)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "账号一键登录",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = palette.onTonalPill,
+                maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.onTonalPill.copy(alpha = 0.12f))
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = "密码 / GitHub / Passkey",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.onTonalPill.copy(alpha = 0.85f),
+                    maxLines = 1
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // 6. 次级登录按钮：通透白底 + 1dp 锋利描边（严格单行）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(palette.cardSurface)
+                .border(1.dp, palette.hairline, RoundedCornerShape(14.dp))
                 .clickable(onClick = onBrowserOneClickAuth)
-                .padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
+                .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "通过系统浏览器一键授权（已登录免输密码）",
-                fontSize = 14.sp,
+                text = "通过系统浏览器一键授权",
+                fontSize = 14.5.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = palette.onTonalPill
+                color = palette.inkPrimary,
+                maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "已登录免密",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.inkTertiary,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.width(2.dp))
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = palette.inkTertiary
             )
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // 5. 底部轻量级游客预览入口
+        // 7. 底部极简游客入口
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(10.dp))
                 .clickable(onClick = onEnterGuestPreview)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = "暂不登录，仅以游客身份预览公开内容",
+                text = "先去逛逛（游客预览）",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
-                color = palette.inkTertiary
+                color = palette.inkTertiary,
+                maxLines = 1
             )
         }
     }
@@ -3556,7 +3804,7 @@ private fun GoogleWelcomeLoginScreen(
 
 @Composable
 private fun WelcomeFeatureRow(
-    badgeText: String,
+    icon: ImageVector,
     title: String,
     subtitle: String
 ) {
@@ -3567,31 +3815,36 @@ private fun WelcomeFeatureRow(
     ) {
         Box(
             modifier = Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(13.dp))
-                .background(palette.tonalPill),
+                .size(38.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .background(palette.cardSurface)
+                .border(0.5.dp, palette.hairline, RoundedCornerShape(11.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = badgeText,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.onTonalPill
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = palette.inkPrimary
             )
         }
-        Spacer(modifier = Modifier.width(14.dp))
+        Spacer(modifier = Modifier.width(13.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
-                fontSize = 14.5.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = palette.inkPrimary
+                color = palette.inkPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(1.5.dp))
             Text(
                 text = subtitle,
                 fontSize = 12.sp,
-                color = palette.inkSecondary
+                color = palette.inkSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }

@@ -383,31 +383,31 @@ private fun AndroidWebLoginModal(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color(0xFFF8FAFD))
+            .background(androidx.compose.ui.graphics.Color(0xFFFFFFFF))
             .windowInsetsPadding(WindowInsets.statusBars)
             .windowInsetsPadding(WindowInsets.navigationBars)
     ) {
-        // 顶部 Google Custom Tab 风格安全顶栏
+        // 顶部 Linear 风格极简安全顶栏
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp)
+                .height(52.dp)
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(androidx.compose.ui.graphics.Color(0xFFEDF2FA))
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(androidx.compose.ui.graphics.Color(0xFFF4F4F5))
                     .clickable(onClick = onDismiss),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "关闭",
-                    modifier = Modifier.size(18.dp),
-                    tint = androidx.compose.ui.graphics.Color(0xFF1F1F1F)
+                    modifier = Modifier.size(17.dp),
+                    tint = androidx.compose.ui.graphics.Color(0xFF09090B)
                 )
             }
 
@@ -418,40 +418,40 @@ private fun AndroidWebLoginModal(
                     Icon(
                         imageVector = Icons.Default.Lock,
                         contentDescription = null,
-                        modifier = Modifier.size(13.dp),
-                        tint = androidx.compose.ui.graphics.Color(0xFF137333)
+                        modifier = Modifier.size(12.dp),
+                        tint = androidx.compose.ui.graphics.Color(0xFF09090B)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = pageTitle,
-                        fontSize = 14.5.sp,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = androidx.compose.ui.graphics.Color(0xFF1F1F1F),
+                        color = androidx.compose.ui.graphics.Color(0xFF09090B),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
                 Text(
-                    text = "linux.do 官方安全会话 · 登录后自动返回",
-                    fontSize = 11.5.sp,
-                    color = androidx.compose.ui.graphics.Color(0xFF444746),
+                    text = "linux.do 官方安全会话 · 登录成功后自动返回",
+                    fontSize = 11.sp,
+                    color = androidx.compose.ui.graphics.Color(0xFF71717A),
                     maxLines = 1
                 )
             }
 
             Box(
                 modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(androidx.compose.ui.graphics.Color(0xFFEDF2FA))
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(androidx.compose.ui.graphics.Color(0xFFF4F4F5))
                     .clickable { webViewRef?.reload() },
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
                     contentDescription = "刷新",
-                    modifier = Modifier.size(18.dp),
-                    tint = androidx.compose.ui.graphics.Color(0xFF1F1F1F)
+                    modifier = Modifier.size(17.dp),
+                    tint = androidx.compose.ui.graphics.Color(0xFF09090B)
                 )
             }
         }
@@ -461,9 +461,9 @@ private fun AndroidWebLoginModal(
                 progress = { progress },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(2.5.dp),
-                color = androidx.compose.ui.graphics.Color(0xFF0B57D0),
-                trackColor = androidx.compose.ui.graphics.Color.Transparent
+                    .height(2.dp),
+                color = androidx.compose.ui.graphics.Color(0xFFFFB003),
+                trackColor = androidx.compose.ui.graphics.Color(0xFFE4E4E7)
             )
         }
 
