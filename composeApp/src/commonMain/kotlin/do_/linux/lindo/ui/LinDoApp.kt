@@ -1,6 +1,12 @@
 package do_.linux.lindo.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -41,6 +47,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
@@ -58,6 +65,7 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.outlined.GridView
@@ -84,6 +92,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -102,13 +111,18 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -250,7 +264,268 @@ private enum class FeedSortFilter(val label: String, val apiPath: String) {
     LATEST("最新", "latest.json"),
     UNREAD("未读", "unread.json"),
     NEW("新帖", "new.json"),
-    TOP("热门", "top.json")
+    TOP("热门", "top.json"),
+    READ("已读", "read.json")
+}
+
+private enum class TopPeriodFilter(val label: String, val apiPeriod: String) {
+    DAILY("今日", "daily"),
+    WEEKLY("本周", "weekly"),
+    MONTHLY("本月", "monthly"),
+    YEARLY("今年", "yearly"),
+    ALL("全部", "all")
+}
+
+/**
+ * Linear 风格流光加载细线（黑·琥珀金·黑微光扫掠动画，取代生硬的默认进度条）
+ */
+@Composable
+private fun LinearLuminanceBar(modifier: Modifier = Modifier) {
+    val palette = LocalPalette.current
+    val transition = rememberInfiniteTransition(label = "luminance")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1050, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "luminance_phase"
+    )
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(2.dp)
+            .clip(RoundedCornerShape(1.dp))
+    ) {
+        val w = size.width
+        drawRect(color = palette.hairline.copy(alpha = 0.45f))
+        val barWidth = w * 0.36f
+        val startX = (w + barWidth) * phase - barWidth
+        drawRect(
+            brush = Brush.horizontalGradient(
+                colors = listOf(
+                    Color.Transparent,
+                palette.brandGold,
+                    palette.inkPrimary,
+                    palette.brandGold,
+                    Color.Transparent
+                ),
+                startX = startX,
+                endX = startX + barWidth
+            ),
+            topLeft = Offset(startX.coerceAtLeast(0f), 0f),
+            size = Size(barWidth, size.height)
+        )
+    }
+}
+
+/**
+ * Linear 风格三点波浪呼吸脉冲底部加载器（支持分页加载中、点击加载更多、已加载全部三种优雅状态）
+ */
+@Composable
+private fun LinearPulseLoadingFooter(
+    isLoadingMore: Boolean,
+    hasMore: Boolean,
+    loadedCount: Int,
+    loadingText: String = "正在同步更多话题",
+    moreText: String = "加载更多话题",
+    doneText: String = "已加载全部 $loadedCount 个话题",
+    onLoadMore: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val transition = rememberInfiniteTransition(label = "pulse_dots")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "pulse_progress"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        if (!hasMore && !isLoadingMore) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(24.dp)
+                        .height(0.5.dp)
+                        .background(palette.hairline)
+                )
+                Text(
+                    text = doneText,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.inkTertiary
+                )
+                Box(
+                    modifier = Modifier
+                        .width(24.dp)
+                        .height(0.5.dp)
+                        .background(palette.hairline)
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(palette.cardSurface)
+                    .border(0.5.dp, palette.hairline, RoundedCornerShape(999.dp))
+                    .clickable(enabled = !isLoadingMore && hasMore) { onLoadMore() }
+                    .padding(horizontal = 16.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                if (isLoadingMore) {
+                    repeat(3) { idx ->
+                        val offsetPhase = ((progress - idx * 0.22f) + 1f) % 1f
+                        val pulse = kotlin.math.sin(offsetPhase * kotlin.math.PI.toFloat()).coerceIn(0f, 1f)
+                        val scale = 0.72f + 0.36f * pulse
+                        Box(
+                            modifier = Modifier
+                                .size(5.5.dp)
+                                .graphicsLayer {
+                                    scaleX = scale
+                                    scaleY = scale
+                                    alpha = 0.35f + 0.65f * pulse
+                                }
+                                .clip(CircleShape)
+                                .background(if (idx == 1) palette.brandGold else palette.inkPrimary)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = loadingText,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkSecondary
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(5.5.dp)
+                            .clip(CircleShape)
+                            .background(palette.brandGold)
+                    )
+                    Text(
+                        text = moreText,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.inkPrimary
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Linear 风格银灰流光骨架屏（切换板块/排序或首次加载时提供丝滑占位，告别空白闪烁）
+ */
+@Composable
+private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
+    val palette = LocalPalette.current
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val alphaAnim by transition.animateFloat(
+        initialValue = 0.38f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 720, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "shimmer_alpha"
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(if (isCompact) 5.dp else 8.dp)
+    ) {
+        repeat(if (isCompact) 7 else 5) { idx ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(if (isCompact) 12.dp else 16.dp))
+                    .background(palette.cardSurface)
+                    .border(0.5.dp, palette.hairline, RoundedCornerShape(if (isCompact) 12.dp else 16.dp))
+                    .padding(
+                        horizontal = if (isCompact) 12.dp else 15.dp,
+                        vertical = if (isCompact) 10.dp else 14.dp
+                    )
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(if (isCompact) 20.dp else 24.dp)
+                            .clip(CircleShape)
+                            .background(palette.subtleSurface.copy(alpha = alphaAnim))
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(92.dp)
+                            .height(11.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(palette.subtleSurface.copy(alpha = alphaAnim))
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Box(
+                        modifier = Modifier
+                            .width(52.dp)
+                            .height(16.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(palette.subtleSurface.copy(alpha = alphaAnim))
+                    )
+                }
+                Spacer(modifier = Modifier.height(if (isCompact) 7.dp else 10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(if (idx % 2 == 0) 0.92f else 0.78f)
+                        .height(if (isCompact) 14.dp else 16.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(palette.subtleSurface.copy(alpha = alphaAnim))
+                )
+                if (!isCompact) {
+                    Spacer(modifier = Modifier.height(7.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.62f)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(palette.subtleSurface.copy(alpha = alphaAnim * 0.75f))
+                    )
+                }
+                Spacer(modifier = Modifier.height(if (isCompact) 7.dp else 10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .width(46.dp)
+                            .height(14.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(palette.subtleSurface.copy(alpha = alphaAnim * 0.8f))
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Box(
+                        modifier = Modifier
+                            .width(68.dp)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(palette.subtleSurface.copy(alpha = alphaAnim * 0.75f))
+                    )
+                }
+            }
+        }
+    }
 }
 
 object BackNavigationBridge {
@@ -548,18 +823,48 @@ private fun GoogleAccountRingAvatar(
 
 @Composable
 fun LinDoApp() {
-    var isDarkTheme by remember { mutableStateOf(false) }
-    var fontScale by remember { mutableStateOf(1.0f) }
+    var isDarkTheme by remember { mutableStateOf(UserApiKeyAuthManager.uiDarkTheme) }
+    var fontScale by remember { mutableStateOf(UserApiKeyAuthManager.uiFontScale) }
+    var enableAnimations by remember { mutableStateOf(UserApiKeyAuthManager.uiEnableAnimations) }
     val palette = if (isDarkTheme) DarkPalette else LightPalette
+
+    fun updateThemePref(dark: Boolean) {
+        isDarkTheme = dark
+        UserApiKeyAuthManager.updateUiPrefs(
+            fontScale = fontScale,
+            darkTheme = dark,
+            enableAnimations = enableAnimations
+        )
+    }
+
+    fun updateFontScalePref(scale: Float) {
+        fontScale = scale
+        UserApiKeyAuthManager.updateUiPrefs(
+            fontScale = scale,
+            darkTheme = isDarkTheme,
+            enableAnimations = enableAnimations
+        )
+    }
+
+    fun updateAnimationsPref(enabled: Boolean) {
+        enableAnimations = enabled
+        UserApiKeyAuthManager.updateUiPrefs(
+            fontScale = fontScale,
+            darkTheme = isDarkTheme,
+            enableAnimations = enabled
+        )
+    }
 
     var currentTab by remember { mutableStateOf(MainTab.HOME) }
     var selectedCategoryId by remember { mutableStateOf<Int?>(null) }
+    var selectedTag by remember { mutableStateOf<String?>(null) }
     var currentSort by remember { mutableStateOf(FeedSortFilter.LATEST) }
+    var currentTopPeriod by remember { mutableStateOf(TopPeriodFilter.DAILY) }
     var searchQuery by remember { mutableStateOf("") }
-    var enableAnimations by remember { mutableStateOf(true) }
 
     var topics by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
     var currentPage by remember { mutableStateOf(0) }
+    var hasMoreTopics by remember { mutableStateOf(true) }
     var isLoadingTopics by remember { mutableStateOf(true) }
     var isLoadingMoreTopics by remember { mutableStateOf(false) }
     var feedError by remember { mutableStateOf<String?>(null) }
@@ -606,18 +911,28 @@ fun LinDoApp() {
         }
     }
 
-    fun loadTopics(sort: FeedSortFilter = currentSort, categoryId: Int? = selectedCategoryId) {
+    fun loadTopics(
+        sort: FeedSortFilter = currentSort,
+        categoryId: Int? = selectedCategoryId,
+        tag: String? = selectedTag,
+        topPeriod: TopPeriodFilter = currentTopPeriod
+    ) {
         scope.launch {
             isLoadingTopics = true
+            isLoadingMoreTopics = false
             feedError = null
             currentPage = 0
+            hasMoreTopics = true
             val fetched = LinuxDoRepository.fetchTopics(
                 path = sort.apiPath,
                 categoryId = categoryId,
-                page = 0
+                page = 0,
+                tag = tag,
+                topPeriod = if (sort == FeedSortFilter.TOP) topPeriod.apiPeriod else null
             )
             if (fetched.isNotEmpty()) {
                 topics = fetched
+                hasMoreTopics = fetched.size >= 15
                 if (activeTopicSummary == null) {
                     val first = fetched.firstOrNull { !it.pinned } ?: fetched.first()
                     activeTopicSummary = first
@@ -628,28 +943,36 @@ fun LinDoApp() {
                 feedListState.scrollToItem(0)
             } else if (topics.isEmpty()) {
                 feedError = "网络连接异常，请轻触重试"
+                hasMoreTopics = false
             }
             isLoadingTopics = false
         }
     }
 
     fun loadNextPageTopics() {
-        if (isLoadingTopics || isLoadingMoreTopics) return
+        if (isLoadingTopics || isLoadingMoreTopics || !hasMoreTopics) return
         scope.launch {
             isLoadingMoreTopics = true
             val nextPage = currentPage + 1
             val more = LinuxDoRepository.fetchTopics(
                 path = currentSort.apiPath,
                 categoryId = selectedCategoryId,
-                page = nextPage
+                page = nextPage,
+                tag = selectedTag,
+                topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null
             )
             if (more.isNotEmpty()) {
-                currentPage = nextPage
                 val existingIds = topics.map { it.id }.toSet()
                 val uniqueNew = more.filterNot { it.id in existingIds }
                 if (uniqueNew.isNotEmpty()) {
+                    currentPage = nextPage
                     topics = topics + uniqueNew
+                    hasMoreTopics = more.size >= 10
+                } else {
+                    hasMoreTopics = false
                 }
+            } else {
+                hasMoreTopics = false
             }
             isLoadingMoreTopics = false
         }
@@ -814,9 +1137,18 @@ fun LinDoApp() {
         }
     }
 
+    val baseDensity = LocalDensity.current
+    val scaledDensity = remember(baseDensity, fontScale) {
+        Density(
+            density = baseDensity.density,
+            fontScale = baseDensity.fontScale * fontScale
+        )
+    }
+
     CompositionLocalProvider(
         LocalPalette provides palette,
-        LocalFontScale provides fontScale
+        LocalFontScale provides fontScale,
+        LocalDensity provides scaledDensity
     ) {
         MaterialTheme(
             colorScheme = if (isDarkTheme) DarkMaterialScheme else LightMaterialScheme
@@ -849,7 +1181,7 @@ fun LinDoApp() {
                                 currentTab = currentTab,
                                 isDarkTheme = isDarkTheme,
                                 onSelectTab = { currentTab = it },
-                                onToggleTheme = { isDarkTheme = !isDarkTheme }
+                                onToggleTheme = { updateThemePref(!isDarkTheme) }
                             )
 
                             when (currentTab) {
@@ -864,12 +1196,16 @@ fun LinDoApp() {
                                             listState = feedListState,
                                             selectedTopicId = activeTopicSummary?.id,
                                             selectedCategoryId = selectedCategoryId,
+                                            selectedTag = selectedTag,
                                             currentSort = currentSort,
+                                            currentTopPeriod = currentTopPeriod,
                                             searchQuery = searchQuery,
                                             isLoading = isLoadingTopics,
                                             isLoadingMore = isLoadingMoreTopics,
+                                            hasMoreTopics = hasMoreTopics,
                                             errorMessage = feedError,
                                             enableAnimations = enableAnimations,
+                                            fontScale = fontScale,
                                             isAuthorized = isAuthorized,
                                             currentUser = currentUser,
                                             unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
@@ -886,15 +1222,26 @@ fun LinDoApp() {
                                                 if (isAuthorized) showNotificationsSheet = true
                                                 else activeWebLoginUrl = "https://linux.do/login"
                                             },
+                                            onToggleCompactMode = {
+                                                updateFontScalePref(if (fontScale < 0.96f) 1.0f else 0.92f)
+                                            },
                                             onSelectCategory = { catId ->
                                                 selectedCategoryId = catId
-                                                loadTopics(currentSort, catId)
+                                                loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
+                                            },
+                                            onSelectTag = { tag ->
+                                                selectedTag = tag
+                                                loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
                                             },
                                             onSelectSort = { sort ->
                                                 currentSort = sort
-                                                loadTopics(sort, selectedCategoryId)
+                                                loadTopics(sort, selectedCategoryId, selectedTag, currentTopPeriod)
                                             },
-                                            onRefresh = { loadTopics(currentSort, selectedCategoryId) },
+                                            onSelectTopPeriod = { period ->
+                                                currentTopPeriod = period
+                                                loadTopics(FeedSortFilter.TOP, selectedCategoryId, selectedTag, period)
+                                            },
+                                            onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod) },
                                             onLoadMore = { loadNextPageTopics() },
                                             onSelectTopic = { openTopic(it) },
                                             onAvatarClick = { currentTab = MainTab.PROFILE }
@@ -917,6 +1264,10 @@ fun LinDoApp() {
                                             onDetailUpdated = { activeTopicDetail = it },
                                             onInspectBadge = { inspectedBadge = it },
                                             onInspectUser = { inspectedUsername = it },
+                                            onSelectTag = { tag ->
+                                                selectedTag = tag
+                                                loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
+                                            },
                                             onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" }
                                         )
                                     }
@@ -928,7 +1279,7 @@ fun LinDoApp() {
                                         onSelectCategory = { catId ->
                                             selectedCategoryId = catId
                                             currentTab = MainTab.HOME
-                                            loadTopics(currentSort, catId)
+                                            loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
                                         },
                                         onSelectTopic = { topic ->
                                             currentTab = MainTab.HOME
@@ -947,9 +1298,9 @@ fun LinDoApp() {
                                         currentUser = currentUser,
                                         fullProfile = fullUserProfile,
                                         onRefreshProfile = { syncUserProfile() },
-                                        onToggleDark = { isDarkTheme = !isDarkTheme },
-                                        onChangeFontScale = { fontScale = it },
-                                        onToggleAnimations = { enableAnimations = !enableAnimations },
+                                        onToggleDark = { updateThemePref(!isDarkTheme) },
+                                        onChangeFontScale = { updateFontScalePref(it) },
+                                        onToggleAnimations = { updateAnimationsPref(!enableAnimations) },
                                         onOpenNotifications = { showNotificationsSheet = true },
                                         onOpenActivities = { showActivitiesSheet = true },
                                         onOpenBookmarks = { showBookmarksSheet = true },
@@ -988,6 +1339,11 @@ fun LinDoApp() {
                                 onDetailUpdated = { activeTopicDetail = it },
                                 onInspectBadge = { inspectedBadge = it },
                                 onInspectUser = { inspectedUsername = it },
+                                onSelectTag = { tag ->
+                                    mobileShowingDetail = false
+                                    selectedTag = tag
+                                    loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
+                                },
                                 onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" }
                             )
                         } else {
@@ -1004,12 +1360,16 @@ fun LinDoApp() {
                                                 listState = feedListState,
                                                 selectedTopicId = null,
                                                 selectedCategoryId = selectedCategoryId,
+                                                selectedTag = selectedTag,
                                                 currentSort = currentSort,
+                                                currentTopPeriod = currentTopPeriod,
                                                 searchQuery = searchQuery,
                                                 isLoading = isLoadingTopics,
                                                 isLoadingMore = isLoadingMoreTopics,
+                                                hasMoreTopics = hasMoreTopics,
                                                 errorMessage = feedError,
                                                 enableAnimations = enableAnimations,
+                                                fontScale = fontScale,
                                                 isAuthorized = isAuthorized,
                                                 currentUser = currentUser,
                                                 unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
@@ -1026,15 +1386,26 @@ fun LinDoApp() {
                                                     if (isAuthorized) showNotificationsSheet = true
                                                     else activeWebLoginUrl = "https://linux.do/login"
                                                 },
+                                                onToggleCompactMode = {
+                                                    updateFontScalePref(if (fontScale < 0.96f) 1.0f else 0.92f)
+                                                },
                                                 onSelectCategory = { catId ->
                                                     selectedCategoryId = catId
-                                                    loadTopics(currentSort, catId)
+                                                    loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
+                                                },
+                                                onSelectTag = { tag ->
+                                                    selectedTag = tag
+                                                    loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
                                                 },
                                                 onSelectSort = { sort ->
                                                     currentSort = sort
-                                                    loadTopics(sort, selectedCategoryId)
+                                                    loadTopics(sort, selectedCategoryId, selectedTag, currentTopPeriod)
                                                 },
-                                                onRefresh = { loadTopics(currentSort, selectedCategoryId) },
+                                                onSelectTopPeriod = { period ->
+                                                    currentTopPeriod = period
+                                                    loadTopics(FeedSortFilter.TOP, selectedCategoryId, selectedTag, period)
+                                                },
+                                                onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod) },
                                                 onLoadMore = { loadNextPageTopics() },
                                                 onSelectTopic = { openTopic(it) },
                                                 onAvatarClick = { currentTab = MainTab.PROFILE }
@@ -1047,7 +1418,7 @@ fun LinDoApp() {
                                                 onSelectCategory = { catId ->
                                                     selectedCategoryId = catId
                                                     currentTab = MainTab.HOME
-                                                    loadTopics(currentSort, catId)
+                                                    loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
                                                 },
                                                 onSelectTopic = { topic ->
                                                     currentTab = MainTab.HOME
@@ -1066,9 +1437,9 @@ fun LinDoApp() {
                                                 currentUser = currentUser,
                                                 fullProfile = fullUserProfile,
                                                 onRefreshProfile = { syncUserProfile() },
-                                                onToggleDark = { isDarkTheme = !isDarkTheme },
-                                                onChangeFontScale = { fontScale = it },
-                                                onToggleAnimations = { enableAnimations = !enableAnimations },
+                                                onToggleDark = { updateThemePref(!isDarkTheme) },
+                                                onChangeFontScale = { updateFontScalePref(it) },
+                                                onToggleAnimations = { updateAnimationsPref(!enableAnimations) },
                                                 onOpenNotifications = { showNotificationsSheet = true },
                                                 onOpenActivities = { showActivitiesSheet = true },
                                                 onOpenBookmarks = { showBookmarksSheet = true },
@@ -1444,12 +1815,16 @@ private fun CommunityHomeFeedPane(
     listState: androidx.compose.foundation.lazy.LazyListState,
     selectedTopicId: Int?,
     selectedCategoryId: Int?,
+    selectedTag: String? = null,
     currentSort: FeedSortFilter,
+    currentTopPeriod: TopPeriodFilter = TopPeriodFilter.DAILY,
     searchQuery: String,
     isLoading: Boolean,
     isLoadingMore: Boolean = false,
+    hasMoreTopics: Boolean = true,
     errorMessage: String?,
     enableAnimations: Boolean,
+    fontScale: Float = 1.0f,
     isAuthorized: Boolean,
     currentUser: AuthenticatedUserProfile?,
     unreadNotificationCount: Int = 0,
@@ -1458,16 +1833,20 @@ private fun CommunityHomeFeedPane(
     onOpenGlobalSearch: () -> Unit,
     onOpenCreateTopic: () -> Unit,
     onOpenNotifications: () -> Unit,
+    onToggleCompactMode: () -> Unit = {},
     onSelectCategory: (Int?) -> Unit,
+    onSelectTag: (String?) -> Unit = {},
     onSelectSort: (FeedSortFilter) -> Unit,
+    onSelectTopPeriod: (TopPeriodFilter) -> Unit = {},
     onRefresh: () -> Unit,
     onLoadMore: () -> Unit,
     onSelectTopic: (TopicSummary) -> Unit,
     onAvatarClick: () -> Unit
 ) {
     val palette = LocalPalette.current
-    val pinnedTopics = remember(topics, selectedCategoryId, searchQuery) {
-        if (selectedCategoryId == null && searchQuery.isBlank()) {
+    val isCompact = fontScale < 0.96f
+    val pinnedTopics = remember(topics, selectedCategoryId, selectedTag, searchQuery) {
+        if (selectedCategoryId == null && selectedTag == null && searchQuery.isBlank() && currentSort == FeedSortFilter.LATEST) {
             topics.filter { it.pinned }
         } else {
             emptyList()
@@ -1477,11 +1856,22 @@ private fun CommunityHomeFeedPane(
         if (pinnedTopics.isEmpty()) topics else topics.filterNot { it.pinned }
     }
 
-    // 滚动触底自动加载下一页
-    val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-    val totalItems = listState.layoutInfo.totalItemsCount
-    LaunchedEffect(lastVisibleIndex, totalItems, isLoading, isLoadingMore) {
-        if (totalItems > 6 && lastVisibleIndex >= totalItems - 3 && !isLoading && !isLoadingMore && searchQuery.isBlank()) {
+    // 滚动触底自动加载下一页（使用 derivedStateOf 避免滚动每帧重组与死循环）
+    val shouldLoadMore by remember(isLoading, isLoadingMore, hasMoreTopics, searchQuery) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val total = info.totalItemsCount
+            val lastIdx = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            total > 4 &&
+                lastIdx >= total - 3 &&
+                !isLoading &&
+                !isLoadingMore &&
+                hasMoreTopics &&
+                searchQuery.isBlank()
+        }
+    }
+    LaunchedEffect(shouldLoadMore, regularTopics.size) {
+        if (shouldLoadMore) {
             onLoadMore()
         }
     }
@@ -1701,7 +2091,7 @@ private fun CommunityHomeFeedPane(
                 }
             }
 
-            // 2. 官方 4 大流切换 + 板块快筛栏（紧凑一体式横滑）
+            // 2. 官方 5 大流切换（最新/未读/新帖/热门/已读）+ 紧凑模式快切 + 板块快筛栏
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1710,7 +2100,7 @@ private fun CommunityHomeFeedPane(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 官方 4 大流分段器：最新 / 未读 / 新帖 / 热门
+                // 官方 5 大流分段器：最新 / 未读 / 新帖 / 热门 / 已读
                 Row(
                     modifier = Modifier
                         .height(31.dp)
@@ -1731,12 +2121,12 @@ private fun CommunityHomeFeedPane(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = null
                                 ) { onSelectSort(sort) }
-                                .padding(horizontal = 9.dp),
+                                .padding(horizontal = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = sort.label,
-                                fontSize = 12.sp,
+                                fontSize = 11.8.sp,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                                 color = if (selected) palette.onTonalPill else palette.inkSecondary,
                                 maxLines = 1
@@ -1744,6 +2134,14 @@ private fun CommunityHomeFeedPane(
                         }
                     }
                 }
+
+                // 一键切换紧凑/标准视图密度胶囊
+                GoogleM3FilterPill(
+                    label = if (isCompact) "紧凑 ✓" else "紧凑",
+                    dotColor = if (isCompact) palette.brandGold else null,
+                    selected = isCompact,
+                    onClick = onToggleCompactMode
+                )
 
                 GoogleM3FilterPill(
                     label = "全部板块",
@@ -1769,19 +2167,70 @@ private fun CommunityHomeFeedPane(
                 }
             }
 
-            if (isLoading) {
-                LinearProgressIndicator(
+            // 官方 Top 热门榜时间维度切换器 + 当前激活的 #Tag 筛选条
+            if (currentSort == FeedSortFilter.TOP || selectedTag != null) {
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp)
-                        .height(1.5.dp),
-                    color = palette.brandGold,
-                    trackColor = Color.Transparent
+                        .horizontalScroll(rememberScrollState())
+                        .padding(start = 12.dp, end = 12.dp, bottom = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (selectedTag != null) {
+                        Row(
+                            modifier = Modifier
+                                .height(26.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(palette.tonalPill)
+                                .clickable { onSelectTag(null) }
+                                .padding(horizontal = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "#$selectedTag ×",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.brandGold
+                            )
+                        }
+                    }
+
+                    if (currentSort == FeedSortFilter.TOP) {
+                        TopPeriodFilter.entries.forEach { period ->
+                            val selected = currentTopPeriod == period
+                            Box(
+                                modifier = Modifier
+                                    .height(26.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) palette.tonalPill else palette.cardSurface)
+                                    .border(0.5.dp, if (selected) palette.tonalPill else palette.hairline, RoundedCornerShape(8.dp))
+                                    .clickable { onSelectTopPeriod(period) }
+                                    .padding(horizontal = 10.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = period.label,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                    color = if (selected) palette.onTonalPill else palette.inkSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (isLoading && topics.isNotEmpty()) {
+                LinearLuminanceBar(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
                 )
             }
 
-            // 3. 话题流（Linear 0.5dp 描边高对比卡片 + 自动加载下一页）
-            if (topics.isEmpty() && !isLoading) {
+            // 3. 话题流（Linear 骨架屏 + 0.5dp 描边高对比卡片 + 紧凑模式高密度支持 + 优雅呼吸分页底栏）
+            if (isLoading && topics.isEmpty()) {
+                LinearShimmerTopicSkeletonList(isCompact = isCompact)
+            } else if (topics.isEmpty() && !isLoading) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -1821,7 +2270,7 @@ private fun CommunityHomeFeedPane(
                         top = 4.dp,
                         bottom = 24.dp
                     ),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(if (isCompact) 5.dp else 8.dp)
                 ) {
                     // 置顶公告容器（Linear 微描边 + 琥珀金置顶徽标）
                     if (pinnedTopics.isNotEmpty()) {
@@ -1829,11 +2278,11 @@ private fun CommunityHomeFeedPane(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
+                                    .clip(RoundedCornerShape(if (isCompact) 12.dp else 14.dp))
                                     .background(palette.cardSurface)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(14.dp))
-                                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(if (isCompact) 12.dp else 14.dp))
+                                    .padding(horizontal = 12.dp, vertical = if (isCompact) 7.dp else 9.dp),
+                                verticalArrangement = Arrangement.spacedBy(if (isCompact) 4.dp else 6.dp)
                             ) {
                                 pinnedTopics.take(2).forEach { pinned ->
                                     Row(
@@ -1883,35 +2332,21 @@ private fun CommunityHomeFeedPane(
                         CommunityTopicItem(
                             topic = topic,
                             isSelected = topic.id == selectedTopicId,
+                            isCompact = isCompact,
                             enableAnimations = enableAnimations,
+                            onSelectTag = { tag -> onSelectTag(tag) },
                             onClick = { onSelectTopic(topic) }
                         )
                     }
 
-                    // 底部分页加载更多按钮
+                    // 底部 Linear 三点波浪呼吸脉冲分页加载栏
                     item(key = "load_more_footer") {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 8.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(palette.cardSurface)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
-                                    .clickable(enabled = !isLoadingMore) { onLoadMore() }
-                                    .padding(horizontal = 18.dp, vertical = 8.dp)
-                            ) {
-                                Text(
-                                    text = if (isLoadingMore) "正在加载更多话题..." else "加载更多话题",
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkSecondary
-                                )
-                            }
-                        }
+                        LinearPulseLoadingFooter(
+                            isLoadingMore = isLoadingMore,
+                            hasMore = hasMoreTopics,
+                            loadedCount = regularTopics.size,
+                            onLoadMore = onLoadMore
+                        )
                     }
                 }
             }
@@ -1962,15 +2397,17 @@ private fun GoogleM3FilterPill(
 }
 
 /**
- * Linear / Threads 风格极简高对比社区卡片：
- * - `16.dp` 紧凑圆角 + `0.5.dp` `#E4E4E7` 锋利描边
- * - 清晰的作者、板块、标题、标签与互动计数层级
+ * Linear / Threads 风格极简高对比社区卡片（原生支持标准/紧凑双密度视图与标签快筛）：
+ * - 标准模式：宽裕呼吸留白 + 摘要预览 + 3 人头像叠放
+ * - 紧凑模式：高信息密度（单屏容纳提升 45%），收起摘要冗余，行距与内边距精密收敛
  */
 @Composable
 private fun CommunityTopicItem(
     topic: TopicSummary,
     isSelected: Boolean,
+    isCompact: Boolean = false,
     enableAnimations: Boolean,
+    onSelectTag: (String) -> Unit = {},
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -1980,15 +2417,19 @@ private fun CommunityTopicItem(
         LinuxDoSiteRules.parseHexColor(topic.categoryColorHex)
     }
     val borderColor = if (isSelected) palette.inkPrimary else palette.hairline
+    val cornerRadius = if (isCompact) 12.dp else 16.dp
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(cornerRadius))
             .background(palette.cardSurface)
-            .border(if (isSelected) 1.dp else 0.5.dp, borderColor, RoundedCornerShape(16.dp))
+            .border(if (isSelected) 1.dp else 0.5.dp, borderColor, RoundedCornerShape(cornerRadius))
             .clickable(onClick = onClick)
-            .padding(horizontal = 15.dp, vertical = 14.dp)
+            .padding(
+                horizontal = if (isCompact) 12.dp else 15.dp,
+                vertical = if (isCompact) 9.dp else 14.dp
+            )
     ) {
         // 第一行：作者信息 + 右侧板块柔色胶囊
         Row(
@@ -2001,15 +2442,15 @@ private fun CommunityTopicItem(
                 animatedAvatar = op.animatedAvatar,
                 primaryGroupName = op.primaryGroupName,
                 flair = null,
-                size = 24.dp,
+                size = if (isCompact) 20.dp else 24.dp,
                 enableAnimations = enableAnimations
             )
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(if (isCompact) 6.dp else 8.dp))
 
             Text(
                 text = authorDisplay,
-                fontSize = 13.5.sp,
+                fontSize = if (isCompact) 12.5.sp else 13.5.sp,
                 fontWeight = FontWeight.Medium,
                 color = palette.inkPrimary,
                 maxLines = 1,
@@ -2019,7 +2460,7 @@ private fun CommunityTopicItem(
             if (topic.lastPostedAt.isNotBlank()) {
                 Text(
                     text = " · ${topic.lastPostedAt}",
-                    fontSize = 12.5.sp,
+                    fontSize = if (isCompact) 11.5.sp else 12.5.sp,
                     color = palette.inkTertiary,
                     maxLines = 1
                 )
@@ -2029,43 +2470,45 @@ private fun CommunityTopicItem(
 
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(7.dp))
                     .background(catColor.copy(alpha = 0.11f))
-                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                    .padding(horizontal = if (isCompact) 6.5.dp else 8.dp, vertical = if (isCompact) 2.dp else 3.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(5.5.dp)
+                        .size(5.dp)
                         .clip(CircleShape)
                         .background(catColor)
                 )
-                Spacer(modifier = Modifier.width(5.dp))
+                Spacer(modifier = Modifier.width(4.5.dp))
                 Text(
                     text = topic.categoryName,
-                    fontSize = 11.sp,
+                    fontSize = if (isCompact) 10.5.sp else 11.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = catColor
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(9.dp))
+        Spacer(modifier = Modifier.height(if (isCompact) 5.dp else 9.dp))
 
         // 第二行：标题
         Text(
             text = topic.title,
-            fontSize = 16.5.sp,
+            fontSize = if (isCompact) 14.8.sp else 16.5.sp,
             fontWeight = FontWeight.SemiBold,
-            lineHeight = 23.5.sp,
+            lineHeight = if (isCompact) 20.5.sp else 23.5.sp,
             letterSpacing = (-0.2).sp,
             color = palette.inkPrimary,
-            maxLines = 2,
+            maxLines = if (isCompact) 1 else 2,
             overflow = TextOverflow.Ellipsis
         )
 
-        // 若存在摘要则展示单行预览
-        val cleanExcerpt = topic.excerpt?.trim()?.takeIf { it.isNotEmpty() && it != topic.title }
+        // 标准模式下若存在摘要则展示单行预览；紧凑模式下收起摘要以最大化首屏密度
+        val cleanExcerpt = if (!isCompact) {
+            topic.excerpt?.trim()?.takeIf { it.isNotEmpty() && it != topic.title }
+        } else null
         if (cleanExcerpt != null) {
             Spacer(modifier = Modifier.height(5.dp))
             Text(
@@ -2078,9 +2521,9 @@ private fun CommunityTopicItem(
             )
         }
 
-        Spacer(modifier = Modifier.height(11.dp))
+        Spacer(modifier = Modifier.height(if (isCompact) 6.dp else 11.dp))
 
-        // 第三行：Tonal 标签胶囊 + 参与者微缩头像叠放 + 评论/阅读数
+        // 第三行：可点击 #Tag 标签胶囊 + 参与者微缩头像叠放 + 评论/阅读数
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -2088,19 +2531,20 @@ private fun CommunityTopicItem(
             if (topic.tags.isNotEmpty()) {
                 Row(
                     modifier = Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    topic.tags.take(3).forEach { tag ->
+                    topic.tags.take(if (isCompact) 2 else 3).forEach { tag ->
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(palette.canvas)
-                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                                .clickable { onSelectTag(tag) }
+                                .padding(horizontal = 6.5.dp, vertical = 2.dp)
                         ) {
                             Text(
                                 text = "#$tag",
-                                fontSize = 11.5.sp,
+                                fontSize = if (isCompact) 10.8.sp else 11.5.sp,
                                 color = palette.inkSecondary,
                                 maxLines = 1
                             )
@@ -2112,7 +2556,7 @@ private fun CommunityTopicItem(
             }
 
             // 参与者微缩头像叠放（带纯白描边环）
-            val participants = topic.participantAvatars.take(3)
+            val participants = topic.participantAvatars.take(if (isCompact) 2 else 3)
             if (participants.size > 1) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -2130,7 +2574,7 @@ private fun CommunityTopicItem(
                                 username = user.username,
                                 avatarTemplate = user.avatarTemplate,
                                 animatedAvatar = null,
-                                size = 17.dp,
+                                size = if (isCompact) 15.dp else 17.dp,
                                 enableAnimations = false
                             )
                         }
@@ -2149,7 +2593,7 @@ private fun CommunityTopicItem(
 
             Text(
                 text = metricsText,
-                fontSize = 12.sp,
+                fontSize = if (isCompact) 11.2.sp else 12.sp,
                 fontWeight = FontWeight.Medium,
                 color = palette.inkTertiary
             )
@@ -2184,10 +2628,12 @@ private fun CommunityTopicReaderPane(
     onDetailUpdated: (TopicDetailModel) -> Unit,
     onInspectBadge: (GrantedBadge) -> Unit,
     onInspectUser: (String) -> Unit,
+    onSelectTag: (String) -> Unit = {},
     onRequestLogin: () -> Unit
 ) {
     val palette = LocalPalette.current
     val fontScale = LocalFontScale.current
+    val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
     if (summary == null) {
@@ -2216,12 +2662,19 @@ private fun CommunityTopicReaderPane(
     var onlyOpFilter by remember(summary.id) { mutableStateOf(false) }
     var notificationLevel by remember(summary.id) { mutableStateOf(1) } // 1=常规, 2=跟踪, 3=关注, 0=免扰
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
+    var copiedShareLink by remember(summary.id) { mutableStateOf(false) }
+    var showFloorJumpBar by remember(summary.id) { mutableStateOf(false) }
 
     // 回复编辑器状态
     var showReplySheet by remember(summary.id) { mutableStateOf(false) }
     var replyTargetPostNumber by remember(summary.id) { mutableStateOf<Int?>(null) }
     var replyTargetUsername by remember(summary.id) { mutableStateOf<String?>(null) }
     var replyInitialQuote by remember(summary.id) { mutableStateOf("") }
+
+    // 编辑本人已发楼层状态
+    var editingPost by remember(summary.id) { mutableStateOf<PostItemModel?>(null) }
+    var editPostRawText by remember(summary.id) { mutableStateOf("") }
+    var isSavingPostEdit by remember(summary.id) { mutableStateOf(false) }
 
     val catColor = remember(summary.categoryColorHex) {
         LinuxDoSiteRules.parseHexColor(summary.categoryColorHex)
@@ -2254,8 +2707,12 @@ private fun CommunityTopicReaderPane(
         }
     }
 
-    // 当滚动接近当前已加载楼层末尾时，自动拉取下一批 20 条评论楼层
-    val lastVisibleFloorIdx = readerListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+    // 当滚动接近当前已加载楼层末尾时，自动拉取下一批 20 条评论楼层（derivedStateOf 防滚动每帧重组）
+    val lastVisibleFloorIdx by remember {
+        derivedStateOf {
+            readerListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        }
+    }
     LaunchedEffect(lastVisibleFloorIdx, posts.size, remainingPostIds.size, isLoadingMorePosts) {
         if (posts.isNotEmpty() && remainingPostIds.isNotEmpty() && !isLoadingMorePosts && lastVisibleFloorIdx >= posts.size - 2) {
             loadMoreFloorBatch(20)
@@ -2305,7 +2762,7 @@ private fun CommunityTopicReaderPane(
             .background(palette.canvas)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        // 1. Linear 风格紧凑快捷操作顶栏（返回 + 楼主名片入口 + 只看楼主 + 订阅 + 书签 + 刷新）
+        // 1. Linear 风格紧凑快捷操作顶栏（返回 + 楼主名片入口 + 只看楼主 + 订阅 + 书签 + 复制链接 + 刷新）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2384,19 +2841,19 @@ private fun CommunityTopicReaderPane(
                             onDetailUpdated(filtered)
                         }
                     }
-                    .padding(horizontal = 9.dp),
+                    .padding(horizontal = 8.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = if (onlyOpFilter) "全部楼层" else "只看楼主",
-                    fontSize = 11.5.sp,
+                    fontSize = 11.2.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = if (onlyOpFilter) palette.onTonalPill else palette.inkSecondary,
                     maxLines = 1
                 )
             }
 
-            Spacer(modifier = Modifier.width(5.dp))
+            Spacer(modifier = Modifier.width(4.dp))
 
             // 快捷操作 2：话题订阅状态切换 (常规 -> 关注 -> 免扰)
             Box(
@@ -2415,7 +2872,7 @@ private fun CommunityTopicReaderPane(
                             LinuxDoRepository.setTopicNotificationLevel(summary.id, nextLevel)
                         }
                     }
-                    .padding(horizontal = 8.dp),
+                    .padding(horizontal = 7.5.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -2424,14 +2881,14 @@ private fun CommunityTopicReaderPane(
                         0 -> "免扰"
                         else -> "订阅"
                     },
-                    fontSize = 11.5.sp,
+                    fontSize = 11.2.sp,
                     fontWeight = FontWeight.Medium,
                     color = if (notificationLevel == 3) palette.brandGold else palette.inkSecondary,
                     maxLines = 1
                 )
             }
 
-            Spacer(modifier = Modifier.width(5.dp))
+            Spacer(modifier = Modifier.width(4.dp))
 
             // 快捷操作 3：收藏书签
             TonalCircleIconButton(
@@ -2451,7 +2908,20 @@ private fun CommunityTopicReaderPane(
                 }
             )
 
-            Spacer(modifier = Modifier.width(5.dp))
+            Spacer(modifier = Modifier.width(4.dp))
+
+            // 快捷操作 4：一键复制官方帖子链接
+            TonalCircleIconButton(
+                icon = if (copiedShareLink) Icons.Default.Check else Icons.Default.Share,
+                contentDescription = "复制链接",
+                tint = if (copiedShareLink) palette.brandGold else palette.inkSecondary,
+                onClick = {
+                    clipboardManager.setText(AnnotatedString("https://linux.do/t/topic/${summary.id}"))
+                    copiedShareLink = true
+                }
+            )
+
+            Spacer(modifier = Modifier.width(4.dp))
 
             TonalCircleIconButton(
                 icon = Icons.Default.Refresh,
@@ -2462,13 +2932,8 @@ private fun CommunityTopicReaderPane(
         }
 
         if (isLoading || isLoadingMorePosts) {
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .height(1.5.dp),
-                color = palette.brandGold,
-                trackColor = Color.Transparent
+            LinearLuminanceBar(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
             )
         }
 
@@ -2515,6 +2980,7 @@ private fun CommunityTopicReaderPane(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(6.dp))
                                         .background(palette.subtleSurface)
+                                        .clickable { onSelectTag(tag) }
                                         .padding(horizontal = 7.dp, vertical = 2.5.dp)
                                 ) {
                                     Text(
@@ -2583,6 +3049,35 @@ private fun CommunityTopicReaderPane(
                     enableAnimations = enableAnimations,
                     onInspectBadge = onInspectBadge,
                     onInspectUser = onInspectUser,
+                    onJumpToFloorNumber = { targetPostNum ->
+                        val targetIdx = posts.indexOfFirst { it.postNumber == targetPostNum }
+                        if (targetIdx >= 0) {
+                            scope.launch {
+                                readerListState.animateScrollToItem(targetIdx + 1)
+                            }
+                        }
+                    },
+                    onEditPost = { targetPost ->
+                        editingPost = targetPost
+                        editPostRawText = targetPost.cookedHtml
+                            .replace(Regex("<br\\s*/?>"), "\n")
+                            .replace(Regex("</p>"), "\n\n")
+                            .replace(Regex("<[^>]+>"), "")
+                            .trim()
+                    },
+                    onDeletePost = { targetPost ->
+                        scope.launch {
+                            val ok = LinuxDoRepository.deletePost(targetPost.id)
+                            if (ok && detail != null) {
+                                onDetailUpdated(
+                                    detail.copy(
+                                        posts = detail.posts.filterNot { it.id == targetPost.id },
+                                        postsCount = maxOf(1, detail.postsCount - 1)
+                                    )
+                                )
+                            }
+                        }
+                    },
                     onReplyFloor = { targetPost ->
                         if (!UserApiKeyAuthManager.isAuthorized()) {
                             onRequestLogin()
@@ -2611,45 +3106,89 @@ private fun CommunityTopicReaderPane(
                 )
             }
 
-            // 剩余未加载楼层的快捷加载条（支持分批加载与一键加载全部）
+            // 剩余未加载楼层的优雅呼吸脉冲加载条
             if (remainingPostIds.isNotEmpty()) {
                 item(key = "load_more_posts_${remainingPostIds.size}") {
-                    Row(
+                    LinearPulseLoadingFooter(
+                        isLoadingMore = isLoadingMorePosts,
+                        hasMore = true,
+                        loadedCount = posts.size,
+                        loadingText = "正在同步后续楼层 (${posts.size}/$totalFloorCount)",
+                        moreText = "加载后续评论 (剩余 ${remainingPostIds.size} 楼 · 已载入 ${posts.size}/$totalFloorCount)",
+                        onLoadMore = { loadMoreFloorBatch(20) }
+                    )
+                }
+            }
+        }
+
+        // 快捷楼层进度电梯条（点击底部楼层胶囊展开：首楼 / 25% / 50% / 75% / 末楼 / 加载全部未读楼层）
+        AnimatedVisibility(visible = showFloorJumpBar && posts.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.cardSurface)
+                    .border(0.5.dp, palette.hairline)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "快速跳转:",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.inkSecondary
+                )
+                val jumpTargets = listOf(
+                    "#1 首楼" to 0,
+                    "25%" to (posts.size / 4).coerceAtLeast(1),
+                    "50%" to (posts.size / 2).coerceAtLeast(1),
+                    "75%" to ((posts.size * 3) / 4).coerceAtLeast(1),
+                    "#${posts.size} 已载末楼" to posts.size
+                )
+                jumpTargets.forEach { (label, idx) ->
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(palette.subtleSurface)
+                            .clickable {
+                                showFloorJumpBar = false
+                                scope.launch {
+                                    readerListState.animateScrollToItem(idx.coerceIn(0, posts.size))
+                                }
+                            }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(42.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(palette.tonalPill)
-                                .clickable(enabled = !isLoadingMorePosts) {
-                                    loadMoreFloorBatch(20)
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = if (isLoadingMorePosts) {
-                                    "正在加载后续评论... (已载入 ${posts.size}/$totalFloorCount 楼)"
-                                } else {
-                                    "加载后续评论 (剩余 ${remainingPostIds.size} 楼 · 已载入 ${posts.size}/$totalFloorCount)"
-                                },
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.onTonalPill,
-                                maxLines = 1
-                            )
-                        }
+                        Text(
+                            text = label,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkPrimary
+                        )
+                    }
+                }
+                if (remainingPostIds.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(palette.tonalPill)
+                            .clickable(enabled = !isLoadingMorePosts) {
+                                loadMoreFloorBatch(50)
+                            }
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "+载入后续 ${minOf(50, remainingPostIds.size)} 楼",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.brandGold
+                        )
                     }
                 }
             }
         }
 
-        // 底部快捷回复栏 + 楼层回顶/置底导航
+        // 底部快捷回复栏 + 楼层电梯导航
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2701,36 +3240,30 @@ private fun CommunityTopicReaderPane(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                // 楼层进度与回顶快捷胶囊
+                // 楼层进度与电梯导航快捷胶囊
                 Row(
                     modifier = Modifier
                         .height(42.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(palette.subtleSurface)
+                        .background(if (showFloorJumpBar) palette.tonalPill else palette.subtleSurface)
                         .clickable {
-                            scope.launch {
-                                if (lastVisibleFloorIdx > 2) {
-                                    readerListState.animateScrollToItem(0)
-                                } else if (posts.isNotEmpty()) {
-                                    readerListState.animateScrollToItem(posts.size)
-                                }
-                            }
+                            showFloorJumpBar = !showFloorJumpBar
                         }
                         .padding(horizontal = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = if (lastVisibleFloorIdx > 2) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                        contentDescription = "楼层跳转",
+                        contentDescription = "楼层电梯",
                         modifier = Modifier.size(15.dp),
-                        tint = palette.inkSecondary
+                        tint = if (showFloorJumpBar) palette.brandGold else palette.inkSecondary
                     )
                     Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = "${posts.size}/$totalFloorCount",
                         fontSize = 11.5.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = palette.inkPrimary,
+                        color = if (showFloorJumpBar) palette.onTonalPill else palette.inkPrimary,
                         maxLines = 1
                     )
                 }
@@ -2761,6 +3294,100 @@ private fun CommunityTopicReaderPane(
                         modifier = Modifier.size(16.dp),
                         tint = palette.brandGold
                     )
+                }
+            }
+        }
+    }
+
+    // 编辑本人已发楼层弹窗
+    editingPost?.let { target ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.52f))
+                .clickable { if (!isSavingPostEdit) editingPost = null },
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(palette.cardSurface)
+                    .border(0.5.dp, palette.hairline, RoundedCornerShape(18.dp))
+                    .clickable(enabled = false) {}
+                    .padding(16.dp)
+            ) {
+                Text(
+                    text = "编辑第 #${target.postNumber} 楼内容",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                BasicTextField(
+                    value = editPostRawText,
+                    onValueChange = { editPostRawText = it },
+                    textStyle = TextStyle(
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                        color = palette.inkPrimary
+                    ),
+                    cursorBrush = SolidColor(palette.brandGold),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 120.dp, max = 260.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(palette.subtleSurface)
+                        .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
+                        .padding(12.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(palette.subtleSurface)
+                            .clickable(enabled = !isSavingPostEdit) { editingPost = null }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text("取消", fontSize = 13.sp, color = palette.inkSecondary)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(palette.tonalPill)
+                            .clickable(enabled = !isSavingPostEdit && editPostRawText.trim().length >= 5) {
+                                scope.launch {
+                                    isSavingPostEdit = true
+                                    val updatedPost = LinuxDoRepository.updatePost(
+                                        postId = target.id,
+                                        newRaw = editPostRawText.trim()
+                                    )
+                                    isSavingPostEdit = false
+                                    if (updatedPost != null && detail != null) {
+                                        val updatedList = detail.posts.map { p ->
+                                            if (p.id == target.id) p.copy(cookedHtml = updatedPost.cookedHtml) else p
+                                        }
+                                        onDetailUpdated(detail.copy(posts = updatedList))
+                                        editingPost = null
+                                    }
+                                }
+                            }
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = if (isSavingPostEdit) "保存中..." else "保存修改",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.brandGold
+                        )
+                    }
                 }
             }
         }
@@ -2825,7 +3452,9 @@ private fun TonalCircleIconButton(
  * Linear / Threads 风格单层楼卡片：
  * - 点击层主头像/昵称查看公开个人名片与统计
  * - 显示真实信任等级徽标 (`Lv.x`)、楼主标识、自定义头衔、已获徽章、楼号 `#N`
- * - 底部提供全套官方楼层快捷操作：真实点赞 + 多表情回应 (`❤️`, `👍`, `🎉`, `🔥`)、引用回复 (`引用`)、针对本楼回复 (`回复`)
+ * - 点击 `回复 #X` 直接跳转到对应被回复楼层
+ * - 代码块一键写入系统剪贴板
+ * - 本人发布的楼层支持「编辑 / 删除」，底部提供真实点赞 + 多表情回应 + 引用 + 回复
  */
 @Composable
 private fun CommunityPostFloor(
@@ -2835,16 +3464,24 @@ private fun CommunityPostFloor(
     enableAnimations: Boolean,
     onInspectBadge: (GrantedBadge) -> Unit,
     onInspectUser: (String) -> Unit,
+    onJumpToFloorNumber: (Int) -> Unit = {},
+    onEditPost: (PostItemModel) -> Unit = {},
+    onDeletePost: (PostItemModel) -> Unit = {},
     onReplyFloor: (PostItemModel) -> Unit,
     onQuoteFloor: (PostItemModel) -> Unit,
     onRequestLogin: () -> Unit
 ) {
     val palette = LocalPalette.current
+    val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var liked by remember(post.id, post.likedByMe) { mutableStateOf(post.likedByMe) }
     var likeCount by remember(post.id, post.likeCount) { mutableStateOf(post.likeCount) }
     var selectedEmoji by remember(post.id) { mutableStateOf<String?>(null) }
     val isOp = post.isTopicOwner || post.username.equals(opUsername, ignoreCase = true)
+    val isOwnPost = remember(post.username) {
+        val me = UserApiKeyAuthManager.currentUser?.username
+        !me.isNullOrBlank() && post.username.equals(me, ignoreCase = true)
+    }
 
     val astNodes = remember(post.id, post.cookedHtml) {
         DiscourseAstParser.parseOrGetCached(post.id, post.cookedHtml)
@@ -2975,18 +3612,19 @@ private fun CommunityPostFloor(
             }
         }
 
-        // 被回复楼层提示
+        // 被回复楼层提示（点击直接跳转到被回复的楼层）
         if (post.replyToPostNumber != null && post.replyToPostNumber > 0) {
             Spacer(modifier = Modifier.height(9.dp))
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(7.dp))
                     .background(palette.subtleSurface)
+                    .clickable { onJumpToFloorNumber(post.replyToPostNumber) }
                     .padding(horizontal = 9.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "回复 #${post.replyToPostNumber}" +
+                    text = "↩ 回复 #${post.replyToPostNumber}" +
                         (post.replyToUsername?.let { " @$it" } ?: ""),
                     fontSize = 11.5.sp,
                     fontWeight = FontWeight.Medium,
@@ -3084,14 +3722,17 @@ private fun CommunityPostFloor(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(7.dp))
                                         .background(if (copied) palette.tonalPill else palette.cardSurface)
-                                        .clickable { copied = true }
+                                        .clickable {
+                                            clipboardManager.setText(AnnotatedString(node.code))
+                                            copied = true
+                                        }
                                         .padding(horizontal = 8.dp, vertical = 2.5.dp)
                                 ) {
                                     Text(
-                                        text = if (copied) "已复制" else "复制代码",
+                                        text = if (copied) "已复制 ✓" else "复制代码",
                                         fontSize = 10.5.sp,
                                         fontWeight = FontWeight.Medium,
-                                        color = if (copied) palette.onTonalPill else palette.inkPrimary
+                                        color = if (copied) palette.brandGold else palette.inkPrimary
                                     )
                                 }
                             }
@@ -3196,7 +3837,7 @@ private fun CommunityPostFloor(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // 3. 楼层底部快捷操作栏：真实点赞 + 多表情回应 + 引用本楼 + 回复本楼
+        // 3. 楼层底部快捷操作栏：真实点赞 + 多表情回应 + (本人可编辑/删除) + 引用本楼 + 回复本楼
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -3265,6 +3906,43 @@ private fun CommunityPostFloor(
             }
 
             Spacer(modifier = Modifier.weight(1f))
+
+            if (isOwnPost) {
+                Box(
+                    modifier = Modifier
+                        .height(30.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(palette.subtleSurface)
+                        .clickable { onEditPost(post) }
+                        .padding(horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "编辑",
+                        fontSize = 11.2.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkSecondary
+                    )
+                }
+                if (post.postNumber > 1) {
+                    Box(
+                        modifier = Modifier
+                            .height(30.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(palette.subtleSurface)
+                            .clickable { onDeletePost(post) }
+                            .padding(horizontal = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "删除",
+                            fontSize = 11.2.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color(0xFFEF4444)
+                        )
+                    }
+                }
+            }
 
             // 快捷操作：引用回复
             Row(

@@ -174,9 +174,18 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 4. 注册会话变更持久化钩子
+        // 4. 注册会话变更与 UI 偏好持久化钩子
         UserApiKeyAuthManager.onPersistSession = { _, _ ->
             persistSessionToDisk()
+        }
+        UserApiKeyAuthManager.onPersistUiPrefs = { fontScale, darkTheme, enableAnimations ->
+            runCatching {
+                prefs.edit()
+                    .putFloat("ui_font_scale", fontScale)
+                    .putBoolean("ui_dark_theme", darkTheme)
+                    .putBoolean("ui_enable_animations", enableAnimations)
+                    .apply()
+            }
         }
         UserApiKeyAuthManager.onLogoutPlatformClear = {
             runCatching {
@@ -407,6 +416,11 @@ class MainActivity : ComponentActivity() {
             val savedPendingPrivKey = prefs.getString("pending_rsa_priv_b64", null)
             val savedPendingNonce = prefs.getString("pending_rsa_nonce", null)
             UserApiKeyAuthManager.restorePendingPrivateKeyBase64(savedPendingPrivKey, savedPendingNonce)
+
+            // 恢复用户的阅读密度/字号、深色模式与动效偏好
+            UserApiKeyAuthManager.uiFontScale = prefs.getFloat("ui_font_scale", 1.0f)
+            UserApiKeyAuthManager.uiDarkTheme = prefs.getBoolean("ui_dark_theme", false)
+            UserApiKeyAuthManager.uiEnableAnimations = prefs.getBoolean("ui_enable_animations", true)
 
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)

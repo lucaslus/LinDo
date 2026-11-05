@@ -249,11 +249,28 @@ object UserApiKeyAuthManager {
     @Volatile
     var customUserAgent: String? = null
 
+    @Volatile
+    var uiFontScale: Float = 1.0f
+
+    @Volatile
+    var uiDarkTheme: Boolean = false
+
+    @Volatile
+    var uiEnableAnimations: Boolean = true
+
     var onAuthStateChanged: (() -> Unit)? = null
     var openExternalUrlLauncher: ((String) -> Unit)? = null
     var onLogoutPlatformClear: (() -> Unit)? = null
     var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
     var onPersistPendingKey: ((String?, String?) -> Unit)? = null
+    var onPersistUiPrefs: ((Float, Boolean, Boolean) -> Unit)? = null
+
+    fun updateUiPrefs(fontScale: Float, darkTheme: Boolean, enableAnimations: Boolean) {
+        uiFontScale = fontScale
+        uiDarkTheme = darkTheme
+        uiEnableAnimations = enableAnimations
+        onPersistUiPrefs?.invoke(fontScale, darkTheme, enableAnimations)
+    }
     var webViewJsonFetcher: (suspend (String) -> String?)? = null
     var webViewHttpExecutor: (suspend (
         url: String,
@@ -642,8 +659,8 @@ object LinuxDoRepository {
         return categoryLookup[categoryId] ?: ("技术讨论" to "0E76BD")
     }
 
-    private fun createClient(): HttpClient {
-        return HttpClient(OkHttp) {
+    private val sharedClient: HttpClient by lazy {
+        HttpClient(OkHttp) {
             engine {
                 config {
                     connectTimeout(6, TimeUnit.SECONDS)
@@ -677,8 +694,8 @@ object LinuxDoRepository {
 
     /**
      * 统一 HTTP 执行器：
-     * 1. 若平台已挂载 Chromium WebView 通道 (`webViewHttpExecutor`) 或 `webViewJsonFetcher`，优先或兜底走共享 TLS 指纹通道，天然携带 `cf_clearance`、`_t` 与 CSRF Token；
-     * 2. 同时支持 User-Api-Key 标头与 OkHttp 直连。
+     * 1. 若平台已挂载 Chromium WebView 通道 (`webViewHttpExecutor`) 或 `webViewJsonFetcher`，优先走共享 TLS 指纹通道，天然携带 `cf_clearance`、`_t` 与 CSRF Token；
+     * 2. 注意：当存在 `_t` 会话 Cookie 或走同源 WebView 时，绝不附加仅含 `one_time_password` 权限的 `User-Api-Key` 标头，避免 Discourse 因 Scope 限制返回 403 Forbidden！
      */
     private suspend fun executeHttp(
         url: String,
@@ -686,7 +703,8 @@ object LinuxDoRepository {
         formParams: Map<String, String>? = null,
         extraHeaders: Map<String, String> = emptyMap()
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
-        val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || CookieSentinel.resolveWinningCookies().containsKey("_t")
+        val hasWebCookie = CookieSentinel.resolveWinningCookies().containsKey("_t")
+        val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || hasWebCookie
         val presenceHeaders = UserPresenceService.buildPresenceHeaders(
             isBackgroundTimingRequest = false,
             isLoggedIn = isLoggedIn
@@ -695,11 +713,14 @@ object LinuxDoRepository {
             put("Accept", "application/json")
             put("X-Requested-With", "XMLHttpRequest")
             presenceHeaders.forEach { (k, v) -> put(k, v) }
-            UserApiKeyAuthManager.getApiKey()?.let { put("User-Api-Key", it) }
+            // 仅当不存在 Web 会话 Cookie 且无 WebView 执行器时才附带 User-Api-Key
+            if (!hasWebCookie && UserApiKeyAuthManager.webViewHttpExecutor == null) {
+                UserApiKeyAuthManager.getApiKey()?.let { put("User-Api-Key", it) }
+            }
             extraHeaders.forEach { (k, v) -> put(k, v) }
         }
 
-        // 写操作 (POST / PUT / DELETE) 或在 Android 端挂载了 WebView 执行器时优先走 Chromium WebView 同源会话（自带真实 CSRF Token 与 _t Cookie）
+        // 在 Android 端挂载了 WebView 执行器时优先走 Chromium WebView 同源会话（自带真实 CSRF Token 与 _t Cookie）
         UserApiKeyAuthManager.webViewHttpExecutor?.let { webExec ->
             val result = try {
                 webExec(url, method, formParams, mergedHeaders)
@@ -712,21 +733,20 @@ object LinuxDoRepository {
             }
         }
 
-        // 尝试 OkHttp 直连（携带 User-Api-Key 或 Cookie）
-        val client = createClient()
+        // 尝试复用全局 OkHttp 连接池直连
         try {
             val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
             val response = if (method.equals("POST", ignoreCase = true) || method.equals("PUT", ignoreCase = true)) {
                 val params = Parameters.build {
                     formParams?.forEach { (k, v) -> append(k, v) }
                 }
-                client.submitForm(url = url, formParameters = params) {
+                sharedClient.submitForm(url = url, formParameters = params) {
                     mergedHeaders.forEach { (k, v) -> header(k, v) }
                     UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
                     if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
                 }
             } else {
-                client.get(url) {
+                sharedClient.get(url) {
                     mergedHeaders.forEach { (k, v) -> header(k, v) }
                     UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
                     if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
@@ -737,7 +757,6 @@ object LinuxDoRepository {
                 UserPresenceService.recordSuccessfulForegroundRequest()
                 return@withContext response.status.value to text
             }
-            // 若直连遇到 Cloudflare HTML 质询，走 webViewJsonFetcher 兜底
             if (method.equals("GET", ignoreCase = true)) {
                 UserApiKeyAuthManager.webViewJsonFetcher?.invoke(url)?.let { fallback ->
                     if (fallback.trimStart().startsWith("{") || fallback.trimStart().startsWith("[")) {
@@ -756,30 +775,43 @@ object LinuxDoRepository {
                 }
             }
             null
-        } finally {
-            client.close()
         }
     }
 
     /**
-     * 拉取线上话题列表（支持 `latest.json`、`top.json`、`new.json`、`unread.json` 以及 `/c/{slug}/{id}.json` 和分页 `page`）
-     * 同时在用户前台活跃时注入 `Discourse-Present: true`，确保服务端更新 `last_seen_at` 与 `user_visits` 连登天数
+     * 拉取线上话题列表：
+     * - 支持 `latest.json`、`top.json`（含 `period=daily|weekly|monthly|yearly|all`）、`new.json`、`unread.json`、`read.json`
+     * - 支持板块筛选 `/c/{slug}/{id}.json` 与标签筛选 `/tag/{tag}.json`
+     * - 支持标准 Discourse 分页 `no_definitions=true&page={page}`
      */
     suspend fun fetchTopics(
         path: String = "latest.json",
         categoryId: Int? = null,
-        page: Int = 0
+        page: Int = 0,
+        tag: String? = null,
+        topPeriod: String? = null
     ): List<TopicSummary> = withContext(Dispatchers.IO) {
-        val targetPath = if (categoryId != null) {
-            val cat = categories.firstOrNull { it.id == categoryId }
-            if (cat != null) "c/${cat.slug}/${cat.id}.json" else "c/$categoryId.json"
-        } else {
-            path
+        val basePath = when {
+            !tag.isNullOrBlank() -> {
+                val encodedTag = java.net.URLEncoder.encode(tag.trim(), "UTF-8")
+                "tag/$encodedTag.json"
+            }
+            categoryId != null -> {
+                val cat = categories.firstOrNull { it.id == categoryId }
+                if (cat != null) "c/${cat.slug}/${cat.id}.json" else "c/$categoryId.json"
+            }
+            else -> path
         }
 
-        val sep = if (targetPath.contains("?")) "&" else "?"
-        val pagedPath = if (page > 0) "$targetPath${sep}page=$page" else targetPath
-        val url = "https://linux.do/$pagedPath"
+        val queryParams = mutableListOf("no_definitions=true")
+        if (basePath.startsWith("top") && !topPeriod.isNullOrBlank()) {
+            queryParams.add("period=$topPeriod")
+        }
+        if (page > 0) {
+            queryParams.add("page=$page")
+        }
+        val sep = if (basePath.contains("?")) "&" else "?"
+        val url = "https://linux.do/$basePath$sep${queryParams.joinToString("&")}"
         val res = executeHttp(url = url, method = "GET")
         val text = res?.second
         if (text != null && text.trimStart().startsWith("{")) {
@@ -962,8 +994,24 @@ object LinuxDoRepository {
         var createdAtText = ""
         var badgeCount = 0
 
-        // 2. 拉取 /u/{username}.json 获取个人主页详情与精确 trust_level
-        val userRes = executeHttp("https://linux.do/u/$uname.json", method = "GET")
+        var daysVisited = 0
+        var timeReadSeconds = 0
+        var recentTimeReadSeconds = 0
+        var topicsEntered = 0
+        var postsReadCount = 0
+        var likesReceived = 0
+        var likesGiven = 0
+        var topicCount = 0
+        var postCount = 0
+        val topBadges = mutableListOf<GrantedBadge>()
+
+        // 2 & 3. 并发拉取 /u/{username}.json 与 /u/{username}/summary.json，将个人中心同步耗时缩短 50%+
+        val (userRes, summaryRes) = coroutineScope {
+            val dUser = async { executeHttp("https://linux.do/u/$uname.json", method = "GET") }
+            val dSummary = async { executeHttp("https://linux.do/u/$uname/summary.json", method = "GET") }
+            dUser.await() to dSummary.await()
+        }
+
         if (userRes != null && userRes.second.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(userRes.second).jsonObject
@@ -998,19 +1046,6 @@ object LinuxDoRepository {
             }
         }
 
-        // 3. 拉取 /u/{username}/summary.json 获取累计阅读、访问天数、获赞、送赞、主帖与回复数
-        var daysVisited = 0
-        var timeReadSeconds = 0
-        var recentTimeReadSeconds = 0
-        var topicsEntered = 0
-        var postsReadCount = 0
-        var likesReceived = 0
-        var likesGiven = 0
-        var topicCount = 0
-        var postCount = 0
-        val topBadges = mutableListOf<GrantedBadge>()
-
-        val summaryRes = executeHttp("https://linux.do/u/$uname/summary.json", method = "GET")
         if (summaryRes != null && summaryRes.second.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(summaryRes.second).jsonObject
@@ -1117,6 +1152,56 @@ object LinuxDoRepository {
             }
         }
         null
+    }
+
+    /**
+     * 编辑自己发布的帖子/评论楼层 (`PUT /posts/{id}.json`)
+     */
+    suspend fun updatePost(
+        postId: Int,
+        newRaw: String,
+        editReason: String = ""
+    ): PostItemModel? = withContext(Dispatchers.IO) {
+        val params = buildMap {
+            put("post[raw]", newRaw.trim())
+            if (editReason.isNotBlank()) {
+                put("post[edit_reason]", editReason.trim())
+            }
+        }
+        val res = executeHttp(
+            url = "https://linux.do/posts/$postId.json",
+            method = "PUT",
+            formParams = params
+        ) ?: return@withContext null
+
+        if (res.first in 200..299 && res.second.trimStart().startsWith("{")) {
+            return@withContext try {
+                val root = json.parseToJsonElement(res.second).jsonObject
+                val pObj = (root["post"] as? JsonObject) ?: root
+                parseSinglePostObject(pObj, 0)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        null
+    }
+
+    /**
+     * 删除自己发布的评论楼层 (`DELETE /posts/{id}.json`)
+     */
+    suspend fun deletePost(postId: Int): Boolean = withContext(Dispatchers.IO) {
+        val res = executeHttp(
+            url = "https://linux.do/posts/$postId.json",
+            method = "DELETE"
+        )
+        res != null && res.first in 200..299
+    }
+
+    /**
+     * 拉取用户最近已读话题历史 (`/read.json`)
+     */
+    suspend fun fetchReadHistoryTopics(page: Int = 0): List<TopicSummary> = withContext(Dispatchers.IO) {
+        fetchTopics(path = "read.json", page = page)
     }
 
     /**
@@ -1842,7 +1927,7 @@ object LinuxDoRepository {
             return@withContext 200
         }
 
-        val client = createClient()
+        val client = sharedClient
         try {
             val headers = UserPresenceService.buildPresenceHeaders(
                 isBackgroundTimingRequest = true,
@@ -1860,15 +1945,16 @@ object LinuxDoRepository {
                 formParameters = params
             ) {
                 headers.forEach { (k, v) -> header(k, v) }
-                UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
                 val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
-                if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+                if (cookieHeader.isNotEmpty()) {
+                    header("Cookie", cookieHeader)
+                } else {
+                    UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
+                }
             }
             response.status.value
         } catch (_: Throwable) {
             null
-        } finally {
-            client.close()
         }
     }
 
@@ -1876,7 +1962,7 @@ object LinuxDoRepository {
      * 获取 `connect.linux.do` 信任等级周期活跃度报告
      */
     suspend fun fetchConnectTrustLevelReport(): ConnectTrustLevelReport = withContext(Dispatchers.IO) {
-        val client = createClient()
+        val client = sharedClient
         try {
             val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "connect.linux.do")
             val response = client.get("https://connect.linux.do/") {
@@ -1887,8 +1973,6 @@ object LinuxDoRepository {
             val html = response.bodyAsText()
             ConnectStatsParser.parseConnectHtml(html)?.let { return@withContext it }
         } catch (_: Throwable) {
-        } finally {
-            client.close()
         }
 
         ConnectStatsParser.buildSessionBaselineReport(
