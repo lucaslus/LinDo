@@ -13,17 +13,19 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|layoutDirection|locale|mcc|navigation|smallestScreenSize|touchscreen|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Deep Link 支持 linux.do 话题直达与 User API Key 授权回调 -->
+            <!-- Deep Link 支持 discourse://auth_redirect 与 lindo://auth_redirect 浏览器一键授权回跳 -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="lindo" android:host="auth_redirect" />
+                <data android:scheme="discourse" android:host="auth_redirect" />
             </intent-filter>
         </activity>
     </application>

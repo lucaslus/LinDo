@@ -112,6 +112,7 @@ import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.TopicDetailModel
 import do_.linux.lindo.core.model.TopicSummary
+import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CloudflareEdgeRacer
 import do_.linux.lindo.core.network.EdgeCandidateResult
 import do_.linux.lindo.core.network.LinuxDoCategoryMeta
@@ -239,6 +240,17 @@ object BackNavigationBridge {
 }
 
 /**
+ * 原生平台内置 WebView 登录宿主桥接器
+ */
+object PlatformWebLoginHost {
+    var webLoginRenderer: (@Composable (
+        initialUrl: String,
+        onDismiss: () -> Unit,
+        onLoginSuccess: () -> Unit
+    ) -> Unit)? = null
+}
+
+/**
  * Gemini 标志性四芒星矢量图标（纯 Canvas 渲染，无锯齿）
  */
 @Composable
@@ -278,11 +290,23 @@ private fun GeminiSparkleIcon(
 @Composable
 private fun GoogleAccountRingAvatar(
     letter: String = "L",
+    avatarUrl: String? = null,
     avatarSize: Dp = 76.dp,
     strokeWidth: Dp = 3.dp,
     onClick: (() -> Unit)? = null
 ) {
     val palette = LocalPalette.current
+    val resolvedAvatarUrl = remember(avatarUrl) {
+        avatarUrl?.takeIf { it.isNotBlank() }?.let { raw ->
+            val sized = raw.replace("{size}", "144")
+            when {
+                sized.startsWith("http://") || sized.startsWith("https://") -> sized
+                sized.startsWith("//") -> "https:$sized"
+                sized.startsWith("/") -> "https://linux.do$sized"
+                else -> "https://linux.do/$sized"
+            }
+        }
+    }
     Box(
         modifier = Modifier
             .size(avatarSize)
@@ -341,12 +365,23 @@ private fun GoogleAccountRingAvatar(
                 .background(palette.tonalPill),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = letter,
-                fontSize = (avatarSize.value * 0.34f).sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.onTonalPill
-            )
+            if (resolvedAvatarUrl != null) {
+                AsyncImage(
+                    model = resolvedAvatarUrl,
+                    contentDescription = letter,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                )
+            } else {
+                Text(
+                    text = letter.take(1).uppercase(),
+                    fontSize = (avatarSize.value * 0.34f).sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.onTonalPill
+                )
+            }
         }
     }
 }
@@ -376,6 +411,14 @@ fun LinDoApp() {
     var showAuthSheet by remember { mutableStateOf(false) }
     var showConnectSheet by remember { mutableStateOf(false) }
 
+    // 认证状态与首屏登录门禁状态
+    var authVersion by remember { mutableStateOf(0) }
+    var guestPreviewMode by remember { mutableStateOf(false) }
+    var activeWebLoginUrl by remember { mutableStateOf<String?>(null) }
+
+    val isAuthorized = remember(authVersion) { UserApiKeyAuthManager.isAuthorized() }
+    val currentUser = remember(authVersion) { UserApiKeyAuthManager.currentUser }
+
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -404,6 +447,27 @@ fun LinDoApp() {
         }
     }
 
+    DisposableEffect(Unit) {
+        val prevCallback = UserApiKeyAuthManager.onAuthStateChanged
+        UserApiKeyAuthManager.onAuthStateChanged = {
+            prevCallback?.invoke()
+            authVersion++
+            val otp = UserApiKeyAuthManager.pendingOtpToken
+            if (!otp.isNullOrBlank()) {
+                UserApiKeyAuthManager.pendingOtpToken = null
+                activeWebLoginUrl = "https://linux.do/session/otp/$otp"
+            }
+            if (UserApiKeyAuthManager.isAuthorized()) {
+                activeWebLoginUrl = null
+                showAuthSheet = false
+                loadTopics(currentSort, selectedCategoryId)
+            }
+        }
+        onDispose {
+            UserApiKeyAuthManager.onAuthStateChanged = prevCallback
+        }
+    }
+
     fun openTopic(topic: TopicSummary) {
         activeTopicSummary = topic
         mobileShowingDetail = true
@@ -419,7 +483,8 @@ fun LinDoApp() {
     }
 
     SideEffect {
-        val canIntercept = inspectedBadge != null ||
+        val canIntercept = activeWebLoginUrl != null ||
+            inspectedBadge != null ||
             showConnectSheet ||
             showNetworkSheet ||
             showAuthSheet ||
@@ -428,6 +493,10 @@ fun LinDoApp() {
         BackNavigationBridge.canGoBack = canIntercept
         BackNavigationBridge.onBack = {
             when {
+                activeWebLoginUrl != null -> {
+                    activeWebLoginUrl = null
+                    true
+                }
                 inspectedBadge != null -> {
                     inspectedBadge = null
                     true
@@ -484,7 +553,22 @@ fun LinDoApp() {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     val isDesktop = maxWidth >= 840.dp
 
-                    if (isDesktop) {
+                    if (!isAuthorized && !guestPreviewMode) {
+                        GoogleWelcomeLoginScreen(
+                            onPrimaryWebLogin = {
+                                activeWebLoginUrl = "https://linux.do/login"
+                            },
+                            onBrowserOneClickAuth = {
+                                val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
+                                if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
+                                    activeWebLoginUrl = url
+                                }
+                            },
+                            onEnterGuestPreview = {
+                                guestPreviewMode = true
+                            }
+                        )
+                    } else if (isDesktop) {
                         Row(modifier = Modifier.fillMaxSize()) {
                             DesktopSideRail(
                                 currentTab = currentTab,
@@ -510,6 +594,11 @@ fun LinDoApp() {
                                             isLoading = isLoadingTopics,
                                             errorMessage = feedError,
                                             enableAnimations = enableAnimations,
+                                            isAuthorized = isAuthorized,
+                                            currentUser = currentUser,
+                                            onRequestLogin = {
+                                                activeWebLoginUrl = "https://linux.do/login"
+                                            },
                                             onSearchChange = { searchQuery = it },
                                             onSelectCategory = { catId ->
                                                 selectedCategoryId = catId
@@ -562,11 +651,20 @@ fun LinDoApp() {
                                     CommunityProfileScreen(
                                         isDarkTheme = isDarkTheme,
                                         enableAnimations = enableAnimations,
+                                        isAuthorized = isAuthorized,
+                                        currentUser = currentUser,
                                         onToggleDark = { isDarkTheme = !isDarkTheme },
                                         onToggleAnimations = { enableAnimations = !enableAnimations },
                                         onOpenConnectSheet = { showConnectSheet = true },
                                         onOpenNetworkSheet = { showNetworkSheet = true },
-                                        onOpenAuthSheet = { showAuthSheet = true }
+                                        onOpenAuthSheet = { showAuthSheet = true },
+                                        onPrimaryWebLogin = {
+                                            activeWebLoginUrl = "https://linux.do/login"
+                                        },
+                                        onLogout = {
+                                            UserApiKeyAuthManager.logout()
+                                            guestPreviewMode = false
+                                        }
                                     )
                                 }
                             }
@@ -603,6 +701,11 @@ fun LinDoApp() {
                                                 isLoading = isLoadingTopics,
                                                 errorMessage = feedError,
                                                 enableAnimations = enableAnimations,
+                                                isAuthorized = isAuthorized,
+                                                currentUser = currentUser,
+                                                onRequestLogin = {
+                                                    activeWebLoginUrl = "https://linux.do/login"
+                                                },
                                                 onSearchChange = { searchQuery = it },
                                                 onSelectCategory = { catId ->
                                                     selectedCategoryId = catId
@@ -637,11 +740,20 @@ fun LinDoApp() {
                                             CommunityProfileScreen(
                                                 isDarkTheme = isDarkTheme,
                                                 enableAnimations = enableAnimations,
+                                                isAuthorized = isAuthorized,
+                                                currentUser = currentUser,
                                                 onToggleDark = { isDarkTheme = !isDarkTheme },
                                                 onToggleAnimations = { enableAnimations = !enableAnimations },
                                                 onOpenConnectSheet = { showConnectSheet = true },
                                                 onOpenNetworkSheet = { showNetworkSheet = true },
-                                                onOpenAuthSheet = { showAuthSheet = true }
+                                                onOpenAuthSheet = { showAuthSheet = true },
+                                                onPrimaryWebLogin = {
+                                                    activeWebLoginUrl = "https://linux.do/login"
+                                                },
+                                                onLogout = {
+                                                    UserApiKeyAuthManager.logout()
+                                                    guestPreviewMode = false
+                                                }
                                             )
                                         }
                                     }
@@ -652,6 +764,22 @@ fun LinDoApp() {
                                     onSelectTab = { currentTab = it }
                                 )
                             }
+                        }
+                    }
+
+                    // 内置全屏安全 WebView 登录弹层
+                    activeWebLoginUrl?.let { loginUrl ->
+                        val renderer = PlatformWebLoginHost.webLoginRenderer
+                        if (renderer != null) {
+                            renderer(
+                                loginUrl,
+                                { activeWebLoginUrl = null },
+                                {
+                                    activeWebLoginUrl = null
+                                    authVersion++
+                                    loadTopics(currentSort, selectedCategoryId)
+                                }
+                            )
                         }
                     }
                 }
@@ -677,6 +805,24 @@ fun LinDoApp() {
 
                 if (showAuthSheet) {
                     UserApiKeyAuthSheet(
+                        isAuthorized = isAuthorized,
+                        currentUser = currentUser,
+                        onPrimaryWebLogin = {
+                            showAuthSheet = false
+                            activeWebLoginUrl = "https://linux.do/login"
+                        },
+                        onBrowserOneClickAuth = {
+                            showAuthSheet = false
+                            val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
+                            if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
+                                activeWebLoginUrl = url
+                            }
+                        },
+                        onLogout = {
+                            UserApiKeyAuthManager.logout()
+                            showAuthSheet = false
+                            guestPreviewMode = false
+                        },
                         onDismiss = { showAuthSheet = false }
                     )
                 }
@@ -857,6 +1003,9 @@ private fun CommunityHomeFeedPane(
     isLoading: Boolean,
     errorMessage: String?,
     enableAnimations: Boolean,
+    isAuthorized: Boolean,
+    currentUser: AuthenticatedUserProfile?,
+    onRequestLogin: () -> Unit,
     onSearchChange: (String) -> Unit,
     onSelectCategory: (Int?) -> Unit,
     onSelectSort: (FeedSortFilter) -> Unit,
@@ -974,11 +1123,44 @@ private fun CommunityHomeFeedPane(
 
             // 右侧 Google Account 标志性四色环微缩头像（点击直达账号中心）
             GoogleAccountRingAvatar(
-                letter = "L",
+                letter = currentUser?.displayName?.takeIf { it.isNotBlank() }
+                    ?: currentUser?.username
+                    ?: "L",
+                avatarUrl = currentUser?.avatarTemplate,
                 avatarSize = 34.dp,
                 strokeWidth = 2.dp,
                 onClick = onAvatarClick
             )
+        }
+
+        // 游客模式温馨提醒胶囊条
+        if (!isAuthorized) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(palette.tonalPill.copy(alpha = 0.65f))
+                    .clickable(onClick = onRequestLogin)
+                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GeminiSparkleIcon(size = 14.dp)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "当前为游客预览，浏览不计入 Connect 连登",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.onTonalPill,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "立即登录",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.accent
+                )
+            }
         }
 
         // 2. Material 3 Tonal Filter Chips（无下划线，纯净胶囊筛选）
@@ -2368,14 +2550,17 @@ private fun CategoryBentoCard(
 private fun CommunityProfileScreen(
     isDarkTheme: Boolean,
     enableAnimations: Boolean,
+    isAuthorized: Boolean,
+    currentUser: AuthenticatedUserProfile?,
     onToggleDark: () -> Unit,
     onToggleAnimations: () -> Unit,
     onOpenConnectSheet: () -> Unit,
     onOpenNetworkSheet: () -> Unit,
-    onOpenAuthSheet: () -> Unit
+    onOpenAuthSheet: () -> Unit,
+    onPrimaryWebLogin: () -> Unit,
+    onLogout: () -> Unit
 ) {
     val palette = LocalPalette.current
-    val isAuthorized = UserApiKeyAuthManager.isAuthorized()
 
     LazyColumn(
         modifier = Modifier
@@ -2394,7 +2579,10 @@ private fun CommunityProfileScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 GoogleAccountRingAvatar(
-                    letter = "L",
+                    letter = currentUser?.displayName?.takeIf { it.isNotBlank() }
+                        ?: currentUser?.username
+                        ?: "L",
+                    avatarUrl = currentUser?.avatarTemplate,
                     avatarSize = 80.dp,
                     strokeWidth = 3.2.dp,
                     onClick = onOpenAuthSheet
@@ -2403,7 +2591,11 @@ private fun CommunityProfileScreen(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = if (isAuthorized) "Linux.do 已登录账号" else "Linux.do 社区成员",
+                    text = when {
+                        currentUser != null -> currentUser.displayName.ifBlank { currentUser.username }
+                        isAuthorized -> "Linux.do 已登录账号"
+                        else -> "未登录（游客预览）"
+                    },
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = (-0.3).sp,
@@ -2413,7 +2605,11 @@ private fun CommunityProfileScreen(
                 Spacer(modifier = Modifier.height(4.dp))
 
                 Text(
-                    text = if (isAuthorized) "连登打卡与阅读进度已开启实时同步" else "登录以同步收藏、通知与 Connect 等级进度",
+                    text = when {
+                        currentUser != null -> "@${currentUser.username} · Lv.${currentUser.trustLevel} 信任等级 · 连登同步已开启"
+                        isAuthorized -> "连登打卡与阅读进度已开启实时同步"
+                        else -> "登录以开启 Connect 连续登录打卡与阅读时长同步"
+                    },
                     fontSize = 13.5.sp,
                     color = palette.inkSecondary,
                     textAlign = TextAlign.Center
@@ -2423,19 +2619,44 @@ private fun CommunityProfileScreen(
 
                 // Google Account 标志性胶囊管理按钮
                 Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(palette.tonalPill)
-                        .clickable(onClick = onOpenAuthSheet)
-                        .padding(horizontal = 20.dp, vertical = 9.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = if (isAuthorized) "管理 Linux.do 账号" else "登录 Linux.do 账号",
-                        fontSize = 13.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.onTonalPill
-                    )
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (isAuthorized) palette.tonalPill else palette.accent)
+                            .clickable(
+                                onClick = if (isAuthorized) onOpenAuthSheet else onPrimaryWebLogin
+                            )
+                            .padding(horizontal = 20.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isAuthorized) "账号与登录设置" else "立即一键登录",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isAuthorized) palette.onTonalPill else Color.White
+                        )
+                    }
+
+                    if (isAuthorized) {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(palette.subtleSurface)
+                                .clickable(onClick = onLogout)
+                                .padding(horizontal = 16.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "退出",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.inkSecondary
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -3065,16 +3286,19 @@ private fun NetworkDiagnosticsSheet(
 }
 
 /**
- * 账号登录抽屉
+ * Google Account 风格账号登录与切换抽屉（支持双主通道一键登录）
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun UserApiKeyAuthSheet(
+    isAuthorized: Boolean,
+    currentUser: AuthenticatedUserProfile?,
+    onPrimaryWebLogin: () -> Unit,
+    onBrowserOneClickAuth: () -> Unit,
+    onLogout: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
-    val (authUrl, _) = remember { UserApiKeyAuthManager.generateAuthorizationUrl() }
-    var apiKeyInput by remember { mutableStateOf(UserApiKeyAuthManager.getApiKey().orEmpty()) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -3086,46 +3310,289 @@ private fun UserApiKeyAuthSheet(
                 .padding(horizontal = 24.dp, vertical = 12.dp)
         ) {
             Text(
-                text = "登录 Linux.do 账号",
-                fontSize = 18.sp,
+                text = if (isAuthorized) "Linux.do 账号会话" else "登录 Linux.do 账号",
+                fontSize = 19.sp,
                 fontWeight = FontWeight.Bold,
                 color = palette.inkPrimary
             )
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "复制下方官方授权链接在浏览器中打开并同意授权，将生成的密钥粘贴至下方即可完成绑定。",
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
+                text = if (isAuthorized && currentUser != null) {
+                    "当前已登录 @${currentUser.username}（Lv.${currentUser.trustLevel}），Connect 连登与阅读时长自动同步中。"
+                } else {
+                    "请选择最顺手的方式完成验证，登录后自动同步 Connect 连登、阅读进度与受保护分区。"
+                },
+                fontSize = 13.5.sp,
+                lineHeight = 20.sp,
                 color = palette.inkSecondary
             )
-            Spacer(modifier = Modifier.height(12.dp))
-            Box(
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            // 方式一（主力推荐）：内置一键登录（支持密码 / GitHub / Passkey / 2FA）
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(palette.subtleSurface)
-                    .padding(12.dp)
+                    .height(52.dp)
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(palette.accent)
+                    .clickable(onClick = onPrimaryWebLogin)
+                    .padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
+                GeminiSparkleIcon(size = 18.dp)
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = authUrl,
-                    fontSize = 11.5.sp,
-                    color = palette.inkSecondary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    text = if (isAuthorized) "重新验证或切换账号" else "账号一键登录（密码 / GitHub / Passkey）",
+                    fontSize = 14.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
                 )
             }
-            Spacer(modifier = Modifier.height(12.dp))
-            OutlinedTextField(
-                value = apiKeyInput,
-                onValueChange = {
-                    apiKeyInput = it
-                    UserApiKeyAuthManager.setApiKey(it)
-                },
-                placeholder = { Text("粘贴授权密钥...", fontSize = 13.sp) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 方式二（官方浏览器授权跳回）：通过系统浏览器一键授权
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .clip(RoundedCornerShape(25.dp))
+                    .background(palette.tonalPill)
+                    .clickable(onClick = onBrowserOneClickAuth)
+                    .padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = "通过系统浏览器一键授权",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.onTonalPill
+                )
+            }
+
+            if (isAuthorized) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(46.dp)
+                        .clip(RoundedCornerShape(23.dp))
+                        .background(palette.subtleSurface)
+                        .clickable(onClick = onLogout)
+                        .padding(horizontal = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "退出当前账号并返回登录页",
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkSecondary
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(26.dp))
+        }
+    }
+}
+
+/**
+ * Google Account / Gemini 风格首屏欢迎与登录门禁页（Welcome & Login Gate）：
+ * - 启动即达，确保用户先完成身份挂载再进入浏览，避免因未登录丢失 Connect 连续登录与阅读时长
+ * - 仅保留最高频、最顺手的两种登录方式：
+ *   1. 账号一键登录（内置安全登录，支持密码 / GitHub / Passkey / 2FA，自动接管 Cookie 会话）
+ *   2. 通过系统浏览器一键授权（复用系统浏览器已登录状态，一键点击「批准」自动跳回）
+ * - 底部提供轻量级「暂不登录，仅以游客身份预览公开内容」入口
+ */
+@Composable
+private fun GoogleWelcomeLoginScreen(
+    onPrimaryWebLogin: () -> Unit,
+    onBrowserOneClickAuth: () -> Unit,
+    onEnterGuestPreview: () -> Unit
+) {
+    val palette = LocalPalette.current
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.canvas)
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(modifier = Modifier.weight(0.8f))
+
+        // 1. 顶部 Google Account 四色环绕徽标 + Gemini 品牌标识
+        GoogleAccountRingAvatar(
+            letter = "L",
+            avatarSize = 86.dp,
+            strokeWidth = 3.5.dp
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            GeminiSparkleIcon(size = 20.dp)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "欢迎来到 LinDo",
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = (-0.5).sp,
+                color = palette.inkPrimary
             )
-            Spacer(modifier = Modifier.height(24.dp))
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "真诚、友善、团结、专业的 Linux.do 社区客户端",
+            fontSize = 14.sp,
+            color = palette.inkSecondary,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(26.dp))
+
+        // 2. 登录后同步的 3 项核心权益卡片（Material 3 Tonal Card）
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(24.dp))
+                .background(palette.cardSurface)
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            WelcomeFeatureRow(
+                badgeText = "连登",
+                title = "Connect 100 天活跃与连登自动打卡",
+                subtitle = "每次打开自动上报在线心跳，防止断签掉级"
+            )
+            WelcomeFeatureRow(
+                badgeText = "阅读",
+                title = "楼层阅读时长与进度精准同步",
+                subtitle = "基于 Discourse Timings 协议实时记录已读帖子"
+            )
+            WelcomeFeatureRow(
+                badgeText = "分区",
+                title = "解锁 Lv.1 ~ Lv.3 专属频道与福利专区",
+                subtitle = "完整访问受信任等级保护的话题、水龙与通知"
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        // 3. 方式一（主力推荐）：内置一键安全登录胶囊按钮（Google Primary Blue `#0B57D0`）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp)
+                .clip(RoundedCornerShape(27.dp))
+                .background(palette.accent)
+                .clickable(onClick = onPrimaryWebLogin)
+                .padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            GeminiSparkleIcon(size = 18.dp)
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "账号一键登录（密码 / GitHub / Passkey）",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // 4. 方式二（官方浏览器跳回）：系统浏览器一键授权胶囊按钮（Tonal Pill `#D3E3FD`）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .clip(RoundedCornerShape(26.dp))
+                .background(palette.tonalPill)
+                .clickable(onClick = onBrowserOneClickAuth)
+                .padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "通过系统浏览器一键授权（已登录免输密码）",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = palette.onTonalPill
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 5. 底部轻量级游客预览入口
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .clickable(onClick = onEnterGuestPreview)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "暂不登录，仅以游客身份预览公开内容",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.inkTertiary
+            )
+        }
+    }
+}
+
+@Composable
+private fun WelcomeFeatureRow(
+    badgeText: String,
+    title: String,
+    subtitle: String
+) {
+    val palette = LocalPalette.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(13.dp))
+                .background(palette.tonalPill),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = badgeText,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = palette.onTonalPill
+            )
+        }
+        Spacer(modifier = Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 14.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = palette.inkPrimary
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                fontSize = 12.sp,
+                color = palette.inkSecondary
+            )
         }
     }
 }

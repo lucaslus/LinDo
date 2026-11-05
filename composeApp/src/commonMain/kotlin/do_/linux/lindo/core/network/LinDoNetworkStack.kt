@@ -159,6 +159,40 @@ object CookieSentinel {
             .joinToString("; ") { "${it.key}=${it.value.value}" }
     }
 
+    /**
+     * 从系统 WebView / CookieManager 同步原始 Cookie 字符串（如 `_t=...; _forum_session=...; cf_clearance=...`）
+     */
+    fun ingestRawCookieString(
+        rawCookieHeader: String?,
+        domain: String = "linux.do",
+        hostOnly: Boolean = false
+    ) {
+        if (rawCookieHeader.isNullOrBlank()) return
+        val now = System.currentTimeMillis()
+        rawCookieHeader.split(";").forEach { segment ->
+            val trimmed = segment.trim()
+            val eqIdx = trimmed.indexOf('=')
+            if (eqIdx > 0) {
+                val name = trimmed.substring(0, eqIdx).trim()
+                val value = trimmed.substring(eqIdx + 1).trim()
+                if (name.isNotEmpty() && value.isNotEmpty()) {
+                    putCookie(
+                        StoredCookieRecord(
+                            key = CookieQuadrupleKey(
+                                name = name,
+                                domain = domain.trim().lowercase().trimStart('.'),
+                                path = "/",
+                                hostOnly = hostOnly
+                            ),
+                            value = value,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                }
+            }
+        }
+    }
+
     suspend fun <T> withSingleFlightRefresh(block: suspend () -> T): T {
         return sessionRefreshMutex.withLock {
             block()
@@ -175,42 +209,194 @@ object CookieSentinel {
 }
 
 /**
- * Discourse 官方 `User API Key` 授权管理器
+ * 已登录的 Linux.do 账号资料快照
+ */
+data class AuthenticatedUserProfile(
+    val username: String,
+    val displayName: String,
+    val avatarTemplate: String = "",
+    val trustLevel: Int = 2
+)
+
+/**
+ * 双引擎登录与会话认证管理器 (`UserApiKeyAuthManager`)：
+ * 1. 支持内置 WebView 统一登录（密码 / GitHub / Passkey / 2FA）并自动捕获 `_t`、`_forum_session`、`cf_clearance` 与用户资料
+ * 2. 支持系统浏览器一键授权回跳 (`discourse://auth_redirect` + `scopes=one_time_password` + RSA PKCS1 解密与 OTP 兑换)
  */
 object UserApiKeyAuthManager {
     private var activeUserApiKey: String? = null
     private var clientId: String = "lindo-kmp-${UUID.randomUUID()}"
+    private var pendingPrivateKey: java.security.PrivateKey? = null
+    private var pendingNonce: String? = null
+
+    @Volatile
+    var currentUser: AuthenticatedUserProfile? = null
+        private set
+
+    @Volatile
+    var pendingOtpToken: String? = null
+
+    @Volatile
+    var customUserAgent: String? = null
+
+    var onAuthStateChanged: (() -> Unit)? = null
+    var openExternalUrlLauncher: ((String) -> Unit)? = null
+    var onLogoutPlatformClear: (() -> Unit)? = null
+    var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
+    var webViewJsonFetcher: (suspend (String) -> String?)? = null
 
     fun setApiKey(apiKey: String?) {
         activeUserApiKey = apiKey?.trim()?.takeIf { it.isNotEmpty() }
+        onPersistSession?.invoke(currentUser, activeUserApiKey)
+        onAuthStateChanged?.invoke()
     }
 
     fun getApiKey(): String? = activeUserApiKey
 
-    fun isAuthorized(): Boolean = !activeUserApiKey.isNullOrBlank()
+    fun onSessionAuthenticated(
+        profile: AuthenticatedUserProfile,
+        rawCookies: String? = null
+    ) {
+        if (!rawCookies.isNullOrBlank()) {
+            CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
+        }
+        currentUser = profile
+        onPersistSession?.invoke(profile, activeUserApiKey)
+        onAuthStateChanged?.invoke()
+    }
 
+    fun restorePersistedSession(
+        profile: AuthenticatedUserProfile?,
+        apiKey: String?,
+        rawCookies: String?
+    ) {
+        if (!rawCookies.isNullOrBlank()) {
+            CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
+        }
+        activeUserApiKey = apiKey?.trim()?.takeIf { it.isNotEmpty() }
+        currentUser = profile
+        onAuthStateChanged?.invoke()
+    }
+
+    fun isAuthorized(): Boolean {
+        return !activeUserApiKey.isNullOrBlank() ||
+            currentUser != null ||
+            CookieSentinel.resolveWinningCookies(targetHost = "linux.do").containsKey("_t")
+    }
+
+    fun logout() {
+        activeUserApiKey = null
+        currentUser = null
+        pendingOtpToken = null
+        CookieSentinel.clearAll()
+        onLogoutPlatformClear?.invoke()
+        onPersistSession?.invoke(null, null)
+        onAuthStateChanged?.invoke()
+    }
+
+    /**
+     * 生成对齐 Linux.do 服务端白名单的浏览器一键授权链接：
+     * - `scopes=one_time_password`（Linux.do 现行允许范围）
+     * - `auth_redirect=discourse://auth_redirect`（Discourse 官方白名单回跳协议）
+     * - `otp=true`（随回调返回一次性登录兑换令牌）
+     */
     fun generateAuthorizationUrl(
         applicationName: String = "LinDo",
-        scopes: String = "read,write,notifications,session_info"
+        scopes: String = "one_time_password"
     ): Pair<String, String> {
         val kpg = KeyPairGenerator.getInstance("RSA")
         kpg.initialize(2048)
         val kp = kpg.generateKeyPair()
+        pendingPrivateKey = kp.private
         val publicPem = buildString {
             appendLine("-----BEGIN PUBLIC KEY-----")
             appendLine(Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(kp.public.encoded))
             append("-----END PUBLIC KEY-----")
         }
         val nonce = UUID.randomUUID().toString().replace("-", "")
+        pendingNonce = nonce
         val encodedPub = java.net.URLEncoder.encode(publicPem, "UTF-8")
         val encodedApp = java.net.URLEncoder.encode(applicationName, "UTF-8")
+        val encodedRedirect = java.net.URLEncoder.encode("discourse://auth_redirect", "UTF-8")
         val url = "https://linux.do/user-api-key/new" +
             "?application_name=$encodedApp" +
             "&client_id=$clientId" +
             "&scopes=$scopes" +
             "&public_key=$encodedPub" +
-            "&nonce=$nonce"
+            "&nonce=$nonce" +
+            "&auth_redirect=$encodedRedirect" +
+            "&otp=true"
         return url to nonce
+    }
+
+    /**
+     * 启动系统浏览器进行一键授权
+     */
+    fun startBrowserOneClickAuth(): String {
+        val (url, _) = generateAuthorizationUrl()
+        openExternalUrlLauncher?.invoke(url)
+        return url
+    }
+
+    /**
+     * 处理 `discourse://auth_redirect?payload=...` 深链回调，RSA/ECB/PKCS1Padding 解密
+     */
+    fun handleAuthRedirectUri(uriString: String): Boolean {
+        val privKey = pendingPrivateKey ?: return false
+        return try {
+            val query = uriString.substringAfter('?', "")
+            if (query.isEmpty()) return false
+            val params = query.split("&").associate { part ->
+                val idx = part.indexOf('=')
+                if (idx > 0) {
+                    val k = part.substring(0, idx)
+                    val v = java.net.URLDecoder.decode(part.substring(idx + 1), "UTF-8")
+                    k to v
+                } else {
+                    part to ""
+                }
+            }
+            val payloadB64 = params["payload"]?.replace(" ", "+") ?: return false
+            val cipher = javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding")
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, privKey)
+            val decryptedBytes = cipher.doFinal(Base64.getMimeDecoder().decode(payloadB64))
+            val decryptedJson = String(decryptedBytes, Charsets.UTF_8)
+
+            val jsonObj = Json { ignoreUnknownKeys = true }.parseToJsonElement(decryptedJson).jsonObject
+            val key = jsonObj["key"]?.jsonPrimitive?.contentOrNull
+            val otpInPayload = jsonObj["one_time_password"]?.jsonPrimitive?.contentOrNull
+
+            // 若 query 独立携带加密 otp 参数则一并解密
+            val otpParamB64 = params["otp"]?.replace(" ", "+")
+            val decryptedOtp = if (!otpParamB64.isNullOrBlank()) {
+                try {
+                    String(cipher.doFinal(Base64.getMimeDecoder().decode(otpParamB64)), Charsets.UTF_8).trim()
+                } catch (_: Throwable) {
+                    otpInPayload
+                }
+            } else {
+                otpInPayload
+            }
+
+            if (!key.isNullOrBlank()) {
+                activeUserApiKey = key
+            }
+            if (!decryptedOtp.isNullOrBlank()) {
+                pendingOtpToken = decryptedOtp
+            }
+            if (currentUser == null) {
+                currentUser = AuthenticatedUserProfile(
+                    username = "linuxdo_user",
+                    displayName = "Linux.do 认证会员",
+                    trustLevel = 2
+                )
+            }
+            onPersistSession?.invoke(currentUser, activeUserApiKey)
+            onAuthStateChanged?.invoke()
+            true
+        } catch (_: Throwable) {
+            false
+        }
     }
 }
 
@@ -399,14 +585,21 @@ object LinuxDoRepository {
                 isBackgroundTimingRequest = false,
                 isLoggedIn = isLoggedIn
             )
-            val response = client.get("https://linux.do/$targetPath") {
+            val url = "https://linux.do/$targetPath"
+            val response = client.get(url) {
                 header("Accept", "application/json")
+                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
                 presenceHeaders.forEach { (k, v) -> header(k, v) }
                 UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
                 val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
                 if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
             }
-            val text = response.bodyAsText()
+            var text = response.bodyAsText()
+            if (!text.trimStart().startsWith("{")) {
+                UserApiKeyAuthManager.webViewJsonFetcher?.invoke(url)?.let { fallbackText ->
+                    text = fallbackText
+                }
+            }
             if (text.trimStart().startsWith("{")) {
                 UserPresenceService.recordSuccessfulForegroundRequest()
                 val root = json.parseToJsonElement(text).jsonObject
@@ -448,6 +641,7 @@ object LinuxDoRepository {
             }
             val response = client.get(url) {
                 header("Accept", "application/json")
+                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
                 presenceHeaders.forEach { (k, v) -> header(k, v) }
                 if (trackVisit) {
                     header("Discourse-Track-View", "1")
@@ -457,7 +651,12 @@ object LinuxDoRepository {
                 val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
                 if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
             }
-            val text = response.bodyAsText()
+            var text = response.bodyAsText()
+            if (!text.trimStart().startsWith("{")) {
+                UserApiKeyAuthManager.webViewJsonFetcher?.invoke(url)?.let { fallbackText ->
+                    text = fallbackText
+                }
+            }
             if (text.trimStart().startsWith("{")) {
                 UserPresenceService.recordSuccessfulForegroundRequest()
                 val root = json.parseToJsonElement(text).jsonObject
@@ -770,6 +969,7 @@ object LinuxDoRepository {
             val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "connect.linux.do")
             val response = client.get("https://connect.linux.do/") {
                 header("Accept", "text/html,application/xhtml+xml")
+                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
                 if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
             }
             val html = response.bodyAsText()
