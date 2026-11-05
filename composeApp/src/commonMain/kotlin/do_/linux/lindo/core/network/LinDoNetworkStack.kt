@@ -659,6 +659,63 @@ object LinuxDoRepository {
         return categoryLookup[categoryId] ?: ("技术讨论" to "0E76BD")
     }
 
+    private val dohBootstrapClient: okhttp3.OkHttpClient by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(2500, TimeUnit.MILLISECONDS)
+            .readTimeout(2500, TimeUnit.MILLISECONDS)
+            .build()
+    }
+
+    @Volatile
+    private var cachedDohAddresses: List<InetAddress> = emptyList()
+
+    @Volatile
+    private var cachedDohExpireEpochMs: Long = 0L
+
+    /**
+     * 内置免配置加密 DoH 解析器（直连阿里 `223.5.5.5` / 腾讯 `1.12.12.12` DoH JSON 接口，无需通过传统 53 端口解析域名）
+     */
+    private fun resolveViaEncryptedDoh(hostname: String): List<InetAddress> {
+        val now = System.currentTimeMillis()
+        if (cachedDohAddresses.isNotEmpty() && now < cachedDohExpireEpochMs) {
+            return cachedDohAddresses
+        }
+        val dohEndpoints = listOf(
+            "https://223.5.5.5/resolve?name=$hostname&type=A",
+            "https://1.12.12.12/resolve?name=$hostname&type=A"
+        )
+        for (endpoint in dohEndpoints) {
+            try {
+                val req = okhttp3.Request.Builder()
+                    .url(endpoint)
+                    .header("Accept", "application/dns-json, application/json")
+                    .build()
+                dohBootstrapClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string().orEmpty()
+                        val root = json.parseToJsonElement(body).jsonObject
+                        val answers = root["Answer"] as? JsonArray
+                        val ips = answers?.mapNotNull { elem ->
+                            val obj = elem as? JsonObject ?: return@mapNotNull null
+                            val type = obj["type"]?.jsonPrimitive?.intOrNull
+                            val data = obj["data"]?.jsonPrimitive?.contentOrNull?.trim()
+                            if (type == 1 && !data.isNullOrBlank() && !data.startsWith("127.") && !data.startsWith("0.")) {
+                                runCatching { InetAddress.getByName(data) }.getOrNull()
+                            } else null
+                        }.orEmpty()
+                        if (ips.isNotEmpty()) {
+                            cachedDohAddresses = ips
+                            cachedDohExpireEpochMs = now + 300_000L // 缓存 5 分钟
+                            return ips
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        return emptyList()
+    }
+
     private val sharedClient: HttpClient by lazy {
         HttpClient(OkHttp) {
             engine {
@@ -667,13 +724,25 @@ object LinuxDoRepository {
                     readTimeout(8, TimeUnit.SECONDS)
                     dns(object : Dns {
                         override fun lookup(hostname: String): List<InetAddress> {
-                            val pinned = CloudflareEdgeRacer.pinnedEdgeIp
-                            if ((hostname == "linux.do" || hostname.endsWith(".linux.do")) && !pinned.isNullOrBlank()) {
-                                return try {
-                                    listOf(InetAddress.getByName(pinned))
-                                } catch (_: Throwable) {
-                                    Dns.SYSTEM.lookup(hostname)
+                            if (hostname == "linux.do" || hostname.endsWith(".linux.do")) {
+                                // 1. 优先使用用户测速锁定的最优 Cloudflare 边缘节点 IP
+                                val pinned = CloudflareEdgeRacer.pinnedEdgeIp
+                                if (!pinned.isNullOrBlank()) {
+                                    runCatching { listOf(InetAddress.getByName(pinned)) }
+                                        .getOrNull()?.let { return it }
                                 }
+                                // 2. 自动走加密 DoH (223.5.5.5 / 1.12.12.12) 防运营商 DNS 污染
+                                val dohList = resolveViaEncryptedDoh(hostname)
+                                if (dohList.isNotEmpty()) {
+                                    return dohList
+                                }
+                                // 3. 兜底使用内置 Cloudflare 边缘节点 IP + 系统 DNS
+                                val fallbackEdgeIps = CloudflareEdgeRacer.defaultCandidates.mapNotNull { (ip, _) ->
+                                    runCatching { InetAddress.getByName(ip) }.getOrNull()
+                                }
+                                val sysIps = runCatching { Dns.SYSTEM.lookup(hostname) }.getOrDefault(emptyList())
+                                val combined = (sysIps + fallbackEdgeIps).distinct()
+                                if (combined.isNotEmpty()) return combined
                             }
                             return Dns.SYSTEM.lookup(hostname)
                         }
