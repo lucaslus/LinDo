@@ -6980,14 +6980,6 @@ private fun UserApiKeyAuthSheet(
                         .clickable(onClick = onLogout)
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 )
-            } else {
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "支持 账号密码 · GitHub · Passkey 通行密钥",
-                    fontSize = 11.2.sp,
-                    color = palette.inkTertiary,
-                    maxLines = 1
-                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -7114,65 +7106,7 @@ private fun GoogleWelcomeLoginScreen(
             )
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // 6. 底部极简协议与登录方式说明
-        Text(
-            text = "支持 账号密码 · GitHub · Passkey 通行密钥安全登录",
-            fontSize = 11.5.sp,
-            fontWeight = FontWeight.Normal,
-            color = palette.inkTertiary,
-            maxLines = 1
-        )
-
-        Spacer(modifier = Modifier.height(6.dp))
-    }
-}
-
-@Composable
-private fun WelcomeFeatureRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String
-) {
-    val palette = LocalPalette.current
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .clip(RoundedCornerShape(11.dp))
-                .background(palette.cardSurface),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-                tint = palette.brandGold
-            )
-        }
-        Spacer(modifier = Modifier.width(13.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                fontSize = 13.8.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = subtitle,
-                fontSize = 11.8.sp,
-                color = palette.inkSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
+        Spacer(modifier = Modifier.height(18.dp))
     }
 }
 
