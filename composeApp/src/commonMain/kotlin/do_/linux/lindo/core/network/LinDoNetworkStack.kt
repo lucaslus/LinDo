@@ -720,20 +720,7 @@ object LinuxDoRepository {
             extraHeaders.forEach { (k, v) -> put(k, v) }
         }
 
-        // 在 Android 端挂载了 WebView 执行器时优先走 Chromium WebView 同源会话（自带真实 CSRF Token 与 _t Cookie）
-        UserApiKeyAuthManager.webViewHttpExecutor?.let { webExec ->
-            val result = try {
-                webExec(url, method, formParams, mergedHeaders)
-            } catch (_: Throwable) {
-                null
-            }
-            if (result != null && result.first in 200..299 && (result.second.trimStart().startsWith("{") || result.second.trimStart().startsWith("[") || method != "GET")) {
-                UserPresenceService.recordSuccessfulForegroundRequest()
-                return@withContext result
-            }
-        }
-
-        // 尝试复用全局 OkHttp 连接池直连
+        // 1. 优先尝试复用全局 OkHttp 连接池直连（最快，零 WebView IPC 损耗）
         try {
             val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
             val response = if (method.equals("POST", ignoreCase = true) || method.equals("PUT", ignoreCase = true)) {
@@ -752,30 +739,32 @@ object LinuxDoRepository {
                     if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
                 }
             }
+            val status = response.status.value
             val text = response.bodyAsText()
-            if (text.trimStart().startsWith("{") || text.trimStart().startsWith("[")) {
+            if (status in 200..299 && (text.trimStart().startsWith("{") || text.trimStart().startsWith("[") || method != "GET")) {
                 UserPresenceService.recordSuccessfulForegroundRequest()
-                return@withContext response.status.value to text
+                return@withContext status to text
             }
-            if (method.equals("GET", ignoreCase = true)) {
-                UserApiKeyAuthManager.webViewJsonFetcher?.invoke(url)?.let { fallback ->
-                    if (fallback.trimStart().startsWith("{") || fallback.trimStart().startsWith("[")) {
-                        UserPresenceService.recordSuccessfulForegroundRequest()
-                        return@withContext 200 to fallback
-                    }
-                }
-            }
-            null
-        } catch (_: Throwable) {
-            if (method.equals("GET", ignoreCase = true)) {
-                UserApiKeyAuthManager.webViewJsonFetcher?.invoke(url)?.let { fallback ->
-                    if (fallback.trimStart().startsWith("{") || fallback.trimStart().startsWith("[")) {
-                        return@withContext 200 to fallback
-                    }
-                }
-            }
-            null
+            println("LinDoHttp: [OkHttp] $method $url -> status=$status")
+        } catch (t: Throwable) {
+            println("LinDoHttp: [OkHttp] $method $url failed: ${t.message}")
         }
+
+        // 2. 若 OkHttp 被 Cloudflare 质询拦截，单次调用 Android Chromium WebView 同源执行器（严禁多次自动循环重试）
+        UserApiKeyAuthManager.webViewHttpExecutor?.let { webExec ->
+            val result = try {
+                webExec(url, method, formParams, mergedHeaders)
+            } catch (_: Throwable) {
+                null
+            }
+            println("LinDoHttp: [WebView] $method $url -> status=${result?.first}")
+            if (result != null && result.first in 200..299 && (result.second.trimStart().startsWith("{") || result.second.trimStart().startsWith("[") || method != "GET")) {
+                UserPresenceService.recordSuccessfulForegroundRequest()
+                return@withContext result
+            }
+        }
+
+        null
     }
 
     /**

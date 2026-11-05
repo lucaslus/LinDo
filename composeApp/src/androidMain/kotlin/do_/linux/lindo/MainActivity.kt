@@ -118,16 +118,16 @@ class MainActivity : ComponentActivity() {
                     val title = u.optString("title", "")
                     activityScope.launch {
                         val rawCookies = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
-                        UserApiKeyAuthManager.onSessionAuthenticated(
-                            profile = AuthenticatedUserProfile(
-                                userId = userId,
-                                username = username,
-                                displayName = displayName,
-                                avatarTemplate = avatarUrl,
-                                userTitle = title,
-                                trustLevel = trustLevel
-                            ),
-                            rawCookies = rawCookies
+                        if (rawCookies.isNotBlank()) {
+                            CookieSentinel.ingestRawCookieString(rawCookies)
+                        }
+                        UserApiKeyAuthManager.recordWebSessionLogin(
+                            username = username,
+                            displayName = displayName,
+                            avatarUrl = avatarUrl,
+                            trustLevel = trustLevel,
+                            userId = userId,
+                            userTitle = title
                         )
                         persistSessionToDisk()
                     }
@@ -285,12 +285,17 @@ class MainActivity : ComponentActivity() {
                     if (!apiWebViewReady.isCompleted) {
                         apiWebViewReady.complete(true)
                     }
-                    // 自动从 DOM data-preloaded 提取当前真实用户（若已存在会话）
-                    view?.evaluateJavascript(EXTRACT_PRELOADED_USER_JS, null)
                 }
             }
             apiWebView = wv
-            wv.loadUrl("https://linux.do/")
+            // 使用轻量级同源空文档初始化 https://linux.do 上下文，瞬时就绪且避免触发整页 HTML 导航的 Cloudflare Turnstile 质询
+            wv.loadDataWithBaseURL(
+                "https://linux.do/",
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
+                "text/html",
+                "UTF-8",
+                "https://linux.do/"
+            )
         }
     }
 
@@ -301,8 +306,7 @@ class MainActivity : ComponentActivity() {
         headers: Map<String, String>
     ): Pair<Int, String>? {
         val wv = apiWebView ?: return null
-        // 等待首次同源页面就绪（最多 4.5s）
-        withTimeoutOrNull(4500L) { apiWebViewReady.await() }
+        withTimeoutOrNull(1500L) { apiWebViewReady.await() }
 
         val reqId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Pair<Int, String>>()
@@ -322,6 +326,8 @@ class MainActivity : ComponentActivity() {
 
         val jsCode = """
             (async function() {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 5500);
                 try {
                     const method = ${JSONObject.quote(method.uppercase())};
                     const hdrs = $headersJson;
@@ -332,9 +338,10 @@ class MainActivity : ComponentActivity() {
                         hdrs['X-CSRF-Token'] = metaCsrf.content;
                     } else if (method !== 'GET') {
                         try {
-                            const csrfResp = await fetch('/session/csrf.json', {
+                            const csrfResp = await fetch('https://linux.do/session/csrf.json', {
                                 headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                                credentials: 'include'
+                                credentials: 'include',
+                                signal: controller.signal
                             });
                             if (csrfResp.ok) {
                                 const csrfData = await csrfResp.json();
@@ -345,7 +352,8 @@ class MainActivity : ComponentActivity() {
                     const opts = {
                         method: method,
                         headers: hdrs,
-                        credentials: 'include'
+                        credentials: 'include',
+                        signal: controller.signal
                     };
                     const bodyStr = ${JSONObject.quote(formBodyEncoded)};
                     if (method !== 'GET' && method !== 'HEAD') {
@@ -354,8 +362,10 @@ class MainActivity : ComponentActivity() {
                     }
                     const resp = await fetch(${JSONObject.quote(url)}, opts);
                     const text = await resp.text();
+                    clearTimeout(timer);
                     window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text);
                 } catch (err) {
+                    clearTimeout(timer);
                     window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 0, '');
                 }
             })();
@@ -370,7 +380,7 @@ class MainActivity : ComponentActivity() {
         }
 
         return try {
-            withTimeoutOrNull(9000L) {
+            withTimeoutOrNull(6000L) {
                 deferred.await()
             }
         } finally {

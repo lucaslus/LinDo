@@ -321,29 +321,21 @@ private fun LinearLuminanceBar(modifier: Modifier = Modifier) {
 }
 
 /**
- * Linear 风格三点波浪呼吸脉冲底部加载器（支持分页加载中、点击加载更多、已加载全部三种优雅状态）
+ * Linear 风格三点波浪呼吸脉冲底部加载器（支持分页加载中、网络异常手动重试、点击加载更多、已加载全部四种状态）
  */
 @Composable
 private fun LinearPulseLoadingFooter(
     isLoadingMore: Boolean,
     hasMore: Boolean,
     loadedCount: Int,
+    isError: Boolean = false,
     loadingText: String = "正在同步更多话题",
     moreText: String = "加载更多话题",
+    errorText: String = "网络异常 · 点击手动重试",
     doneText: String = "已加载全部 $loadedCount 个话题",
     onLoadMore: () -> Unit
 ) {
     val palette = LocalPalette.current
-    val transition = rememberInfiniteTransition(label = "pulse_dots")
-    val progress by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 900, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "pulse_progress"
-    )
 
     Box(
         modifier = Modifier
@@ -351,7 +343,7 @@ private fun LinearPulseLoadingFooter(
             .padding(vertical = 10.dp),
         contentAlignment = Alignment.Center
     ) {
-        if (!hasMore && !isLoadingMore) {
+        if (!hasMore && !isLoadingMore && !isError) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -379,14 +371,28 @@ private fun LinearPulseLoadingFooter(
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(999.dp))
-                    .background(palette.cardSurface)
-                    .border(0.5.dp, palette.hairline, RoundedCornerShape(999.dp))
-                    .clickable(enabled = !isLoadingMore && hasMore) { onLoadMore() }
+                    .background(if (isError) palette.tonalPill else palette.cardSurface)
+                    .border(
+                        width = 0.5.dp,
+                        color = if (isError) palette.tonalPill else palette.hairline,
+                        shape = RoundedCornerShape(999.dp)
+                    )
+                    .clickable(enabled = !isLoadingMore && (hasMore || isError)) { onLoadMore() }
                     .padding(horizontal = 16.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 if (isLoadingMore) {
+                    val transition = rememberInfiniteTransition(label = "pulse_dots")
+                    val progress by transition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 900, easing = LinearEasing),
+                            repeatMode = RepeatMode.Restart
+                        ),
+                        label = "pulse_progress"
+                    )
                     repeat(3) { idx ->
                         val offsetPhase = ((progress - idx * 0.22f) + 1f) % 1f
                         val pulse = kotlin.math.sin(offsetPhase * kotlin.math.PI.toFloat()).coerceIn(0f, 1f)
@@ -409,6 +415,19 @@ private fun LinearPulseLoadingFooter(
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         color = palette.inkSecondary
+                    )
+                } else if (isError) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "手动重试",
+                        modifier = Modifier.size(13.dp),
+                        tint = palette.brandGold
+                    )
+                    Text(
+                        text = errorText,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.onTonalPill
                     )
                 } else {
                     Box(
@@ -867,7 +886,10 @@ fun LinDoApp() {
     var hasMoreTopics by remember { mutableStateOf(true) }
     var isLoadingTopics by remember { mutableStateOf(true) }
     var isLoadingMoreTopics by remember { mutableStateOf(false) }
+    var loadMoreError by remember { mutableStateOf(false) }
     var feedError by remember { mutableStateOf<String?>(null) }
+    var loadTopicsJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     var activeTopicSummary by remember { mutableStateOf<TopicSummary?>(null) }
     var activeTopicDetail by remember { mutableStateOf<TopicDetailModel?>(null) }
@@ -891,12 +913,13 @@ fun LinDoApp() {
 
     // 认证状态与真实个人资料状态
     var authVersion by remember { mutableStateOf(0) }
+    var wasAuthorized by remember { mutableStateOf(UserApiKeyAuthManager.isAuthorized()) }
     var guestPreviewMode by remember { mutableStateOf(false) }
     var activeWebLoginUrl by remember { mutableStateOf<String?>(null) }
     var fullUserProfile by remember { mutableStateOf<UserFullProfileSummary?>(UserApiKeyAuthManager.fullProfileCache) }
 
     val isAuthorized = remember(authVersion) { UserApiKeyAuthManager.isAuthorized() }
-    val currentUser = remember(authVersion) { UserApiKeyAuthManager.currentUser }
+    val currentUser = remember(authVersion, fullUserProfile) { UserApiKeyAuthManager.currentUser }
 
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -906,7 +929,6 @@ fun LinDoApp() {
             val profile = LinuxDoRepository.fetchCurrentUserProfile()
             if (profile != null) {
                 fullUserProfile = profile
-                authVersion++
             }
         }
     }
@@ -917,64 +939,86 @@ fun LinDoApp() {
         tag: String? = selectedTag,
         topPeriod: TopPeriodFilter = currentTopPeriod
     ) {
-        scope.launch {
+        loadMoreJob?.cancel()
+        loadTopicsJob?.cancel()
+        loadTopicsJob = scope.launch {
             isLoadingTopics = true
             isLoadingMoreTopics = false
+            loadMoreError = false
             feedError = null
             currentPage = 0
             hasMoreTopics = true
-            val fetched = LinuxDoRepository.fetchTopics(
-                path = sort.apiPath,
-                categoryId = categoryId,
-                page = 0,
-                tag = tag,
-                topPeriod = if (sort == FeedSortFilter.TOP) topPeriod.apiPeriod else null
-            )
-            if (fetched.isNotEmpty()) {
-                topics = fetched
-                hasMoreTopics = fetched.size >= 15
-                if (activeTopicSummary == null) {
-                    val first = fetched.firstOrNull { !it.pinned } ?: fetched.first()
-                    activeTopicSummary = first
-                    scope.launch {
-                        activeTopicDetail = LinuxDoRepository.fetchTopicDetail(first.id, first)
+            try {
+                val fetched = LinuxDoRepository.fetchTopics(
+                    path = sort.apiPath,
+                    categoryId = categoryId,
+                    page = 0,
+                    tag = tag,
+                    topPeriod = if (sort == FeedSortFilter.TOP) topPeriod.apiPeriod else null
+                )
+                if (fetched.isNotEmpty()) {
+                    topics = fetched
+                    hasMoreTopics = fetched.size >= 15
+                    if (activeTopicSummary == null) {
+                        val first = fetched.firstOrNull { !it.pinned } ?: fetched.first()
+                        activeTopicSummary = first
+                        scope.launch {
+                            activeTopicDetail = LinuxDoRepository.fetchTopicDetail(first.id, first)
+                        }
                     }
+                    feedListState.scrollToItem(0)
+                } else if (topics.isEmpty()) {
+                    feedError = "网络连接异常，请点击下方按钮手动重试"
+                    hasMoreTopics = false
                 }
-                feedListState.scrollToItem(0)
-            } else if (topics.isEmpty()) {
-                feedError = "网络连接异常，请轻触重试"
-                hasMoreTopics = false
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                if (topics.isEmpty()) {
+                    feedError = "网络连接异常，请点击下方按钮手动重试"
+                    hasMoreTopics = false
+                }
+            } finally {
+                isLoadingTopics = false
             }
-            isLoadingTopics = false
         }
     }
 
     fun loadNextPageTopics() {
         if (isLoadingTopics || isLoadingMoreTopics || !hasMoreTopics) return
-        scope.launch {
+        loadMoreJob = scope.launch {
             isLoadingMoreTopics = true
-            val nextPage = currentPage + 1
-            val more = LinuxDoRepository.fetchTopics(
-                path = currentSort.apiPath,
-                categoryId = selectedCategoryId,
-                page = nextPage,
-                tag = selectedTag,
-                topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null
-            )
-            if (more.isNotEmpty()) {
-                val existingIds = topics.map { it.id }.toSet()
-                val uniqueNew = more.filterNot { it.id in existingIds }
-                if (uniqueNew.isNotEmpty()) {
-                    currentPage = nextPage
-                    topics = topics + uniqueNew
-                    hasMoreTopics = more.size >= 10
+            loadMoreError = false
+            try {
+                val nextPage = currentPage + 1
+                val more = LinuxDoRepository.fetchTopics(
+                    path = currentSort.apiPath,
+                    categoryId = selectedCategoryId,
+                    page = nextPage,
+                    tag = selectedTag,
+                    topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null
+                )
+                if (more.isNotEmpty()) {
+                    val existingIds = topics.map { it.id }.toSet()
+                    val uniqueNew = more.filterNot { it.id in existingIds }
+                    if (uniqueNew.isNotEmpty()) {
+                        currentPage = nextPage
+                        topics = topics + uniqueNew
+                        hasMoreTopics = more.size >= 10
+                    } else {
+                        hasMoreTopics = false
+                    }
                 } else {
-                    hasMoreTopics = false
+                    // 网络异常或未返回数据：标记错误态，停止自动重试，交由用户点击手动重试
+                    loadMoreError = true
                 }
-            } else {
-                hasMoreTopics = false
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                loadMoreError = true
+            } finally {
+                isLoadingMoreTopics = false
             }
-            isLoadingMoreTopics = false
         }
     }
 
@@ -995,11 +1039,15 @@ fun LinDoApp() {
             activeWebLoginUrl = "https://linux.do/session/otp/$otp"
             return@LaunchedEffect
         }
-        if (UserApiKeyAuthManager.isAuthorized()) {
+        val nowAuth = UserApiKeyAuthManager.isAuthorized()
+        if (nowAuth && !wasAuthorized) {
+            wasAuthorized = true
             activeWebLoginUrl = null
             showAuthSheet = false
-            loadTopics(currentSort, selectedCategoryId)
+            loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
             syncUserProfile()
+        } else {
+            wasAuthorized = nowAuth
         }
     }
 
@@ -1009,8 +1057,11 @@ fun LinDoApp() {
         currentTab = MainTab.HOME
         scope.launch {
             isLoadingDetail = true
-            activeTopicDetail = LinuxDoRepository.fetchTopicDetail(topic.id, topic)
-            isLoadingDetail = false
+            try {
+                activeTopicDetail = LinuxDoRepository.fetchTopicDetail(topic.id, topic)
+            } finally {
+                isLoadingDetail = false
+            }
         }
     }
 
@@ -1203,6 +1254,7 @@ fun LinDoApp() {
                                             isLoading = isLoadingTopics,
                                             isLoadingMore = isLoadingMoreTopics,
                                             hasMoreTopics = hasMoreTopics,
+                                            loadMoreError = loadMoreError,
                                             errorMessage = feedError,
                                             enableAnimations = enableAnimations,
                                             fontScale = fontScale,
@@ -1367,6 +1419,7 @@ fun LinDoApp() {
                                                 isLoading = isLoadingTopics,
                                                 isLoadingMore = isLoadingMoreTopics,
                                                 hasMoreTopics = hasMoreTopics,
+                                                loadMoreError = loadMoreError,
                                                 errorMessage = feedError,
                                                 enableAnimations = enableAnimations,
                                                 fontScale = fontScale,
@@ -1822,6 +1875,7 @@ private fun CommunityHomeFeedPane(
     isLoading: Boolean,
     isLoadingMore: Boolean = false,
     hasMoreTopics: Boolean = true,
+    loadMoreError: Boolean = false,
     errorMessage: String?,
     enableAnimations: Boolean,
     fontScale: Float = 1.0f,
@@ -1856,8 +1910,8 @@ private fun CommunityHomeFeedPane(
         if (pinnedTopics.isEmpty()) topics else topics.filterNot { it.pinned }
     }
 
-    // 滚动触底自动加载下一页（使用 derivedStateOf 避免滚动每帧重组与死循环）
-    val shouldLoadMore by remember(isLoading, isLoadingMore, hasMoreTopics, searchQuery) {
+    // 滚动触底自动加载下一页（使用 derivedStateOf 避免滚动每帧重组；一旦发生网络异常 loadMoreError=true 立即停止自动重试，仅允许手动点击重试）
+    val shouldLoadMore by remember(isLoading, isLoadingMore, hasMoreTopics, loadMoreError, searchQuery) {
         derivedStateOf {
             val info = listState.layoutInfo
             val total = info.totalItemsCount
@@ -1867,11 +1921,12 @@ private fun CommunityHomeFeedPane(
                 !isLoading &&
                 !isLoadingMore &&
                 hasMoreTopics &&
+                !loadMoreError &&
                 searchQuery.isBlank()
         }
     }
     LaunchedEffect(shouldLoadMore, regularTopics.size) {
-        if (shouldLoadMore) {
+        if (shouldLoadMore && !loadMoreError) {
             onLoadMore()
         }
     }
@@ -2339,12 +2394,13 @@ private fun CommunityHomeFeedPane(
                         )
                     }
 
-                    // 底部 Linear 三点波浪呼吸脉冲分页加载栏
+                    // 底部 Linear 三点波浪呼吸脉冲分页加载栏（网络异常时显示手动重试按钮）
                     item(key = "load_more_footer") {
                         LinearPulseLoadingFooter(
                             isLoadingMore = isLoadingMore,
                             hasMore = hasMoreTopics,
                             loadedCount = regularTopics.size,
+                            isError = loadMoreError,
                             onLoadMore = onLoadMore
                         )
                     }
@@ -2662,6 +2718,7 @@ private fun CommunityTopicReaderPane(
     var onlyOpFilter by remember(summary.id) { mutableStateOf(false) }
     var notificationLevel by remember(summary.id) { mutableStateOf(1) } // 1=常规, 2=跟踪, 3=关注, 0=免扰
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
+    var loadMorePostsError by remember(summary.id) { mutableStateOf(false) }
     var copiedShareLink by remember(summary.id) { mutableStateOf(false) }
     var showFloorJumpBar by remember(summary.id) { mutableStateOf(false) }
 
@@ -2697,24 +2754,34 @@ private fun CommunityTopicReaderPane(
         if (isLoadingMorePosts || remainingPostIds.isEmpty()) return
         scope.launch {
             isLoadingMorePosts = true
-            val batchIds = remainingPostIds.take(batchSize)
-            val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds)
-            if (morePosts.isNotEmpty()) {
-                val merged = (currentDetail.posts + morePosts).distinctBy { it.id }
-                onDetailUpdated(currentDetail.copy(posts = merged))
+            loadMorePostsError = false
+            try {
+                val batchIds = remainingPostIds.take(batchSize)
+                val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds)
+                if (morePosts.isNotEmpty()) {
+                    val merged = (currentDetail.posts + morePosts).distinctBy { it.id }
+                    onDetailUpdated(currentDetail.copy(posts = merged))
+                } else {
+                    loadMorePostsError = true
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                loadMorePostsError = true
+            } finally {
+                isLoadingMorePosts = false
             }
-            isLoadingMorePosts = false
         }
     }
 
-    // 当滚动接近当前已加载楼层末尾时，自动拉取下一批 20 条评论楼层（derivedStateOf 防滚动每帧重组）
+    // 当滚动接近当前已加载楼层末尾时，自动拉取下一批 20 条评论楼层（若发生网络错误则停止自动重试，仅允许手动点击重试）
     val lastVisibleFloorIdx by remember {
         derivedStateOf {
             readerListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
         }
     }
-    LaunchedEffect(lastVisibleFloorIdx, posts.size, remainingPostIds.size, isLoadingMorePosts) {
-        if (posts.isNotEmpty() && remainingPostIds.isNotEmpty() && !isLoadingMorePosts && lastVisibleFloorIdx >= posts.size - 2) {
+    LaunchedEffect(lastVisibleFloorIdx, posts.size, remainingPostIds.size, isLoadingMorePosts, loadMorePostsError) {
+        if (posts.isNotEmpty() && remainingPostIds.isNotEmpty() && !isLoadingMorePosts && !loadMorePostsError && lastVisibleFloorIdx >= posts.size - 2) {
             loadMoreFloorBatch(20)
         }
     }
@@ -3113,8 +3180,10 @@ private fun CommunityTopicReaderPane(
                         isLoadingMore = isLoadingMorePosts,
                         hasMore = true,
                         loadedCount = posts.size,
+                        isError = loadMorePostsError,
                         loadingText = "正在同步后续楼层 (${posts.size}/$totalFloorCount)",
                         moreText = "加载后续评论 (剩余 ${remainingPostIds.size} 楼 · 已载入 ${posts.size}/$totalFloorCount)",
+                        errorText = "评论加载异常 · 点击手动重试",
                         onLoadMore = { loadMoreFloorBatch(20) }
                     )
                 }
