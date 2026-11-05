@@ -33,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,6 +43,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import do_.linux.lindo.ui.LocalLinDoAnimations
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -73,22 +77,38 @@ fun SmartAvatar(
     enableAnimations: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val staticUrl = remember(avatarTemplate) {
-        LinuxDoSiteRules.resolveStaticAvatarUrl(avatarTemplate, sizePx = 240)
+    val requestedPixels = with(LocalDensity.current) { size.roundToPx() }
+    val thumbnailSize = listOf(45, 60, 90, 120, 180, 240).firstOrNull { it >= requestedPixels } ?: 240
+    val motionEnabled = enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused
+    val staticUrl = remember(avatarTemplate, thumbnailSize) {
+        LinuxDoSiteRules.resolveStaticAvatarUrl(avatarTemplate, sizePx = thumbnailSize)
     }
-    val animatedUrl = remember(animatedAvatar, enableAnimations) {
-        if (enableAnimations) LinuxDoSiteRules.resolveAnimatedAvatarUrl(animatedAvatar) else null
+    val animatedUrl = remember(animatedAvatar, motionEnabled) {
+        if (motionEnabled) LinuxDoSiteRules.resolveAnimatedAvatarUrl(animatedAvatar) else null
     }
     val isSquare = remember(username, staticUrl) {
         LinuxDoSiteRules.isSquareAvatar(username, staticUrl)
     }
-    val shape: Shape = if (isSquare) RoundedCornerShape(percent = 12) else CircleShape
+    val shape: Shape = if (isSquare) RoundedCornerShape(percent = 10) else CircleShape
+    val glowColor = remember(username, primaryGroupName) { LinuxDoSiteRules.matchAvatarGlowColor(username, primaryGroupName) }
+    val glowAlpha = if (glowColor != null && motionEnabled) {
+        val pulse = rememberInfiniteTransition(label = "official_avatar_glow")
+        pulse.animateFloat(0.18f, 0.42f,
+            animationSpec = infiniteRepeatable(tween(if (isSquare) 3000 else 5000), RepeatMode.Reverse),
+            label = "glow_alpha")
+    } else rememberUpdatedState(0.25f)
 
     var animatedReady by remember(animatedUrl) { mutableStateOf(false) }
     var staticLoaded by remember(staticUrl) { mutableStateOf(false) }
 
     Box(
-        modifier = modifier.size(size),
+        modifier = modifier.size(size).drawBehind {
+            glowColor?.let { glow ->
+                drawCircle(brush = Brush.radialGradient(
+                    listOf(glow.copy(alpha = glowAlpha.value), glow.copy(alpha = 0f)),
+                    radius = this.size.minDimension * 0.8f), radius = this.size.minDimension * 0.8f)
+            }
+        },
         contentAlignment = Alignment.Center
     ) {
         Box(
@@ -240,13 +260,13 @@ fun UserTitleTag(
         return
     }
 
-    val shift = if (enableAnimations) {
+    val shift = if (enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused) {
         val transition = rememberInfiniteTransition(label = "holoTitle")
         val value by transition.animateFloat(
             initialValue = 0f,
             targetValue = 200f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 4200, easing = LinearEasing),
+                animation = tween(durationMillis = 15000, easing = LinearEasing),
                 repeatMode = RepeatMode.Restart
             ),
             label = "holoShift"
@@ -258,11 +278,11 @@ fun UserTitleTag(
 
     val holoBrush = Brush.linearGradient(
         colors = listOf(
-            Color(0xFFFF2E93),
-            Color(0xFF00B4D8),
-            Color(0xFFF59E0B),
-            Color(0xFF9333EA),
-            Color(0xFFFF2E93)
+            Color(0xFFFF00FF),
+            Color(0xFF00FFFF),
+            Color(0xFFFFFF00),
+            Color(0xFFFF00FF),
+            Color(0xFF00FFFF)
         ),
         start = Offset(shift, 0f),
         end = Offset(shift + 140f, 30f)

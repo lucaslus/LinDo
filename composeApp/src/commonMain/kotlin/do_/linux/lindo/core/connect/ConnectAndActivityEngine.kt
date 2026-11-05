@@ -31,10 +31,10 @@ object UserPresenceService {
     var lastUserActivityEpochMs: Long = System.currentTimeMillis()
         private set
 
-    var todayVisitConfirmed by mutableStateOf(true)
+    var todayVisitConfirmed by mutableStateOf(false)
         private set
 
-    var lastVisitSyncTimeText by mutableStateOf("刚刚")
+    var lastVisitSyncTimeText by mutableStateOf("尚未确认")
         private set
 
     fun setAppForeground(foreground: Boolean, countAsActivity: Boolean = true) {
@@ -109,7 +109,7 @@ data class ConsolidatedTimingBatch(
  * 2. 阅读过程中每秒 (`tick`) 为当前视口内可见楼层 (`onscreenPostNumbers`) 累加毫秒时长；
  * 3. 当有新楼层首次进入视野达到阈值（`rush`）或离开话题时，立即合并上报 `POST /topics/timings`：
  *    `topic_id={id}&topic_time={ms}&timings[{postNumber}]={ms}`；
- * 4. 遇到 429/502/503 等临时限流时自动将未上报时长合并回队列并按 `5s -> 10s -> 20s -> 40s` 指数退避重传，绝不丢数据。
+ * 4. 临时网络失败会合并回内存队列并指数退避重传；进程被杀时尚未持久化的队列仍可能丢失。
  */
 object ScreenTrackEngine {
     private const val PAUSE_UNLESS_SCROLLED_MS = 3 * 60 * 1000L
@@ -126,7 +126,8 @@ object ScreenTrackEngine {
 
     private val currentTimingsMs = LinkedHashMap<Int, Int>()
     private val totalTimingsMs = LinkedHashMap<Int, Int>()
-    private val readPostsSet = LinkedHashSet<Int>()
+    private val readPostsSet = LinkedHashSet<Pair<Int, Int>>()
+    private var sessionReadingMilliseconds = 0L
     private val consolidatedQueue = ArrayList<ConsolidatedTimingBatch>()
 
     private var onscreenPosts: Set<Int> = emptySet()
@@ -148,7 +149,7 @@ object ScreenTrackEngine {
 
     fun onTopicEntered(topicId: Int, initialVisiblePosts: Set<Int> = setOf(1), nowMs: Long = System.currentTimeMillis()) {
         if (currentTopicId != null && currentTopicId != topicId) {
-            flushCurrentTopic(nowMs)
+            onTopicExited(currentTopicId!!, nowMs)
         }
         resetCurrentTopicState(nowMs)
         currentTopicId = topicId
@@ -158,11 +159,8 @@ object ScreenTrackEngine {
     }
 
     fun updateVisiblePosts(visiblePostNumbers: Set<Int>, nowMs: Long = System.currentTimeMillis()) {
-        if (visiblePostNumbers.isNotEmpty()) {
-            onscreenPosts = visiblePostNumbers
-            lastScrolledEpochMs = nowMs
-            UserPresenceService.markUserActivity(nowMs)
-        }
+        onscreenPosts = visiblePostNumbers
+        // Updating the viewport is not user interaction; a stationary screen must still time out.
     }
 
     fun onUserScrolled(nowMs: Long = System.currentTimeMillis()) {
@@ -176,7 +174,10 @@ object ScreenTrackEngine {
      */
     fun tick(nowMs: Long = System.currentTimeMillis()): ConsolidatedTimingBatch? {
         val topicId = currentTopicId ?: return null
-        if (!UserPresenceService.isForeground) return null
+        if (!UserPresenceService.isForeground) {
+            lastTickEpochMs = nowMs
+            return null
+        }
 
         if (lastTickEpochMs == 0L) {
             lastTickEpochMs = nowMs
@@ -190,11 +191,12 @@ object ScreenTrackEngine {
             return null
         }
 
-        val diffMs = (nowMs - lastTickEpochMs).coerceIn(100L, 3_000L).toInt()
+        val diffMs = (nowMs - lastTickEpochMs).coerceIn(0L, 3_000L).toInt()
         lastTickEpochMs = nowMs
         accumulatedSinceFlushMs += diffMs
         currentTopicTimeMs += diffMs
-        sessionReadingSeconds = (sessionReadingSeconds * 1000L + diffMs) / 1000L
+        sessionReadingMilliseconds += diffMs
+        sessionReadingSeconds = sessionReadingMilliseconds / 1000L
 
         for (postNumber in onscreenPosts) {
             currentTimingsMs[postNumber] = (currentTimingsMs[postNumber] ?: 0) + diffMs
@@ -202,7 +204,7 @@ object ScreenTrackEngine {
 
         // 检查是否有首次阅读的新楼层累积满 1 秒（rush 立即上报策略）
         val hasUnreadRush = currentTimingsMs.entries.any { (postNum, ms) ->
-            ms >= 1_000 && !totalTimingsMs.containsKey(postNum) && !readPostsSet.contains(postNum)
+            ms >= 1_000 && !totalTimingsMs.containsKey(postNum) && !readPostsSet.contains(topicId to postNum)
         }
 
         if (accumulatedSinceFlushMs >= FLUSH_INTERVAL_MS || hasUnreadRush) {
@@ -221,7 +223,7 @@ object ScreenTrackEngine {
             if (timeMs > 0 && prevTotal < MAX_TRACKING_TIME_PER_POST_MS) {
                 totalTimingsMs[postNumber] = prevTotal + timeMs
                 newTimings[postNumber] = timeMs
-                if (readPostsSet.add(postNumber)) {
+                if (readPostsSet.add(topicId to postNumber)) {
                     sessionPostsRead += 1
                 }
             }
@@ -234,6 +236,15 @@ object ScreenTrackEngine {
         }
         accumulatedSinceFlushMs = 0L
         return popNextSendableBatch(nowMs)
+    }
+
+    fun onTopicExited(topicId: Int, nowMs: Long = System.currentTimeMillis()) {
+        if (currentTopicId != topicId) return
+        // Disposal must enqueue, never launch work into a scope that Compose is cancelling.
+        val batch = flushCurrentTopic(nowMs)
+        if (batch != null) consolidateBatch(batch.topicId, batch.topicTimeMs, batch.timingsMs)
+        currentTopicId = null
+        onscreenPosts = emptySet()
     }
 
     fun consolidateBatch(topicId: Int, topicTimeMs: Int, timingsMs: Map<Int, Int>) {
@@ -265,7 +276,7 @@ object ScreenTrackEngine {
     }
 
     fun onBatchSendResult(batch: ConsolidatedTimingBatch, statusCode: Int?, nowMs: Long = System.currentTimeMillis()) {
-        if (statusCode != null && statusCode in 200..399) {
+        if (statusCode != null && statusCode in 200..299) {
             consecutiveFailures = 0
             blockSendingUntilEpochMs = 0L
         } else if (statusCode == null || statusCode in RETRYABLE_STATUS_CODES) {
@@ -296,6 +307,7 @@ object ScreenTrackEngine {
         sessionTopicsEntered = 0
         sessionPostsRead = 0
         sessionReadingSeconds = 0L
+        sessionReadingMilliseconds = 0L
         pendingBatchesCount = 0
         consecutiveFailures = 0
         blockSendingUntilEpochMs = 0L
@@ -343,7 +355,7 @@ data class ConnectTrustLevelReport(
 )
 
 /**
- * `connect.linux.do` HTML 解析器（100% 兼容 `.tl3-ring`、`.tl3-bar-item`、`.tl3-quota-card` 与 `--val`/`--max` CSS 变量）
+ * `connect.linux.do` 当前环形、条形、举报配额及经典表格布局解析器。
  */
 object ConnectStatsParser {
 
@@ -373,10 +385,11 @@ object ConnectStatsParser {
         val badgeClasses = badgeMatch?.groupValues?.getOrNull(1).orEmpty()
         val badgeText = badgeMatch?.groupValues?.getOrNull(2)?.let { cleanText(it) }
             ?: if (htmlContent.contains("符合信任等级") || htmlContent.contains("已达标")) "已达标" else "实时数据"
-        val isQualified = badgeClasses.contains("badge-success") ||
+        val hasNegativeBadge = listOf("不符合", "未达标", "未达到", "不满足").any { badgeText.contains(it) }
+        val isQualified = !hasNegativeBadge && (badgeClasses.contains("badge-success") ||
             badgeText.contains("已达标") ||
             badgeText.contains("符合") ||
-            htmlContent.contains("符合信任等级 3")
+            htmlContent.contains("符合信任等级 3"))
 
         val periodDays = Regex("""(\d+)\s*(?:天|days)""", RegexOption.IGNORE_CASE)
             .find(subtitle)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 100
@@ -394,7 +407,7 @@ object ConnectStatsParser {
                 .find(block)?.groupValues?.getOrNull(1)?.let { cleanText(it) }.orEmpty()
             val circleTag = Regex("""<[^>]*class=["'][^"']*tl3-ring-circle[^"']*["'][^>]*>""")
                 .find(block)?.value.orEmpty()
-            val isMet = circleTag.contains("met") && !circleTag.contains("unmet")
+            val isMet = Regex("""class=["']([^"']*)["']""").find(circleTag)?.groupValues?.get(1)?.split(' ', '\t', '\n')?.contains("met") == true
             val cur = parseCssVar(circleTag, "--val")
             val max = parseCssVar(circleTag, "--max").coerceAtLeast(1)
             if (label.isNotEmpty()) {
@@ -422,7 +435,7 @@ object ConnectStatsParser {
                 .find(block)?.groupValues?.getOrNull(1)?.let { cleanText(it) }.orEmpty()
             val fillTag = Regex("""<[^>]*class=["'][^"']*tl3-bar-fill[^"']*["'][^>]*>""")
                 .find(block)?.value.orEmpty()
-            val isMet = fillTag.contains("met") && !fillTag.contains("unmet")
+            val isMet = Regex("""class=["']([^"']*)["']""").find(fillTag)?.groupValues?.get(1)?.split(' ', '\t', '\n')?.contains("met") == true
             val cssVal = parseCssVar(fillTag, "--val")
             val cssMax = parseCssVar(fillTag, "--max").coerceAtLeast(1)
             val parsedNum = parseFirstInt(numsText)
@@ -439,7 +452,25 @@ object ConnectStatsParser {
             }
         }
 
-        // 3. 兼容 connect.linux.do 经典 <table><tr><td>指标</td><td>当前</td><td>要求</td></tr></table> 布局
+        // Quotas are upper bounds. Never treat an excessive report count as positive progress.
+        val quotaRegex = Regex(
+            """<div[^>]*class=["']([^"']*\btl3-quota-card\b[^"']*)["'][^>]*>(.*?)(?=<div[^>]*class=["'][^"']*\btl3-quota-card\b|$)""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        for (match in quotaRegex.findAll(htmlContent)) {
+            val block = match.groupValues[2]
+            val label = Regex("""class=["'][^"']*tl3-quota-label[^"']*["'][^>]*>(.*?)<""", RegexOption.DOT_MATCHES_ALL)
+                .find(block)?.groupValues?.get(1)?.let(::cleanText).orEmpty()
+            val numbers = Regex("""class=["'][^"']*tl3-quota-nums[^"']*["'][^>]*>(.*?)<""", RegexOption.DOT_MATCHES_ALL)
+                .find(block)?.groupValues?.get(1)?.let(::cleanText).orEmpty()
+            val values = Regex("""(\d+)\s*/\s*(\d+)""").find(numbers) ?: continue
+            val current = values.groupValues[1].toInt()
+            val limit = values.groupValues[2].toInt()
+            if (label.isNotBlank()) metrics += ConnectMetricItem(label, current, limit,
+                current.toString(), limit.toString(), current <= limit)
+        }
+
+        // 兼容 connect.linux.do 经典 <table><tr><td>指标</td><td>当前</td><td>要求</td></tr></table> 布局
         if (metrics.isEmpty() && htmlContent.contains("<tr", ignoreCase = true)) {
             val trRegex = Regex("""<tr[^>]*>(.*?)</tr>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
             val tdRegex = Regex("""<td[^>]*>(.*?)</td>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
@@ -482,7 +513,7 @@ object ConnectStatsParser {
             title = title,
             subtitle = subtitle,
             statusBadgeText = badgeText,
-            isQualified = isQualified || metrics.all { it.isMet },
+            isQualified = !hasNegativeBadge && (isQualified || metrics.all { it.isMet }),
             timePeriodDays = periodDays,
             daysVisited = matchMetric(mapByLabel, listOf("访问天数", "days visited")),
             topicsEntered = matchMetric(mapByLabel, listOf("浏览话题", "浏览的话题", "浏览主题", "topics viewed")),
@@ -513,104 +544,33 @@ object ConnectStatsParser {
         likesReceived: Int,
         timeReadSeconds: Int
     ): ConnectTrustLevelReport {
-        val readMinutes = (timeReadSeconds / 60).coerceAtLeast(1)
-        return if (trustLevel <= 1) {
-            // Lv.1 -> Lv.2 晋升要求（15天访问、20浏览话题、100已读帖子、60分钟阅读、3条回复、1送赞、1获赞）
-            val items = listOf(
-                ConnectMetricItem("累计访问天数", daysVisited, 15, "$daysVisited 天", "15 天", daysVisited >= 15),
-                ConnectMetricItem("浏览话题数", topicsEntered, 20, "$topicsEntered", "20", topicsEntered >= 20),
-                ConnectMetricItem("已读帖子数", postsReadCount, 100, "$postsReadCount", "100", postsReadCount >= 100),
-                ConnectMetricItem("累计阅读时长", readMinutes, 60, "$readMinutes 分钟", "60 分钟", readMinutes >= 60),
-                ConnectMetricItem("发布回复数", postCount, 3, "$postCount", "3", postCount >= 3),
-                ConnectMetricItem("送出点赞数", likesGiven, 1, "$likesGiven", "1", likesGiven >= 1),
-                ConnectMetricItem("获得点赞数", likesReceived, 1, "$likesReceived", "1", likesReceived >= 1)
-            )
-            val allMet = items.all { it.isMet }
-            ConnectTrustLevelReport(
-                title = "Lv.$trustLevel → Lv.2 晋升进度 (@$username)",
-                subtitle = "数据实时同步自 Linux.do 个人统计档案",
-                statusBadgeText = if (allMet) "已达标 Lv.2" else "Lv.$trustLevel 晋升中",
-                isQualified = allMet,
-                timePeriodDays = 100,
-                daysVisited = daysVisited,
-                topicsEntered = topicsEntered,
-                postsRead = postsReadCount,
-                topicsRepliedTo = postCount,
-                likesGiven = likesGiven,
-                likesReceived = likesReceived,
-                likesReceivedDays = likesReceived.coerceAtMost(7),
-                likesReceivedUsers = likesReceived.coerceAtMost(5),
-                metrics = items,
-                isLiveConnectData = true
-            )
-        } else {
-            // Lv.2 / Lv.3 / Lv.4 活跃度与 TL3 要求对照
-            val items = listOf(
-                ConnectMetricItem("访问天数", daysVisited, 50, "$daysVisited 天", "50 天", daysVisited >= 50),
-                ConnectMetricItem("浏览话题", topicsEntered, 200, "$topicsEntered", "200", topicsEntered >= 200),
-                ConnectMetricItem("已读帖子", postsReadCount, 500, "$postsReadCount", "500", postsReadCount >= 500),
-                ConnectMetricItem("回复与发帖", postCount + topicCount, 10, "${postCount + topicCount}", "10", (postCount + topicCount) >= 10),
-                ConnectMetricItem("送出点赞", likesGiven, 30, "$likesGiven", "30", likesGiven >= 30),
-                ConnectMetricItem("获得点赞", likesReceived, 20, "$likesReceived", "20", likesReceived >= 20),
-                ConnectMetricItem("累计阅读时长", readMinutes / 60, 10, "${readMinutes / 60} 小时", "10 小时", (readMinutes / 60) >= 10)
-            )
-            val allMet = items.all { it.isMet }
-            ConnectTrustLevelReport(
-                title = "Lv.$trustLevel 社区活跃度与保级指标 (@$username)",
-                subtitle = "已同步 Linux.do 账户真实统计 · 访问 $daysVisited 天 / 获赞 $likesReceived",
-                statusBadgeText = if (allMet) "Lv.$trustLevel 活跃达标" else "Lv.$trustLevel 追踪中",
-                isQualified = allMet,
-                timePeriodDays = 100,
-                daysVisited = daysVisited,
-                topicsEntered = topicsEntered,
-                postsRead = postsReadCount,
-                topicsRepliedTo = postCount,
-                likesGiven = likesGiven,
-                likesReceived = likesReceived,
-                likesReceivedDays = likesReceived.coerceAtMost(7),
-                likesReceivedUsers = likesReceived.coerceAtMost(5),
-                metrics = items,
-                isLiveConnectData = true
-            )
-        }
-    }
-
-    /**
-     * 当用户尚未配置 Cookie 时，结合当前会话已同步的真实阅读进度生成清晰的 TL2/TL3 达标对照基准表
-     */
-    fun buildSessionBaselineReport(
-        sessionTopicsEntered: Int,
-        sessionPostsRead: Int
-    ): ConnectTrustLevelReport {
-        val daysVisited = 1
-        val topicsEntered = sessionTopicsEntered.coerceAtLeast(1)
-        val postsRead = sessionPostsRead.coerceAtLeast(5)
-        val items = listOf(
-            ConnectMetricItem("访问天数", daysVisited, 50, "$daysVisited 天", "50 天", daysVisited >= 50),
-            ConnectMetricItem("浏览话题", topicsEntered, 200, "$topicsEntered", "200", topicsEntered >= 200),
-            ConnectMetricItem("已读帖子", postsRead, 500, "$postsRead", "500", postsRead >= 500),
-            ConnectMetricItem("回复话题", 0, 10, "0", "10", false),
-            ConnectMetricItem("送出点赞", 0, 30, "0", "30", false),
-            ConnectMetricItem("获得点赞", 0, 20, "0", "20", false),
-            ConnectMetricItem("获赞天数", 0, 7, "0 天", "7 天", false),
-            ConnectMetricItem("获赞用户", 0, 5, "0 人", "5 人", false)
+        fun metric(label: String, value: Int, suffix: String = "") = ConnectMetricItem(
+            label, value, 0, "$value$suffix", "未提供", false
         )
         return ConnectTrustLevelReport(
-            title = "Connect",
-            subtitle = "过去 100 天周期要求",
-            statusBadgeText = "",
-            isQualified = false,
-            timePeriodDays = 100,
-            daysVisited = daysVisited,
-            topicsEntered = topicsEntered,
-            postsRead = postsRead,
-            topicsRepliedTo = 0,
-            likesGiven = 0,
-            likesReceived = 0,
-            likesReceivedDays = 0,
-            likesReceivedUsers = 0,
-            metrics = items,
+            title = "Lv.$trustLevel 账户累计统计 (@$username)",
+            subtitle = "Connect 周期数据暂未取得；以下为账户累计统计",
+            statusBadgeText = "累计统计，非 Connect 周期数据",
+            isQualified = false, timePeriodDays = 0,
+            daysVisited = daysVisited, topicsEntered = topicsEntered, postsRead = postsReadCount,
+            topicsRepliedTo = postCount, likesGiven = likesGiven, likesReceived = likesReceived,
+            likesReceivedDays = 0, likesReceivedUsers = 0,
+            metrics = listOf(
+                metric("累计访问天数", daysVisited, " 天"), metric("累计浏览话题", topicsEntered),
+                metric("累计已读帖子", postsReadCount), metric("发布话题", topicCount),
+                metric("发布回复", postCount), metric("送出点赞", likesGiven), metric("获得点赞", likesReceived),
+                metric("累计阅读时长", timeReadSeconds / 60, " 分钟")
+            ),
             isLiveConnectData = false
+        )
+    }
+
+    fun buildSessionBaselineReport(sessionTopicsEntered: Int, sessionPostsRead: Int): ConnectTrustLevelReport {
+        return ConnectTrustLevelReport(
+            title = "Connect", subtitle = "尚未取得 Connect 数据", statusBadgeText = "尚未同步",
+            isQualified = false, timePeriodDays = 0, daysVisited = 0, topicsEntered = 0, postsRead = 0,
+            topicsRepliedTo = 0, likesGiven = 0, likesReceived = 0, likesReceivedDays = 0, likesReceivedUsers = 0,
+            metrics = emptyList(), isLiveConnectData = false
         )
     }
 

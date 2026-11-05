@@ -1,46 +1,62 @@
-# LinDo — Linux.do High-Performance Native Client (Android / macOS / Windows)
+# LinDo
 
-> **LinDo (Linux.do for Android & Desktop)** — 基于 **Kotlin Multiplatform (KMP) + Compose Multiplatform** 打造的性能第一、全端原生级 [Linux.do](https://linux.do) 第三方客户端。
+基于 Kotlin Multiplatform 与 Compose Multiplatform 的 LINUX DO 第三方客户端，包含 Android 和桌面 JVM 目标。当前主要在 Android 模拟器验证。
 
----
+## 本地构建
 
-## 核心特性（针对现有开源客户端痛点的根治重构）
+需要 JDK 21、Android SDK 和已启动的 Android 模拟器。macOS 可使用 Android Studio JBR：
 
-1. **五合一全格式新徽章引擎 (`UniversalBadgeEngine`)**
-   - **SVG 徽章直出与魔数嗅探**：解决现有客户端将 `.svg` 徽章或伪装成位图的 SVG 直接交给位图 `Image` 导致裂图或空白（`SizedBox.shrink()`）的 Bug。
-   - **站点动态 SVG Sprite 热同步 (`/svg-sprite/linux.do/...`)**：自动提取并缓存 `<symbol id="...">` 矢量符号，社区新上线的自定义徽章无需客户端发版即可动态显示。
-   - **零丢失等级勋章兜底**：对未知未来图标自动回退为金/银/铜首字勋章，绝不吞掉任何一枚用户徽章。
-   - **顶层 `user_badges` 跨分页注入 (`BadgeInjector`)**：同时兼容 Map 与 List 响应结构，并在长帖翻页时保持用户徽章映射。
-
-2. **双栈无闪烁/无重影动态头像 (`SmartAvatar`)**
-   - **静态缩略图秒显打底 + 动图首帧原子接管**：话题卡片与帖子详情页楼层统一先展示几 KB 的 `avatar_template` 静态缩略图，当顶层 `animated_avatar`（GIF / WebP）首帧解码就绪后立即隐藏静态底图，彻底消除透明 GIF 透出底图造成的“双影”。
-   - **完整对齐 Linux.do 站点身份特效 (`LinuxDoSiteRules`)**：
-     - `@neo` 站长专属 `10%` 圆角方形头像 + `#00AEFF` 冰蓝脉冲光晕；
-     - `g-merchant` 认证商家专属 `#F5BF03` 鎏金脉冲光晕；
-     - `种子用户` 与 `Premium` 专属全息流光渐变头衔（`UserTitleTag`）；
-     - 右下角 `FlairBadgeOverlay` 群组角标、生日 🎂 与纪念日 🍰 标识；
-     - 支持全局一键切换「60fps 动效模式 / 省电静态模式」。
-
-3. **原生 AST 帖子渲染引擎 (`DiscourseAstParser`)**
-   - 在后台线程一次性将 Discourse `cooked` HTML 转换为结构化 `PostBlockNode` AST（标题、段落、代码块、嵌套引用卡 `aside.quote`、折叠块 `details`、列表、图片画廊），结合内容签名 LRU 缓存，实现长帖 60/120fps 丝滑滚动。
-
-4. **防盾网络竞速与免掉登录认证架构 (`CloudflareEdgeRacer` & `CookieSentinel`)**
-   - **Cloudflare 边缘节点并发竞速**：并发探测候选 Anycast 节点 `/cdn-cgi/trace` 延迟并锁定单一最快出口 IP，防止出口漂移触发 Cloudflare 频繁弹盾。
-   - **User API Key (RSA-2048) 授权通道**：通过 `User-Api-Key` 请求头通信，摆脱对易失效 WebView Cookie 的依赖。
-   - **RFC 6265bis 4元组 Cookie 哨兵**：强制对 `_t`、`cf_clearance`、`_forum_session` 执行单一 canonical 去重，根治 `host-only` 与 `.linux.do` 多变体共存导致的“假掉登录”。
-
----
-
-## 快速构建与运行
-
-```bash
-# 使用 JDK 21 或 Android Studio JBR 运行测试（Desktop JVM + Android Unit Tests）
+```sh
 export JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home'
-./gradlew :composeApp:desktopTest :composeApp:testDebugUnitTest
-
-# 启动 macOS / Windows 桌面端原生窗口
-./gradlew :composeApp:run
-
-# 构建 Android Debug APK（兼容 arm64-v8a 与 x86 模拟器）
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
 ./gradlew :composeApp:assembleDebug
+./gradlew :composeApp:testDebugUnitTest :composeApp:desktopTest
 ```
+
+Debug APK：`composeApp/build/outputs/apk/debug/composeApp-debug.apk`。桌面启动：`./gradlew :composeApp:run`。构建工具链存在兼容性债务，不能以 Debug 构建成功替代发布验证，见[审查报告](docs/review-2026-11-06.md)。
+
+## Android 自动预览
+
+```sh
+python3 scripts/android-dev.py --device emulator-5554
+```
+
+脚本监听共享代码、Android 代码、资源与 Gradle 配置，自动增量构建、`adb install -r` 覆盖安装并重启。保留登录数据，内存中的页面状态会重置。编译失败时保留已安装版本。`--once` 仅部署一次，`--skip-initial` 从监听开始；同一工作区只允许一个实例。macOS 优先使用 Android Studio JBR，其他环境使用 `JAVA_HOME`。
+
+这是自动重新部署。Android Studio 的 [Live Edit](https://developer.android.com/develop/ui/compose/tooling/iterative-development) 可用于支持范围内的 Compose 函数体即时预览；[Compose Hot Reload](https://kotlinlang.org/docs/multiplatform/compose-hot-reload.html) 面向桌面 JVM。
+
+## 零度娘品牌与通用状态
+
+最终资产与来源见 [design/brand-v3](design/brand-v3/README.md)。App 使用真实 SVG 路径导出的 VectorDrawable，透明底人物；加载与刷新使用 Compose 图层轻摇摆，无 Lottie 依赖。网络异常、空内容、完成、分页结束、发送与上传等状态共用品牌组件。
+
+```sh
+python3 scripts/generate-brand-vectors.py
+```
+
+WebView 使用全屏网页与系统返回键，网站自身的登录、验证及加载页面由网站呈现。
+
+## 自动化 UI 回归
+
+已安装 Debug APK 后运行，无额外 Python 依赖：
+
+```sh
+python3 scripts/android-ui-smoke.py --device emulator-5554
+```
+
+覆盖欢迎页明暗主题、1.3/1.6 大字体、六种状态、关闭动效、全屏 WebView 与返回、重复释放、断网恢复、列表滚动和网页渲染进程崩溃恢复。测试会短暂调整系统字体和网络并在结束时恢复，不清除登录数据，不发送帖子、点赞或私信。结果在 `build/ui-smoke/results.json`，同目录保存截图。
+
+Debug 专属预览（不退出当前账号）：
+
+```sh
+adb shell am start -n do_.linux.lindo/.MainActivity --es lindo.preview welcome
+adb shell am start -n do_.linux.lindo/.MainActivity --ez lindo.brand_preview true
+```
+
+返回正常 App：`adb shell am start -S -n do_.linux.lindo/.MainActivity`。预览 Intent 仅在 debuggable 应用生效。
+
+## 数据与验证边界
+
+Connect 展示取得的官方周期指标；获取失败时明确标为账户累计数据，不推算保级资格。动态头像使用 CDN 原件，尊重动效开关及窗口焦点。原生富文本、实时消息、WebView 文件下载等与 Web 仍有差距。详细发现、修复、测试证据和后续方案见[审查报告](docs/review-2026-11-06.md)。
+
+Cookie、令牌及调试导入文件不得加入仓库。

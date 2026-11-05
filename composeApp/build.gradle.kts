@@ -50,6 +50,7 @@ kotlin {
         }
 
         commonTest.dependencies {
+            implementation(libs.ktor.client.mock)
             implementation(kotlin("test"))
             implementation(libs.kotlinx.coroutines.test)
         }
@@ -68,8 +69,10 @@ kotlin {
 }
 
 android {
+    sourceSets.getByName("test").resources.srcDir("src/commonTest/resources")
     namespace = "do_.linux.lindo"
     compileSdk = 37
+    compileSdkMinor = 0
 
     defaultConfig {
         applicationId = "do_.linux.lindo"
@@ -92,9 +95,14 @@ android {
     }
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    coreLibraryDesugaring(libs.android.desugar)
 }
 
 tasks.matching { it.name.contains("AarMetadata") }.configureEach {

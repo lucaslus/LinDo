@@ -16,7 +16,7 @@ object LinuxDoSiteRules {
     const val BASE_URL = "https://linux.do"
 
     private val squareAvatarUsernames = setOf("neo")
-    private val holographicTitles = setOf("种子用户", "Premium")
+    private val holographicTitles = setOf("种子用户", "破界者", "premium")
     private val avatarUsernameRegex = Regex("""/user_avatar/[^/]+/([^/]+)/""")
 
     /**
@@ -42,7 +42,7 @@ object LinuxDoSiteRules {
         if (username?.equals("neo", ignoreCase = true) == true) {
             return Color(0xFF00AEFF) // 站长专属冰蓝光晕
         }
-        if (primaryGroupName?.equals("g-merchant", ignoreCase = true) == true) {
+        if (primaryGroupName?.lowercase() in setOf("g-merchant", "g-merchant2")) {
             return Color(0xFFF5BF03) // 认证商家鎏金光晕
         }
         return null
@@ -52,7 +52,7 @@ object LinuxDoSiteRules {
      * 判断用户头衔是否应使用全息流光渐变特效
      */
     fun isHolographicTitle(userTitle: String?): Boolean {
-        return userTitle != null && holographicTitles.contains(userTitle.trim())
+        return userTitle != null && holographicTitles.contains(userTitle.trim().lowercase())
     }
 
     /**

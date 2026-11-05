@@ -6,6 +6,7 @@ local.properties
 .idea/
 *.iml
 .DS_Store
+__pycache__/
 captures/
 .externalNativeBuild/
 .cxx/
@@ -13,3 +14,7 @@ captures/
 *.aab
 *.ap_
 *.dex
+
+# Local authentication material and account-identifying captures
+lindo-session-import.json
+docs/review-evidence/2026-11-06/connect-native.png

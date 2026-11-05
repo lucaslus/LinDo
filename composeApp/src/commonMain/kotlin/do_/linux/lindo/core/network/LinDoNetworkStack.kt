@@ -18,12 +18,14 @@ import do_.linux.lindo.core.model.TopicUser
 import do_.linux.lindo.core.model.UserActivityItem
 import do_.linux.lindo.core.model.UserFullProfileSummary
 import do_.linux.lindo.core.model.UserNotificationItem
+import do_.linux.lindo.core.site.LinuxDoSiteRules
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitForm
 import io.ktor.client.request.forms.submitFormWithBinaryData
 import io.ktor.client.request.get
+import kotlinx.coroutines.CancellationException
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.Headers
@@ -94,6 +96,7 @@ object CookieSentinel {
     private val store = LinkedHashMap<CookieQuadrupleKey, StoredCookieRecord>()
     private val sessionRefreshMutex = Mutex()
 
+    @Synchronized
     fun putCookie(record: StoredCookieRecord) {
         if (record.key.name in criticalCookieNames && record.value.isBlank()) {
             return
@@ -125,6 +128,7 @@ object CookieSentinel {
         }
     }
 
+    @Synchronized
     fun resolveWinningCookies(
         nowMs: Long = System.currentTimeMillis(),
         targetHost: String = "linux.do"
@@ -208,10 +212,12 @@ object CookieSentinel {
         }
     }
 
+    @Synchronized
     fun clear() {
         store.clear()
     }
 
+    @Synchronized
     fun clearAll() {
         store.clear()
     }
@@ -219,6 +225,7 @@ object CookieSentinel {
     /**
      * 退出账号时仅清除 Discourse 会话 Cookie（`_t`、`_forum_session`），保留 Cloudflare 信任凭证（`cf_clearance`、`__cf_bm`、`_cfuvid`）以避免下次登录重新触发 Turnstile 验证
      */
+    @Synchronized
     fun clearAuthCookiesOnly() {
         val cfTrustCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
         val keysToRemove = store.keys.filter { it.name !in cfTrustCookies }
@@ -651,6 +658,11 @@ data class LinuxDoCategoryMeta(
 /**
  * Linux.do 核心数据仓库（100% 纯净线上社区内容）
  */
+internal fun isSuccessfulApiResponse(status: Int, body: String): Boolean {
+    val trimmed = body.trimStart()
+    return status in 200..299 && (trimmed.isEmpty() || trimmed.startsWith("{") || trimmed.startsWith("["))
+}
+
 object LinuxDoRepository {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -804,7 +816,7 @@ object LinuxDoRepository {
         val hasWebCookie = CookieSentinel.resolveWinningCookies().containsKey("_t")
         val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || hasWebCookie
         val presenceHeaders = UserPresenceService.buildPresenceHeaders(
-            isBackgroundTimingRequest = false,
+            isBackgroundTimingRequest = extraHeaders["Discourse-Background"] == "true",
             isLoggedIn = isLoggedIn
         )
         val mergedHeaders = buildMap {
@@ -818,48 +830,43 @@ object LinuxDoRepository {
             extraHeaders.forEach { (k, v) -> put(k, v) }
         }
 
-        // 1. 优先尝试复用全局 OkHttp 连接池直连（最快，零 WebView IPC 损耗）
-        try {
-            val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
-            val response = if (method.equals("POST", ignoreCase = true) || method.equals("PUT", ignoreCase = true)) {
-                val params = Parameters.build {
-                    formParams?.forEach { (k, v) -> append(k, v) }
+        suspend fun viaWebView(): Pair<Int, String>? {
+            val executor = UserApiKeyAuthManager.webViewHttpExecutor ?: return null
+            return try {
+                executor(url, method, formParams, mergedHeaders)?.takeIf {
+                    isSuccessfulApiResponse(it.first, it.second)
                 }
-                sharedClient.submitForm(url = url, formParameters = params) {
-                    mergedHeaders.forEach { (k, v) -> header(k, v) }
-                    UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
-                    if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
-                }
-            } else {
-                sharedClient.get(url) {
-                    mergedHeaders.forEach { (k, v) -> header(k, v) }
-                    UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
-                    if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
-                }
-            }
-            val status = response.status.value
-            val text = response.bodyAsText()
-            if (status in 200..299 && (text.trimStart().startsWith("{") || text.trimStart().startsWith("[") || method != "GET")) {
-                UserPresenceService.recordSuccessfulForegroundRequest()
-                return@withContext status to text
-            }
-            println("LinDoHttp: [OkHttp] $method $url -> status=$status")
-        } catch (t: Throwable) {
-            println("LinDoHttp: [OkHttp] $method $url failed: ${t.message}")
-        }
-
-        // 2. 若 OkHttp 被 Cloudflare 质询拦截，单次调用 Android Chromium WebView 同源执行器（严禁多次自动循环重试）
-        UserApiKeyAuthManager.webViewHttpExecutor?.let { webExec ->
-            val result = try {
-                webExec(url, method, formParams, mergedHeaders)
-            } catch (_: Throwable) {
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
                 null
             }
-            println("LinDoHttp: [WebView] $method $url -> status=${result?.first}")
-            if (result != null && result.first in 200..299 && (result.second.trimStart().startsWith("{") || result.second.trimStart().startsWith("[") || method != "GET")) {
-                UserPresenceService.recordSuccessfulForegroundRequest()
-                return@withContext result
+        }
+        // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
+        if (!method.equals("GET", true) && !method.equals("HEAD", true) && UserApiKeyAuthManager.webViewHttpExecutor != null) {
+            return@withContext viaWebView()
+        }
+        try {
+            val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
+            val requestHeaders = mergedHeaders.toMutableMap()
+            UserApiKeyAuthManager.customUserAgent?.let { requestHeaders["User-Agent"] = it }
+            if (cookieHeader.isNotEmpty()) requestHeaders["Cookie"] = cookieHeader
+            val response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+            val status = response.status.value
+            val text = response.bodyAsText()
+            if (isSuccessfulApiResponse(status, text)) {
+                if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
+                return@withContext status to text
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // A read can safely fall back to the existing authenticated browser transport.
+        }
+        val browserResult = viaWebView()
+        if (browserResult != null) {
+            if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
+            return@withContext browserResult
         }
 
         null
@@ -954,8 +961,8 @@ object LinuxDoRepository {
         val sep = if (basePath.contains("?")) "&" else "?"
         val url = "https://linux.do/$basePath$sep${queryParams.joinToString("&")}"
         val res = executeHttp(url = url, method = "GET")
-        val text = res?.second
-        if (text != null && text.trimStart().startsWith("{")) {
+        val text = res?.second ?: throw java.io.IOException("讨论加载失败，请检查网络连接")
+        if (text.trimStart().startsWith("{")) {
             return@withContext try {
                 val root = json.parseToJsonElement(text).jsonObject
                 parseTopicListRoot(root)
@@ -1006,7 +1013,7 @@ object LinuxDoRepository {
             }
         }
 
-        // 若某私密板块话题需登录查看，返回基于话题摘要的干净首楼
+        // Preserve the real summary, but never fabricate a first post from an excerpt on failure.
         val s = summaryFallback
         TopicDetailModel(
             id = s?.id ?: topicId,
@@ -1017,36 +1024,8 @@ object LinuxDoRepository {
             views = s?.views ?: 0,
             likeCount = s?.likeCount ?: 0,
             postsCount = s?.postsCount ?: 1,
-            posts = if (s != null) {
-                listOf(
-                    PostItemModel(
-                        id = s.id * 10 + 1,
-                        postNumber = 1,
-                        userId = s.originalPoster.id,
-                        username = s.originalPoster.username,
-                        displayName = s.originalPoster.name,
-                        avatarTemplate = s.originalPoster.avatarTemplate,
-                        animatedAvatar = s.originalPoster.animatedAvatar,
-                        primaryGroupName = s.originalPoster.primaryGroupName,
-                        trustLevel = s.originalPoster.trustLevel,
-                        admin = s.originalPoster.admin,
-                        moderator = s.originalPoster.moderator,
-                        isTopicOwner = true,
-                        flair = FlairInfo(
-                            url = s.originalPoster.flairUrl,
-                            name = s.originalPoster.flairName,
-                            bgColorHex = s.originalPoster.flairBgColor,
-                            fgColorHex = s.originalPoster.flairColor
-                        ),
-                        createdAtText = s.lastPostedAt,
-                        likeCount = s.likeCount,
-                        replyCount = s.replyCount,
-                        cookedHtml = "<p>${s.excerpt ?: s.title}</p>"
-                    )
-                )
-            } else {
-                emptyList()
-            }
+            posts = emptyList(),
+            loadError = "网络请求失败，或当前账号没有访问此话题的权限。"
         )
     }
 
@@ -1108,15 +1087,10 @@ object LinuxDoRepository {
                         ?: currentUsername ?: displayName
                     val rawTpl = cu["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
                     if (rawTpl.isNotBlank()) {
-                        avatarUrl = if (rawTpl.startsWith("http")) {
-                            rawTpl.replace("{size}", "240")
-                        } else {
-                            "https://linux.do${rawTpl.replace("{size}", "240")}"
-                        }
+                        avatarUrl = LinuxDoSiteRules.resolveUrl(rawTpl)
                     }
-                    animatedAvatar = cu["animated_avatar"]?.jsonPrimitive?.contentOrNull?.let {
-                        if (it.startsWith("http")) it else "https://linux.do$it"
-                    } ?: animatedAvatar
+                    animatedAvatar = LinuxDoSiteRules.resolveAnimatedAvatarUrl(
+                        cu["animated_avatar"]?.jsonPrimitive?.contentOrNull) ?: animatedAvatar
                     trustLevel = cu["trust_level"]?.jsonPrimitive?.intOrNull ?: trustLevel
                     title = cu["title"]?.jsonPrimitive?.contentOrNull ?: title
                     unreadNotifs = cu["unread_notifications"]?.jsonPrimitive?.intOrNull
@@ -1162,12 +1136,10 @@ object LinuxDoRepository {
                     displayName = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: displayName.ifBlank { uname }
                     val rawTpl = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
                     if (rawTpl.isNotBlank()) {
-                        avatarUrl = if (rawTpl.startsWith("http")) {
-                            rawTpl.replace("{size}", "240")
-                        } else {
-                            "https://linux.do${rawTpl.replace("{size}", "240")}"
-                        }
+                        avatarUrl = LinuxDoSiteRules.resolveUrl(rawTpl)
                     }
+                    animatedAvatar = LinuxDoSiteRules.resolveAnimatedAvatarUrl(
+                        uObj["animated_avatar"]?.jsonPrimitive?.contentOrNull) ?: animatedAvatar
                     trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: trustLevel
                     title = uObj["title"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: title
                     bioExcerpt = uObj["bio_excerpt"]?.jsonPrimitive?.contentOrNull
@@ -2174,35 +2146,13 @@ object LinuxDoRepository {
             return@withContext 200
         }
 
-        val client = sharedClient
-        try {
-            val headers = UserPresenceService.buildPresenceHeaders(
-                isBackgroundTimingRequest = true,
-                isLoggedIn = true
-            )
-            val params = Parameters.build {
-                append("topic_id", batch.topicId.toString())
-                append("topic_time", batch.topicTimeMs.toString())
-                batch.timingsMs.forEach { (postNumber, durationMs) ->
-                    append("timings[$postNumber]", durationMs.toString())
-                }
-            }
-            val response = client.submitForm(
-                url = "https://linux.do/topics/timings",
-                formParameters = params
-            ) {
-                headers.forEach { (k, v) -> header(k, v) }
-                val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
-                if (cookieHeader.isNotEmpty()) {
-                    header("Cookie", cookieHeader)
-                } else {
-                    UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
-                }
-            }
-            response.status.value
-        } catch (_: Throwable) {
-            null
+        val headers = UserPresenceService.buildPresenceHeaders(isBackgroundTimingRequest = true, isLoggedIn = true)
+        val params = buildMap {
+            put("topic_id", batch.topicId.toString())
+            put("topic_time", batch.topicTimeMs.toString())
+            batch.timingsMs.forEach { (number, milliseconds) -> put("timings[$number]", milliseconds.toString()) }
         }
+        executeHttp("https://linux.do/topics/timings", method = "POST", formParams = params, extraHeaders = headers)?.first
     }
 
     /**
@@ -2231,7 +2181,6 @@ object LinuxDoRepository {
         val client = sharedClient
         try {
             val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "connect.linux.do")
-                .ifEmpty { CookieSentinel.buildCookieHeader(targetHost = "linux.do") }
             val response = client.get("https://connect.linux.do/") {
                 header("Accept", "text/html,application/xhtml+xml")
                 UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }

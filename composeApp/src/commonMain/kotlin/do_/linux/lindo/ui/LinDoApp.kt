@@ -55,7 +55,6 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -404,43 +403,7 @@ private enum class TopPeriodFilter(val label: String, val apiPeriod: String) {
  */
 @Composable
 private fun LinearLuminanceBar(modifier: Modifier = Modifier) {
-    val palette = LocalPalette.current
-    val transition = rememberInfiniteTransition(label = "luminance")
-    val phase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1050, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "luminance_phase"
-    )
-    Canvas(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(2.dp)
-            .clip(RoundedCornerShape(1.dp))
-    ) {
-        val w = size.width
-        drawRect(color = palette.hairline.copy(alpha = 0.45f))
-        val barWidth = w * 0.36f
-        val startX = (w + barWidth) * phase - barWidth
-        drawRect(
-            brush = Brush.horizontalGradient(
-                colors = listOf(
-                    Color.Transparent,
-                palette.brandGold,
-                    palette.inkPrimary,
-                    palette.brandGold,
-                    Color.Transparent
-                ),
-                startX = startX,
-                endX = startX + barWidth
-            ),
-            topLeft = Offset(startX.coerceAtLeast(0f), 0f),
-            size = Size(barWidth, size.height)
-        )
-    }
+    LinDoLoadingIndicator(modifier = modifier)
 }
 
 /**
@@ -459,115 +422,27 @@ private fun LinearPulseLoadingFooter(
     onLoadMore: () -> Unit
 ) {
     val palette = LocalPalette.current
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 10.dp),
-        contentAlignment = Alignment.Center
+    val state = when {
+        isError -> LinDoMascotState.NetworkError
+        isLoadingMore -> LinDoMascotState.Loading
+        !hasMore -> LinDoMascotState.End
+        else -> LinDoMascotState.Refreshing
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)
+            .clickable(enabled = !isLoadingMore && (hasMore || isError), onClick = onLoadMore)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        if (!hasMore && !isLoadingMore && !isError) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .width(24.dp)
-                        .height(0.5.dp)
-                        .background(palette.hairline)
-                )
-                Text(
-                    text = doneText,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.inkTertiary
-                )
-                Box(
-                    modifier = Modifier
-                        .width(24.dp)
-                        .height(0.5.dp)
-                        .background(palette.hairline)
-                )
-            }
-        } else {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(if (isError) palette.tonalPill else palette.cardSurface)
-                    .border(
-                        width = 0.5.dp,
-                        color = if (isError) palette.tonalPill else palette.hairline,
-                        shape = RoundedCornerShape(999.dp)
-                    )
-                    .clickable(enabled = !isLoadingMore && (hasMore || isError)) { onLoadMore() }
-                    .padding(horizontal = 16.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
-            ) {
-                if (isLoadingMore) {
-                    val transition = rememberInfiniteTransition(label = "pulse_dots")
-                    val progress by transition.animateFloat(
-                        initialValue = 0f,
-                        targetValue = 1f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 900, easing = LinearEasing),
-                            repeatMode = RepeatMode.Restart
-                        ),
-                        label = "pulse_progress"
-                    )
-                    repeat(3) { idx ->
-                        val offsetPhase = ((progress - idx * 0.22f) + 1f) % 1f
-                        val pulse = kotlin.math.sin(offsetPhase * kotlin.math.PI.toFloat()).coerceIn(0f, 1f)
-                        val scale = 0.72f + 0.36f * pulse
-                        Box(
-                            modifier = Modifier
-                                .size(5.5.dp)
-                                .graphicsLayer {
-                                    scaleX = scale
-                                    scaleY = scale
-                                    alpha = 0.35f + 0.65f * pulse
-                                }
-                                .clip(CircleShape)
-                                .background(if (idx == 1) palette.brandGold else palette.inkPrimary)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(3.dp))
-                    Text(
-                        text = loadingText,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.inkSecondary
-                    )
-                } else if (isError) {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "手动重试",
-                        modifier = Modifier.size(13.dp),
-                        tint = palette.brandGold
-                    )
-                    Text(
-                        text = errorText,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.onTonalPill
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(5.5.dp)
-                            .clip(CircleShape)
-                            .background(palette.brandGold)
-                    )
-                    Text(
-                        text = moreText,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.inkPrimary
-                    )
-                }
-            }
-        }
+        LinDoMascot(state = state, compact = true, size = 34.dp, animate = isLoadingMore || isError)
+        Spacer(Modifier.width(8.dp))
+        Text(text = when {
+            isError -> errorText
+            isLoadingMore -> loadingText
+            !hasMore -> doneText
+            else -> moreText
+        }, color = palette.inkSecondary, fontSize = 12.sp, lineHeight = 18.sp)
     }
 }
 
@@ -577,16 +452,15 @@ private fun LinearPulseLoadingFooter(
 @Composable
 private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
     val palette = LocalPalette.current
-    val transition = rememberInfiniteTransition(label = "shimmer")
-    val alphaAnim by transition.animateFloat(
-        initialValue = 0.38f,
-        targetValue = 0.85f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 720, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "shimmer_alpha"
-    )
+    val alphaAnim = if (LocalLinDoAnimations.current) {
+        val transition = rememberInfiniteTransition(label = "shimmer")
+        val animated by transition.animateFloat(
+            initialValue = 0.38f, targetValue = 0.85f,
+            animationSpec = infiniteRepeatable(tween(1000, easing = LinearEasing), RepeatMode.Reverse),
+            label = "shimmer_alpha"
+        )
+        animated
+    } else 0.6f
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -602,12 +476,7 @@ private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Image(
-                painter = painterResource(Res.drawable.lingdu_bushaoxin),
-                contentDescription = "零度娘加载中",
-                modifier = Modifier.size(48.dp),
-                contentScale = ContentScale.Fit
-            )
+            LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 44.dp)
             Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -618,7 +487,7 @@ private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "连接 LINUX DO 理想型社区 · 不烧心流畅阅读",
+                    text = "马上就能看到最新讨论",
                     fontSize = 11.5.sp,
                     color = palette.inkSecondary
                 )
@@ -776,212 +645,6 @@ private fun GeminiSparkleIcon(
 }
 
 /**
- * 零度娘 · 品牌应用图标（#F6B73C 暖金底 + 零度娘冕冠头像）
- */
-@Composable
-private fun LinDoGlassAppIcon(
-    tileSize: Dp = 84.dp,
-    isCircle: Boolean = false,
-    modifier: Modifier = Modifier
-) {
-    val shape = if (isCircle) CircleShape else RoundedCornerShape(tileSize * 0.25f)
-    Box(
-        modifier = modifier
-            .size(tileSize)
-            .clip(shape)
-            .background(Color(0xFFF6B73C)),
-        contentAlignment = Alignment.Center
-    ) {
-        Image(
-            painter = painterResource(Res.drawable.lindo_mascot_icon),
-            contentDescription = "LinDo 零度娘应用图标",
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop
-        )
-    }
-}
-
-/**
- * DESIGN CONCEPT / 01：`LinDo` 品牌字标（含 `Lin` 下方标志性 #F6B73C 暖金短横线）
- */
-@Composable
-fun LinDoBrandWordmark(
-    isDark: Boolean = false,
-    fontSizeSp: Float = 24f,
-    modifier: Modifier = Modifier
-) {
-    Column(modifier = modifier) {
-        Text(
-            text = "LinDo",
-            fontSize = fontSizeSp.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = (-0.7).sp,
-            color = if (isDark) Color(0xFFF8F5F0) else Color(0xFF201D19),
-            maxLines = 1
-        )
-        Spacer(modifier = Modifier.height(1.5.dp))
-        Box(
-            modifier = Modifier
-                .width((fontSizeSp * 0.78f).dp)
-                .height(3.2.dp)
-                .clip(RoundedCornerShape(99.dp))
-                .background(Color(0xFFF6B73C))
-        )
-    }
-}
-
-/**
- * 零度娘 · 登录加载与身份核验过渡页 (`我要验牌` 贴纸 + 暖金胶囊进度条 + 黑金亲切轻盈留白)
- */
-@Composable
-fun LinDoMascotLoginTransitionView(
-    isDark: Boolean,
-    progress: Float,
-    statusTitle: String = "正在连接 LINUX DO...",
-    statusSubtitle: String = "零度娘正在核验佬友身份牌与安全会话",
-    onCancel: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val bgColor = if (isDark) Color(0xFF1C1815) else Color(0xFFFFFBF4)
-    val inkPrimary = if (isDark) Color(0xFFF8F5F0) else Color(0xFF201D19)
-    val inkSecondary = if (isDark) Color(0xFF9E9689) else Color(0xFF7A736A)
-    val trackColor = if (isDark) Color(0xFF2E2924) else Color(0xFFF0E6D6)
-    val closeBtnBg = if (isDark) Color(0xFF2A2520) else Color(0xFFF3ECE0)
-
-    val infiniteTransition = rememberInfiniteTransition(label = "mascot_login_float")
-    val floatOffsetY by infiniteTransition.animateFloat(
-        initialValue = -4f,
-        targetValue = 5f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1350, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "float_y"
-    )
-    val animatedProgress by infiniteTransition.animateFloat(
-        initialValue = 0.22f,
-        targetValue = 0.88f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1500, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "indeterminate_gold_bar"
-    )
-    val effectiveProgress = if (progress in 0.15f..0.95f) {
-        maxOf(progress, animatedProgress * 0.75f)
-    } else {
-        animatedProgress
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(bgColor)
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 24.dp, vertical = 14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // 顶栏：左侧 LinDo 品牌字标 + 右侧取消按钮
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            LinDoBrandWordmark(
-                isDark = isDark,
-                fontSizeSp = 22f
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(closeBtnBg)
-                    .clickable(onClick = onCancel),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = LinDoIcons.Close,
-                    contentDescription = "取消登录",
-                    modifier = Modifier.size(16.dp),
-                    tint = inkPrimary
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.weight(0.85f))
-
-        // 核心视觉：零度娘「我要验牌」贴纸 + 柔和暖金背景光晕
-        Box(
-            modifier = Modifier.size(216.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            Color(0xFFF6B73C).copy(alpha = if (isDark) 0.22f else 0.26f),
-                            Color(0xFFF6B73C).copy(alpha = 0f)
-                        ),
-                        radius = size.minDimension * 0.48f
-                    )
-                )
-            }
-            Image(
-                painter = painterResource(Res.drawable.lingdu_yanpai),
-                contentDescription = "零度娘正在验牌",
-                modifier = Modifier
-                    .size(188.dp)
-                    .offset(y = floatOffsetY.dp),
-                contentScale = ContentScale.Fit
-            )
-        }
-
-        Spacer(modifier = Modifier.height(18.dp))
-
-        Text(
-            text = statusTitle,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = (-0.4).sp,
-            color = inkPrimary,
-            maxLines = 1
-        )
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        Text(
-            text = statusSubtitle,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            color = inkSecondary,
-            maxLines = 1
-        )
-
-        Spacer(modifier = Modifier.height(22.dp))
-
-        // 暖金胶囊进度条 (#F6B73C)
-        Box(
-            modifier = Modifier
-                .width(196.dp)
-                .height(6.dp)
-                .clip(RoundedCornerShape(99.dp))
-                .background(trackColor)
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(effectiveProgress.coerceIn(0.18f, 1f))
-                    .height(6.dp)
-                    .clip(RoundedCornerShape(99.dp))
-                    .background(Color(0xFFF6B73C))
-            )
-        }
-
-        Spacer(modifier = Modifier.weight(1.15f))
-    }
-}
-
-/**
  * 纯净圆角用户头像（移除外围 Linux.do 双色圆环，保持清爽现代全尺寸圆形裁切与 0.5dp 微描边）
  */
 @Composable
@@ -990,51 +653,21 @@ private fun GoogleAccountRingAvatar(
     avatarUrl: String? = null,
     avatarSize: Dp = 76.dp,
     strokeWidth: Dp = 0.5.dp,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
+    animatedAvatar: String? = null
 ) {
-    val palette = LocalPalette.current
-    val resolvedAvatarUrl = remember(avatarUrl) {
-        avatarUrl?.takeIf { it.isNotBlank() }?.let { raw ->
-            val sized = raw.replace("{size}", "240")
-            when {
-                sized.startsWith("http://") || sized.startsWith("https://") -> sized
-                sized.startsWith("//") -> "https:$sized"
-                sized.startsWith("/") -> "https://linux.do$sized"
-                else -> "https://linux.do/$sized"
-            }
-        }
-    }
-    Box(
-        modifier = Modifier
-            .size(avatarSize)
-            .clip(CircleShape)
-            .background(palette.subtleSurface)
-            .border(0.5.dp, palette.hairline, CircleShape)
-            .let { if (onClick != null) it.clickable(onClick = onClick) else it },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = letter.take(1).uppercase(),
-            fontSize = (avatarSize.value * 0.38f).sp,
-            fontWeight = FontWeight.Bold,
-            color = palette.inkSecondary
-        )
-        if (resolvedAvatarUrl != null) {
-            AsyncImage(
-                model = resolvedAvatarUrl,
-                contentDescription = letter,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(CircleShape)
-            )
-        }
+    Box(Modifier.size(avatarSize.coerceAtLeast(48.dp)).let {
+        if (onClick != null) it.clickable(onClick = onClick) else it
+    }, contentAlignment = Alignment.Center) {
+        SmartAvatar(username = letter, avatarTemplate = avatarUrl, animatedAvatar = animatedAvatar,
+            size = avatarSize, enableAnimations = LocalLinDoAnimations.current)
     }
 }
 
 @Composable
-fun LinDoApp() {
+fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Boolean = true) {
     var isDarkTheme by remember { mutableStateOf(UserApiKeyAuthManager.uiDarkTheme) }
+    LaunchedEffect(isDarkTheme) { onThemeChanged(isDarkTheme) }
     var fontScale by remember { mutableStateOf(UserApiKeyAuthManager.uiFontScale) }
     var enableAnimations by remember { mutableStateOf(UserApiKeyAuthManager.uiEnableAnimations) }
     var themeOption by remember { mutableStateOf(BrandThemeOption.fromKey(UserApiKeyAuthManager.uiThemeAccent)) }
@@ -1285,16 +918,20 @@ fun LinDoApp() {
         }
     }
 
+    var detailLoadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     fun openTopic(topic: TopicSummary) {
+        detailLoadJob?.cancel()
+        activeTopicDetail = null
         activeTopicSummary = topic
         mobileShowingDetail = true
         currentTab = MainTab.HOME
-        scope.launch {
+        detailLoadJob = scope.launch {
             isLoadingDetail = true
             try {
-                activeTopicDetail = LinuxDoRepository.fetchTopicDetail(topic.id, topic)
+                val loaded = LinuxDoRepository.fetchTopicDetail(topic.id, topic)
+                if (activeTopicSummary?.id == topic.id) activeTopicDetail = loaded
             } finally {
-                isLoadingDetail = false
+                if (activeTopicSummary?.id == topic.id) isLoadingDetail = false
             }
         }
     }
@@ -1322,10 +959,22 @@ fun LinDoApp() {
         syncUserProfile()
     }
 
+    LaunchedEffect(isAuthorized) {
+        while (isAuthorized) {
+            delay(2000L)
+            if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) continue
+            val batch = ScreenTrackEngine.popNextSendableBatch() ?: continue
+            var status: Int? = null
+            try { status = LinuxDoRepository.sendTopicTimings(batch) }
+            finally { ScreenTrackEngine.onBatchSendResult(batch, status) }
+        }
+    }
+
     // 实时新帖子推送检测（LIST-024：在首页静默检测是否有新发布或新回复的话题，有则在顶部弹出「查看 N 条新帖子动态」提示条）
     LaunchedEffect(currentTab, mobileShowingDetail, currentSort, selectedCategoryId, selectedTag, currentTopPeriod) {
         while (currentTab == MainTab.HOME && !mobileShowingDetail) {
             delay(18_000L)
+            if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) continue
             if (!isLoadingTopics && !isLoadingMoreTopics && topics.isNotEmpty() && searchQuery.isBlank()) {
                 val fresh = try {
                     LinuxDoRepository.fetchTopics(
@@ -1475,6 +1124,8 @@ fun LinDoApp() {
 
     CompositionLocalProvider(
         LocalPalette provides palette,
+        LocalLinDoAnimations provides (enableAnimations && systemAnimationsEnabled),
+        LocalLinDoDarkTheme provides isDarkTheme,
         LocalFontScale provides fontScale,
         LocalDensity provides scaledDensity
     ) {
@@ -2562,44 +2213,7 @@ private fun CommunityHomeFeedPane(
                             ) { onRefresh() },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        LinDoGlassAppIcon(
-                            tileSize = 26.dp,
-                            isCircle = true
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Row(verticalAlignment = Alignment.Bottom) {
-                            Text(
-                                text = "LINUX ",
-                                fontSize = 20.5.sp,
-                                fontWeight = FontWeight.Black,
-                                letterSpacing = (-0.6).sp,
-                                color = palette.inkPrimary,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier.alignByBaseline()
-                            )
-                            Text(
-                                text = "DO",
-                                fontSize = 20.5.sp,
-                                fontWeight = FontWeight.Black,
-                                letterSpacing = (-0.6).sp,
-                                color = palette.logoDoColor,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier.alignByBaseline()
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text(
-                                text = "新的理想型社区",
-                                fontSize = 9.2.sp,
-                                fontWeight = FontWeight.Medium,
-                                letterSpacing = 0.2.sp,
-                                color = palette.inkTertiary,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier.alignByBaseline()
-                            )
-                        }
+                        LinDoBrandWordmark(isDark = palette.isDark, fontSizeSp = 22f)
                     }
 
                     // 顶部快捷刷新
@@ -2654,6 +2268,7 @@ private fun CommunityHomeFeedPane(
                             ?: currentUser?.username
                             ?: "L",
                         avatarUrl = currentUser?.avatarTemplate,
+                        animatedAvatar = currentUser?.animatedAvatar,
                         avatarSize = 27.dp,
                         onClick = onAvatarClick
                     )
@@ -2904,24 +2519,19 @@ private fun CommunityHomeFeedPane(
                 ) {
                     Row(
                         modifier = Modifier
-                            .height(30.dp)
+                            .height(48.dp)
                             .clip(RoundedCornerShape(15.dp))
                             .background(palette.activeChipBg)
                             .padding(horizontal = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(palette.tabIndicatorColor)
-                        )
+                        LinDoMascot(state = LinDoMascotState.Refreshing, compact = true, size = 32.dp, animate = isLoading)
                         Text(
                             text = when {
-                                isLoading -> "正在刷新最新帖子..."
-                                ready -> "↑ 松开立即更新最新帖子"
-                                else -> "↓ 下拉刷新最新帖子"
+                                isLoading -> "零度娘正在同步新讨论"
+                                ready -> "松开，更新最新讨论"
+                                else -> "下拉，看看新的讨论"
                             },
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -2970,44 +2580,14 @@ private fun CommunityHomeFeedPane(
             if (isLoading && topics.isEmpty()) {
                 LinearShimmerTopicSkeletonList(isCompact = isCompact)
             } else if (topics.isEmpty() && !isLoading) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Image(
-                            painter = painterResource(
-                                if (errorMessage != null) Res.drawable.lingdu_baocuo else Res.drawable.lingdu_moyu
-                            ),
-                            contentDescription = null,
-                            modifier = Modifier.size(136.dp),
-                            contentScale = ContentScale.Fit
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = errorMessage ?: "暂时没有匹配的话题，陪零度娘摸会儿鱼吧~",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.inkSecondary
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(99.dp))
-                                .background(Color(0xFFF6B73C))
-                                .clickable { onRefresh() }
-                                .padding(horizontal = 22.dp, vertical = 9.dp)
-                        ) {
-                            Text(
-                                text = "重新加载",
-                                fontSize = 13.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF201D19)
-                            )
-                        }
-                    }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    LinDoStatePanel(
+                        state = if (errorMessage != null) LinDoMascotState.NetworkError else LinDoMascotState.Empty,
+                        title = if (errorMessage != null) "暂时没能加载讨论" else "这里还没有匹配的讨论",
+                        detail = errorMessage ?: "换个关键词，或看看其他板块吧",
+                        onRetry = onRefresh,
+                        actionLabel = if (errorMessage != null) "重新加载" else "刷新看看"
+                    )
                 }
             } else {
                 LazyColumn(
@@ -3668,41 +3248,27 @@ private fun CommunityTopicReaderPane(
         }
     }
 
-    // 后台静默同步阅读进度与在岗状态（对齐 Discourse ScreenTrack）
-    LaunchedEffect(summary.id, posts.size) {
-        ScreenTrackEngine.onTopicEntered(
-            topicId = summary.id,
-            initialVisiblePosts = posts.take(2).map { it.postNumber }.toSet().ifEmpty { setOf(1) }
-        )
+    val latestReaderPosts by androidx.compose.runtime.rememberUpdatedState(posts)
+    LaunchedEffect(summary.id) {
+        ScreenTrackEngine.onTopicEntered(topicId = summary.id, initialVisiblePosts = emptySet())
         while (true) {
             delay(1000L)
-            val visiblePostNums = readerListState.layoutInfo.visibleItemsInfo
-                .mapNotNull { itemInfo ->
-                    val postIdx = itemInfo.index - 1
-                    posts.getOrNull(postIdx)?.postNumber
-                }
-                .toSet()
-            if (visiblePostNums.isNotEmpty()) {
-                ScreenTrackEngine.updateVisiblePosts(visiblePostNums)
-            }
-            val batch = ScreenTrackEngine.tick()
-            if (batch != null) {
-                val status = LinuxDoRepository.sendTopicTimings(batch)
-                ScreenTrackEngine.onBatchSendResult(batch, status)
+            val visiblePostNums = readerListState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
+                latestReaderPosts.getOrNull(item.index - 1)?.postNumber
+            }.toSet()
+            ScreenTrackEngine.updateVisiblePosts(visiblePostNums)
+            ScreenTrackEngine.tick()?.let { batch ->
+                ScreenTrackEngine.consolidateBatch(batch.topicId, batch.topicTimeMs, batch.timingsMs)
             }
         }
     }
-
+    LaunchedEffect(summary.id, readerListState) {
+        androidx.compose.runtime.snapshotFlow {
+            readerListState.firstVisibleItemIndex to readerListState.firstVisibleItemScrollOffset
+        }.collect { ScreenTrackEngine.onUserScrolled() }
+    }
     DisposableEffect(summary.id) {
-        onDispose {
-            val finalBatch = ScreenTrackEngine.flushCurrentTopic()
-            if (finalBatch != null) {
-                scope.launch {
-                    val status = LinuxDoRepository.sendTopicTimings(finalBatch)
-                    ScreenTrackEngine.onBatchSendResult(finalBatch, status)
-                }
-            }
-        }
+        onDispose { ScreenTrackEngine.onTopicExited(summary.id) }
     }
 
     var showTopMoreMenu by remember(summary.id) { mutableStateOf(false) }
@@ -3948,9 +3514,9 @@ private fun CommunityTopicReaderPane(
                     // 完整多行大标题
                     Text(
                         text = detail?.title ?: summary.title,
-                        fontSize = (19.5f * fontScale).sp,
+                        fontSize = 19.5f.sp,
                         fontWeight = FontWeight.Bold,
-                        lineHeight = (27.5f * fontScale).sp,
+                        lineHeight = 27.5f.sp,
                         letterSpacing = (-0.3).sp,
                         color = palette.inkPrimary
                     )
@@ -4031,6 +3597,18 @@ private fun CommunityTopicReaderPane(
             }
 
             // 楼层卡片列表（#1 楼主 + #2..#N 全部评论楼层）
+            if (!isLoading && detail?.loadError != null) {
+                item(key = "topic_load_error") {
+                    LinDoStatePanel(LinDoMascotState.NetworkError,
+                        title = "暂时没能加载完整话题", detail = detail.loadError,
+                        onRetry = {
+                            scope.launch {
+                                onDetailUpdated(LinuxDoRepository.fetchTopicDetail(summary.id, summary))
+                            }
+                        })
+                }
+            }
+
             itemsIndexed(posts, key = { _, post -> post.id }) { _, post ->
                 CommunityPostFloor(
                     post = post,
@@ -4390,13 +3968,13 @@ private fun TonalCircleIconButton(
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
-    Box(
+    androidx.compose.material3.IconButton(
+        onClick = onClick,
         modifier = Modifier
-            .size(34.dp)
+            .size(48.dp)
+            .padding(6.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(palette.subtleSurface)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
@@ -4496,8 +4074,13 @@ private fun CommunityPostFloor(
         !me.isNullOrBlank() && post.username.equals(me, ignoreCase = true)
     }
 
-    val astNodes = remember(post.id, post.cookedHtml) {
-        DiscourseAstParser.parseOrGetCached(post.id, post.cookedHtml)
+    val astNodes by androidx.compose.runtime.produceState(
+        initialValue = DiscourseAstParser.getCached(post.id, post.cookedHtml).orEmpty(),
+        post.id, post.cookedHtml
+    ) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            DiscourseAstParser.parseOrGetCached(post.id, post.cookedHtml)
+        }
     }
 
     Column(
@@ -4648,9 +4231,9 @@ private fun CommunityPostFloor(
                     is PostBlockNode.Heading -> {
                         Text(
                             text = node.text,
-                            fontSize = ((if (node.level <= 2) 17f else 15.5f) * fontScale).sp,
+                            fontSize = (if (node.level <= 2) 17f else 15.5f).sp,
                             fontWeight = FontWeight.SemiBold,
-                            lineHeight = (24f * fontScale).sp,
+                            lineHeight = 24f.sp,
                             color = palette.inkPrimary
                         )
                     }
@@ -4658,8 +4241,8 @@ private fun CommunityPostFloor(
                     is PostBlockNode.Paragraph -> {
                         Text(
                             text = node.text,
-                            fontSize = (15f * fontScale).sp,
-                            lineHeight = (24f * fontScale).sp,
+                            fontSize = 15f.sp,
+                            lineHeight = 24f.sp,
                             color = palette.inkPrimary
                         )
                     }
@@ -4692,8 +4275,8 @@ private fun CommunityPostFloor(
                                 }
                                 Text(
                                     text = node.quotedText,
-                                    fontSize = (13.8f * fontScale).sp,
-                                    lineHeight = (21f * fontScale).sp,
+                                    fontSize = 13.8f.sp,
+                                    lineHeight = 21f.sp,
                                     color = palette.inkSecondary
                                 )
                             }
@@ -4737,8 +4320,8 @@ private fun CommunityPostFloor(
                             }
                             Text(
                                 text = node.code,
-                                fontSize = (12.5f * fontScale).sp,
-                                lineHeight = (19f * fontScale).sp,
+                                fontSize = 12.5f.sp,
+                                lineHeight = 19f.sp,
                                 fontFamily = FontFamily.Monospace,
                                 color = palette.inkPrimary,
                                 modifier = Modifier
@@ -4755,15 +4338,15 @@ private fun CommunityPostFloor(
                                 Row(verticalAlignment = Alignment.Top) {
                                     Text(
                                         text = if (node.ordered) "${idx + 1}." else "•",
-                                        fontSize = (14.5f * fontScale).sp,
+                                        fontSize = 14.5f.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = palette.inkPrimary,
                                         modifier = Modifier.padding(end = 8.dp)
                                     )
                                     Text(
                                         text = item,
-                                        fontSize = (14.5f * fontScale).sp,
-                                        lineHeight = (22.5f * fontScale).sp,
+                                        fontSize = 14.5f.sp,
+                                        lineHeight = 22.5f.sp,
                                         color = palette.inkPrimary
                                     )
                                 }
@@ -4800,8 +4383,8 @@ private fun CommunityPostFloor(
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text(
                                         text = node.innerText,
-                                        fontSize = (13.5f * fontScale).sp,
-                                        lineHeight = (20.5f * fontScale).sp,
+                                        fontSize = 13.5f.sp,
+                                        lineHeight = 20.5f.sp,
                                         color = palette.inkSecondary
                                     )
                                 }
@@ -5756,7 +5339,7 @@ private fun CommunityMessagesScreen(
                                 .padding(vertical = 48.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("暂无私信记录，点击右上角可发起私信", fontSize = 13.sp, color = palette.inkTertiary)
+                            LinDoEmptyState(message = "暂无私信记录，点击右上角可发起私信")
                         }
                     }
                 } else {
@@ -5774,10 +5357,8 @@ private fun CommunityMessagesScreen(
         } else {
             // 通知流列表（左莫兰迪圆头像 + 动作标题 + 右未读点 + #F4F5F7 引用框 + 时间）
             if (isLoading && notifications.isEmpty()) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                    color = palette.tabIndicatorColor,
-                    trackColor = Color.Transparent
+                LinDoLoadingIndicator(
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
                 )
             }
 
@@ -5795,7 +5376,7 @@ private fun CommunityMessagesScreen(
                                 .padding(vertical = 56.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("暂无相关通知消息", fontSize = 13.5.sp, color = palette.inkTertiary)
+                            LinDoEmptyState(message = "暂无相关通知消息")
                         }
                     }
                 } else {
@@ -6049,6 +5630,7 @@ private fun CommunityProfileScreen(
                         GoogleAccountRingAvatar(
                             letter = displayName.ifBlank { "L" },
                             avatarUrl = avatarUrl,
+                            animatedAvatar = fullProfile?.animatedAvatar ?: currentUser?.animatedAvatar,
                             avatarSize = 52.dp,
                             onClick = if (isAuthorized) onOpenEditProfile else onPrimaryWebLogin
                         )
@@ -6761,115 +6343,63 @@ private fun BadgeDetailBottomSheet(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ConnectTrustLevelSheet(
-    onDismiss: () -> Unit
-) {
+private fun ConnectTrustLevelSheet(onDismiss: () -> Unit) {
     val palette = LocalPalette.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var report by remember {
-        mutableStateOf<ConnectTrustLevelReport?>(
-            do_.linux.lindo.core.connect.ConnectStatsParser.buildSessionBaselineReport(0, 0)
-        )
+    val scope = rememberCoroutineScope()
+    var report by remember { mutableStateOf<ConnectTrustLevelReport?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    suspend fun refresh() {
+        isLoading = true
+        try { report = LinuxDoRepository.fetchConnectTrustLevelReport() }
+        finally { isLoading = false }
     }
-    var isLoading by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        report = LinuxDoRepository.fetchConnectTrustLevelReport()
-    }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = palette.cardSurface
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 12.dp)
-        ) {
-            val currentReport = report
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = "Connect",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "过去 100 天周期要求",
-                    fontSize = 12.5.sp,
-                    color = palette.inkSecondary
-                )
+    LaunchedEffect(Unit) { refresh() }
+    ModalBottomSheet(onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = palette.cardSurface) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Connect", fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                TextButton(enabled = !isLoading, onClick = { scope.launch { refresh() } }) { Text("刷新") }
             }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            if (isLoading) {
-                LinearProgressIndicator(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(2.dp)
-                        .clip(RoundedCornerShape(1.dp)),
-                    color = palette.accent,
-                    trackColor = Color.Transparent
-                )
-                Spacer(modifier = Modifier.height(16.dp))
+            Text(report?.subtitle ?: "正在查询 Connect 官方页面", color = palette.inkSecondary,
+                fontSize = 12.sp, lineHeight = 19.sp)
+            Spacer(Modifier.height(12.dp))
+            if (isLoading) LinDoLoadingIndicator(label = "零度娘正在同步 Connect")
+            val current = report
+            if (!isLoading && current?.metrics.isNullOrEmpty()) {
+                LinDoStatePanel(LinDoMascotState.NetworkError, title = "暂未取得 Connect 数据",
+                    detail = "当前未获得可核实的周期统计，请稍后重试。",
+                    onRetry = { scope.launch { refresh() } })
             }
-
-            currentReport?.metrics?.forEach { metric ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 7.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = metric.label,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.inkPrimary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = "${metric.displayCurrent} / ${metric.displayTarget}",
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (metric.isMet) palette.onSuccessContainer else palette.inkSecondary
-                        )
+            current?.metrics?.forEach { metric ->
+                Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(metric.label, modifier = Modifier.weight(1f), color = palette.inkPrimary, fontSize = 13.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(if (current.isLiveConnectData && metric.targetValue > 0)
+                            "${metric.displayCurrent} / ${metric.displayTarget}" else metric.displayCurrent,
+                            color = palette.inkSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(palette.subtleSurface)
-                    ) {
-                        if (metric.progress > 0f) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth(metric.progress.coerceIn(0.03f, 1f))
-                                    .height(6.dp)
-                                    .clip(RoundedCornerShape(3.dp))
-                                    .background(if (metric.isMet) palette.onSuccessContainer else palette.accent)
-                            )
+                    if (current.isLiveConnectData && metric.targetValue > 0) {
+                        Spacer(Modifier.height(7.dp))
+                        Box(Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)).background(palette.subtleSurface)) {
+                            Box(Modifier.fillMaxWidth(metric.progress).height(5.dp).background(palette.brandGold))
                         }
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
+            if (current != null && current.metrics.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(if (current.isLiveConnectData) "来源：connect.linux.do · ${current.timePeriodDays} 天周期"
+                    else "来源：LINUX DO 个人档案 · 累计数据，不能用于判断 Connect 保级",
+                    color = palette.inkSecondary, fontSize = 11.sp, lineHeight = 18.sp)
+            }
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
 
-/**
- * 节点延迟优选抽屉
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NetworkDiagnosticsSheet(
@@ -6880,13 +6410,13 @@ private fun NetworkDiagnosticsSheet(
     val candidates = remember {
         mutableStateListOf<EdgeCandidateResult>().apply {
             val initial = CloudflareEdgeRacer.lastRaceResults.ifEmpty {
-                CloudflareEdgeRacer.defaultCandidates.mapIndexed { index, (ip, label) ->
+                CloudflareEdgeRacer.defaultCandidates.map { (ip, label) ->
                     EdgeCandidateResult(
                         ip = ip,
                         providerLabel = label,
-                        rttMs = 38L + index * 14L,
-                        traceVerified = true,
-                        colo = "HKG"
+                        rttMs = -1L,
+                        traceVerified = false,
+                        colo = ""
                     )
                 }
             }
@@ -6946,7 +6476,7 @@ private fun NetworkDiagnosticsSheet(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "${node.providerLabel} (${node.colo})",
+                            text = if (node.colo.isBlank()) node.providerLabel else "${node.providerLabel} (${node.colo})",
                             fontSize = 14.5.sp,
                             fontWeight = FontWeight.Medium,
                             color = palette.inkPrimary
@@ -6964,7 +6494,7 @@ private fun NetworkDiagnosticsSheet(
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text(
-                            text = "${node.rttMs} ms",
+                            text = if (node.rttMs < 0) "未测试" else if (!node.traceVerified) "不可用" else "${node.rttMs} ms",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = if (index == 0) palette.onTonalPill else palette.inkSecondary
@@ -7111,172 +6641,19 @@ private fun UserApiKeyAuthSheet(
     }
 }
 
-/**
- * DESIGN CONCEPT / 01 · 零度娘品牌与登录体验 (`GoogleWelcomeLoginScreen`)：
- * - 配色体系：`#F6B73C` (暖金) · `#201D19` (黑金墨色) · `#FFFBF4` (浅色暖米画布) / `#1C1815` (深色黑金画布)
- * - 左上角 `LinDo` 字标（带 `Lin` 下方暖金短横线）
- * - 中央零度娘挥手迎宾主视觉插画 (`lindo_login_hero_light` / `lindo_login_hero_dark`)
- * - 左对齐亲切问候文案：`你好，佬友。` + `欢迎来到 LinDo` + `连接 LINUX DO，发现有趣的讨论`
- * - 主力 `#F6B73C` 暖金全圆角胶囊按钮：`使用 LINUX DO 登录  →`
- * - 彻底移除游客预览入口，保留轻量级次要入口 `通过系统浏览器免密授权`
- */
 @Composable
 private fun GoogleWelcomeLoginScreen(
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
     onToggleDark: () -> Unit = {}
 ) {
-    val palette = LocalPalette.current
-    val isDark = palette.isDark
-    val canvasColor = if (isDark) Color(0xFF1C1815) else Color(0xFFFFFBF4)
-    val inkPrimary = if (isDark) Color(0xFFF8F5F0) else Color(0xFF201D19)
-    val inkSubTitle = if (isDark) Color(0xFFEDE7DF) else Color(0xFF201D19)
-    val inkSecondary = if (isDark) Color(0xFF9E9689) else Color(0xFF8C857B)
-    val goldAccent = Color(0xFFF6B73C)
-    val goldButtonText = Color(0xFF201D19)
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(canvasColor)
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 26.dp, vertical = 14.dp)
-    ) {
-        // 1. 顶部栏：左上角 LinDo 品牌字标（含暖金短下划线） + 右上角深浅主题切换
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            LinDoBrandWordmark(
-                isDark = isDark,
-                fontSizeSp = 24f
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onToggleDark),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
-                    contentDescription = "切换深浅模式",
-                    modifier = Modifier.size(18.dp),
-                    tint = inkSecondary
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.weight(0.45f))
-
-        // 2. 中央零度娘挥手迎宾插画（浅色 #FFFBF4 / 深色 #1C1815 原生无缝融合）
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(256.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Image(
-                painter = painterResource(
-                    if (isDark) Res.drawable.lindo_login_hero_dark else Res.drawable.lindo_login_hero_light
-                ),
-                contentDescription = "零度娘欢迎插画",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Fit
-            )
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // 3. 左对齐亲切问候排版（你好，佬友。 / 欢迎来到 LinDo / 连接 LINUX DO，发现有趣的讨论）
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.Start
-        ) {
-            Text(
-                text = "你好，佬友。",
-                fontSize = 31.sp,
-                fontWeight = FontWeight.Black,
-                letterSpacing = (-0.6).sp,
-                color = inkPrimary,
-                maxLines = 1
-            )
-            Spacer(modifier = Modifier.height(5.dp))
-            Text(
-                text = "欢迎来到 LinDo",
-                fontSize = 20.sp,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = (-0.3).sp,
-                color = inkSubTitle,
-                maxLines = 1
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "连接 LINUX DO，发现有趣的讨论",
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight.Normal,
-                color = inkSecondary,
-                maxLines = 1
-            )
-        }
-
-        Spacer(modifier = Modifier.weight(0.55f))
-
-        // 4. 主力登录按钮：#F6B73C 暖金全圆角胶囊按钮 (`使用 LINUX DO 登录  →`)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .clip(RoundedCornerShape(99.dp))
-                .background(goldAccent)
-                .clickable(onClick = onPrimaryWebLogin)
-                .padding(horizontal = 24.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            Text(
-                text = "使用 LINUX DO 登录",
-                fontSize = 15.8.sp,
-                fontWeight = FontWeight.Bold,
-                color = goldButtonText,
-                maxLines = 1
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = "→",
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Bold,
-                color = goldButtonText,
-                maxLines = 1
-            )
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // 5. 次级免密授权轻量入口（无游客模式）
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(40.dp)
-                .clip(RoundedCornerShape(99.dp))
-                .clickable(onClick = onBrowserOneClickAuth),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "通过系统浏览器免密授权",
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight.Medium,
-                color = inkSecondary,
-                maxLines = 1
-            )
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-    }
+    LinDoWelcomeScreen(
+        isDark = LocalPalette.current.isDark,
+        onPrimaryWebLogin = onPrimaryWebLogin,
+        onBrowserOneClickAuth = onBrowserOneClickAuth,
+        onToggleDark = onToggleDark
+    )
 }
-
 
 /**
  * 官方功能 1：话题回复与楼层引用全屏级编辑器抽屉 (`POST /posts.json`)
@@ -7384,12 +6761,7 @@ private fun TopicReplyComposerSheet(
                         .padding(horizontal = 16.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = if (isSubmitting) "发送中..." else "发布回复",
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (canSend) palette.publishBtnContent else palette.inkTertiary
-                    )
+                    LinDoBusyButtonLabel(busy = isSubmitting, busyLabel = "发送中...", label = "发布回复", color = if (canSend) palette.publishBtnContent else palette.inkTertiary)
                 }
             }
 
@@ -7408,11 +6780,7 @@ private fun TopicReplyComposerSheet(
 
             if (errorMsg != null) {
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = errorMsg!!,
-                    fontSize = 12.sp,
-                    color = Color(0xFFDC2626)
-                )
+                LinDoFeedbackRow(message = errorMsg!!, state = LinDoMascotState.NetworkError)
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -7547,12 +6915,7 @@ private fun CreateTopicModalSheet(
                         .padding(horizontal = 16.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = if (isSubmitting) "发布中..." else "立即发布",
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (canPublish) palette.publishBtnContent else palette.inkTertiary
-                    )
+                    LinDoBusyButtonLabel(busy = isSubmitting, busyLabel = "发布中...", label = "立即发布", color = if (canPublish) palette.publishBtnContent else palette.inkTertiary)
                 }
             }
 
@@ -7701,7 +7064,7 @@ private fun CreateTopicModalSheet(
 
             if (errorMsg != null) {
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(text = errorMsg!!, fontSize = 12.sp, color = Color(0xFFDC2626))
+                LinDoFeedbackRow(message = errorMsg!!, state = LinDoMascotState.NetworkError)
             }
 
             Spacer(modifier = Modifier.height(22.dp))
@@ -7925,6 +7288,9 @@ private fun LinDoMarkdownWorkbench(
                 }
             }
 
+            if (draftStatus.startsWith("正在")) {
+                LinDoFeedbackRow(message = draftStatus, state = LinDoMascotState.Loading, modifier = Modifier.weight(1f))
+            } else {
             Text(
                 text = "$draftStatus · ${tfv.text.length} 字",
                 fontSize = 11.sp,
@@ -7933,6 +7299,7 @@ private fun LinDoMarkdownWorkbench(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
+            }
 
             // 撤销 / 重做（无边框纯图标）
             Icon(
@@ -8028,13 +7395,13 @@ private fun LinDoMarkdownWorkbench(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text(
-                    text = uploadStatusText ?: "图片已插入",
-                    fontSize = 11.sp,
-                    color = palette.inkSecondary,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                LinDoFeedbackRow(
+                    message = uploadStatusText ?: "图片已插入",
+                    state = when {
+                        isUploadingMedia -> LinDoMascotState.Loading
+                        uploadStatusText?.contains("失败") == true -> LinDoMascotState.NetworkError
+                        else -> LinDoMascotState.Success
+                    }, modifier = Modifier.weight(1f)
                 )
                 if (latestImg != null && latestImg.isImage && latestImg.width > 0 && latestImg.height > 0) {
                     listOf("100%", "75%", "50%").forEach { pct ->
@@ -8359,11 +7726,7 @@ private fun WorkbenchAstLivePreviewBox(
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
         if (rawMarkdown.isBlank()) {
-            Text(
-                text = "暂无内容，在编辑区输入 Markdown 或插入组件即可实时预览渲染效果。",
-                fontSize = 12.5.sp,
-                color = palette.inkTertiary
-            )
+            LinDoEmptyState("还没有预览内容，试着写点什么吧")
         } else {
             astNodes.forEach { node ->
                 when (node) {
@@ -8882,7 +8245,7 @@ private fun WorkbenchInteractiveSubPanel(
                     shape = RoundedCornerShape(8.dp)
                 )
                 if (isSearchingMentions) {
-                    Text("正在搜索用户...", fontSize = 11.sp, color = palette.inkTertiary)
+                    LinDoLoadingIndicator(label = "零度娘正在寻找佬友")
                 } else if (mentionCandidates.isNotEmpty()) {
                     Row(
                         modifier = Modifier
@@ -9120,10 +8483,8 @@ private fun GlobalSearchModalSheet(
             Spacer(modifier = Modifier.height(10.dp))
 
             if (isSearching) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                    color = palette.brandGold,
-                    trackColor = Color.Transparent
+                LinDoLoadingIndicator(
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
                 )
             }
 
@@ -9138,11 +8499,7 @@ private fun GlobalSearchModalSheet(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 36.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = if (query.isBlank()) "输入关键词搜索全站历史帖子与精华回复" else "未找到匹配结果",
-                                fontSize = 13.sp,
-                                color = palette.inkTertiary
-                            )
+                            LinDoEmptyState(if (query.isBlank()) "输入关键词，寻找感兴趣的讨论" else "没有找到匹配结果，换个关键词试试吧")
                         }
                     }
                 } else {
@@ -9290,10 +8647,8 @@ private fun UserNotificationsSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                    color = palette.brandGold,
-                    trackColor = Color.Transparent
+                LinDoLoadingIndicator(
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
                 )
             }
 
@@ -9308,7 +8663,7 @@ private fun UserNotificationsSheet(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("暂无相关通知消息", fontSize = 13.sp, color = palette.inkTertiary)
+                            LinDoEmptyState(message = "暂无相关通知消息")
                         }
                     }
                 } else {
@@ -9425,10 +8780,8 @@ private fun UserActivitiesSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                    color = palette.brandGold,
-                    trackColor = Color.Transparent
+                LinDoLoadingIndicator(
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
                 )
             }
 
@@ -9443,7 +8796,7 @@ private fun UserActivitiesSheet(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("暂无相关社区动态记录", fontSize = 13.sp, color = palette.inkTertiary)
+                            LinDoEmptyState(message = "暂无相关社区动态记录")
                         }
                     }
                 } else {
@@ -9544,10 +8897,8 @@ private fun UserBookmarksSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                    color = palette.brandGold,
-                    trackColor = Color.Transparent
+                LinDoLoadingIndicator(
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
                 )
             }
 
@@ -9562,7 +8913,7 @@ private fun UserBookmarksSheet(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("暂未收藏任何书签，阅读话题时点击右上角书签即可收藏", fontSize = 12.5.sp, color = palette.inkTertiary)
+                            LinDoEmptyState(message = "暂未收藏任何书签，阅读话题时点击右上角书签即可收藏")
                         }
                     }
                 } else {
@@ -9700,7 +9051,7 @@ private fun UserPrivateMessagesSheet(
                 )
                 if (statusMsg != null) {
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text(text = statusMsg!!, fontSize = 12.sp, color = palette.onSuccessContainer)
+                    LinDoFeedbackRow(message = statusMsg!!, state = if (statusMsg!!.contains("失败")) LinDoMascotState.NetworkError else LinDoMascotState.Success)
                 }
                 Spacer(modifier = Modifier.height(10.dp))
                 Box(
@@ -9724,19 +9075,12 @@ private fun UserPrivateMessagesSheet(
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = if (isSending) "正在发送..." else "发送私信",
-                        fontSize = 13.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.brandGold
-                    )
+                    LinDoBusyButtonLabel(busy = isSending, busyLabel = "正在发送", label = "发送私信", color = palette.brandGold)
                 }
             } else {
                 if (isLoading) {
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                        color = palette.brandGold,
-                        trackColor = Color.Transparent
+                    LinDoLoadingIndicator(
+                        modifier = Modifier.fillMaxWidth().height(44.dp)
                     )
                 }
                 LazyColumn(
@@ -9750,7 +9094,7 @@ private fun UserPrivateMessagesSheet(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text("暂无站内私信会话", fontSize = 13.sp, color = palette.inkTertiary)
+                                LinDoEmptyState(message = "暂无站内私信会话")
                             }
                         }
                     } else {
@@ -9802,10 +9146,8 @@ private fun PublicUserCardSheet(
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
             if (isLoading && cardProfile == null) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                    color = palette.brandGold,
-                    trackColor = Color.Transparent
+                LinDoLoadingIndicator(
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
                 )
                 Spacer(modifier = Modifier.height(24.dp))
             }
@@ -9818,6 +9160,7 @@ private fun PublicUserCardSheet(
                 GoogleAccountRingAvatar(
                     letter = p?.displayName ?: username,
                     avatarUrl = p?.avatarTemplate,
+                    animatedAvatar = p?.animatedAvatar,
                     avatarSize = 56.dp,
                     strokeWidth = 2.2.dp
                 )
@@ -10085,10 +9428,8 @@ private fun UserReadHistorySheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                    color = palette.tabIndicatorColor,
-                    trackColor = Color.Transparent
+                LinDoLoadingIndicator(
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
                 )
             }
 
@@ -10103,7 +9444,7 @@ private fun UserReadHistorySheet(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("暂无阅读历史记录", fontSize = 13.sp, color = palette.inkTertiary)
+                            LinDoEmptyState(message = "暂无阅读历史记录")
                         }
                     }
                 } else {
@@ -10161,10 +9502,8 @@ private fun UserCloudDraftsSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(1.5.dp),
-                    color = palette.tabIndicatorColor,
-                    trackColor = Color.Transparent
+                LinDoLoadingIndicator(
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
                 )
             }
 
@@ -10179,7 +9518,7 @@ private fun UserCloudDraftsSheet(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("云端草稿箱为空，未发送的话题与回复会自动保存在此", fontSize = 12.8.sp, color = palette.inkTertiary)
+                            LinDoEmptyState(message = "云端草稿箱为空，未发送的话题与回复会自动保存在此")
                         }
                     }
                 } else {

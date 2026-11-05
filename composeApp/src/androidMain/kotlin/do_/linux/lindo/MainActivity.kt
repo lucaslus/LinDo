@@ -13,6 +13,8 @@ import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -22,6 +24,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -46,7 +49,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -68,10 +70,15 @@ import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.LinDoApp
 import do_.linux.lindo.ui.LinDoBrandWordmark
 import do_.linux.lindo.ui.LinDoMascotLoginTransitionView
+import do_.linux.lindo.ui.LinDoLoadingIndicator
+import do_.linux.lindo.ui.LinDoMascotGallery
+import do_.linux.lindo.ui.LinDoWelcomeScreen
+import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.ui.PlatformWebLoginHost
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -85,8 +92,24 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import org.json.JSONArray
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.cancel
+
+private fun releaseNativeWebView(view: WebView, rendererGone: Boolean = false) {
+    (view.parent as? ViewGroup)?.removeView(view)
+    if (!rendererGone) {
+        view.stopLoading()
+        view.removeJavascriptInterface("LinDoJsBridge")
+        view.webChromeClient = null
+        view.webViewClient = WebViewClient()
+        view.loadUrl("about:blank")
+    }
+    view.destroy()
+}
 
 class MainActivity : ComponentActivity() {
+    private var debugPreviewGeneration by mutableStateOf(0)
 
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -96,7 +119,7 @@ class MainActivity : ComponentActivity() {
 
     // 常驻同源 Chromium WebView 引擎：共享 BoringSSL JA3/JA4 指纹、cf_clearance、_t 与 CSRF Token
     private var apiWebView: WebView? = null
-    private val apiWebViewReady = CompletableDeferred<Boolean>()
+    private var apiWebViewReady = CompletableDeferred<Boolean>()
     private val pendingHttpCallbacks = ConcurrentHashMap<String, CompletableDeferred<Pair<Int, String>>>()
     private var pendingMediaPickCallback: ((fileName: String, mimeType: String, bytes: ByteArray) -> Unit)? = null
 
@@ -311,8 +334,51 @@ class MainActivity : ComponentActivity() {
             }
         )
 
+        val systemAnimationsEnabled = android.provider.Settings.Global.getFloat(
+            contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f
+        ) > 0f
+        val updateSystemBars: (Boolean) -> Unit = { dark ->
+            val style = if (dark) SystemBarStyle.dark(Color.TRANSPARENT)
+                else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+            enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+        }
         setContent {
-            LinDoApp()
+            val currentIntent = remember(debugPreviewGeneration) { intent }
+            val debugPreview = if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0)
+                currentIntent.getStringExtra("lindo.preview") else null
+            val closePreview: () -> Unit = {
+                intent.removeExtra("lindo.preview")
+                intent.removeExtra("lindo.brand_preview")
+                debugPreviewGeneration++
+            }
+            if (debugPreview == "welcome") {
+                var dark by remember { mutableStateOf(false) }
+                LaunchedEffect(dark) { updateSystemBars(dark) }
+                LinDoWelcomeScreen(isDark = dark, onPrimaryWebLogin = closePreview,
+                    onBrowserOneClickAuth = closePreview, onToggleDark = { dark = !dark })
+            } else if (debugPreview in listOf("web", "web_crash", "connect")) {
+                AndroidWebLoginModal(initialUrl = when (debugPreview) {
+                    "web_crash" -> "chrome://crash"
+                    "connect" -> "https://connect.linux.do/"
+                    else -> "https://linux.do/"
+                },
+                    onDismiss = closePreview, onLoginSuccess = closePreview)
+            } else if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+                currentIntent.getBooleanExtra("lindo.brand_preview", false)) {
+                LinDoMascotGallery(onClose = {
+                    closePreview()
+                }, onThemeChanged = updateSystemBars, systemAnimationsEnabled = systemAnimationsEnabled)
+            } else {
+                LinDoApp(onThemeChanged = updateSystemBars, systemAnimationsEnabled = systemAnimationsEnabled)
+            }
+        }
+
+        // Explicit debug-only, app-private import. Never put session values in Intent extras or logs.
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+            intent.getBooleanExtra("lindo.import_cookies", false)) {
+            activityScope.launch {
+                importPrivateDebugCookies()
+            }
         }
 
         // Attach 1x1 invisible apiWebView to window so Chromium keeps timers & fetch active
@@ -333,9 +399,11 @@ class MainActivity : ComponentActivity() {
     private fun initPersistentApiWebView() {
         runCatching {
             val wv = WebView(this)
-            val cleanUa = wv.settings.userAgentString.replace("; wv", "")
+            val cleanUa = wv.settings.userAgentString
             UserApiKeyAuthManager.customUserAgent = cleanUa
             wv.settings.apply {
+                // Use the same UA as the visible browser and the native HTTP transport.
+                userAgentString = cleanUa
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
@@ -348,6 +416,26 @@ class MainActivity : ComponentActivity() {
 
             wv.addJavascriptInterface(LinDoJsBridge(), "LinDoJsBridge")
             wv.webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    if (apiWebView === view) apiWebView = null
+                    pendingHttpCallbacks.values.forEach { it.cancel() }
+                    pendingHttpCallbacks.clear()
+                    releaseNativeWebView(view, rendererGone = true)
+                    apiWebViewReady = CompletableDeferred()
+                    activityScope.launch {
+                        delay(250L)
+                        if (!isFinishing && !isDestroyed) {
+                            initPersistentApiWebView()
+                            val fresh = apiWebView
+                            val parent = window.decorView.findViewById<ViewGroup>(android.R.id.content)
+                            if (fresh != null && fresh.parent == null && parent != null) {
+                                fresh.visibility = View.INVISIBLE
+                                parent.addView(fresh, 0, FrameLayout.LayoutParams(1, 1))
+                            }
+                        }
+                    }
+                    return true
+                }
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     val cookies = cm.getCookie("https://linux.do").orEmpty()
@@ -562,23 +650,27 @@ class MainActivity : ComponentActivity() {
                     UserApiKeyAuthManager.customUserAgent?.let { userAgentString = it }
                 }
                 wv.webViewClient = object : WebViewClient() {
+                    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                        tempWv = null
+                        releaseNativeWebView(view, rendererGone = true)
+                        if (!deferred.isCompleted) deferred.complete(null)
+                        return true
+                    }
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         val currentUrl = url.orEmpty()
                         view?.evaluateJavascript(
-                            "(function(){ return document.documentElement ? document.documentElement.outerHTML : ''; })()"
+                            """(function(){ return JSON.stringify({html: document.documentElement?.outerHTML || '',
+                                hasMetrics: !!document.querySelector('.tl3-ring, .tl3-bar-item, table td')}); })()"""
                         ) { rawJsResult ->
-                            val unescaped = runCatching {
+                            val snapshot = runCatching {
                                 if (!rawJsResult.isNullOrBlank() && rawJsResult != "null") {
-                                    org.json.JSONTokener(rawJsResult).nextValue()?.toString().orEmpty()
-                                } else ""
-                            }.getOrDefault("")
+                                    JSONObject(org.json.JSONTokener(rawJsResult).nextValue().toString())
+                                } else JSONObject()
+                            }.getOrDefault(JSONObject())
+                            val unescaped = snapshot.optString("html")
 
-                            if (
-                                unescaped.contains("tl3-ring") ||
-                                unescaped.contains("tl3-bar-item") ||
-                                unescaped.contains("<table", ignoreCase = true)
-                            ) {
+                            if (snapshot.optBoolean("hasMetrics")) {
                                 val syncCookies = cm.getCookie("https://connect.linux.do")
                                 if (!syncCookies.isNullOrBlank()) {
                                     CookieSentinel.ingestRawCookieString(syncCookies, domain = "connect.linux.do", hostOnly = false)
@@ -608,6 +700,10 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                // Attach the temporary browser so Chromium can run navigation and JS normally.
+                val parent = window.decorView.findViewById<ViewGroup>(android.R.id.content)
+                wv.visibility = View.INVISIBLE
+                parent.addView(wv, 0, FrameLayout.LayoutParams(1, 1))
                 wv.loadUrl("https://connect.linux.do/")
             }.onFailure {
                 if (!deferred.isCompleted) deferred.complete(null)
@@ -615,14 +711,14 @@ class MainActivity : ComponentActivity() {
         }
 
         return try {
-            withTimeoutOrNull(6500L) {
+            withTimeoutOrNull(15_000L) {
                 deferred.await()
             }
         } finally {
-            withContext(Dispatchers.Main) {
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
                 runCatching {
-                    tempWv?.stopLoading()
-                    tempWv?.destroy()
+                    tempWv?.let(::releaseNativeWebView)
+                    tempWv = null
                 }
             }
         }
@@ -630,6 +726,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        debugPreviewGeneration++
         setIntent(intent)
         handleIncomingAuthIntent(intent)
     }
@@ -695,6 +792,7 @@ class MainActivity : ComponentActivity() {
                     username = username,
                     displayName = displayName ?: username,
                     avatarTemplate = avatarTemplate.orEmpty(),
+                    animatedAvatar = prefs.getString("animated_avatar", null),
                     userTitle = userTitle,
                     trustLevel = trustLevel
                 )
@@ -740,6 +838,7 @@ class MainActivity : ComponentActivity() {
                 editor.putString("username", user.username)
                 editor.putString("display_name", user.displayName)
                 editor.putString("avatar_template", user.avatarTemplate)
+                editor.putString("animated_avatar", user.animatedAvatar)
                 editor.putString("user_title", user.userTitle)
                 editor.putInt("trust_level", user.trustLevel)
             }
@@ -747,10 +846,85 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private suspend fun importPrivateDebugCookies() {
+        val source = java.io.File(filesDir, "lindo-session-import.json")
+        if (!source.isFile) return
+        try {
+            val entries = withContext(Dispatchers.IO) { JSONArray(source.readText()) }
+            val manager = CookieManager.getInstance()
+            manager.setAcceptCookie(true)
+            suspend fun set(value: String) = suspendCancellableCoroutine<Unit> { continuation ->
+                manager.setCookie("https://linux.do/", value) {
+                    if (continuation.isActive) continuation.resume(Unit)
+                }
+            }
+            val accepted = mutableListOf<String>()
+            for (index in 0 until entries.length()) {
+                val cookie = entries.getJSONObject(index)
+                if (cookie.optString("domain").removePrefix(".") != "linux.do") continue
+                if (cookie.has("expirationDate") && cookie.optDouble("expirationDate") * 1000 < System.currentTimeMillis()) continue
+                val name = cookie.optString("name")
+                val value = cookie.optString("value")
+                if (name.isBlank() || value.isBlank() || name.any { it in "\r\n;=" } || value.any { it in "\r\n;" }) continue
+                set("$name=; Max-Age=0; Path=/; Secure")
+                set("$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure")
+                val domain = if (cookie.optBoolean("hostOnly", true)) "" else "; Domain=.linux.do"
+                val httpOnly = if (cookie.optBoolean("httpOnly")) "; HttpOnly" else ""
+                set("$name=$value; Path=/${domain}; Secure$httpOnly")
+                accepted += "$name=$value"
+            }
+            manager.flush()
+            CookieSentinel.clear()
+            CookieSentinel.ingestRawCookieString(accepted.joinToString("; "))
+            prefs.edit().putString("raw_cookies", accepted.joinToString("; ")).apply()
+            apiWebView?.reload()
+            withContext(Dispatchers.IO) { LinuxDoRepository.fetchCurrentUserProfile() }
+            persistSessionToDisk()
+            UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+        } finally {
+            withContext(Dispatchers.IO) { source.delete() }
+        }
+    }
+
     override fun onDestroy() {
-        apiWebView?.destroy()
+        activityScope.cancel()
+        pendingMediaPickCallback = null
+        pendingHttpCallbacks.values.forEach { it.cancel() }
+        pendingHttpCallbacks.clear()
+        UserApiKeyAuthManager.onPersistPendingKey = null
+        UserApiKeyAuthManager.openExternalUrlLauncher = null
+        UserApiKeyAuthManager.onPersistSession = null
+        UserApiKeyAuthManager.onPersistUiPrefs = null
+        UserApiKeyAuthManager.onPersistThemeAndDensity = null
+        UserApiKeyAuthManager.onSyncCookieToPlatform = null
+        UserApiKeyAuthManager.onLogoutPlatformClear = null
+        UserApiKeyAuthManager.webViewHttpExecutor = null
+        UserApiKeyAuthManager.webViewJsonFetcher = null
+        UserApiKeyAuthManager.webViewConnectHtmlFetcher = null
+        PlatformMediaPicker.launchPicker = null
+        PlatformMediaPicker.webViewUploadExecutor = null
+        PlatformWebLoginHost.webLoginRenderer = null
+        apiWebView?.let { releaseNativeWebView(it) }
         apiWebView = null
         super.onDestroy()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        UserPresenceService.setAppForeground(true)
+        if (android.os.Build.VERSION.SDK_INT >= 35) {
+            window.decorView.requestedFrameRate = View.REQUESTED_FRAME_RATE_CATEGORY_HIGH
+        }
+    }
+
+    override fun onPause() {
+        UserPresenceService.setAppForeground(false)
+        super.onPause()
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        UserPresenceService.markUserActivity()
     }
 }
 
@@ -825,22 +999,16 @@ private fun AndroidWebLoginModal(
             initialUrl.contains("/session/otp/") ||
             initialUrl.contains("/user-api-key/")
     }
-    var pageTitle by remember(initialUrl) {
-        mutableStateOf(if (isLoginFlow) "安全登录 linux.do" else "Linux.do 官方容器")
-    }
-    var progress by remember { mutableStateOf(0.1f) }
+
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember { mutableStateOf(false) }
-    var pageReady by remember { mutableStateOf(false) }
-    var minSplashDone by remember { mutableStateOf(false) }
-    var isVerifyingSession by remember { mutableStateOf(false) }
+    var pageLoadError by remember(initialUrl) { mutableStateOf<String?>(null) }
+    var rendererGone by remember { mutableStateOf(false) }
+    BackHandler {
+        if (webViewRef?.canGoBack() == true) webViewRef?.goBack() else onDismiss()
+    }
     val isDark = remember { UserApiKeyAuthManager.uiDarkTheme }
 
-    LaunchedEffect(initialUrl) {
-        minSplashDone = false
-        delay(1250L)
-        minSplashDone = true
-    }
 
     fun completeWithUserObject(u: JSONObject) {
         if (completed) return
@@ -849,10 +1017,7 @@ private fun AndroidWebLoginModal(
         val userId = u.optInt("id", 0)
         val displayName = u.optString("name").ifBlank { username }
         val rawTpl = u.optString("avatar_template").ifBlank { u.optString("avatar") }
-        val avatarUrl = if (rawTpl.isNotBlank()) {
-            if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "240")
-            else "https://linux.do${rawTpl.replace("{size}", "240")}"
-        } else ""
+        val avatarUrl = LinuxDoSiteRules.resolveUrl(rawTpl)
         val title = u.optString("title", "")
         val trust = if (u.has("trust_level")) u.optInt("trust_level", 1) else u.optInt("trust", 1)
 
@@ -867,6 +1032,7 @@ private fun AndroidWebLoginModal(
                 username = username,
                 displayName = displayName,
                 avatarTemplate = avatarUrl,
+                animatedAvatar = LinuxDoSiteRules.resolveAnimatedAvatarUrl(u.optString("animated_avatar")),
                 userTitle = title,
                 trustLevel = trust
             ),
@@ -900,7 +1066,6 @@ private fun AndroidWebLoginModal(
         if (!rawCookies.contains("_t=")) {
             return
         }
-        isVerifyingSession = true
 
         // 已检测到 `_t=` 会话 Cookie：通过单次无副作用 evaluateJavascript 提取当前用户资料
         val probeJs = """
@@ -970,16 +1135,11 @@ private fun AndroidWebLoginModal(
 
     DisposableEffect(Unit) {
         onDispose {
-            webViewRef?.stopLoading()
+            webViewRef = null
         }
     }
 
-    val showMascotTransition = isLoginFlow && (!minSplashDone || (!pageReady && progress < 0.85f) || isVerifyingSession)
     val barBg = if (isDark) androidx.compose.ui.graphics.Color(0xFF1C1815) else androidx.compose.ui.graphics.Color(0xFFFFFBF4)
-    val barInk = if (isDark) androidx.compose.ui.graphics.Color(0xFFF8F5F0) else androidx.compose.ui.graphics.Color(0xFF201D19)
-    val barSubInk = if (isDark) androidx.compose.ui.graphics.Color(0xFF9E9689) else androidx.compose.ui.graphics.Color(0xFF7A736A)
-    val btnSurface = if (isDark) androidx.compose.ui.graphics.Color(0xFF2A2520) else androidx.compose.ui.graphics.Color(0xFFF3ECE0)
-
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -988,106 +1148,17 @@ private fun AndroidWebLoginModal(
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
-            // 顶部零度娘黑金安全顶栏
-            Row(
+            // Full-screen browser content; system Back returns to LinDo.
+            if (!rendererGone) AndroidView(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(54.dp)
-                    .padding(horizontal = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(btnSurface)
-                        .clickable(onClick = onDismiss),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "关闭",
-                        modifier = Modifier.size(17.dp),
-                        tint = barInk
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Lock,
-                            contentDescription = null,
-                            modifier = Modifier.size(12.dp),
-                            tint = androidx.compose.ui.graphics.Color(0xFFF6B73C)
-                        )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text(
-                            text = pageTitle,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = barInk,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Text(
-                        text = if (isLoginFlow) {
-                            "LINUX DO 官方安全登录 · 登录成功后自动同步 Connect"
-                        } else {
-                            "已共享当前账号登录态 · 支持社区生态免登直达"
-                        },
-                        fontSize = 11.sp,
-                        color = barSubInk,
-                        maxLines = 1
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(btnSurface)
-                        .clickable {
-                            pageReady = false
-                            webViewRef?.reload()
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "刷新",
-                        modifier = Modifier.size(17.dp),
-                        tint = barInk
-                    )
-                }
-            }
-
-            if (progress in 0.01f..0.98f) {
-                LinearProgressIndicator(
-                    progress = { progress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(2.5.dp),
-                    color = androidx.compose.ui.graphics.Color(0xFFF6B73C),
-                    trackColor = btnSurface
-                )
-            }
-
-            // 内置安全 WebView 容器
-            AndroidView(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)),
+                    .fillMaxSize(),
                 factory = { ctx ->
                     WebView(ctx).apply {
                         layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        val cleanUa = settings.userAgentString.replace("; wv", "")
+                        val cleanUa = settings.userAgentString
                         UserApiKeyAuthManager.customUserAgent = cleanUa
 
                         settings.apply {
@@ -1103,28 +1174,27 @@ private fun AndroidWebLoginModal(
                         val cookieManager = CookieManager.getInstance()
                         cookieManager.setAcceptCookie(true)
                         cookieManager.setAcceptThirdPartyCookies(this, true)
-                        // 预注入当前会话 Cookie，确保打开主站子页面或 Connect/Credit/CDK/Lottery 生态时 100% 携带登录态
-                        CookieSentinel.resolveWinningCookies(targetHost = "linux.do").forEach { (k, rec) ->
-                            cookieManager.setCookie("https://linux.do", "$k=${rec.value}; Domain=.linux.do; Path=/; Secure")
-                        }
+                        // CookieManager already owns the browser session, including domain and path scope.
+                        // Rebuilding these as Domain=.linux.do would widen host-only session cookies.
                         cookieManager.flush()
 
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                progress = (newProgress / 100f).coerceIn(0.05f, 1f)
-                                if (newProgress >= 85) {
-                                    pageReady = true
-                                }
-                            }
-
-                            override fun onReceivedTitle(view: WebView?, title: String?) {
-                                if (!title.isNullOrBlank()) {
-                                    pageTitle = title
-                                }
-                            }
-                        }
+                        webChromeClient = WebChromeClient()
 
                         webViewClient = object : WebViewClient() {
+                            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                                webViewRef = null
+                                rendererGone = true
+                                pageLoadError = "网页渲染进程已停止，可以返回应用或重新打开。"
+                                releaseNativeWebView(view, rendererGone = true)
+                                return true
+                            }
+                            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                                super.onReceivedError(view, request, error)
+                                if (request?.isForMainFrame == true) {
+                                    pageLoadError = "网络暂时不可用，请检查连接后再试一次。"
+                                }
+                            }
+
                             override fun shouldOverrideUrlLoading(
                                 view: WebView?,
                                 request: WebResourceRequest?
@@ -1133,7 +1203,6 @@ private fun AndroidWebLoginModal(
                                 if (target.startsWith("discourse://auth_redirect") ||
                                     target.startsWith("lindo://auth_redirect")
                                 ) {
-                                    isVerifyingSession = true
                                     val ok = UserApiKeyAuthManager.handleAuthRedirectUri(target)
                                     if (ok) {
                                         val otp = UserApiKeyAuthManager.consumePendingOtpToken()
@@ -1155,30 +1224,33 @@ private fun AndroidWebLoginModal(
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
-                                pageReady = true
                                 tryExtractSessionAndComplete(view)
                             }
                         }
 
                         webViewRef = this
-                        loadUrl(initialUrl)
                     }
+                },
+                onRelease = { view ->
+                    webViewRef = null
+                    if (!rendererGone) releaseNativeWebView(view)
                 }
             )
         }
 
         // 登录加载与核验身份过渡层：零度娘「我要验牌」全屏过渡页
-        if (showMascotTransition) {
+        if (pageLoadError != null) {
             LinDoMascotLoginTransitionView(
                 isDark = isDark,
-                progress = progress,
-                statusTitle = if (isVerifyingSession) "正在核验佬友身份牌..." else "正在连接 LINUX DO...",
-                statusSubtitle = if (isVerifyingSession) {
-                    "零度娘正在同步你的等级、徽章与 Connect 数据"
-                } else {
-                    "零度娘正在为你建立安全加密登录通道"
-                },
-                onCancel = onDismiss
+                progress = Float.NaN,
+                statusTitle = if (rendererGone) "网页已停止运行" else "暂时连接不上 LINUX DO",
+                statusSubtitle = pageLoadError.orEmpty(),
+                onCancel = onDismiss,
+                onRetry = {
+                    pageLoadError = null
+                    rendererGone = false
+                    webViewRef?.reload()
+                }
             )
         }
     }

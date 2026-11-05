@@ -24,27 +24,38 @@ sealed interface PostBlockNode {
  *
  * 解决痛点：
  * - 摒弃 WebView 逐楼层挂载和主线程同步 DOM 遍历；
- * - 按 `postId + cookedHtml.hashCode()` 缓存 AST 结果，列表上下反复滚动时 0ms 直接命中。
+ * - 按帖子 ID 与完整内容缓存，避免 32 位哈希碰撞造成旧正文串入。
  */
 object DiscourseAstParser {
     private const val MAX_CACHE_ENTRIES = 256
-    private val astCache = LinkedHashMap<Long, List<PostBlockNode>>(MAX_CACHE_ENTRIES, 0.75f, true)
+    private const val MAX_CACHE_HTML_CHARS = 1_000_000
+    private data class CacheKey(val postId: Int, val html: String)
+    private val astCache = LinkedHashMap<CacheKey, List<PostBlockNode>>(MAX_CACHE_ENTRIES, 0.75f, true)
+    private var cachedHtmlChars = 0
 
     fun signatureOf(postId: Int, cookedHtml: String): Long {
         return (postId.toLong() shl 32) xor (cookedHtml.hashCode().toLong() and 0xFFFFFFFFL)
     }
 
-    @Synchronized
-    fun parseOrGetCached(postId: Int, cookedHtml: String): List<PostBlockNode> {
-        val key = signatureOf(postId, cookedHtml)
-        astCache[key]?.let { return it }
+    fun getCached(postId: Int, cookedHtml: String): List<PostBlockNode>? = synchronized(astCache) {
+        astCache[CacheKey(postId, cookedHtml)]
+    }
 
+    fun parseOrGetCached(postId: Int, cookedHtml: String): List<PostBlockNode> {
+        getCached(postId, cookedHtml)?.let { return it }
         val parsed = parseCookedHtml(cookedHtml)
-        if (astCache.size >= MAX_CACHE_ENTRIES) {
-            val eldestKey = astCache.entries.firstOrNull()?.key
-            if (eldestKey != null) astCache.remove(eldestKey)
+        if (cookedHtml.length > MAX_CACHE_HTML_CHARS / 4) return parsed
+        val key = CacheKey(postId, cookedHtml)
+        synchronized(astCache) {
+            astCache[key]?.let { return it }
+            while (astCache.size >= MAX_CACHE_ENTRIES || cachedHtmlChars + cookedHtml.length > MAX_CACHE_HTML_CHARS) {
+                val oldest = astCache.entries.firstOrNull()?.key ?: break
+                cachedHtmlChars -= oldest.html.length
+                astCache.remove(oldest)
+            }
+            astCache[key] = parsed
+            cachedHtmlChars += cookedHtml.length
         }
-        astCache[key] = parsed
         return parsed
     }
 

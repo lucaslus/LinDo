@@ -1,0 +1,16 @@
+{
+  "sampleCount": 3,
+  "intervalSeconds": 0.7,
+  "avatarBounds": [
+    36,
+    172,
+    140,
+    276
+  ],
+  "distinctFrames": 3,
+  "hashes": [
+    "d1eb752aa2ff85c4d77332b9d75462ab3981e1ad66f02a2c395d2dce71f059df",
+    "8bd3e777478d4092ba2301f451c2076e14386362001f1a85c0bef81bd1d35b5c",
+    "6b6bb9a675e85f2e98a83756c7acaa1e9593c3d0a4a606c1511ec6fbb8cb8e79"
+  ]
+}

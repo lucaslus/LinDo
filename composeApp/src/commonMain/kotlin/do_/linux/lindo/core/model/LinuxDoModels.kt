@@ -203,7 +203,8 @@ data class TopicDetailModel(
     val replyCostHint: String? = null,
     val minWordCountRule: Int? = null,
     val posts: List<PostItemModel> = emptyList(),
-    val streamIds: List<Int> = emptyList()
+    val streamIds: List<Int> = emptyList(),
+    val loadError: String? = null
 )
 
 /**
