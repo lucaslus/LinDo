@@ -2,6 +2,9 @@ package do_.linux.lindo
 
 import do_.linux.lindo.core.badge.ResolvedBadgeVisual
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
+import do_.linux.lindo.core.connect.ConnectStatsParser
+import do_.linux.lindo.core.connect.ScreenTrackEngine
+import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.network.CookieSentinel
@@ -127,5 +130,65 @@ class LinDoCoreTest {
         assertTrue(nodes.any { it is PostBlockNode.QuoteBlock })
         assertTrue(nodes.any { it is PostBlockNode.CodeBlock })
         assertTrue(nodes.any { it is PostBlockNode.Paragraph })
+    }
+
+    @Test
+    fun testUserPresenceAndScreenTrackAndConnectStats() {
+        // 1. UserPresenceService 在前台活跃时必须生成 Discourse-Present: true，保护连续登录天数
+        UserPresenceService.setAppForeground(true, countAsActivity = true)
+        val fgHeaders = UserPresenceService.buildPresenceHeaders(isBackgroundTimingRequest = false, isLoggedIn = true)
+        assertEquals("true", fgHeaders["Discourse-Present"])
+        assertEquals("true", fgHeaders["Discourse-Logged-In"])
+        assertEquals("XMLHttpRequest", fgHeaders["X-Requested-With"])
+
+        // 2. ScreenTrackEngine 追踪楼层阅读时长并在退避失败时重合并，绝不丢数据
+        ScreenTrackEngine.resetForTest()
+        val t0 = 1_000_000L
+        ScreenTrackEngine.onTopicEntered(topicId = 42001, initialVisiblePosts = setOf(1, 2), nowMs = t0)
+        assertEquals(1, ScreenTrackEngine.sessionTopicsEntered)
+
+        val batch = ScreenTrackEngine.tick(nowMs = t0 + 1_200L)
+        assertNotNull(batch)
+        assertEquals(42001, batch.topicId)
+        assertEquals(1200, batch.timingsMs[1])
+        assertEquals(1200, batch.timingsMs[2])
+        assertEquals(2, ScreenTrackEngine.sessionPostsRead)
+
+        // 模拟 429 限流，验证未上报时长不会丢失而是合并回队列
+        ScreenTrackEngine.onBatchSendResult(batch, statusCode = 429, nowMs = t0 + 1_200L)
+        assertEquals(1, ScreenTrackEngine.pendingBatchesCount)
+
+        // 3. ConnectStatsParser 解析 connect.linux.do HTML 卡片
+        val sampleConnectHtml = """
+            <div class="card">
+              <h2 class="card-title">信任等级 3 要求</h2>
+              <span class="badge badge-success">已达标</span>
+              <p class="card-subtitle">过去 100 天内社区活跃度统计</p>
+              <div class="tl3-rings">
+                <div class="tl3-ring">
+                  <div class="tl3-ring-circle met" style="--val: 68; --max: 50;"></div>
+                  <div class="tl3-ring-label">访问天数</div>
+                </div>
+              </div>
+              <div class="tl3-bars">
+                <div class="tl3-bar-item">
+                  <span class="tl3-bar-label">浏览话题</span>
+                  <span class="tl3-bar-nums">312 / 200</span>
+                  <div class="tl3-bar-fill met" style="--val: 312; --max: 200;"></div>
+                </div>
+                <div class="tl3-bar-item">
+                  <span class="tl3-bar-label">已读帖子</span>
+                  <span class="tl3-bar-nums">1,420 / 500</span>
+                  <div class="tl3-bar-fill met" style="--val: 1420; --max: 500;"></div>
+                </div>
+              </div>
+            </div>
+        """.trimIndent()
+        val report = ConnectStatsParser.parseConnectHtml(sampleConnectHtml)
+        assertNotNull(report)
+        assertTrue(report.isQualified)
+        assertEquals(68, report.daysVisited)
+        assertEquals(312, report.topicsEntered)
+        assertEquals(1420, report.postsRead)
     }
 }

@@ -57,6 +57,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -77,6 +78,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.connect.ConnectTrustLevelReport
+import do_.linux.lindo.core.connect.ScreenTrackEngine
+import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.TopicDetailModel
@@ -94,6 +98,7 @@ import do_.linux.lindo.ui.components.PostGrantedBadgeIcon
 import do_.linux.lindo.ui.components.SmartAvatar
 import do_.linux.lindo.ui.components.UniversalBadgeChip
 import do_.linux.lindo.ui.components.UserTitleTag
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -200,6 +205,7 @@ fun LinDoApp() {
     var inspectedBadge by remember { mutableStateOf<GrantedBadge?>(null) }
     var showNetworkSheet by remember { mutableStateOf(false) }
     var showAuthSheet by remember { mutableStateOf(false) }
+    var showConnectSheet by remember { mutableStateOf(false) }
 
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -355,6 +361,7 @@ fun LinDoApp() {
                                         enableAnimations = enableAnimations,
                                         onToggleDark = { isDarkTheme = !isDarkTheme },
                                         onToggleAnimations = { enableAnimations = !enableAnimations },
+                                        onOpenConnectSheet = { showConnectSheet = true },
                                         onOpenNetworkSheet = { showNetworkSheet = true },
                                         onOpenAuthSheet = { showAuthSheet = true }
                                     )
@@ -426,6 +433,7 @@ fun LinDoApp() {
                                             enableAnimations = enableAnimations,
                                             onToggleDark = { isDarkTheme = !isDarkTheme },
                                             onToggleAnimations = { enableAnimations = !enableAnimations },
+                                            onOpenConnectSheet = { showConnectSheet = true },
                                             onOpenNetworkSheet = { showNetworkSheet = true },
                                             onOpenAuthSheet = { showAuthSheet = true }
                                         )
@@ -445,6 +453,12 @@ fun LinDoApp() {
                     BadgeDetailBottomSheet(
                         badge = badge,
                         onDismiss = { inspectedBadge = null }
+                    )
+                }
+
+                if (showConnectSheet) {
+                    ConnectTrustLevelSheet(
+                        onDismiss = { showConnectSheet = false }
                     )
                 }
 
@@ -1230,8 +1244,49 @@ private fun EditorialTopicReaderPane(
         }
 
         val posts = detail?.posts.orEmpty()
+        val readerListState = rememberLazyListState()
+        val scope = rememberCoroutineScope()
+
+        // 对齐 Discourse 官方 ScreenTrack：进入话题即追踪可见楼层并周期上报 /topics/timings
+        LaunchedEffect(summary.id, posts.size) {
+            ScreenTrackEngine.onTopicEntered(
+                topicId = summary.id,
+                initialVisiblePosts = posts.take(2).map { it.postNumber }.toSet().ifEmpty { setOf(1) }
+            )
+            while (true) {
+                delay(1000L)
+                val visiblePostNums = readerListState.layoutInfo.visibleItemsInfo
+                    .mapNotNull { itemInfo ->
+                        // index 0 是标题 header，index >= 1 对应 posts[index - 1]
+                        val postIdx = itemInfo.index - 1
+                        posts.getOrNull(postIdx)?.postNumber
+                    }
+                    .toSet()
+                if (visiblePostNums.isNotEmpty()) {
+                    ScreenTrackEngine.updateVisiblePosts(visiblePostNums)
+                }
+                val batch = ScreenTrackEngine.tick()
+                if (batch != null) {
+                    val status = LinuxDoRepository.sendTopicTimings(batch)
+                    ScreenTrackEngine.onBatchSendResult(batch, status)
+                }
+            }
+        }
+
+        DisposableEffect(summary.id) {
+            onDispose {
+                val finalBatch = ScreenTrackEngine.flushCurrentTopic()
+                if (finalBatch != null) {
+                    scope.launch {
+                        val status = LinuxDoRepository.sendTopicTimings(finalBatch)
+                        ScreenTrackEngine.onBatchSendResult(finalBatch, status)
+                    }
+                }
+            }
+        }
 
         LazyColumn(
+            state = readerListState,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
@@ -1773,7 +1828,7 @@ private fun EditorialCategoryRow(
 }
 
 /**
- * Apple HIG 原生偏好设置页（零彩虹图标块，克制单色分组表格）
+ * Apple HIG 原生偏好设置页（含 Connect 等级与活跃度同步中心）
  */
 @Composable
 private fun EditorialProfileScreen(
@@ -1781,6 +1836,7 @@ private fun EditorialProfileScreen(
     enableAnimations: Boolean,
     onToggleDark: () -> Unit,
     onToggleAnimations: () -> Unit,
+    onOpenConnectSheet: () -> Unit,
     onOpenNetworkSheet: () -> Unit,
     onOpenAuthSheet: () -> Unit
 ) {
@@ -1814,7 +1870,69 @@ private fun EditorialProfileScreen(
             }
         }
 
-        // 1. 账户授权卡片
+        // 1. Connect 等级与活跃度保活中心（解决第三方客户端断签/漏计阅读痛点）
+        item {
+            EditorialSettingsSection(title = "CONNECT 等级与活跃度同步") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenConnectSheet)
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Connect 信任等级与保级指标",
+                            fontSize = 15.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkPrimary
+                        )
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = "查看 100 天访问天数、浏览话题与已读楼层",
+                            fontSize = 12.5.sp,
+                            color = palette.inkTertiary
+                        )
+                    }
+                    Text(
+                        text = "查看",
+                        fontSize = 13.5.sp,
+                        color = palette.accent
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = palette.inkTertiary
+                    )
+                }
+
+                HorizontalDivider(
+                    modifier = Modifier.padding(start = 16.dp),
+                    thickness = 0.5.dp,
+                    color = palette.hairline
+                )
+
+                EditorialStaticRow(
+                    title = "今日连登在岗保活",
+                    value = if (UserPresenceService.todayVisitConfirmed) "已同步 · 在线" else "待同步"
+                )
+
+                HorizontalDivider(
+                    modifier = Modifier.padding(start = 16.dp),
+                    thickness = 0.5.dp,
+                    color = palette.hairline
+                )
+
+                EditorialStaticRow(
+                    title = "阅读轨迹上报",
+                    value = "进 ${ScreenTrackEngine.sessionTopicsEntered} 贴 · 读 ${ScreenTrackEngine.sessionPostsRead} 楼 · ${ScreenTrackEngine.sessionReadingSeconds}s"
+                )
+            }
+        }
+
+        // 2. 账户授权卡片
         item {
             EditorialSettingsSection(title = "LINUX.DO 账户") {
                 Row(
@@ -2073,6 +2191,152 @@ private fun BadgeDetailBottomSheet(
 }
 
 /**
+ * `connect.linux.do` 信任等级周期指标与活跃度核验抽屉
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConnectTrustLevelSheet(
+    onDismiss: () -> Unit
+) {
+    val palette = LocalEditorialPalette.current
+    var report by remember { mutableStateOf<ConnectTrustLevelReport?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        isLoading = true
+        report = LinuxDoRepository.fetchConnectTrustLevelReport()
+        isLoading = false
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = palette.groupedCard
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 12.dp)
+        ) {
+            val currentReport = report
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = currentReport?.title ?: "Connect 活跃度与保级指标",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.inkPrimary
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = currentReport?.subtitle ?: "正在同步 connect.linux.do 周期数据...",
+                        fontSize = 12.5.sp,
+                        color = palette.inkTertiary
+                    )
+                }
+
+                if (currentReport != null) {
+                    Text(
+                        text = currentReport.statusBadgeText,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (currentReport.isQualified) Color(0xFF34C759) else palette.accent
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 活跃度保活机制说明栏
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(palette.subtleSurface)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "全链路活跃度防断签保障已激活",
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.inkPrimary
+                )
+                Text(
+                    text = "1. 连登天数：前台请求自动携带 Discourse-Present: true 触发 user_visits 记录\n" +
+                        "2. 浏览话题：打开帖子自动携带 track_visit=true 与 Discourse-Track-View: 1\n" +
+                        "3. 已读帖子：ScreenTrack 每秒追踪可见楼层并上报 POST /topics/timings（含失败退避重传）",
+                    fontSize = 11.5.sp,
+                    lineHeight = 17.sp,
+                    color = palette.inkSecondary
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            if (isLoading) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.5.dp),
+                    color = palette.accent,
+                    trackColor = Color.Transparent
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            currentReport?.metrics?.forEach { metric ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 7.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = metric.label,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "${metric.displayCurrent} / ${metric.displayTarget}",
+                            fontSize = 12.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = if (metric.isMet) Color(0xFF34C759) else palette.inkSecondary
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(palette.subtleSurface)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(metric.progress.coerceIn(0.02f, 1f))
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(if (metric.isMet) Color(0xFF34C759) else palette.accent)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+
+/**
  * 节点延迟与 Cookie 诊断抽屉
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2244,3 +2508,4 @@ private fun UserApiKeyAuthSheet(
         }
     }
 }
+

@@ -1,6 +1,11 @@
 package do_.linux.lindo.core.network
 
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
+import do_.linux.lindo.core.connect.ConnectStatsParser
+import do_.linux.lindo.core.connect.ConnectTrustLevelReport
+import do_.linux.lindo.core.connect.ConsolidatedTimingBatch
+import do_.linux.lindo.core.connect.ScreenTrackEngine
+import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
@@ -10,9 +15,11 @@ import do_.linux.lindo.core.model.TopicSummary
 import do_.linux.lindo.core.model.TopicUser
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.request.forms.submitForm
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.Parameters
 import java.net.InetAddress
 import java.security.KeyPairGenerator
 import java.time.Duration
@@ -109,9 +116,17 @@ object CookieSentinel {
         }
     }
 
-    fun resolveWinningCookies(nowMs: Long = System.currentTimeMillis()): Map<String, StoredCookieRecord> {
+    fun resolveWinningCookies(
+        nowMs: Long = System.currentTimeMillis(),
+        targetHost: String = "linux.do"
+    ): Map<String, StoredCookieRecord> {
+        val normalizedTarget = targetHost.trim().lowercase().trimStart('.')
         val grouped = store.values
-            .filter { !it.isExpired(nowMs) && it.value.isNotBlank() }
+            .filter { record ->
+                !record.isExpired(nowMs) &&
+                    record.value.isNotBlank() &&
+                    matchesDomain(record.key, normalizedTarget)
+            }
             .groupBy { it.key.name }
 
         val winners = LinkedHashMap<String, StoredCookieRecord>()
@@ -126,8 +141,20 @@ object CookieSentinel {
         return winners
     }
 
-    fun buildCookieHeader(nowMs: Long = System.currentTimeMillis()): String {
-        return resolveWinningCookies(nowMs)
+    private fun matchesDomain(key: CookieQuadrupleKey, targetHost: String): Boolean {
+        val cookieDomain = key.domain.trim().lowercase().trimStart('.')
+        return if (key.hostOnly) {
+            cookieDomain == targetHost
+        } else {
+            targetHost == cookieDomain || targetHost.endsWith(".$cookieDomain")
+        }
+    }
+
+    fun buildCookieHeader(
+        nowMs: Long = System.currentTimeMillis(),
+        targetHost: String = "linux.do"
+    ): String {
+        return resolveWinningCookies(nowMs, targetHost)
             .entries
             .joinToString("; ") { "${it.key}=${it.value.value}" }
     }
@@ -352,6 +379,7 @@ object LinuxDoRepository {
 
     /**
      * 拉取线上话题列表（支持 `latest.json`、`top.json`、`new.json` 以及 `/c/{slug}/{id}.json`）
+     * 同时在用户前台活跃时注入 `Discourse-Present: true`，确保服务端更新 `last_seen_at` 与 `user_visits` 连登天数
      */
     suspend fun fetchTopics(
         path: String = "latest.json",
@@ -366,14 +394,21 @@ object LinuxDoRepository {
 
         val client = createClient()
         try {
+            val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || CookieSentinel.resolveWinningCookies().containsKey("_t")
+            val presenceHeaders = UserPresenceService.buildPresenceHeaders(
+                isBackgroundTimingRequest = false,
+                isLoggedIn = isLoggedIn
+            )
             val response = client.get("https://linux.do/$targetPath") {
                 header("Accept", "application/json")
+                presenceHeaders.forEach { (k, v) -> header(k, v) }
                 UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
-                val cookieHeader = CookieSentinel.buildCookieHeader()
+                val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
                 if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
             }
             val text = response.bodyAsText()
             if (text.trimStart().startsWith("{")) {
+                UserPresenceService.recordSuccessfulForegroundRequest()
                 val root = json.parseToJsonElement(text).jsonObject
                 val parsed = parseTopicListRoot(root)
                 if (parsed.isNotEmpty()) {
@@ -388,19 +423,43 @@ object LinuxDoRepository {
     }
 
     /**
-     * 实时拉取指定话题详情 (`/t/{id}.json`)
+     * 实时拉取指定话题详情 (`/t/{id}.json?track_visit=true`)
+     *
+     * 对齐 Discourse 官方前端：
+     * - 携带 `track_visit=true`、`Discourse-Track-View: 1`、`Discourse-Track-View-Topic-Id: {id}`
+     *   以确保后端递增 `UserStat.topics_entered`（即 Connect 中的「浏览话题」指标）！
      */
-    suspend fun fetchTopicDetail(topicId: Int, summaryFallback: TopicSummary? = null): TopicDetailModel = withContext(Dispatchers.IO) {
+    suspend fun fetchTopicDetail(
+        topicId: Int,
+        summaryFallback: TopicSummary? = null,
+        trackVisit: Boolean = true
+    ): TopicDetailModel = withContext(Dispatchers.IO) {
         val client = createClient()
         try {
-            val response = client.get("https://linux.do/t/$topicId.json") {
+            val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || CookieSentinel.resolveWinningCookies().containsKey("_t")
+            val presenceHeaders = UserPresenceService.buildPresenceHeaders(
+                isBackgroundTimingRequest = false,
+                isLoggedIn = isLoggedIn
+            )
+            val url = if (trackVisit) {
+                "https://linux.do/t/$topicId.json?track_visit=true"
+            } else {
+                "https://linux.do/t/$topicId.json"
+            }
+            val response = client.get(url) {
                 header("Accept", "application/json")
+                presenceHeaders.forEach { (k, v) -> header(k, v) }
+                if (trackVisit) {
+                    header("Discourse-Track-View", "1")
+                    header("Discourse-Track-View-Topic-Id", topicId.toString())
+                }
                 UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
-                val cookieHeader = CookieSentinel.buildCookieHeader()
+                val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
                 if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
             }
             val text = response.bodyAsText()
             if (text.trimStart().startsWith("{")) {
+                UserPresenceService.recordSuccessfulForegroundRequest()
                 val root = json.parseToJsonElement(text).jsonObject
                 val detail = parseLiveTopicDetail(root, summaryFallback)
                 if (detail.posts.isNotEmpty()) {
@@ -655,5 +714,74 @@ object LinuxDoRepository {
         } catch (_: Throwable) {
             "刚刚"
         }
+    }
+
+    /**
+     * 上报帖子阅读时长与已读楼层 (`POST /topics/timings`)
+     *
+     * 对齐 Discourse 官方 `ScreenTrack` 协议，使服务端实时累加：
+     * - `posts_read_count`（Connect 已读帖子数）
+     * - `time_read` / `recent_time_read`（阅读时长）
+     * - 话题阅读进度游标 (`last_read_post_number`)
+     */
+    suspend fun sendTopicTimings(batch: ConsolidatedTimingBatch): Int? = withContext(Dispatchers.IO) {
+        val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || CookieSentinel.resolveWinningCookies().containsKey("_t")
+        if (!isLoggedIn) {
+            // 未绑定账号时返回 200 交由本地会话统计维护
+            return@withContext 200
+        }
+
+        val client = createClient()
+        try {
+            val headers = UserPresenceService.buildPresenceHeaders(
+                isBackgroundTimingRequest = true,
+                isLoggedIn = true
+            )
+            val params = Parameters.build {
+                append("topic_id", batch.topicId.toString())
+                append("topic_time", batch.topicTimeMs.toString())
+                batch.timingsMs.forEach { (postNumber, durationMs) ->
+                    append("timings[$postNumber]", durationMs.toString())
+                }
+            }
+            val response = client.submitForm(
+                url = "https://linux.do/topics/timings",
+                formParameters = params
+            ) {
+                headers.forEach { (k, v) -> header(k, v) }
+                UserApiKeyAuthManager.getApiKey()?.let { header("User-Api-Key", it) }
+                val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
+                if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+            }
+            response.status.value
+        } catch (_: Throwable) {
+            null
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * 获取 `connect.linux.do` 信任等级周期活跃度报告
+     */
+    suspend fun fetchConnectTrustLevelReport(): ConnectTrustLevelReport = withContext(Dispatchers.IO) {
+        val client = createClient()
+        try {
+            val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "connect.linux.do")
+            val response = client.get("https://connect.linux.do/") {
+                header("Accept", "text/html,application/xhtml+xml")
+                if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+            }
+            val html = response.bodyAsText()
+            ConnectStatsParser.parseConnectHtml(html)?.let { return@withContext it }
+        } catch (_: Throwable) {
+        } finally {
+            client.close()
+        }
+
+        ConnectStatsParser.buildSessionBaselineReport(
+            sessionTopicsEntered = ScreenTrackEngine.sessionTopicsEntered,
+            sessionPostsRead = ScreenTrackEngine.sessionPostsRead
+        )
     }
 }
