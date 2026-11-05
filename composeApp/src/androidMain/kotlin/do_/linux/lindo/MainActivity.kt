@@ -187,12 +187,30 @@ class MainActivity : ComponentActivity() {
                     .apply()
             }
         }
-        UserApiKeyAuthManager.onLogoutPlatformClear = {
+        UserApiKeyAuthManager.onSyncCookieToPlatform = { rawSetCookie ->
             runCatching {
                 val cm = CookieManager.getInstance()
-                cm.removeAllCookies(null)
+                cm.setCookie("https://linux.do", rawSetCookie)
                 cm.flush()
-                prefs.edit().clear().apply()
+            }
+        }
+        UserApiKeyAuthManager.onLogoutPlatformClear = {
+            runCatching {
+                // 仅清除 Discourse 账号会话 Cookie (_t / _forum_session)，保留 Cloudflare 信任通行证 (cf_clearance / __cf_bm / _cfuvid)
+                val cm = CookieManager.getInstance()
+                cm.setCookie("https://linux.do", "_t=; Max-Age=0; Path=/; Secure; HttpOnly")
+                cm.setCookie("https://linux.do", "_forum_session=; Max-Age=0; Path=/; Secure; HttpOnly")
+                cm.flush()
+                prefs.edit()
+                    .remove("api_key")
+                    .remove("username")
+                    .remove("display_name")
+                    .remove("avatar_template")
+                    .remove("user_id")
+                    .remove("user_title")
+                    .remove("trust_level")
+                    .putString("raw_cookies", CookieSentinel.buildCookieHeader(targetHost = "linux.do"))
+                    .apply()
             }
         }
 
@@ -267,7 +285,7 @@ class MainActivity : ComponentActivity() {
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
-                userAgentString = cleanUa
+                // 保持 WebView 原生 User-Agent 与 Sec-CH-UA Client Hints 100% 一致，避免 Cloudflare 识别出伪造 UA 指纹
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             }
             val cm = CookieManager.getInstance()
@@ -624,12 +642,19 @@ private fun AndroidWebLoginModal(
             CookieSentinel.ingestRawCookieString(rawCookies)
         }
 
-        // 若当前在 /session/otp/ 兑换页，自动触发表单 POST 提交
-        webView.evaluateJavascript(AUTO_SUBMIT_OTP_FORM_JS, null)
-        // 触发同步 data-preloaded + 异步 /session/current.json 双通道探测
-        webView.evaluateJavascript(EXTRACT_PRELOADED_USER_JS, null)
+        // 若当前在 /session/otp/ 兑换页，仅在此路径下自动触发表单 POST 提交
+        if (webView.url?.contains("/session/otp/") == true) {
+            webView.evaluateJavascript(AUTO_SUBMIT_OTP_FORM_JS, null)
+        }
 
-        // 同步兜底探测
+        // 关键防风控守卫：在原生 CookieManager 尚未检测到 Discourse `_t=` 登录凭证前，
+        // 严禁向页面注入任何探测脚本或发起 `/session/current.json` (404) 轮询请求，
+        // 保持 `/login` 与 Cloudflare Turnstile 页面 100% 纯净零干扰！
+        if (!rawCookies.contains("_t=")) {
+            return
+        }
+
+        // 已检测到 `_t=` 会话 Cookie：通过单次无副作用 evaluateJavascript 提取当前用户资料
         val probeJs = """
             (function() {
                 try {
@@ -663,9 +688,18 @@ private fun AndroidWebLoginModal(
 
         webView.evaluateJavascript(probeJs) { rawJson ->
             if (completed) return@evaluateJavascript
-            val decoded = decodeJsStringResult(rawJson)?.takeIf { it.isNotBlank() } ?: return@evaluateJavascript
-            runCatching {
-                completeWithUserObject(JSONObject(decoded))
+            val decoded = decodeJsStringResult(rawJson)?.takeIf { it.isNotBlank() }
+            if (decoded != null) {
+                runCatching {
+                    completeWithUserObject(JSONObject(decoded))
+                }
+            } else if (!completed && rawCookies.contains("_t=")) {
+                // `_t` Cookie 已落盘但 DOM 尚在跳转中：直接关闭登录弹窗并由后台拉取完整 `/session/current.json`
+                completed = true
+                cookieManager.flush()
+                CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
+                UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+                onLoginSuccess()
             }
         }
     }
@@ -798,7 +832,7 @@ private fun AndroidWebLoginModal(
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         databaseEnabled = true
-                        userAgentString = cleanUa
+                        // 保持 WebView 原生 User-Agent 与 Sec-CH-UA Client Hints 完全一致，不暴露任何 window.LinDoJsBridge 全局变量
                         useWideViewPort = true
                         loadWithOverviewMode = true
                         mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
@@ -807,21 +841,6 @@ private fun AndroidWebLoginModal(
                     val cookieManager = CookieManager.getInstance()
                     cookieManager.setAcceptCookie(true)
                     cookieManager.setAcceptThirdPartyCookies(this, true)
-
-                    addJavascriptInterface(
-                        object {
-                            @JavascriptInterface
-                            fun onPreloadedUserDetected(userJson: String) {
-                                if (userJson.isBlank() || completed) return
-                                post {
-                                    runCatching {
-                                        completeWithUserObject(JSONObject(userJson))
-                                    }
-                                }
-                            }
-                        },
-                        "LinDoJsBridge"
-                    )
 
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {

@@ -1036,8 +1036,12 @@ fun LinDoApp() {
     LaunchedEffect(authVersion) {
         val otp = UserApiKeyAuthManager.consumePendingOtpToken()
         if (!otp.isNullOrBlank()) {
-            activeWebLoginUrl = "https://linux.do/session/otp/$otp"
-            return@LaunchedEffect
+            // 优先在后台静默兑换 OTP 令牌，免弹 WebView 页面以避免二次触发 Cloudflare Turnstile 验证
+            val redeemed = LinuxDoRepository.redeemOtpSilently(otp)
+            if (!redeemed) {
+                activeWebLoginUrl = "https://linux.do/session/otp/$otp"
+                return@LaunchedEffect
+            }
         }
         val nowAuth = UserApiKeyAuthManager.isAuthorized()
         if (nowAuth && !wasAuthorized) {

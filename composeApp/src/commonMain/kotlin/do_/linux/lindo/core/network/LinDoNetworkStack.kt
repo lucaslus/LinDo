@@ -210,6 +210,15 @@ object CookieSentinel {
     fun clearAll() {
         store.clear()
     }
+
+    /**
+     * 退出账号时仅清除 Discourse 会话 Cookie（`_t`、`_forum_session`），保留 Cloudflare 信任凭证（`cf_clearance`、`__cf_bm`、`_cfuvid`）以避免下次登录重新触发 Turnstile 验证
+     */
+    fun clearAuthCookiesOnly() {
+        val cfTrustCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
+        val keysToRemove = store.keys.filter { it.name !in cfTrustCookies }
+        keysToRemove.forEach { store.remove(it) }
+    }
 }
 
 /**
@@ -264,6 +273,7 @@ object UserApiKeyAuthManager {
     var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
     var onPersistPendingKey: ((String?, String?) -> Unit)? = null
     var onPersistUiPrefs: ((Float, Boolean, Boolean) -> Unit)? = null
+    var onSyncCookieToPlatform: ((String) -> Unit)? = null
 
     fun updateUiPrefs(fontScale: Float, darkTheme: Boolean, enableAnimations: Boolean) {
         uiFontScale = fontScale
@@ -383,7 +393,7 @@ object UserApiKeyAuthManager {
         currentUser = null
         fullProfileCache = null
         pendingOtpToken = null
-        CookieSentinel.clearAll()
+        CookieSentinel.clearAuthCookiesOnly()
         onLogoutPlatformClear?.invoke()
         onPersistSession?.invoke(null, null)
         onAuthStateChanged?.invoke()
@@ -834,6 +844,60 @@ object LinuxDoRepository {
         }
 
         null
+    }
+
+    /**
+     * 静默无感兑换系统浏览器回调的 OTP 令牌（免打开 WebView 页面，从而规避整页 HTML 导航的 Cloudflare Turnstile 验证）：
+     * - 先通过 OkHttp `sharedClient` 获取 `/session/csrf.json` 与 `_forum_session`；
+     * - 再 POST `/session/otp/$otp` 直接捕获服务端下发的 `_t` 会话 Cookie 并同步至系统 `CookieManager`；
+     * - 若直连兑换成功返回 `true`（直接完成登录），若被拦截则返回 `false` 交由 WebView 兜底。
+     */
+    suspend fun redeemOtpSilently(otp: String): Boolean = withContext(Dispatchers.IO) {
+        if (otp.isBlank()) return@withContext false
+        try {
+            val initialCookie = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
+            val csrfResp = sharedClient.get("https://linux.do/session/csrf.json") {
+                header("Accept", "application/json")
+                header("X-Requested-With", "XMLHttpRequest")
+                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
+                if (initialCookie.isNotEmpty()) header("Cookie", initialCookie)
+            }
+            csrfResp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                val pair = setCookie.substringBefore(';')
+                CookieSentinel.ingestRawCookieString(pair, domain = "linux.do", hostOnly = false)
+                UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke(setCookie)
+            }
+            val csrfBody = csrfResp.bodyAsText()
+            val csrfToken = runCatching {
+                json.parseToJsonElement(csrfBody).jsonObject["csrf"]?.jsonPrimitive?.contentOrNull
+            }.getOrNull() ?: return@withContext false
+
+            val updatedCookie = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
+            val otpResp = sharedClient.submitForm(
+                url = "https://linux.do/session/otp/${otp.trim()}",
+                formParameters = Parameters.Empty
+            ) {
+                header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
+                header("X-CSRF-Token", csrfToken)
+                header("X-Requested-With", "XMLHttpRequest")
+                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
+                if (updatedCookie.isNotEmpty()) header("Cookie", updatedCookie)
+            }
+            otpResp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                val pair = setCookie.substringBefore(';')
+                CookieSentinel.ingestRawCookieString(pair, domain = "linux.do", hostOnly = false)
+                UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke(setCookie)
+            }
+
+            if (CookieSentinel.resolveWinningCookies(targetHost = "linux.do").containsKey("_t")) {
+                fetchCurrentUserProfile()
+                UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+                return@withContext true
+            }
+        } catch (t: Throwable) {
+            println("LinDoAuth: redeemOtpSilently failed: ${t.message}")
+        }
+        false
     }
 
     /**
