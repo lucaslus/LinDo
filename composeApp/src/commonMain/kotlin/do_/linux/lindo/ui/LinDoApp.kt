@@ -1024,7 +1024,6 @@ fun LinDoApp() {
     // 认证状态与真实个人资料状态
     var authVersion by remember { mutableStateOf(0) }
     var wasAuthorized by remember { mutableStateOf(UserApiKeyAuthManager.isAuthorized()) }
-    var guestPreviewMode by remember { mutableStateOf(false) }
     var activeWebLoginUrl by remember { mutableStateOf<String?>(null) }
     var fullUserProfile by remember { mutableStateOf<UserFullProfileSummary?>(UserApiKeyAuthManager.fullProfileCache) }
 
@@ -1383,7 +1382,7 @@ fun LinDoApp() {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     val isDesktop = maxWidth >= 840.dp
 
-                    if (!isAuthorized && !guestPreviewMode) {
+                    if (!isAuthorized) {
                         GoogleWelcomeLoginScreen(
                             onPrimaryWebLogin = {
                                 activeWebLoginUrl = "https://linux.do/login"
@@ -1393,9 +1392,6 @@ fun LinDoApp() {
                                 if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
                                     activeWebLoginUrl = url
                                 }
-                            },
-                            onEnterGuestPreview = {
-                                guestPreviewMode = true
                             }
                         )
                     } else if (isDesktop) {
@@ -1575,7 +1571,6 @@ fun LinDoApp() {
                                         onLogout = {
                                             UserApiKeyAuthManager.logout()
                                             fullUserProfile = null
-                                            guestPreviewMode = false
                                         }
                                     )
                                 }
@@ -1745,7 +1740,6 @@ fun LinDoApp() {
                                                 onLogout = {
                                                     UserApiKeyAuthManager.logout()
                                                     fullUserProfile = null
-                                                    guestPreviewMode = false
                                                 }
                                             )
                                         }
@@ -1949,7 +1943,6 @@ fun LinDoApp() {
                             UserApiKeyAuthManager.logout()
                             fullUserProfile = null
                             showAuthSheet = false
-                            guestPreviewMode = false
                         },
                         onDismiss = { showAuthSheet = false }
                     )
@@ -5614,37 +5607,7 @@ private fun CommunityMessagesScreen(
                 .background(palette.subtleSurface)
         )
 
-        if (!isAuthorized) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(32.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "登录后即可实时接收回复、获赞、@提及与站内私信",
-                        fontSize = 13.5.sp,
-                        color = palette.inkSecondary
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(palette.publishBtnBg)
-                            .clickable { onRequestLogin() }
-                            .padding(horizontal = 20.dp, vertical = 9.dp)
-                    ) {
-                        Text(
-                            text = "立即登录账号",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.publishBtnContent
-                        )
-                    }
-                }
-            }
-        } else if (subTab == 1) {
+        if (subTab == 1) {
             // 私信列表与写私信入口
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -5890,7 +5853,7 @@ private fun CommunityProfileScreen(
         ?: ""
     val displayName = fullProfile?.displayName?.takeIf { it.isNotBlank() }
         ?: currentUser?.displayName?.takeIf { it.isNotBlank() }
-        ?: displayUsername.ifBlank { if (isAuthorized) "正在同步资料..." else "未登录游客" }
+        ?: displayUsername.ifBlank { "正在同步资料..." }
     val avatarUrl = fullProfile?.avatarTemplate?.takeIf { it.isNotBlank() }
         ?: currentUser?.avatarTemplate
     val trustLevel = fullProfile?.trustLevel ?: currentUser?.trustLevel ?: 1
@@ -7100,15 +7063,14 @@ private fun UserApiKeyAuthSheet(
 
 /**
  * QQ音乐 12.x/13.x 级臻品极简登录欢迎页 (`GoogleWelcomeLoginScreen`)：
- * - 摒弃厚重方框与生硬分割线，采用高定留白 + 柔和品牌标识 + 纯线性微特性条
+ * - 摒弃厚重方框与生硬分割线，采用高定留白 + 柔和品牌标识
  * - 底部采用 QQ音乐 标志性全圆角胶囊双通道按钮 (`RoundedCornerShape(99.dp)`)
- * - 顶部右上角与底部均提供自然的「游客预览」轻入口
+ * - 彻底移除游客预览入口，强制登录保障社区完整鉴权与 Connect 保级追踪
  */
 @Composable
 private fun GoogleWelcomeLoginScreen(
     onPrimaryWebLogin: () -> Unit,
-    onBrowserOneClickAuth: () -> Unit,
-    onEnterGuestPreview: () -> Unit
+    onBrowserOneClickAuth: () -> Unit
 ) {
     val palette = LocalPalette.current
     val primaryCapsuleBg = if (palette.isDark) palette.publishBtnBg else Color(0xFF111827)
@@ -7123,38 +7085,9 @@ private fun GoogleWelcomeLoginScreen(
             .padding(horizontal = 28.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. 顶部右上角轻盈「跳过 / 先去逛逛」入口（无底色纯文字）
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(99.dp))
-                    .clickable(onClick = onEnterGuestPreview)
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "先去逛逛",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.inkSecondary
-                )
-                Spacer(modifier = Modifier.width(2.dp))
-                Icon(
-                    imageVector = LinDoIcons.ChevronRight,
-                    contentDescription = "进入游客预览",
-                    modifier = Modifier.size(14.dp),
-                    tint = palette.inkTertiary
-                )
-            }
-        }
+        Spacer(modifier = Modifier.weight(0.82f))
 
-        Spacer(modifier = Modifier.weight(0.78f))
-
-        // 2. 核心品牌视觉：立体玻璃图标 + LINUX DO 标志性黑金/主题色双字重排版（黄金分割点居中留白，彻底去除累赘看板卡片）
+        // 1. 核心品牌视觉：立体玻璃图标 + LINUX DO 标志性黑金/主题色双字重排版（黄金分割点居中留白，彻底去除累赘看板卡片与游客跳过入口）
         LinDoGlassAppIcon(tileSize = 88.dp)
 
         Spacer(modifier = Modifier.height(24.dp))
