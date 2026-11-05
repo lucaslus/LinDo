@@ -7,13 +7,16 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
@@ -35,7 +38,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -61,21 +63,77 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CookieSentinel
+import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.LinDoApp
 import do_.linux.lindo.ui.PlatformWebLoginHost
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
 
+    private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
     private val prefs by lazy {
         getSharedPreferences("lindo_auth_session", Context.MODE_PRIVATE)
+    }
+
+    // 常驻同源 Chromium WebView 引擎：共享 BoringSSL JA3/JA4 指纹、cf_clearance、_t 与 CSRF Token
+    private var apiWebView: WebView? = null
+    private val apiWebViewReady = CompletableDeferred<Boolean>()
+    private val pendingHttpCallbacks = ConcurrentHashMap<String, CompletableDeferred<Pair<Int, String>>>()
+
+    inner class LinDoJsBridge {
+        @JavascriptInterface
+        fun onHttpResult(reqId: String, status: Int, body: String) {
+            pendingHttpCallbacks.remove(reqId)?.complete(status to body)
+        }
+
+        @JavascriptInterface
+        fun onPreloadedUserDetected(userJson: String) {
+            if (userJson.isBlank()) return
+            runCatching {
+                val u = JSONObject(userJson)
+                val username = u.optString("username").trim()
+                if (username.isNotBlank() && username != "linuxdo_user") {
+                    val userId = u.optInt("id", 0)
+                    val displayName = u.optString("name").ifBlank { username }
+                    val rawTpl = u.optString("avatar_template")
+                    val avatarUrl = if (rawTpl.isNotBlank()) {
+                        if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "240")
+                        else "https://linux.do${rawTpl.replace("{size}", "240")}"
+                    } else ""
+                    val trustLevel = u.optInt("trust_level", 1)
+                    val title = u.optString("title", "")
+                    activityScope.launch {
+                        val rawCookies = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
+                        UserApiKeyAuthManager.onSessionAuthenticated(
+                            profile = AuthenticatedUserProfile(
+                                userId = userId,
+                                username = username,
+                                displayName = displayName,
+                                avatarTemplate = avatarUrl,
+                                userTitle = title,
+                                trustLevel = trustLevel
+                            ),
+                            rawCookies = rawCookies
+                        )
+                        persistSessionToDisk()
+                    }
+                }
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,7 +152,10 @@ class MainActivity : ComponentActivity() {
         // 1. 恢复持久化的登录状态与 WebView Cookie
         restoreSessionFromDisk()
 
-        // 2. 注册系统浏览器跳转桥接器
+        // 2. 初始化常驻同源 WebView API 桥接引擎
+        initPersistentApiWebView()
+
+        // 3. 注册系统浏览器跳转桥接器
         UserApiKeyAuthManager.openExternalUrlLauncher = { url: String ->
             runCatching {
                 val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
@@ -104,7 +165,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 3. 注册会话变更持久化钩子
+        // 4. 注册会话变更持久化钩子
         UserApiKeyAuthManager.onPersistSession = { _, _ ->
             persistSessionToDisk()
         }
@@ -117,24 +178,33 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 4. 注册内置 WebView 登录器
+        // 5. 注册内置 WebView 登录器
         PlatformWebLoginHost.webLoginRenderer = { initialUrl, onDismiss, onLoginSuccess ->
             AndroidWebLoginModal(
                 initialUrl = initialUrl,
                 onDismiss = onDismiss,
                 onLoginSuccess = {
                     persistSessionToDisk()
+                    // 刷新常驻 apiWebView 以同步最新 Cookie 与 CSRF
+                    apiWebView?.reload()
+                    activityScope.launch {
+                        LinuxDoRepository.fetchCurrentUserProfile()
+                        persistSessionToDisk()
+                    }
                     onLoginSuccess()
                 }
             )
         }
 
-        // 5. 注册 WebView 同源 JSON 兜底抓取器（当 OkHttp 遇到 Cloudflare 质询时自动使用 WebView 会话拉取）
+        // 6. 注册异步 Promise 级 WebView HTTP 执行器与 JSON 兜底器
+        UserApiKeyAuthManager.webViewHttpExecutor = { url, method, formParams, headers ->
+            executeHttpViaWebViewBridge(url, method, formParams, headers)
+        }
         UserApiKeyAuthManager.webViewJsonFetcher = { targetUrl ->
-            fetchJsonViaWebViewSession(targetUrl)
+            executeHttpViaWebViewBridge(targetUrl, "GET", null, emptyMap())?.second
         }
 
-        // 6. 检查冷启动是否由 discourse://auth_redirect 唤起
+        // 7. 检查冷启动是否由 discourse://auth_redirect 唤起
         handleIncomingAuthIntent(intent)
 
         onBackPressedDispatcher.addCallback(
@@ -154,6 +224,140 @@ class MainActivity : ComponentActivity() {
         setContent {
             LinDoApp()
         }
+
+        // Attach 1x1 invisible apiWebView to window so Chromium keeps timers & fetch active
+        window.decorView.post {
+            runCatching {
+                val root = window.decorView.findViewById<ViewGroup>(android.R.id.content)
+                val wv = apiWebView
+                if (root != null && wv != null && wv.parent == null) {
+                    val lp = FrameLayout.LayoutParams(1, 1)
+                    wv.visibility = View.INVISIBLE
+                    root.addView(wv, 0, lp)
+                }
+            }
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun initPersistentApiWebView() {
+        runCatching {
+            val wv = WebView(this)
+            val cleanUa = wv.settings.userAgentString.replace("; wv", "")
+            UserApiKeyAuthManager.customUserAgent = cleanUa
+            wv.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                userAgentString = cleanUa
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            }
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            cm.setAcceptThirdPartyCookies(wv, true)
+
+            wv.addJavascriptInterface(LinDoJsBridge(), "LinDoJsBridge")
+            wv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    val cookies = cm.getCookie("https://linux.do").orEmpty()
+                    if (cookies.isNotBlank()) {
+                        CookieSentinel.ingestRawCookieString(cookies)
+                    }
+                    if (!apiWebViewReady.isCompleted) {
+                        apiWebViewReady.complete(true)
+                    }
+                    // 自动从 DOM data-preloaded 提取当前真实用户（若已存在会话）
+                    view?.evaluateJavascript(EXTRACT_PRELOADED_USER_JS, null)
+                }
+            }
+            apiWebView = wv
+            wv.loadUrl("https://linux.do/")
+        }
+    }
+
+    private suspend fun executeHttpViaWebViewBridge(
+        url: String,
+        method: String,
+        formParams: Map<String, String>?,
+        headers: Map<String, String>
+    ): Pair<Int, String>? {
+        val wv = apiWebView ?: return null
+        // 等待首次同源页面就绪（最多 4.5s）
+        withTimeoutOrNull(4500L) { apiWebViewReady.await() }
+
+        val reqId = UUID.randomUUID().toString()
+        val deferred = CompletableDeferred<Pair<Int, String>>()
+        pendingHttpCallbacks[reqId] = deferred
+
+        val formBodyEncoded = if (!formParams.isNullOrEmpty()) {
+            formParams.entries.joinToString("&") { (k, v) ->
+                "${Uri.encode(k)}=${Uri.encode(v)}"
+            }
+        } else {
+            ""
+        }
+
+        val headersJson = JSONObject().apply {
+            headers.forEach { (k, v) -> put(k, v) }
+        }.toString()
+
+        val jsCode = """
+            (async function() {
+                try {
+                    const method = ${JSONObject.quote(method.uppercase())};
+                    const hdrs = $headersJson;
+                    hdrs['Accept'] = 'application/json, text/javascript, */*; q=0.01';
+                    hdrs['X-Requested-With'] = 'XMLHttpRequest';
+                    const metaCsrf = document.querySelector('meta[name="csrf-token"]');
+                    if (metaCsrf && metaCsrf.content) {
+                        hdrs['X-CSRF-Token'] = metaCsrf.content;
+                    } else if (method !== 'GET') {
+                        try {
+                            const csrfResp = await fetch('/session/csrf.json', {
+                                headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                                credentials: 'include'
+                            });
+                            if (csrfResp.ok) {
+                                const csrfData = await csrfResp.json();
+                                if (csrfData && csrfData.csrf) hdrs['X-CSRF-Token'] = csrfData.csrf;
+                            }
+                        } catch (_) {}
+                    }
+                    const opts = {
+                        method: method,
+                        headers: hdrs,
+                        credentials: 'include'
+                    };
+                    const bodyStr = ${JSONObject.quote(formBodyEncoded)};
+                    if (method !== 'GET' && method !== 'HEAD') {
+                        hdrs['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+                        opts.body = bodyStr;
+                    }
+                    const resp = await fetch(${JSONObject.quote(url)}, opts);
+                    const text = await resp.text();
+                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text);
+                } catch (err) {
+                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 0, '');
+                }
+            })();
+        """.trimIndent()
+
+        withContext(Dispatchers.Main) {
+            val cookieStr = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
+            if (cookieStr.isNotBlank()) {
+                CookieSentinel.ingestRawCookieString(cookieStr)
+            }
+            wv.evaluateJavascript(jsCode, null)
+        }
+
+        return try {
+            withTimeoutOrNull(9000L) {
+                deferred.await()
+            }
+        } finally {
+            pendingHttpCallbacks.remove(reqId)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -169,7 +373,16 @@ class MainActivity : ComponentActivity() {
         ) {
             val handled = UserApiKeyAuthManager.handleAuthRedirectUri(dataUri)
             if (handled) {
-                persistSessionToDisk()
+                val otp = UserApiKeyAuthManager.pendingOtpToken
+                if (!otp.isNullOrBlank()) {
+                    UserApiKeyAuthManager.pendingOtpToken = null
+                    apiWebView?.loadUrl("https://linux.do/session/otp/$otp")
+                }
+                activityScope.launch {
+                    delay(800L)
+                    LinuxDoRepository.fetchCurrentUserProfile()
+                    persistSessionToDisk()
+                }
             }
         }
     }
@@ -191,12 +404,17 @@ class MainActivity : ComponentActivity() {
             val displayName = prefs.getString("display_name", null)
             val avatarTemplate = prefs.getString("avatar_template", null)
             val trustLevel = prefs.getInt("trust_level", 1)
+            val userId = prefs.getInt("user_id", 0)
+            val userTitle = prefs.getString("user_title", null)
 
-            val userProfile = if (!username.isNullOrBlank()) {
+            // 彻底过滤掉旧版假占位符 linuxdo_user
+            val userProfile = if (!username.isNullOrBlank() && username != "linuxdo_user") {
                 AuthenticatedUserProfile(
+                    userId = userId,
                     username = username,
                     displayName = displayName ?: username,
                     avatarTemplate = avatarTemplate.orEmpty(),
+                    userTitle = userTitle,
                     trustLevel = trustLevel
                 )
             } else {
@@ -233,65 +451,55 @@ class MainActivity : ComponentActivity() {
             editor.putString("api_key", UserApiKeyAuthManager.getApiKey())
             editor.putString("user_agent", UserApiKeyAuthManager.customUserAgent)
             val user = UserApiKeyAuthManager.currentUser
-            if (user != null) {
+            if (user != null && user.username != "linuxdo_user") {
+                editor.putInt("user_id", user.userId)
                 editor.putString("username", user.username)
                 editor.putString("display_name", user.displayName)
                 editor.putString("avatar_template", user.avatarTemplate)
+                editor.putString("user_title", user.userTitle)
                 editor.putInt("trust_level", user.trustLevel)
             }
             editor.apply()
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun fetchJsonViaWebViewSession(url: String): String? = withContext(Dispatchers.Main) {
-        val cookieStr = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
-        if (cookieStr.isNotBlank()) {
-            CookieSentinel.ingestRawCookieString(cookieStr)
-        }
-        suspendCancellableCoroutine { cont ->
-            val headlessWebView = WebView(this@MainActivity)
-            headlessWebView.settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                userAgentString = UserApiKeyAuthManager.customUserAgent
-                    ?: userAgentString.replace("; wv", "")
-            }
-            CookieManager.getInstance().setAcceptThirdPartyCookies(headlessWebView, true)
+    override fun onDestroy() {
+        apiWebView?.destroy()
+        apiWebView = null
+        super.onDestroy()
+    }
+}
 
-            val script = """
-                (async function() {
-                    try {
-                        const resp = await fetch(${JSONObject.quote(url)}, {
-                            headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                            credentials: 'include'
-                        });
-                        if (!resp.ok) return '';
-                        return await resp.text();
-                    } catch (e) {
-                        return '';
-                    }
-                })();
-            """.trimIndent()
-
-            headlessWebView.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, loadedUrl: String?) {
-                    view?.evaluateJavascript(script) { rawResult ->
-                        val decoded = decodeJsStringResult(rawResult)
-                        headlessWebView.destroy()
-                        if (cont.isActive) {
-                            cont.resume(decoded?.takeIf { it.startsWith("{") || it.startsWith("[") })
-                        }
+/**
+ * 从 Discourse `<data id="data-preloaded">` 或 `/session/current.json` 提取 100% 真实的 `currentUser` JSON
+ */
+private val EXTRACT_PRELOADED_USER_JS = """
+    (async function() {
+        try {
+            var el = document.getElementById('data-preloaded');
+            if (el && el.dataset && el.dataset.preloaded) {
+                var p = JSON.parse(el.dataset.preloaded);
+                if (p && p.currentUser) {
+                    var cu = JSON.parse(p.currentUser);
+                    if (cu && cu.username) {
+                        window.LinDoJsBridge.onPreloadedUserDetected(JSON.stringify(cu));
+                        return;
                     }
                 }
             }
-            headlessWebView.loadUrl("https://linux.do/")
-            cont.invokeOnCancellation {
-                headlessWebView.destroy()
+            var resp = await fetch('/session/current.json', {
+                headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                credentials: 'include'
+            });
+            if (resp.ok) {
+                var data = await resp.json();
+                if (data && data.current_user && data.current_user.username) {
+                    window.LinDoJsBridge.onPreloadedUserDetected(JSON.stringify(data.current_user));
+                }
             }
-        }
-    }
-}
+        } catch (e) {}
+    })();
+""".trimIndent()
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -313,24 +521,41 @@ private fun AndroidWebLoginModal(
             CookieSentinel.ingestRawCookieString(rawCookies)
         }
 
+        // 直接从 DOM `<data id="data-preloaded">` 同步读取 Discourse 注入的 currentUser（包含真实 username、trust_level=3、avatar_template）
         val probeJs = """
             (function() {
                 try {
-                    var u = null;
+                    var el = document.getElementById('data-preloaded');
+                    if (el && el.dataset && el.dataset.preloaded) {
+                        var p = JSON.parse(el.dataset.preloaded);
+                        if (p && p.currentUser) {
+                            var u = JSON.parse(p.currentUser);
+                            if (u && u.username) {
+                                return JSON.stringify({
+                                    loggedIn: true,
+                                    id: u.id || 0,
+                                    username: u.username || '',
+                                    name: u.name || u.username || '',
+                                    avatar: u.avatar_template || '',
+                                    title: u.title || '',
+                                    trust: typeof u.trust_level === 'number' ? u.trust_level : 1
+                                });
+                            }
+                        }
+                    }
                     if (window.Discourse && Discourse.User && Discourse.User.current) {
-                        u = Discourse.User.current();
-                    }
-                    if (!u && window.PreloadStore && PreloadStore.get) {
-                        u = PreloadStore.get('currentUser');
-                    }
-                    if (u && u.username) {
-                        return JSON.stringify({
-                            loggedIn: true,
-                            username: u.username || '',
-                            name: u.name || u.username || '',
-                            avatar: u.avatar_template || '',
-                            trust: u.trust_level || 1
-                        });
+                        var du = Discourse.User.current();
+                        if (du && du.username) {
+                            return JSON.stringify({
+                                loggedIn: true,
+                                id: du.id || 0,
+                                username: du.username || '',
+                                name: du.name || du.username || '',
+                                avatar: du.avatar_template || '',
+                                title: du.title || '',
+                                trust: typeof du.trust_level === 'number' ? du.trust_level : 1
+                            });
+                        }
                     }
                 } catch (e) {}
                 return JSON.stringify({ loggedIn: false });
@@ -343,19 +568,27 @@ private fun AndroidWebLoginModal(
             runCatching {
                 val obj = JSONObject(decoded)
                 val jsLoggedIn = obj.optBoolean("loggedIn", false)
-                val hasAuthCookie = rawCookies.contains("_t=")
-                if (jsLoggedIn || hasAuthCookie) {
-                    val username = obj.optString("username").ifBlank { "linuxdo_user" }
+                val username = obj.optString("username").trim()
+                // 必须拿到真实非空 username（绝不使用 linuxdo_user 假占位符）
+                if (jsLoggedIn && username.isNotBlank() && username != "linuxdo_user") {
+                    val userId = obj.optInt("id", 0)
                     val displayName = obj.optString("name").ifBlank { username }
-                    val avatar = obj.optString("avatar")
-                    val trust = obj.optInt("trust", 2)
+                    val rawTpl = obj.optString("avatar")
+                    val avatarUrl = if (rawTpl.isNotBlank()) {
+                        if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "240")
+                        else "https://linux.do${rawTpl.replace("{size}", "240")}"
+                    } else ""
+                    val title = obj.optString("title", "")
+                    val trust = obj.optInt("trust", 1)
                     completed = true
                     cookieManager.flush()
                     UserApiKeyAuthManager.onSessionAuthenticated(
                         profile = AuthenticatedUserProfile(
+                            userId = userId,
                             username = username,
                             displayName = displayName,
-                            avatarTemplate = avatar,
+                            avatarTemplate = avatarUrl,
+                            userTitle = title,
                             trustLevel = trust
                         ),
                         rawCookies = rawCookies
@@ -369,7 +602,7 @@ private fun AndroidWebLoginModal(
     // 轮询探测登录完成状态（处理 SPA 无刷新跳转或 Passkey/GitHub 登录完成）
     LaunchedEffect(webViewRef, completed) {
         while (!completed && webViewRef != null) {
-            delay(1000L)
+            delay(900L)
             tryExtractSessionAndComplete(webViewRef)
         }
     }
@@ -432,7 +665,7 @@ private fun AndroidWebLoginModal(
                     )
                 }
                 Text(
-                    text = "linux.do 官方安全会话 · 登录成功后自动返回",
+                    text = "linux.do 官方安全会话 · 登录成功后自动同步真实等级与资料",
                     fontSize = 11.sp,
                     color = androidx.compose.ui.graphics.Color(0xFF71717A),
                     maxLines = 1
@@ -524,8 +757,7 @@ private fun AndroidWebLoginModal(
                                         UserApiKeyAuthManager.pendingOtpToken = null
                                         view?.loadUrl("https://linux.do/session/otp/$otp")
                                     } else {
-                                        completed = true
-                                        onLoginSuccess()
+                                        tryExtractSessionAndComplete(view)
                                     }
                                 }
                                 return true

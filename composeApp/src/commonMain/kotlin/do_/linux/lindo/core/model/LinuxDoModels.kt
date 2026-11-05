@@ -168,6 +168,8 @@ data class PostItemModel(
     val likeCount: Int = 0,
     val replyCount: Int = 0,
     val readsCount: Int = 0,
+    val likedByMe: Boolean = false,
+    val bookmarkedByMe: Boolean = false,
     val isSmallAction: Boolean = false,
     val actionCode: String? = null
 )
@@ -185,10 +187,124 @@ data class TopicDetailModel(
     val views: Int = 0,
     val likeCount: Int = 0,
     val postsCount: Int = 1,
+    val bookmarked: Boolean = false,
     val replyCostHint: String? = null,
     val minWordCountRule: Int? = null,
     val posts: List<PostItemModel> = emptyList(),
     val streamIds: List<Int> = emptyList()
+)
+
+/**
+ * 线上个人资料与全量社区统计摘要（来自 `/session/current.json` + `/u/{username}.json` + `/u/{username}/summary.json`）
+ */
+@Serializable
+data class UserFullProfileSummary(
+    val id: Int = 0,
+    val username: String,
+    val displayName: String,
+    val avatarTemplate: String = "",
+    val animatedAvatar: String? = null,
+    val trustLevel: Int = 1,
+    val title: String = "",
+    val bioExcerpt: String = "",
+    val primaryGroupName: String? = null,
+    val admin: Boolean = false,
+    val moderator: Boolean = false,
+    val createdAtText: String = "",
+    val daysVisited: Int = 0,
+    val timeReadSeconds: Int = 0,
+    val recentTimeReadSeconds: Int = 0,
+    val topicsEntered: Int = 0,
+    val postsReadCount: Int = 0,
+    val likesGiven: Int = 0,
+    val likesReceived: Int = 0,
+    val topicCount: Int = 0,
+    val postCount: Int = 0,
+    val badgeCount: Int = 0,
+    val unreadNotifications: Int = 0,
+    val badges: List<GrantedBadge> = emptyList()
+) {
+    val trustLevelName: String
+        get() = when (trustLevel) {
+            0 -> "Lv.0 新用户"
+            1 -> "Lv.1 基本用户"
+            2 -> "Lv.2 成员"
+            3 -> "Lv.3 活跃会员"
+            4 -> "Lv.4 社区领袖"
+            else -> "Lv.$trustLevel 成员"
+        }
+}
+
+/**
+ * 用户通知条目（来自 `/notifications.json`）
+ */
+@Serializable
+data class UserNotificationItem(
+    val id: Int,
+    val notificationType: Int,
+    val read: Boolean,
+    val createdAtText: String,
+    val topicId: Int = 0,
+    val postNumber: Int = 1,
+    val title: String,
+    val actingUsername: String = "",
+    val excerpt: String = ""
+) {
+    val typeLabel: String
+        get() = when (notificationType) {
+            1 -> "提及了你"
+            2 -> "回复了你"
+            3 -> "引用了你"
+            4 -> "编辑了帖子"
+            5, 25 -> "赞了你的帖子"
+            6 -> "发来私信"
+            9 -> "回复了话题"
+            12 -> "授予徽章"
+            else -> "社区通知"
+        }
+}
+
+/**
+ * 用户个人动态 / 回复 / 书签条目（来自 `/user_actions.json` 或 `/u/{username}/bookmarks.json`）
+ */
+@Serializable
+data class UserActivityItem(
+    val id: Int,
+    val topicId: Int,
+    val postNumber: Int = 1,
+    val title: String,
+    val excerpt: String = "",
+    val createdAtText: String = "",
+    val categoryName: String = "技术讨论",
+    val actionType: Int = 5
+) {
+    val actionLabel: String
+        get() = when (actionType) {
+            1 -> "送出赞"
+            2 -> "收到赞"
+            4 -> "发布话题"
+            5 -> "发表回复"
+            88 -> "收藏书签"
+            else -> "社区动态"
+        }
+}
+
+/**
+ * 全局搜索结果条目（来自 `/search.json?q=...`）
+ */
+@Serializable
+data class CommunitySearchResult(
+    val topicId: Int,
+    val postNumber: Int = 1,
+    val title: String,
+    val blurb: String = "",
+    val username: String = "",
+    val avatarTemplate: String = "",
+    val createdAtText: String = "",
+    val categoryName: String = "技术讨论",
+    val categoryColorHex: String = "0E76BD",
+    val likeCount: Int = 0,
+    val postsCount: Int = 1
 )
 
 /**
