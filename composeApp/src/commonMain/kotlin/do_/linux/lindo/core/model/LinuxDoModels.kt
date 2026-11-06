@@ -179,6 +179,7 @@ data class PostItemModel(
     val replyCount: Int = 0,
     val readsCount: Int = 0,
     val likedByMe: Boolean = false,
+    val isRead: Boolean = false,
     val myReactionId: String? = null,
     val reactions: List<PostReactionItem> = emptyList(),
     val bookmarkedByMe: Boolean = false,

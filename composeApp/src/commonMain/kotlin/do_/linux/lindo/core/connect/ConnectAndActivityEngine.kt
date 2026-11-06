@@ -168,6 +168,18 @@ object ScreenTrackEngine {
         UserPresenceService.markUserActivity(nowMs)
     }
 
+    fun isPostRead(topicId: Int, postNumber: Int): Boolean {
+        return readPostsSet.contains(topicId to postNumber)
+    }
+
+    fun markPostReadLocally(topicId: Int, postNumber: Int) {
+        if (topicId > 0 && postNumber > 0) {
+            if (readPostsSet.add(topicId to postNumber)) {
+                sessionPostsRead += 1
+            }
+        }
+    }
+
     /**
      * 每秒调用一次，累加当前屏幕可见楼层的阅读毫秒数
      * @return 若达到上报条件，返回待发送的批次

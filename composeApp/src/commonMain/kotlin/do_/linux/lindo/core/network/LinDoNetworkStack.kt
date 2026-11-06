@@ -1155,7 +1155,11 @@ object LinuxDoRepository {
             val postStream = root["post_stream"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
             val postsArr = postStream.requireArray("posts")
             val rawPosts = postsArr.mapIndexedNotNull { idx, elem ->
-                parseSinglePostObject(elem as? JsonObject ?: return@mapIndexedNotNull null, idx)
+                parseSinglePostObject(
+                    pObj = elem as? JsonObject ?: return@mapIndexedNotNull null,
+                    fallbackIdx = idx,
+                    topicId = topicId
+                )
             }
             BadgeInjector.injectTopLevelUserBadges(rawPosts, root)
         } catch (cancelled: CancellationException) {
@@ -2235,9 +2239,16 @@ object LinuxDoRepository {
         false
     }
 
-    private fun parseSinglePostObject(pObj: JsonObject, fallbackIdx: Int): PostItemModel? {
+    private fun parseSinglePostObject(
+        pObj: JsonObject,
+        fallbackIdx: Int,
+        topicId: Int = 0,
+        lastReadPostNumber: Int? = null,
+        forceRead: Boolean = false
+    ): PostItemModel? {
         val pid = pObj["id"]?.jsonPrimitive?.intOrNull ?: return null
         val postNumber = pObj["post_number"]?.jsonPrimitive?.intOrNull ?: (fallbackIdx + 1)
+        val resolvedTopicId = pObj["topic_id"]?.jsonPrimitive?.intOrNull ?: topicId
         val userId = pObj["user_id"]?.jsonPrimitive?.intOrNull ?: 0
         val username = pObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$userId"
         val displayName = pObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
@@ -2307,6 +2318,19 @@ object LinuxDoRepository {
 
         val likedByMe = !myReactionId.isNullOrBlank()
 
+        val rawRead = pObj["read"]?.jsonPrimitive?.booleanOrNull
+        val alreadyReadInSession = resolvedTopicId > 0 && ScreenTrackEngine.isPostRead(resolvedTopicId, postNumber)
+        val myUsername = UserApiKeyAuthManager.currentUser?.username
+        val isOwnPost = !myUsername.isNullOrBlank() && username.equals(myUsername, ignoreCase = true)
+        val isRead = when {
+            forceRead || alreadyReadInSession || isOwnPost -> true
+            rawRead == false -> false
+            lastReadPostNumber != null && postNumber > lastReadPostNumber -> false
+            rawRead == true && lastReadPostNumber != null -> true
+            rawRead == true && postNumber == 1 -> true
+            else -> false
+        }
+
         val bookmarkedByMe = pObj["bookmarked"]?.jsonPrimitive?.booleanOrNull ?: false
         val canEdit = pObj["can_edit"]?.jsonPrimitive?.booleanOrNull ?: true
         val canDelete = pObj["can_delete"]?.jsonPrimitive?.booleanOrNull ?: false
@@ -2344,6 +2368,7 @@ object LinuxDoRepository {
             likeCount = reactionsCount,
             readsCount = reads,
             likedByMe = likedByMe,
+            isRead = isRead,
             myReactionId = myReactionId,
             reactions = parsedReactions,
             bookmarkedByMe = bookmarkedByMe,
@@ -2363,6 +2388,7 @@ object LinuxDoRepository {
         val likeCount = root["like_count"]?.jsonPrimitive?.intOrNull ?: summaryFallback?.likeCount ?: 0
         val postsCount = root["posts_count"]?.jsonPrimitive?.intOrNull ?: summaryFallback?.postsCount ?: 1
         val bookmarked = root["bookmarked"]?.jsonPrimitive?.booleanOrNull ?: false
+        val lastReadPostNumber = root["last_read_post_number"]?.jsonPrimitive?.intOrNull
 
         val postStream = root["post_stream"] as? JsonObject
         val postsArr = postStream?.get("posts") as? JsonArray ?: JsonArray(emptyList())
@@ -2371,7 +2397,12 @@ object LinuxDoRepository {
         }.orEmpty()
 
         val rawPosts = postsArr.mapIndexedNotNull { idx, elem ->
-            parseSinglePostObject(elem as? JsonObject ?: return@mapIndexedNotNull null, idx)
+            parseSinglePostObject(
+                pObj = elem as? JsonObject ?: return@mapIndexedNotNull null,
+                fallbackIdx = idx,
+                topicId = id,
+                lastReadPostNumber = lastReadPostNumber
+            )
         }
 
         val enrichedPosts = BadgeInjector.injectTopLevelUserBadges(rawPosts, root)

@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -2931,7 +2932,7 @@ private fun CommunityTopicItem(
                 Box(
                     modifier = Modifier
                         .size(6.5.dp)
-                        .clip(RoundedCornerShape(1.5.dp))
+                        .clip(CircleShape)
                         .background(catDotColor)
                 )
                 Spacer(modifier = Modifier.width(5.dp))
@@ -3138,7 +3139,7 @@ private fun CommunityTopicItem(
                     Box(
                         modifier = Modifier
                             .size(7.dp)
-                            .clip(RoundedCornerShape(2.dp))
+                            .clip(CircleShape)
                             .background(catDotColor)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
@@ -3459,16 +3460,32 @@ private fun CommunityTopicReaderPane(
     }
 
     val latestReaderPosts by androidx.compose.runtime.rememberUpdatedState(posts)
+    val postFirstSeenAtMs = remember(summary.id) { mutableMapOf<Int, Long>() }
+    val locallyReadPostNumbers = remember(summary.id) { androidx.compose.runtime.mutableStateMapOf<Int, Boolean>() }
+
     LaunchedEffect(summary.id) {
         ScreenTrackEngine.onTopicEntered(topicId = summary.id, initialVisiblePosts = emptySet())
+        var tickAccumulatorMs = 0L
         while (true) {
-            delay(1000L)
+            delay(400L)
+            val nowMs = System.currentTimeMillis()
             val visiblePostNums = readerListState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
                 latestReaderPosts.getOrNull(item.index - 1)?.postNumber
             }.toSet()
-            ScreenTrackEngine.updateVisiblePosts(visiblePostNums)
-            ScreenTrackEngine.tick()?.let { batch ->
-                ScreenTrackEngine.consolidateBatch(batch.topicId, batch.topicTimeMs, batch.timingsMs)
+            for (postNum in visiblePostNums) {
+                val firstSeen = postFirstSeenAtMs.getOrPut(postNum) { nowMs }
+                if (nowMs - firstSeen >= 1100L && locallyReadPostNumbers[postNum] != true) {
+                    locallyReadPostNumbers[postNum] = true
+                    ScreenTrackEngine.markPostReadLocally(summary.id, postNum)
+                }
+            }
+            ScreenTrackEngine.updateVisiblePosts(visiblePostNums, nowMs)
+            tickAccumulatorMs += 400L
+            if (tickAccumulatorMs >= 1000L) {
+                tickAccumulatorMs = 0L
+                ScreenTrackEngine.tick(nowMs)?.let { batch ->
+                    ScreenTrackEngine.consolidateBatch(batch.topicId, batch.topicTimeMs, batch.timingsMs)
+                }
             }
         }
     }
@@ -3561,8 +3578,8 @@ private fun CommunityTopicReaderPane(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(8.dp)
-                            .clip(RoundedCornerShape(2.dp))
+                            .size(7.5.dp)
+                            .clip(CircleShape)
                             .background(catColor)
                     )
                     Text(
@@ -3803,7 +3820,7 @@ private fun CommunityTopicReaderPane(
                             Box(
                                 modifier = Modifier
                                     .size(7.dp)
-                                    .clip(RoundedCornerShape(1.8.dp))
+                                    .clip(CircleShape)
                                     .background(catColor)
                             )
                             Spacer(modifier = Modifier.width(5.dp))
@@ -3921,9 +3938,11 @@ private fun CommunityTopicReaderPane(
                         posts.firstOrNull { it.postNumber == targetNum }
                     } else null
                 }
+                val isFloorUnread = !post.isRead && locallyReadPostNumbers[post.postNumber] != true
                 CommunityPostFloor(
                     post = post,
                     repliedPost = repliedPost,
+                    isUnread = isFloorUnread,
                     onOpenWebUrl = onOpenWebUrl,
                     originalUrl = "https://linux.do/t/topic/${summary.id}/${post.postNumber}",
                     opUsername = effectiveOpUsername,
@@ -4323,6 +4342,7 @@ private fun TonalCircleIconButton(
 private fun CommunityPostFloor(
     post: PostItemModel,
     repliedPost: PostItemModel? = null,
+    isUnread: Boolean = false,
     opUsername: String,
     fontScale: Float,
     enableAnimations: Boolean,
@@ -4600,6 +4620,28 @@ private fun CommunityPostFloor(
                         maxLines = 1,
                         softWrap = false
                     )
+
+                    val unreadDotAlpha by animateFloatAsState(
+                        targetValue = if (isUnread) 1f else 0f,
+                        animationSpec = tween(durationMillis = 900),
+                        label = "unreadFloorDotAlpha"
+                    )
+                    if (unreadDotAlpha > 0.01f) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.5.dp)
+                                .graphicsLayer {
+                                    alpha = unreadDotAlpha
+                                    val scale = 0.65f + 0.35f * unreadDotAlpha
+                                    scaleX = scale
+                                    scaleY = scale
+                                }
+                                .clip(CircleShape)
+                                .background(
+                                    if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
+                                )
+                        )
+                    }
                 }
             }
         }
@@ -9798,7 +9840,7 @@ private fun GlobalSearchModalSheet(
                                     Box(
                                         modifier = Modifier
                                             .size(6.5.dp)
-                                            .clip(RoundedCornerShape(1.5.dp))
+                                            .clip(CircleShape)
                                             .background(catDotColor)
                                     )
                                     Spacer(modifier = Modifier.width(4.5.dp))
