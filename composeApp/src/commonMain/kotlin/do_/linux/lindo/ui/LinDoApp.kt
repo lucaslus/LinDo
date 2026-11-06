@@ -409,11 +409,11 @@ private enum class TopPeriodFilter(val label: String, val apiPeriod: String) {
  */
 @Composable
 private fun LinearLuminanceBar(modifier: Modifier = Modifier) {
-    LinDoLoadingIndicator(modifier = modifier)
+    LinDoLoadingIndicator(modifier = modifier, label = "加载中")
 }
 
 /**
- * Linear 风格三点波浪呼吸脉冲底部加载器（支持分页加载中、网络异常手动重试、点击加载更多、已加载全部四种状态）
+ * 底部加载与收尾条（支持分页加载中、网络异常手动重试、点击加载更多、已加载全部四种状态）
  */
 @Composable
 private fun LinearPulseLoadingFooter(
@@ -421,10 +421,10 @@ private fun LinearPulseLoadingFooter(
     hasMore: Boolean,
     loadedCount: Int,
     isError: Boolean = false,
-    loadingText: String = "正在同步更多话题",
-    moreText: String = "加载更多话题",
-    errorText: String = "网络异常 · 点击手动重试",
-    doneText: String = "没有更多了 · 零度娘已经翻到底啦",
+    loadingText: String = "加载中",
+    moreText: String = "加载更多",
+    errorText: String = "网络异常",
+    doneText: String = "没有更多了",
     onLoadMore: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -452,13 +452,13 @@ private fun LinearPulseLoadingFooter(
             )
             Spacer(Modifier.width(10.dp))
         }
-        LinDoMascot(state = state, compact = true, size = 20.dp, animate = isLoadingMore)
+        LinDoMascot(state = state, compact = true, size = 22.dp, animate = isLoadingMore)
         Spacer(Modifier.width(6.dp))
         Text(
             text = when {
-                isError -> "网络连接异常"
-                isLoadingMore -> loadingText
-                !hasMore -> doneText
+                isError -> errorText
+                isLoadingMore -> "加载中"
+                !hasMore -> "没有更多了"
                 else -> moreText
             },
             color = palette.inkSecondary,
@@ -466,6 +466,10 @@ private fun LinearPulseLoadingFooter(
             fontWeight = FontWeight.Normal,
             lineHeight = 18.sp
         )
+        if (isLoadingMore) {
+            Spacer(Modifier.width(4.dp))
+            LinDoWaveDots(color = palette.inkSecondary, dotSize = 3.5.dp)
+        }
         if (isError) {
             Spacer(Modifier.width(8.dp))
             Row(
@@ -499,117 +503,19 @@ private fun LinearPulseLoadingFooter(
 }
 
 /**
- * Linear 风格银灰流光骨架屏（切换板块/排序或首次加载时提供丝滑占位，告别空白闪烁）
+ * 全局统一的屏幕居中零度娘摇摆 Loading 视图
  */
 @Composable
 private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
     val palette = LocalPalette.current
-    val alphaAnim = if (LocalLinDoAnimations.current) {
-        val transition = rememberInfiniteTransition(label = "shimmer")
-        val animated by transition.animateFloat(
-            initialValue = 0.38f, targetValue = 0.85f,
-            animationSpec = infiniteRepeatable(tween(1000, easing = LinearEasing), RepeatMode.Reverse),
-            label = "shimmer_alpha"
-        )
-        animated
-    } else 0.6f
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(if (isCompact) 5.dp else 8.dp)
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
     ) {
-        // 顶部零度娘清爽加载提示行（仅保留小字提示，不加粗大标题）
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 20.dp)
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = "零度娘正在同步最新讨论...",
-                fontSize = 12.sp,
-                color = palette.inkSecondary
-            )
-        }
-
-        repeat(if (isCompact) 6 else 4) { idx ->
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(if (isCompact) 12.dp else 16.dp))
-                    .background(palette.cardSurface)
-                    .border(0.5.dp, palette.hairline, RoundedCornerShape(if (isCompact) 12.dp else 16.dp))
-                    .padding(
-                        horizontal = if (isCompact) 12.dp else 15.dp,
-                        vertical = if (isCompact) 10.dp else 14.dp
-                    )
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(if (isCompact) 20.dp else 24.dp)
-                            .clip(CircleShape)
-                            .background(palette.subtleSurface.copy(alpha = alphaAnim))
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .width(92.dp)
-                            .height(11.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(palette.subtleSurface.copy(alpha = alphaAnim))
-                    )
-                    Spacer(modifier = Modifier.weight(1f))
-                    Box(
-                        modifier = Modifier
-                            .width(52.dp)
-                            .height(16.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(palette.subtleSurface.copy(alpha = alphaAnim))
-                    )
-                }
-                Spacer(modifier = Modifier.height(if (isCompact) 7.dp else 10.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(if (idx % 2 == 0) 0.92f else 0.78f)
-                        .height(if (isCompact) 14.dp else 16.dp)
-                        .clip(RoundedCornerShape(5.dp))
-                        .background(palette.subtleSurface.copy(alpha = alphaAnim))
-                )
-                if (!isCompact) {
-                    Spacer(modifier = Modifier.height(7.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(0.62f)
-                            .height(12.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(palette.subtleSurface.copy(alpha = alphaAnim * 0.75f))
-                    )
-                }
-                Spacer(modifier = Modifier.height(if (isCompact) 7.dp else 10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .width(46.dp)
-                            .height(14.dp)
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(palette.subtleSurface.copy(alpha = alphaAnim * 0.8f))
-                    )
-                    Spacer(modifier = Modifier.weight(1f))
-                    Box(
-                        modifier = Modifier
-                            .width(68.dp)
-                            .height(12.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(palette.subtleSurface.copy(alpha = alphaAnim * 0.75f))
-                    )
-                }
-            }
-        }
+        LinDoLoadingIndicator(
+            color = palette.inkSecondary,
+            label = "加载中"
+        )
     }
 }
 
@@ -2882,10 +2788,10 @@ private fun CommunityHomeFeedPane(
                         else -> LinDoMascotState.End
                     }
                     val pillText = when {
-                        isLoading -> "零度娘正在同步新讨论..."
-                        showPullOverlay && ready -> "松开，更新最新讨论"
-                        showPullOverlay -> "继续下拉刷新最新讨论"
-                        else -> "没有更多新内容了 · 当前已是最新"
+                        isLoading -> "刷新中"
+                        showPullOverlay && ready -> "松开刷新"
+                        showPullOverlay -> "下拉刷新"
+                        else -> "已是最新"
                     }
                     Box(
                         modifier = Modifier
@@ -2895,19 +2801,19 @@ private fun CommunityHomeFeedPane(
                     ) {
                         Row(
                             modifier = Modifier
-                                .height(40.dp)
-                                .clip(RoundedCornerShape(20.dp))
+                                .height(38.dp)
+                                .clip(RoundedCornerShape(19.dp))
                                 .background(palette.cardSurface.copy(alpha = 0.96f))
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(20.dp))
+                                .border(0.5.dp, palette.hairline, RoundedCornerShape(19.dp))
                                 .padding(horizontal = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             LinDoMascot(
                                 state = mascotState,
                                 compact = true,
-                                size = 24.dp,
-                                animate = isLoading
+                                size = 22.dp,
+                                animate = isLoading || showPullOverlay
                             )
                             Text(
                                 text = pillText,
@@ -2916,6 +2822,9 @@ private fun CommunityHomeFeedPane(
                                 color = palette.inkPrimary,
                                 maxLines = 1
                             )
+                            if (isLoading) {
+                                LinDoWaveDots(color = palette.inkSecondary, dotSize = 3.5.dp)
+                            }
                         }
                     }
                 }
@@ -3868,12 +3777,6 @@ private fun CommunityTopicReaderPane(
 
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
-        if (isLoading || isLoadingMorePosts) {
-            LinearLuminanceBar(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
-            )
-        }
-
         LazyColumn(
             state = readerListState,
             modifier = Modifier
@@ -4002,15 +3905,36 @@ private fun CommunityTopicReaderPane(
             }
 
             // 楼层卡片列表（#1 楼主 + #2..#N 全部评论楼层）
-            if (!isLoading && detail?.loadError != null) {
+            if (isLoading && posts.isEmpty()) {
+                item(key = "topic_loading_center") {
+                    Box(
+                        modifier = Modifier
+                            .fillParentMaxHeight(0.72f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        LinDoLoadingIndicator(
+                            color = palette.inkSecondary,
+                            label = "加载中"
+                        )
+                    }
+                }
+            } else if (!isLoading && detail?.loadError != null) {
                 item(key = "topic_load_error") {
-                    LinDoStatePanel(LinDoMascotState.NetworkError,
-                        title = "暂时没能加载完整话题", detail = detail.loadError,
-                        onRetry = {
-                            scope.launch {
-                                onDetailUpdated(LinuxDoRepository.fetchTopicDetail(summary.id, summary))
-                            }
-                        })
+                    Box(
+                        modifier = Modifier
+                            .fillParentMaxHeight(0.70f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        LinDoStatePanel(LinDoMascotState.NetworkError,
+                            title = "暂时没能加载完整话题", detail = detail.loadError,
+                            onRetry = {
+                                scope.launch {
+                                    onDetailUpdated(LinuxDoRepository.fetchTopicDetail(summary.id, summary))
+                                }
+                            })
+                    }
                 }
             }
 
@@ -9496,87 +9420,92 @@ private fun UserNotificationsSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinDoLoadingIndicator(
-                    modifier = Modifier.fillMaxWidth().height(44.dp)
-                )
-            } else if (loadError != null) {
-                LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-            }
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    LinDoLoadingIndicator(label = "加载中")
+                }
+            } else {
+                if (loadError != null) {
+                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                }
 
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(7.dp),
-                contentPadding = PaddingValues(vertical = 6.dp)
-            ) {
-                if (filtered.isEmpty() && !isLoading && loadError == null) {
-                    item {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState(message = "暂无相关通知消息")
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                    contentPadding = PaddingValues(vertical = 6.dp)
+                ) {
+                    if (filtered.isEmpty() && loadError == null) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoEmptyState(message = "暂无相关通知消息")
+                            }
                         }
-                    }
-                } else {
-                    itemsIndexed(filtered, key = { _, item -> item.id }) { _, item ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (!item.read) palette.subtleSurface else palette.canvas)
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                .clickable {
-                                    if (item.topicId > 0) {
-                                        onSelectNotification(item.topicId, item.title, item.postNumber)
-                                    } else {
-                                        val primaryActor = item.actingUsername.substringBefore("、").trim()
-                                        if (primaryActor.isNotBlank() && primaryActor != "系统") {
-                                            onInspectUser(primaryActor)
+                    } else {
+                        itemsIndexed(filtered, key = { _, item -> item.id }) { _, item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (!item.read) palette.subtleSurface else palette.canvas)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        if (item.topicId > 0) {
+                                            onSelectNotification(item.topicId, item.title, item.postNumber)
+                                        } else {
+                                            val primaryActor = item.actingUsername.substringBefore("、").trim()
+                                            if (primaryActor.isNotBlank() && primaryActor != "系统") {
+                                                onInspectUser(primaryActor)
+                                            }
                                         }
                                     }
-                                }
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            if (!item.read) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(palette.brandGold)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                            }
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = "@${item.actingUsername}",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.inkPrimary
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (!item.read) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(palette.brandGold)
                                     )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = "@${item.actingUsername}",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.inkPrimary
+                                        )
+                                        Text(
+                                            text = " ${item.typeLabel} · ${item.createdAtText}",
+                                            fontSize = 11.5.sp,
+                                            color = palette.inkTertiary
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(3.dp))
                                     Text(
-                                        text = " ${item.typeLabel} · ${item.createdAtText}",
-                                        fontSize = 11.5.sp,
-                                        color = palette.inkTertiary
+                                        text = item.title,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.inkPrimary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                Spacer(modifier = Modifier.height(3.dp))
-                                Text(
-                                    text = item.title,
-                                    fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkPrimary,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
+                                Icon(
+                                    imageVector = LinDoIcons.ChevronRight,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                    tint = palette.inkTertiary
                                 )
                             }
-                            Icon(
-                                imageVector = LinDoIcons.ChevronRight,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp),
-                                tint = palette.inkTertiary
-                            )
                         }
                     }
                 }
@@ -9650,77 +9579,82 @@ private fun UserActivitiesSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinDoLoadingIndicator(
-                    modifier = Modifier.fillMaxWidth().height(44.dp)
-                )
-            } else if (loadError != null) {
-                LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-            }
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    LinDoLoadingIndicator(label = "加载中")
+                }
+            } else {
+                if (loadError != null) {
+                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                }
 
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 6.dp)
-            ) {
-                if (items.isEmpty() && !isLoading && loadError == null) {
-                    item {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState(message = "暂无相关社区动态记录")
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 6.dp)
+                ) {
+                    if (items.isEmpty() && loadError == null) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoEmptyState(message = "暂无相关社区动态记录")
+                            }
                         }
-                    }
-                } else {
-                    itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }) { _, item ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(palette.canvas)
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                .clickable { onSelectActivity(item.topicId, item.title, item.postNumber) }
-                                .padding(12.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(5.dp))
-                                        .background(palette.subtleSurface)
-                                        .padding(horizontal = 6.dp, vertical = 1.5.dp)
-                                ) {
+                    } else {
+                        itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }) { _, item ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(palette.canvas)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
+                                    .clickable { onSelectActivity(item.topicId, item.title, item.postNumber) }
+                                    .padding(12.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(5.dp))
+                                            .background(palette.subtleSurface)
+                                            .padding(horizontal = 6.dp, vertical = 1.5.dp)
+                                    ) {
+                                        Text(
+                                            text = item.actionLabel,
+                                            fontSize = 10.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.inkPrimary
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = item.actionLabel,
-                                        fontSize = 10.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.inkPrimary
+                                        text = "${item.categoryName} · #${item.postNumber}楼 · ${item.createdAtText}",
+                                        fontSize = 11.5.sp,
+                                        color = palette.inkTertiary
                                     )
                                 }
-                                Spacer(modifier = Modifier.width(6.dp))
+                                Spacer(modifier = Modifier.height(5.dp))
                                 Text(
-                                    text = "${item.categoryName} · #${item.postNumber}楼 · ${item.createdAtText}",
-                                    fontSize = 11.5.sp,
-                                    color = palette.inkTertiary
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(5.dp))
-                            Text(
-                                text = item.title,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.inkPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (item.excerpt.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(3.dp))
-                                Text(
-                                    text = item.excerpt,
-                                    fontSize = 12.5.sp,
-                                    color = palette.inkSecondary,
-                                    maxLines = 2,
+                                    text = item.title,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.inkPrimary,
+                                    maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                if (item.excerpt.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        text = item.excerpt,
+                                        fontSize = 12.5.sp,
+                                        color = palette.inkSecondary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -9779,61 +9713,66 @@ private fun UserBookmarksSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinDoLoadingIndicator(
-                    modifier = Modifier.fillMaxWidth().height(44.dp)
-                )
-            } else if (loadError != null) {
-                LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-            }
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    LinDoLoadingIndicator(label = "加载中")
+                }
+            } else {
+                if (loadError != null) {
+                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                }
 
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                if (items.isEmpty() && !isLoading && loadError == null) {
-                    item {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState(message = "暂未收藏任何书签，阅读话题时点击右上角书签即可收藏")
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    if (items.isEmpty() && loadError == null) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoEmptyState(message = "暂未收藏任何书签，阅读话题时点击右上角书签即可收藏")
+                            }
                         }
-                    }
-                } else {
-                    itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }) { _, item ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(palette.canvas)
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                .clickable { onSelectBookmark(item.topicId, item.title, item.postNumber) }
-                                .padding(12.dp)
-                        ) {
-                            Text(
-                                text = "${item.categoryName} · #${item.postNumber}楼 · ${item.createdAtText}",
-                                fontSize = 11.sp,
-                                color = palette.inkTertiary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = item.title,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.inkPrimary,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (item.excerpt.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(3.dp))
+                    } else {
+                        itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }) { _, item ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(palette.canvas)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
+                                    .clickable { onSelectBookmark(item.topicId, item.title, item.postNumber) }
+                                    .padding(12.dp)
+                            ) {
                                 Text(
-                                    text = item.excerpt,
-                                    fontSize = 12.sp,
-                                    color = palette.inkSecondary,
+                                    text = "${item.categoryName} · #${item.postNumber}楼 · ${item.createdAtText}",
+                                    fontSize = 11.sp,
+                                    color = palette.inkTertiary
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = item.title,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.inkPrimary,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                if (item.excerpt.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        text = item.excerpt,
+                                        fontSize = 12.sp,
+                                        color = palette.inkSecondary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -9975,34 +9914,39 @@ private fun UserPrivateMessagesSheet(
                 }
             } else {
                 if (isLoading) {
-                    LinDoLoadingIndicator(
-                        modifier = Modifier.fillMaxWidth().height(44.dp)
-                    )
-                } else if (loadError != null) {
-                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-                }
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 6.dp)
-                ) {
-                    if (messages.isEmpty() && !isLoading && loadError == null) {
-                        item {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                LinDoEmptyState(message = "暂无站内私信会话")
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        LinDoLoadingIndicator(label = "加载中")
+                    }
+                } else {
+                    if (loadError != null) {
+                        LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                    }
+                    LazyColumn(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(vertical = 6.dp)
+                    ) {
+                        if (messages.isEmpty() && loadError == null) {
+                            item {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    LinDoEmptyState(message = "暂无站内私信会话")
+                                }
                             }
-                        }
-                    } else {
-                        itemsIndexed(messages, key = { _, m -> m.id }) { _, msg ->
-                            CommunityTopicItem(
-                                topic = msg,
-                                isSelected = false,
-                                enableAnimations = false,
-                                onClick = { onSelectMessageTopic(msg) }
-                            )
+                        } else {
+                            itemsIndexed(messages, key = { _, m -> m.id }) { _, msg ->
+                                CommunityTopicItem(
+                                    topic = msg,
+                                    isSelected = false,
+                                    enableAnimations = false,
+                                    onClick = { onSelectMessageTopic(msg) }
+                                )
+                            }
                         }
                     }
                 }
@@ -10117,9 +10061,7 @@ private fun PublicUserCardSheet(
 
             if (isLoading && cardProfile == null) {
                 Spacer(modifier = Modifier.height(12.dp))
-                LinDoLoadingIndicator(
-                    modifier = Modifier.fillMaxWidth().height(44.dp)
-                )
+                LinDoLoadingIndicator(label = "加载中")
             } else if (loadError != null) {
                 Spacer(modifier = Modifier.height(10.dp))
                 LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
@@ -10361,36 +10303,41 @@ private fun UserReadHistorySheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinDoLoadingIndicator(
-                    modifier = Modifier.fillMaxWidth().height(44.dp)
-                )
-            } else if (loadError != null) {
-                LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-            }
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    LinDoLoadingIndicator(label = "加载中")
+                }
+            } else {
+                if (loadError != null) {
+                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                }
 
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                if (items.isEmpty() && !isLoading && loadError == null) {
-                    item {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState(message = "暂无阅读历史记录")
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    if (items.isEmpty() && loadError == null) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoEmptyState(message = "暂无阅读历史记录")
+                            }
                         }
-                    }
-                } else {
-                    itemsIndexed(items, key = { _, item -> item.id }) { _, topic ->
-                        CommunityTopicItem(
-                            topic = topic,
-                            isSelected = false,
-                            isCompact = true,
-                            enableAnimations = false,
-                            onClick = { onSelectTopic(topic) }
-                        )
+                    } else {
+                        itemsIndexed(items, key = { _, item -> item.id }) { _, topic ->
+                            CommunityTopicItem(
+                                topic = topic,
+                                isSelected = false,
+                                isCompact = true,
+                                enableAnimations = false,
+                                onClick = { onSelectTopic(topic) }
+                            )
+                        }
                     }
                 }
             }
@@ -10447,90 +10394,95 @@ private fun UserCloudDraftsSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (isLoading) {
-                LinDoLoadingIndicator(
-                    modifier = Modifier.fillMaxWidth().height(44.dp)
-                )
-            } else if (loadError != null) {
-                LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-            }
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    LinDoLoadingIndicator(label = "加载中")
+                }
+            } else {
+                if (loadError != null) {
+                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                }
 
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                if (drafts.isEmpty() && !isLoading && loadError == null) {
-                    item {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState(message = "云端草稿箱为空，未发送的话题与回复会自动保存在此")
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    if (drafts.isEmpty() && loadError == null) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoEmptyState(message = "云端草稿箱为空，未发送的话题与回复会自动保存在此")
+                            }
                         }
-                    }
-                } else {
-                    itemsIndexed(drafts, key = { idx, d -> "${d.draftKey}_$idx" }) { _, draft ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(palette.canvas)
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                .clickable {
-                                    onOpenDraftTopic(draft)
-                                }
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = draft.title,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = palette.inkPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (draft.excerpt.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(3.dp))
+                    } else {
+                        itemsIndexed(drafts, key = { idx, d -> "${d.draftKey}_$idx" }) { _, draft ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(palette.canvas)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        onOpenDraftTopic(draft)
+                                    }
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = draft.excerpt,
-                                        fontSize = 12.5.sp,
-                                        color = palette.inkSecondary,
-                                        maxLines = 2,
+                                        text = draft.title,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.inkPrimary,
+                                        maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    if (draft.excerpt.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        Text(
+                                            text = draft.excerpt,
+                                            fontSize = 12.5.sp,
+                                            color = palette.inkSecondary,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = draft.createdAtText,
+                                        fontSize = 11.sp,
+                                        color = palette.inkTertiary
+                                    )
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = draft.createdAtText,
-                                    fontSize = 11.sp,
-                                    color = palette.inkTertiary
-                                )
-                            }
 
-                            Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
 
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(palette.subtleSurface)
-                                    .clickable {
-                                        scope.launch {
-                                            val ok = LinuxDoRepository.deleteCloudDraft(draft.draftKey, draft.sequence)
-                                            if (ok) {
-                                                drafts = drafts.filterNot { it.draftKey == draft.draftKey }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(palette.subtleSurface)
+                                        .clickable {
+                                            scope.launch {
+                                                val ok = LinuxDoRepository.deleteCloudDraft(draft.draftKey, draft.sequence)
+                                                if (ok) {
+                                                    drafts = drafts.filterNot { it.draftKey == draft.draftKey }
+                                                }
                                             }
                                         }
-                                    }
-                                    .padding(horizontal = 9.dp, vertical = 5.dp)
-                            ) {
-                                Text(
-                                    text = "删除",
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkSecondary
-                                )
+                                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        text = "删除",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.inkSecondary
+                                    )
+                                }
                             }
                         }
                     }

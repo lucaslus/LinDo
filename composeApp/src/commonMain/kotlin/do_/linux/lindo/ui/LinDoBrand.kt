@@ -177,8 +177,8 @@ internal fun LinDoWelcomeScreen(
 fun LinDoMascotLoginTransitionView(
     isDark: Boolean,
     progress: Float,
-    statusTitle: String = "正在连接 LINUX DO",
-    statusSubtitle: String = "零度娘正在为你准备登录页面",
+    statusTitle: String = "加载中",
+    statusSubtitle: String = "",
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
     onRetry: (() -> Unit)? = null
@@ -197,15 +197,29 @@ fun LinDoMascotLoginTransitionView(
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(Modifier.widthIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(vertical = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    LinDoMascot(state = if (onRetry != null) LinDoMascotState.NetworkError else LinDoMascotState.Loading, size = 76.dp)
-                    Spacer(Modifier.height(14.dp))
-                    Text(
-                        text = statusSubtitle.ifBlank { statusTitle.removeSuffix("...") },
-                        color = brandSecondary(isDark),
-                        fontSize = 12.2.sp,
-                        textAlign = TextAlign.Center,
-                        lineHeight = 19.sp
-                    )
+                    LinDoMascot(state = if (onRetry != null) LinDoMascotState.NetworkError else LinDoMascotState.Loading, size = 64.dp)
+                    Spacer(Modifier.height(12.dp))
+                    val textToShow = if (onRetry != null) {
+                        statusSubtitle.ifBlank { statusTitle.removeSuffix("...") }
+                    } else {
+                        "加载中"
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = textToShow,
+                            color = brandSecondary(isDark),
+                            fontSize = 12.2.sp,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 19.sp
+                        )
+                        if (onRetry == null) {
+                            Spacer(Modifier.width(5.dp))
+                            LinDoWaveDots(color = brandSecondary(isDark), dotSize = 4.dp)
+                        }
+                    }
                     if (onRetry != null) {
                         Spacer(Modifier.height(14.dp))
                         TextButton(

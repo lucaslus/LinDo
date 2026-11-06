@@ -1,22 +1,26 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.animation.core.*
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.liveRegion
@@ -38,76 +42,273 @@ val LocalLinDoAnimations = staticCompositionLocalOf { true }
 val LocalLinDoDarkTheme = staticCompositionLocalOf { false }
 
 enum class LinDoMascotState(val asset: String, val title: String, val detail: String) {
-    Loading("loading", "零度娘正在整理内容", "新的讨论，马上就好"),
-    Refreshing("refreshing", "正在同步最新内容", "看看社区又发生了什么"),
-    NetworkError("error", "连接暂时中断了", "检查一下网络，再试一次吧"),
-    Empty("empty", "这里还很安静", "有新内容时，再来看看吧"),
-    Success("success", "已经准备好啦", "一起去看看新的讨论"),
-    End("end", "已经看到这里啦", "休息一下，稍后再来逛逛")
+    Loading("loading", "加载中", "加载中"),
+    Refreshing("refreshing", "刷新中", "刷新中"),
+    NetworkError("error", "网络异常", "网络连接异常"),
+    Empty("empty", "暂无内容", "暂无内容"),
+    Success("success", "已完成", "已完成"),
+    End("end", "没有更多了", "没有更多了")
 }
 
-/** Detailed SVG-derived vectors, animated as a single retained graphics layer. */
+/**
+ * 零度娘统一形象组件：
+ * - 加载 / 刷新状态下自带灵动的「左右摇摆」不倒翁动效 + 外圈柔和旋转光弧（转圈圈）
+ */
 @Composable
 fun LinDoMascot(
     state: LinDoMascotState = LinDoMascotState.Loading,
     size: Dp = 80.dp,
     compact: Boolean = false,
     animate: Boolean = true,
+    showSpinnerRing: Boolean = state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing),
     modifier: Modifier = Modifier
 ) {
-    val moving = LocalLinDoAnimations.current && animate && LocalWindowInfo.current.isWindowFocused &&
-        state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing, LinDoMascotState.Empty)
-    val rotation = if (moving) {
-        val transition = rememberInfiniteTransition(label = "lingdu_sway")
+    val isActivelyLoading = state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing)
+    val moving = LocalLinDoAnimations.current && animate &&
+        (isActivelyLoading || state == LinDoMascotState.Empty)
+
+    val transition = if (moving) rememberInfiniteTransition(label = "lingdu_motion") else null
+    val rotation = if (transition != null) {
         transition.animateFloat(
-            initialValue = -1.8f, targetValue = 1.8f,
-            animationSpec = infiniteRepeatable(tween(1800, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-            label = "gentle_sway"
+            initialValue = if (isActivelyLoading) -11f else -3.5f,
+            targetValue = if (isActivelyLoading) 11f else 3.5f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(if (isActivelyLoading) 480 else 1400, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "sway_rotation"
         )
     } else rememberUpdatedState(0f)
+
+    val swayOffsetX = if (transition != null && isActivelyLoading) {
+        transition.animateFloat(
+            initialValue = -3.2f,
+            targetValue = 3.2f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(480, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "sway_offset_x"
+        )
+    } else rememberUpdatedState(0f)
+
+    val bobOffsetY = if (transition != null && isActivelyLoading) {
+        transition.animateFloat(
+            initialValue = -1.8f,
+            targetValue = 1.2f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(240, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "sway_bob_y"
+        )
+    } else rememberUpdatedState(0f)
+
+    val spinAngle = if (transition != null && isActivelyLoading && showSpinnerRing) {
+        transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1050, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "spinner_ring"
+        )
+    } else rememberUpdatedState(0f)
+
     val art = when {
         compact -> Res.drawable.lindo_brand_mark
         state == LinDoMascotState.Loading || state == LinDoMascotState.NetworkError -> Res.drawable.lindo_mascot_connecting
         else -> Res.drawable.lindo_mascot_welcome
     }
-    Image(
-        painter = painterResource(art),
-        contentDescription = null,
-        modifier = modifier.size(size).graphicsLayer {
-            rotationZ = rotation.value
-            transformOrigin = TransformOrigin(0.5f, 0.85f)
-        },
-        contentScale = ContentScale.Fit
-    )
+
+    Box(
+        modifier = modifier.size(size),
+        contentAlignment = Alignment.Center
+    ) {
+        if (moving && isActivelyLoading && showSpinnerRing) {
+            val ringColor = Color(0xFFF59E0B)
+            val trackColor = ringColor.copy(alpha = 0.14f)
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val strokePx = (this.size.minDimension * 0.065f).coerceIn(3f, 6.5f)
+                drawCircle(
+                    color = trackColor,
+                    style = Stroke(width = strokePx)
+                )
+                drawArc(
+                    color = ringColor,
+                    startAngle = spinAngle.value,
+                    sweepAngle = 92f,
+                    useCenter = false,
+                    style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                )
+                drawArc(
+                    color = ringColor.copy(alpha = 0.45f),
+                    startAngle = spinAngle.value + 180f,
+                    sweepAngle = 56f,
+                    useCenter = false,
+                    style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                )
+            }
+        }
+
+        val innerScale = if (moving && isActivelyLoading && showSpinnerRing) 0.78f else 1f
+        Image(
+            painter = painterResource(art),
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxSize(innerScale)
+                .graphicsLayer {
+                    rotationZ = rotation.value
+                    translationX = swayOffsetX.value * density
+                    translationY = bobOffsetY.value * density
+                    transformOrigin = TransformOrigin(0.5f, 0.85f)
+                },
+            contentScale = ContentScale.Fit
+        )
+    }
 }
 
-/** Compact loading for toolbars, searches, pagination and embedded web pages. */
+/**
+ * 灵动三点跳动波浪动效（`• • •`）
+ */
+@Composable
+fun LinDoWaveDots(
+    color: Color = if (LocalLinDoDarkTheme.current) Color(0xFFC7BFB3) else Color(0xFF746C61),
+    dotSize: Dp = 4.dp,
+    modifier: Modifier = Modifier
+) {
+    val moving = LocalLinDoAnimations.current
+    val transition = if (moving) rememberInfiniteTransition(label = "wave_dots") else null
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.5.dp)
+    ) {
+        repeat(3) { idx ->
+            val phaseShift = idx * 150
+            val animProgress = if (transition != null) {
+                transition.animateFloat(
+                    initialValue = 0.25f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 480, delayMillis = 0, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse,
+                        initialStartOffset = StartOffset(phaseShift)
+                    ),
+                    label = "dot_$idx"
+                )
+            } else rememberUpdatedState(0.75f)
+            val p = animProgress.value
+            Box(
+                modifier = Modifier
+                    .size(dotSize)
+                    .graphicsLayer {
+                        translationY = -(p - 0.25f) * 3.2f * density
+                        alpha = p
+                    }
+                    .clip(CircleShape)
+                    .background(color)
+            )
+        }
+    }
+}
+
+/**
+ * 全局统一加载组件：
+ * - 默认屏幕/容器居中展示：左右摇摆的零度娘 + 外圈转圈圈光弧 + 极简文案（`加载中`）+ 跳动点点点（`•••`）；
+ * - `compactInline = true` 时提供紧凑行内模式（用于顶栏胶囊或底部加载条）。
+ */
 @Composable
 fun LinDoLoadingIndicator(
     modifier: Modifier = Modifier,
     color: Color = if (LocalLinDoDarkTheme.current) Color(0xFFC7BFB3) else Color(0xFF746C61),
     trackColor: Color = Color.Transparent,
     progress: (() -> Float)? = null,
-    label: String = "零度娘正在加载",
-    state: LinDoMascotState = LinDoMascotState.Loading
+    label: String = "加载中",
+    state: LinDoMascotState = LinDoMascotState.Loading,
+    compactInline: Boolean = false
 ) {
-    Row(
-        modifier = modifier.fillMaxWidth().heightIn(min = 44.dp).background(trackColor)
-            .semantics(mergeDescendants = true) {
-                liveRegion = LiveRegionMode.Polite
-                progressBarRangeInfo = progress?.invoke()?.takeIf { it.isFinite() }?.let {
-                    ProgressBarRangeInfo(it.coerceIn(0f, 1f), 0f..1f)
-                } ?: ProgressBarRangeInfo.Indeterminate
-            },
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        LinDoMascot(state = state, compact = true, size = 24.dp)
-        Spacer(Modifier.width(8.dp))
-        Text(label, fontSize = 12.sp, color = color, maxLines = 2, lineHeight = 17.sp)
-        progress?.invoke()?.takeIf { it.isFinite() }?.let { value ->
-            Spacer(Modifier.width(8.dp))
-            Text("${(value.coerceIn(0f, 1f) * 100).toInt()}%", fontSize = 11.sp, color = color)
+    val cleanLabel = remember(label) {
+        val stripped = label
+            .replace("零度娘正在", "")
+            .replace("正在", "")
+            .removeSuffix("...")
+            .removeSuffix("…")
+            .trim()
+        when {
+            stripped.isEmpty() || stripped.length > 6 -> "加载中"
+            else -> stripped
+        }
+    }
+
+    if (compactInline) {
+        Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .background(trackColor)
+                .semantics(mergeDescendants = true) {
+                    liveRegion = LiveRegionMode.Polite
+                    progressBarRangeInfo = progress?.invoke()?.takeIf { it.isFinite() }?.let {
+                        ProgressBarRangeInfo(it.coerceIn(0f, 1f), 0f..1f)
+                    } ?: ProgressBarRangeInfo.Indeterminate
+                },
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LinDoMascot(state = state, compact = true, size = 24.dp, animate = true)
+            Spacer(Modifier.width(7.dp))
+            Text(cleanLabel, fontSize = 12.sp, color = color, maxLines = 1)
+            Spacer(Modifier.width(4.dp))
+            LinDoWaveDots(color = color, dotSize = 3.5.dp)
+        }
+    } else {
+        Box(
+            modifier = modifier
+                .fillMaxWidth()
+                .heightIn(min = 180.dp)
+                .background(trackColor)
+                .padding(vertical = 24.dp)
+                .semantics(mergeDescendants = true) {
+                    liveRegion = LiveRegionMode.Polite
+                    progressBarRangeInfo = progress?.invoke()?.takeIf { it.isFinite() }?.let {
+                        ProgressBarRangeInfo(it.coerceIn(0f, 1f), 0f..1f)
+                    } ?: ProgressBarRangeInfo.Indeterminate
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                LinDoMascot(
+                    state = state,
+                    compact = false,
+                    size = 56.dp,
+                    animate = true,
+                    showSpinnerRing = true
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = cleanLabel,
+                        fontSize = 12.2.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = color,
+                        maxLines = 1
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    LinDoWaveDots(color = color, dotSize = 4.dp)
+                    progress?.invoke()?.takeIf { it.isFinite() }?.let { value ->
+                        Spacer(Modifier.width(6.dp))
+                        Text("${(value.coerceIn(0f, 1f) * 100).toInt()}%", fontSize = 11.sp, color = color)
+                    }
+                }
+            }
         }
     }
 }
@@ -121,6 +322,14 @@ fun LinDoStatePanel(
     actionLabel: String = "刷新",
     modifier: Modifier = Modifier
 ) {
+    if (state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing) && onRetry == null) {
+        LinDoLoadingIndicator(
+            modifier = modifier,
+            label = "加载中",
+            state = state
+        )
+        return
+    }
     val dark = LocalLinDoDarkTheme.current
     val secondaryText = if (dark) Color(0xFFB8AFA2) else Color(0xFF746C61)
     val displayText = detail?.takeIf { it.isNotBlank() } ?: title
@@ -131,7 +340,7 @@ fun LinDoStatePanel(
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        LinDoMascot(state = state, size = 64.dp)
+        LinDoMascot(state = state, size = 60.dp)
         Spacer(Modifier.height(8.dp))
         Text(
             text = displayText,
