@@ -5035,39 +5035,39 @@ private fun CommunityDiscoverScreen(
             Triple("群组虫洞", LinDoIcons.Users, "https://linux.do/g"),
             Triple("全站徽章", LinDoIcons.AwardBadge, "https://linux.do/badges"),
             Triple("积分排行", LinDoIcons.BarChartPoll, "https://linux.do/leaderboard"),
-            Triple("福利抽奖", LinDoIcons.Gift, "https://cdk.linux.do/")
+            Triple("福利抽奖", LinDoIcons.Trophy, "https://cdk.linux.do/")
         )
     }
 
-    val popularTags = remember {
+    val popularTagRows = remember {
         listOf(
-            "人工智能" to "AI 大模型、Agent 与前沿探讨",
-            "OpenAI" to "ChatGPT / GPT-4o / API 开发",
-            "Claude" to "Anthropic Claude 编程与写作",
-            "Docker" to "容器化部署与开发环境编排",
-            "Linux" to "内核、发行版与服务器运维",
-            "开源项目" to "GitHub 优质小而美开源推荐",
-            "Cursor" to "AI 辅助编程 IDE 实践技巧",
-            "DeepSeek" to "国产开源推理模型部署与应用",
-            "VPS" to "全球云主机测评与线路优化",
-            "自建服务" to "NAS / Homelab / 私有云搭建",
-            "福利" to "社区公益分享与限免资源",
-            "抽奖" to "L 站日常活跃抽奖与回馈"
+            DiscoverBoardEntry("人工智能", "AI 大模型与智能体", LinDoIcons.Sparkles, Color(0xFF8B5CF6)),
+            DiscoverBoardEntry("OpenAI", "ChatGPT 与 API 开发", LinDoIcons.Bolt, Color(0xFF10B981)),
+            DiscoverBoardEntry("Claude", "Anthropic 编程与写作", LinDoIcons.BookOpen, Color(0xFFD97757)),
+            DiscoverBoardEntry("Docker", "容器编排与镜像部署", LinDoIcons.Layers, Color(0xFF3B82F6)),
+            DiscoverBoardEntry("Linux", "内核、发行版与运维", LinDoIcons.Terminal, Color(0xFFEAB308)),
+            DiscoverBoardEntry("开源项目", "GitHub 优质开源推荐", LinDoIcons.Code, Color(0xFF6366F1)),
+            DiscoverBoardEntry("Cursor", "AI 辅助编程 IDE 实践", LinDoIcons.CpuChip, Color(0xFF0EA5E9)),
+            DiscoverBoardEntry("DeepSeek", "国产开源推理大模型", LinDoIcons.Rocket, Color(0xFF06B6D4)),
+            DiscoverBoardEntry("VPS", "全球云主机测评与线路", LinDoIcons.CloudServer, Color(0xFFA855F7)),
+            DiscoverBoardEntry("自建服务", "NAS / Homelab 私有云", LinDoIcons.WifiSpeed, Color(0xFF14B8A6)),
+            DiscoverBoardEntry("福利", "社区公益分享与限免", LinDoIcons.Gift, Color(0xFFEC4899)),
+            DiscoverBoardEntry("抽奖", "L 站日常活跃开奖回馈", LinDoIcons.Trophy, Color(0xFFF59E0B))
         ).chunked(2)
     }
 
-    val ecoPortalPairs = remember {
+    val ecoPortalRows = remember {
         listOf(
-            Triple("Connect 中心", "保级 / 邮箱 / DeepLX", "https://connect.linux.do/"),
-            Triple("Credit 积分", "积分流转与服务认证", "https://credit.linux.do/"),
-            Triple("CDK 分发", "社区福利领取与发布", "https://cdk.linux.do/"),
-            Triple("Lottery 抽奖", "官方楼层开奖工具", "https://lottery.linux.do/"),
-            Triple("LD Hub", "生态 AI 与聚合中心", "https://hub.linux.do/"),
-            Triple("社区 Wiki", "共建指南与文档库", "https://wiki.linux.do/"),
-            Triple("IDC Flare", "官方云与主机生态站", "https://idcflare.com/"),
-            Triple("关于与准则", "管理人员 / 条款 / 统计", "https://linux.do/about"),
-            Triple("即时聊天", "频道 / 群聊 / 消息串", "https://linux.do/chat"),
-            Triple("独立筛选器", "多条件表达式过滤", "https://linux.do/filter")
+            DiscoverBoardEntry("Connect 中心", "保级 / 邮箱 / DeepLX", LinDoIcons.ShieldCheck, Color(0xFF3B82F6), "https://connect.linux.do/"),
+            DiscoverBoardEntry("Credit 积分", "积分流转与服务认证", LinDoIcons.Coins, Color(0xFFF59E0B), "https://credit.linux.do/"),
+            DiscoverBoardEntry("CDK 分发", "社区福利领取与发布", LinDoIcons.Gift, Color(0xFFEC4899), "https://cdk.linux.do/"),
+            DiscoverBoardEntry("Lottery 抽奖", "官方楼层开奖工具", LinDoIcons.Trophy, Color(0xFFEAB308), "https://lottery.linux.do/"),
+            DiscoverBoardEntry("LD Hub", "生态 AI 与聚合中心", LinDoIcons.Sparkles, Color(0xFF8B5CF6), "https://hub.linux.do/"),
+            DiscoverBoardEntry("社区 Wiki", "共建指南与文档库", LinDoIcons.BookOpen, Color(0xFF10B981), "https://wiki.linux.do/"),
+            DiscoverBoardEntry("IDC Flare", "官方云与主机生态站", LinDoIcons.CloudServer, Color(0xFF06B6D4), "https://idcflare.com/"),
+            DiscoverBoardEntry("关于与准则", "管理人员 / 条款 / 统计", LinDoIcons.InfoCircle, Color(0xFF6366F1), "https://linux.do/about"),
+            DiscoverBoardEntry("即时聊天", "频道 / 群聊 / 消息串", LinDoIcons.MessageCircle, Color(0xFF14B8A6), "https://linux.do/chat"),
+            DiscoverBoardEntry("独立筛选器", "多条件表达式过滤", LinDoIcons.Sliders, Color(0xFFF97316), "https://linux.do/filter")
         ).chunked(2)
     }
 
@@ -5269,21 +5269,33 @@ private fun CommunityDiscoverScreen(
                     }
                 }
 
-                // 3. 紧凑三列版块网格（一行三个，轻巧克制不占屏）
-                itemsIndexed(categoryRows) { _, rowCats ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                // 3. 社区版块整体背景板（与「不止于讨论」视觉语言完全统一：单张大圆角底板 + 内容不分割清爽展示）
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(palette.cardSurface)
+                            .padding(vertical = 12.dp, horizontal = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        rowCats.forEach { category ->
-                            CategoryBentoCard(
-                                category = category,
-                                modifier = Modifier.weight(1f),
-                                onClick = { onSelectCategory(category.id) }
-                            )
-                        }
-                        repeat(3 - rowCats.size) {
-                            Spacer(modifier = Modifier.weight(1f))
+                        categoryRows.forEach { rowCats ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                rowCats.forEach { category ->
+                                    CategoryBentoCard(
+                                        category = category,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { onSelectCategory(category.id) }
+                                    )
+                                }
+                                repeat(3 - rowCats.size) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
                         }
                     }
                 }
@@ -5316,6 +5328,7 @@ private fun CommunityDiscoverScreen(
                                     Column(
                                         modifier = Modifier
                                             .weight(1f)
+                                            .clip(RoundedCornerShape(10.dp))
                                             .clickable { onOpenWebUrl(url) }
                                             .padding(vertical = 4.dp),
                                         horizontalAlignment = Alignment.CenterHorizontally
@@ -5342,7 +5355,7 @@ private fun CommunityDiscoverScreen(
                     }
                 }
             } else if (subTab == 1) {
-                // 标签页：点击任一标签直接筛选首页流
+                // 标签页：整体背景板 + 内容不分割清爽展示 + 每个标签配备专属语义图标
                 item {
                     Text(
                         text = "热门社区标签",
@@ -5350,28 +5363,41 @@ private fun CommunityDiscoverScreen(
                         fontWeight = FontWeight.Bold,
                         color = palette.inkPrimary
                     )
-                }
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                itemsIndexed(popularTags) { _, pair ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(palette.cardSurface)
+                            .padding(vertical = 12.dp, horizontal = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        pair.forEach { (tag, desc) ->
-                            DiscoverPortalCard(
-                                title = "# $tag",
-                                subtitle = desc,
-                                modifier = Modifier.weight(1f),
-                                onClick = { onSelectTag(tag) }
-                            )
-                        }
-                        if (pair.size == 1) {
-                            Spacer(modifier = Modifier.weight(1f))
+                        popularTagRows.forEach { pair ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                pair.forEach { entry ->
+                                    DiscoverPortalCard(
+                                        title = "# ${entry.title}",
+                                        subtitle = entry.subtitle,
+                                        icon = entry.icon,
+                                        iconTint = entry.tint,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { onSelectTag(entry.title) }
+                                    )
+                                }
+                                if (pair.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
                         }
                     }
                 }
             } else {
-                // 生态页：Linux.do 官方周边与服务
+                // 生态页：整体背景板 + 内容不分割清爽展示 + 每个模块配备专属语义图标
                 item {
                     Text(
                         text = "LINUX DO 官方生态矩阵",
@@ -5379,23 +5405,36 @@ private fun CommunityDiscoverScreen(
                         fontWeight = FontWeight.Bold,
                         color = palette.inkPrimary
                     )
-                }
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                itemsIndexed(ecoPortalPairs) { _, pair ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(palette.cardSurface)
+                            .padding(vertical = 12.dp, horizontal = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        pair.forEach { (title, subtitle, url) ->
-                            DiscoverPortalCard(
-                                title = title,
-                                subtitle = subtitle,
-                                modifier = Modifier.weight(1f),
-                                onClick = { onOpenWebUrl(url) }
-                            )
-                        }
-                        if (pair.size == 1) {
-                            Spacer(modifier = Modifier.weight(1f))
+                        ecoPortalRows.forEach { pair ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                pair.forEach { entry ->
+                                    DiscoverPortalCard(
+                                        title = entry.title,
+                                        subtitle = entry.subtitle,
+                                        icon = entry.icon,
+                                        iconTint = entry.tint,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { onOpenWebUrl(entry.url) }
+                                    )
+                                }
+                                if (pair.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
                         }
                     }
                 }
@@ -5404,29 +5443,46 @@ private fun CommunityDiscoverScreen(
     }
 }
 
+private data class DiscoverBoardEntry(
+    val title: String,
+    val subtitle: String,
+    val icon: ImageVector,
+    val tint: Color,
+    val url: String = ""
+)
+
 @Composable
 private fun DiscoverPortalCard(
     title: String,
     subtitle: String,
+    icon: ImageVector,
+    iconTint: Color,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(palette.cardSurface)
+            .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 10.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = title,
+            modifier = Modifier.size(19.dp),
+            tint = iconTint
+        )
+        Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
                 fontSize = 13.5.sp,
                 fontWeight = FontWeight.Bold,
                 color = palette.inkPrimary,
-                maxLines = 1
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
@@ -5437,12 +5493,46 @@ private fun DiscoverPortalCard(
                 overflow = TextOverflow.Ellipsis
             )
         }
-        Icon(
-            imageVector = LinDoIcons.ChevronRight,
-            contentDescription = null,
-            modifier = Modifier.size(14.dp),
-            tint = palette.inkTertiary
-        )
+    }
+}
+
+private fun resolveDistinctCategoryIcon(category: LinuxDoCategoryMeta): ImageVector {
+    val name = category.name.trim()
+    return when {
+        name.contains("开发") || category.id == 4 -> LinDoIcons.Code
+        name.contains("资源") || category.id == 14 -> LinDoIcons.Layers
+        name.contains("文档") || category.id == 42 -> LinDoIcons.FileText
+        name.contains("非我") || name.contains("招聘") || category.id == 27 -> LinDoIcons.Users
+        name.contains("读书") || category.id == 32 -> LinDoIcons.BookOpen
+        name.contains("快讯") || name.contains("前沿") || category.id == 34 -> LinDoIcons.Bolt
+        name.contains("记忆") || name.contains("历史") -> LinDoIcons.HistoryClock
+        name.contains("福利") || name.contains("羊毛") || category.id == 36 -> LinDoIcons.Gift
+        name.contains("搞七") || name.contains("日常") || category.id == 11 -> LinDoIcons.Coffee
+        name.contains("孵化") || name.contains("创新") -> LinDoIcons.Seedling
+        name.contains("运营") || name.contains("反馈") || name.contains("公告") -> LinDoIcons.Megaphone
+        name.contains("深海") || name.contains("幽域") -> LinDoIcons.Anchor
+        name.contains("扬帆") || name.contains("起航") -> LinDoIcons.Rocket
+        name.contains("跳蚤") || name.contains("市场") || name.contains("交易") || category.id == 10 -> LinDoIcons.ShoppingBag
+        name.contains("国产") || name.contains("替代") || name.contains("硬件") -> LinDoIcons.CpuChip
+        name.contains("积分") || name.contains("乐园") -> LinDoIcons.Coins
+        name.contains("虫洞") || name.contains("广场") -> LinDoIcons.Globe
+        name.contains("智能") || name.contains("AI") || category.id == 46 -> LinDoIcons.Sparkles
+        name.contains("问答") || name.contains("讨论") -> LinDoIcons.MessageCircle
+        name.contains("安全") || name.contains("认证") -> LinDoIcons.ShieldCheck
+        name.contains("主机") || name.contains("云") -> LinDoIcons.CloudServer
+        else -> {
+            val fallbackPool = listOf(
+                LinDoIcons.Terminal,
+                LinDoIcons.KanbanBoard,
+                LinDoIcons.AwardBadge,
+                LinDoIcons.BarChartPoll,
+                LinDoIcons.AppsGrid,
+                LinDoIcons.Trophy,
+                LinDoIcons.WifiSpeed,
+                LinDoIcons.Sliders
+            )
+            fallbackPool[(category.id.coerceAtLeast(0)) % fallbackPool.size]
+        }
     }
 }
 
@@ -5456,29 +5546,16 @@ private fun CategoryBentoCard(
     val (_, morandiFg) = remember(category.name, palette.isDark) {
         resolveMorandiCategoryColors(category.name, palette.isDark)
     }
-    val categoryIcon = remember(category.id) {
-        when (category.id) {
-            4 -> LinDoIcons.Code                   // 开发调优
-            14 -> LinDoIcons.Layers                // 资源荟萃
-            42 -> LinDoIcons.BookOpen              // 文档共建
-            11 -> LinDoIcons.Coffee                // 搞七捻三
-            36 -> LinDoIcons.Gift                  // 福利羊毛
-            34 -> LinDoIcons.Sparkles              // 前沿快讯
-            46 -> LinDoIcons.Globe                 // 人工智能 / 网络
-            27 -> LinDoIcons.Users                 // 非我莫属
-            32 -> LinDoIcons.BookOpen              // 读书成诗
-            10 -> LinDoIcons.AppsGrid              // 跳蚤市场
-            else -> LinDoIcons.Compass             // 其它动态版块
-        }
+    val categoryIcon = remember(category.id, category.name) {
+        resolveDistinctCategoryIcon(category)
     }
 
     Row(
         modifier = modifier
-            .height(44.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(palette.cardSurface)
+            .height(42.dp)
+            .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp),
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
@@ -6535,15 +6612,10 @@ private fun CommunityProfileScreen(
                     Spacer(modifier = Modifier.height(6.dp))
                 }
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp)
-                        .background(palette.subtleSurface)
-                )
+                Spacer(modifier = Modifier.height(10.dp))
             }
 
-            // 2. 社区功能与 Connect 看板分组菜单列表（专业克制、告别杂乱突兀卡片）
+            // 2. 社区功能与 Connect 看板整体背景板（内容不分割清爽展示）
             item {
                 val connectSub = if (isAuthorized && fullProfile != null) {
                     "访问 ${fullProfile.daysVisited} 天 · 获赞 ${fullProfile.likesReceived} · 保级与信任等级进度"
@@ -6564,7 +6636,7 @@ private fun CommunityProfileScreen(
                             onPrimaryWebLogin()
                         }
                     },
-                    Triple("社区积分", "社区底板分与积分流转记录", LinDoIcons.BarChartPoll) to {
+                    Triple("社区积分", "社区底板分与积分流转记录", LinDoIcons.Coins) to {
                         onOpenWebUrl("https://credit.linux.do/")
                     },
                     Triple("订阅与权益", "偏好设置、安全与账号管理", LinDoIcons.ShieldCheck) to {
@@ -6578,7 +6650,10 @@ private fun CommunityProfileScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .clip(RoundedCornerShape(16.dp))
                         .background(palette.cardSurface)
+                        .padding(vertical = 6.dp)
                 ) {
                     menuRows.forEachIndexed { idx, (meta, action) ->
                         val (title, subtitle, iconVec) = meta
@@ -6586,7 +6661,7 @@ private fun CommunityProfileScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { action() }
-                                .padding(horizontal = 20.dp, vertical = 14.dp),
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
@@ -6596,7 +6671,7 @@ private fun CommunityProfileScreen(
                                 tint = if (idx == 0) palette.brandGold else palette.inkSecondary
                             )
 
-                            Spacer(modifier = Modifier.width(16.dp))
+                            Spacer(modifier = Modifier.width(14.dp))
 
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
@@ -6618,30 +6693,17 @@ private fun CommunityProfileScreen(
                             Icon(
                                 imageVector = LinDoIcons.ChevronRight,
                                 contentDescription = null,
-                                modifier = Modifier.size(16.dp),
+                                modifier = Modifier.size(15.dp),
                                 tint = palette.inkTertiary
-                            )
-                        }
-
-                        if (idx < menuRows.lastIndex) {
-                            HorizontalDivider(
-                                modifier = Modifier.padding(horizontal = 20.dp),
-                                thickness = 0.5.dp,
-                                color = palette.hairline
                             )
                         }
                     }
                 }
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp)
-                        .background(palette.subtleSurface)
-                )
+                Spacer(modifier = Modifier.height(12.dp))
             }
 
-            // 3. 外观偏好与网络设置分组列表（将主题色、视图密度、字号、节点优选统一收敛为标准设置行）
+            // 3. 外观偏好与网络设置整体背景板（内容不分割清爽展示）
             item {
                 val nextScale = if (fontScale < 0.96f) 1.0f else if (fontScale < 1.05f) 1.10f else 0.92f
                 val scaleLabel = if (fontScale < 0.96f) "小字号" else if (fontScale < 1.05f) "标准" else "大字号"
@@ -6649,13 +6711,16 @@ private fun CommunityProfileScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .clip(RoundedCornerShape(16.dp))
                         .background(palette.cardSurface)
+                        .padding(vertical = 6.dp)
                 ) {
                     // 3.1 主题配色（内联 4 色圆点选择器）
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 13.dp),
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -6664,7 +6729,7 @@ private fun CommunityProfileScreen(
                             modifier = Modifier.size(20.dp),
                             tint = palette.inkSecondary
                         )
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "主题配色",
@@ -6710,18 +6775,12 @@ private fun CommunityProfileScreen(
                         }
                     }
 
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 20.dp),
-                        thickness = 0.5.dp,
-                        color = palette.hairline
-                    )
-
                     // 3.2 首页列表视图（精巧卡片 / 紧凑列表）
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onToggleCompactFeed() }
-                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -6730,7 +6789,7 @@ private fun CommunityProfileScreen(
                             modifier = Modifier.size(20.dp),
                             tint = palette.inkSecondary
                         )
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
                         Text(
                             text = "首页列表视图",
                             fontSize = 15.sp,
@@ -6748,23 +6807,17 @@ private fun CommunityProfileScreen(
                         Icon(
                             imageVector = LinDoIcons.ChevronRight,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(15.dp),
                             tint = palette.inkTertiary
                         )
                     }
-
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 20.dp),
-                        thickness = 0.5.dp,
-                        color = palette.hairline
-                    )
 
                     // 3.3 阅读字号
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onChangeFontScale(nextScale) }
-                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -6773,7 +6826,7 @@ private fun CommunityProfileScreen(
                             modifier = Modifier.size(20.dp),
                             tint = palette.inkSecondary
                         )
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
                         Text(
                             text = "阅读字号",
                             fontSize = 15.sp,
@@ -6791,23 +6844,17 @@ private fun CommunityProfileScreen(
                         Icon(
                             imageVector = LinDoIcons.ChevronRight,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(15.dp),
                             tint = palette.inkTertiary
                         )
                     }
-
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 20.dp),
-                        thickness = 0.5.dp,
-                        color = palette.hairline
-                    )
 
                     // 3.4 线路与节点优选
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onOpenNetworkSheet() }
-                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -6816,7 +6863,7 @@ private fun CommunityProfileScreen(
                             modifier = Modifier.size(20.dp),
                             tint = palette.inkSecondary
                         )
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "线路与节点优选",
@@ -6833,23 +6880,17 @@ private fun CommunityProfileScreen(
                         Icon(
                             imageVector = LinDoIcons.ChevronRight,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(15.dp),
                             tint = palette.inkTertiary
                         )
                     }
-
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 20.dp),
-                        thickness = 0.5.dp,
-                        color = palette.hairline
-                    )
 
                     // 3.5 关于社区
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onOpenWebUrl("https://linux.do/about") }
-                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -6858,7 +6899,7 @@ private fun CommunityProfileScreen(
                             modifier = Modifier.size(20.dp),
                             tint = palette.inkSecondary
                         )
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "关于社区",
@@ -6875,23 +6916,25 @@ private fun CommunityProfileScreen(
                         Icon(
                             imageVector = LinDoIcons.ChevronRight,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(15.dp),
                             tint = palette.inkTertiary
                         )
                     }
                 }
             }
 
-            // 4. 列表最底部：退出登录（符合专业移动端个人中心交互习惯）
+            // 4. 列表最底部：退出登录（圆角整体底板）
             if (isAuthorized) {
                 item {
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .clip(RoundedCornerShape(16.dp))
                             .background(palette.cardSurface)
                             .clickable { onLogout() }
-                            .padding(horizontal = 20.dp, vertical = 15.dp),
+                            .padding(horizontal = 20.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {

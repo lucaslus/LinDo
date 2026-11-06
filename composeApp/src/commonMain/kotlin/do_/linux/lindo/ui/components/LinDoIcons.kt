@@ -1729,4 +1729,132 @@ object LinDoIcons {
             }
         }
     }
+
+    val ShoppingBag: ImageVector by lazy {
+        lucideIcon("ShoppingBag") {
+            strokePath(1.8f) {
+                moveTo(6f, 2f)
+                lineTo(3f, 6f)
+                verticalLineTo(20f)
+                curveTo(3f, 21.1f, 3.9f, 22f, 5f, 22f)
+                horizontalLineTo(19f)
+                curveTo(20.1f, 22f, 21f, 21.1f, 21f, 20f)
+                verticalLineTo(6f)
+                lineTo(18f, 2f)
+                close()
+                moveTo(3f, 6f)
+                horizontalLineTo(21f)
+                moveTo(16f, 10f)
+                curveTo(16f, 12.21f, 14.21f, 14f, 12f, 14f)
+                curveTo(9.79f, 14f, 8f, 12.21f, 8f, 10f)
+            }
+        }
+    }
+
+    val Megaphone: ImageVector by lazy {
+        lucideIcon("Megaphone") {
+            strokePath(1.8f) {
+                moveTo(3f, 11f)
+                lineTo(21f, 3f)
+                verticalLineTo(19f)
+                lineTo(3f, 13f)
+                close()
+                moveTo(6f, 14f)
+                verticalLineTo(19f)
+                curveTo(6f, 20.1f, 6.9f, 21f, 8f, 21f)
+                horizontalLineTo(9.5f)
+                curveTo(10.6f, 21f, 11.5f, 20.1f, 11.5f, 19f)
+                verticalLineTo(15.8f)
+            }
+        }
+    }
+
+    val CpuChip: ImageVector by lazy {
+        lucideIcon("CpuChip") {
+            strokePath(1.8f) {
+                moveTo(6f, 4f)
+                horizontalLineTo(18f)
+                curveTo(19.1f, 4f, 20f, 4.9f, 20f, 6f)
+                verticalLineTo(18f)
+                curveTo(20f, 19.1f, 19.1f, 20f, 18f, 20f)
+                horizontalLineTo(6f)
+                curveTo(4.9f, 20f, 4f, 19.1f, 4f, 18f)
+                verticalLineTo(6f)
+                curveTo(4f, 4.9f, 4.9f, 4f, 6f, 4f)
+                close()
+                moveTo(9f, 9f)
+                horizontalLineTo(15f)
+                verticalLineTo(15f)
+                horizontalLineTo(9f)
+                close()
+                moveTo(9f, 1f)
+                verticalLineTo(4f)
+                moveTo(15f, 1f)
+                verticalLineTo(4f)
+                moveTo(9f, 20f)
+                verticalLineTo(23f)
+                moveTo(15f, 20f)
+                verticalLineTo(23f)
+                moveTo(20f, 9f)
+                horizontalLineTo(23f)
+                moveTo(20f, 14f)
+                horizontalLineTo(23f)
+                moveTo(1f, 9f)
+                horizontalLineTo(4f)
+                moveTo(1f, 14f)
+                horizontalLineTo(4f)
+            }
+        }
+    }
+
+    val Anchor: ImageVector by lazy {
+        lucideIcon("Anchor") {
+            strokePath(1.8f) {
+                moveTo(12f, 8f)
+                curveTo(13.66f, 8f, 15f, 6.66f, 15f, 5f)
+                curveTo(15f, 3.34f, 13.66f, 2f, 12f, 2f)
+                curveTo(10.34f, 2f, 9f, 3.34f, 9f, 5f)
+                curveTo(9f, 6.66f, 10.34f, 8f, 12f, 8f)
+                close()
+                moveTo(12f, 8f)
+                verticalLineTo(22f)
+                moveTo(5f, 12f)
+                horizontalLineTo(2f)
+                curveTo(2f, 17.52f, 6.48f, 22f, 12f, 22f)
+                curveTo(17.52f, 22f, 22f, 17.52f, 22f, 12f)
+                horizontalLineTo(19f)
+            }
+        }
+    }
+
+    val CloudServer: ImageVector by lazy {
+        lucideIcon("CloudServer") {
+            strokePath(1.8f) {
+                moveTo(4f, 4f)
+                horizontalLineTo(20f)
+                curveTo(21.1f, 4f, 22f, 4.9f, 22f, 6f)
+                verticalLineTo(10f)
+                curveTo(22f, 11.1f, 21.1f, 12f, 20f, 12f)
+                horizontalLineTo(4f)
+                curveTo(2.9f, 12f, 2f, 11.1f, 2f, 10f)
+                verticalLineTo(6f)
+                curveTo(2f, 4.9f, 2.9f, 4f, 4f, 4f)
+                close()
+                moveTo(4f, 12f)
+                horizontalLineTo(20f)
+                curveTo(21.1f, 12f, 22f, 12.9f, 22f, 14f)
+                verticalLineTo(18f)
+                curveTo(22f, 19.1f, 21.1f, 20f, 20f, 20f)
+                horizontalLineTo(4f)
+                curveTo(2.9f, 20f, 2f, 19.1f, 2f, 18f)
+                verticalLineTo(14f)
+                curveTo(2f, 12.9f, 2.9f, 12f, 4f, 12f)
+                close()
+                moveTo(6f, 8f)
+                horizontalLineTo(6.02f)
+                moveTo(6f, 16f)
+                horizontalLineTo(6.02f)
+            }
+        }
+    }
 }
