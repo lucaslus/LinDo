@@ -7,11 +7,14 @@ import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.GrantedBadge
+import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.CookieVariant
 import do_.linux.lindo.core.render.DiscourseAstParser
 import do_.linux.lindo.core.render.PostBlockNode
+import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
+import do_.linux.lindo.ui.components.LinDoIcons
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
@@ -190,5 +193,50 @@ class LinDoCoreTest {
         assertEquals(68, report.daysVisited)
         assertEquals(312, report.topicsEntered)
         assertEquals(1420, report.postsRead)
+    }
+
+    @Test
+    fun testOnlyAppleCanDoBadgeAndEmojiCatalogAlignment() {
+        // 1. Only Apple Can Do 徽章（无论来自 name、slug、fab-apple icon 还是 .svg URL）均识别为 AppleLogo 矢量图标
+        val appleBadge = GrantedBadge(
+            id = 205,
+            name = "Only Apple Can Do",
+            icon = "fab-apple",
+            imageUrl = "/uploads/default/original/3X/only-apple-can-do.svg",
+            slug = "only-apple-can-do",
+            isFirstTimeGrant = true
+        )
+        assertTrue(UniversalBadgeEngine.isAppleBadge(appleBadge))
+        val visual = UniversalBadgeEngine.resolveBadgeVisual(appleBadge, isDark = true)
+        assertIs<ResolvedBadgeVisual.VectorGlyph>(visual)
+        assertEquals(LinDoIcons.AppleLogo, visual.icon)
+
+        // 2. 首次获取徽章在楼层注入时优先置于首位（紧跟用户名展示苹果 Logo）
+        val rawPost = PostItemModel(
+            id = 1001,
+            postNumber = 5,
+            userId = 99,
+            username = "apple_fan",
+            displayName = "Apple 佬友",
+            userTitle = "Only Apple Can Do",
+            badgesGranted = listOf(appleBadge)
+        )
+        val rootJson = Json.parseToJsonElement("""{"user_badges": {}}""").jsonObject
+        val enriched = BadgeInjector.injectTopLevelUserBadges(listOf(rawPost), rootJson).single()
+        assertTrue(enriched.badgesGranted.isNotEmpty())
+        assertTrue(UniversalBadgeEngine.isAppleBadge(enriched.badgesGranted.first()))
+
+        // 3. 官方表情包与表态映射校验
+        assertEquals("🫠", LinuxDoEmojiCatalog.shortcodeToUnicode("distorted_face"))
+        assertEquals("🫡", LinuxDoEmojiCatalog.shortcodeToUnicode(":saluting_face:"))
+        assertEquals("😮", LinuxDoEmojiCatalog.shortcodeToUnicode("open_mouth"))
+        LinuxDoEmojiCatalog.registerDynamicServerEmojis(
+            mapOf("bili" to listOf("bili_057" to "/uploads/default/original/3X/bili_057.png"))
+        )
+        assertTrue(LinuxDoEmojiCatalog.isCustomImageEmoji("bili_057"))
+        assertEquals(
+            "https://linux.do/uploads/default/original/3X/bili_057.png",
+            LinuxDoEmojiCatalog.resolveReactionImageUrl("bili_057")
+        )
     }
 }

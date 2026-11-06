@@ -44,6 +44,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import do_.linux.lindo.ui.LocalLinDoAnimations
+import do_.linux.lindo.ui.LocalLinDoDarkTheme
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -317,50 +318,81 @@ fun PostGrantedBadgeIcon(
     onClick: ((GrantedBadge) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val visual = remember(badge) {
-        UniversalBadgeEngine.resolveBadgeVisual(badge, isDark = false)
+    val isDark = LocalLinDoDarkTheme.current
+    val visual = remember(badge, isDark) {
+        UniversalBadgeEngine.resolveBadgeVisual(badge, isDark = isDark)
     }
-    val tierColor = remember(badge) {
-        UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = false)
+    val tierColor = remember(badge, isDark) {
+        UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = isDark)
+    }
+    val fallbackVector = remember(badge) {
+        UniversalBadgeEngine.resolveFallbackIcon(badge)
+    }
+    val isApple = remember(badge) {
+        UniversalBadgeEngine.isAppleBadge(badge)
     }
 
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
             .padding(start = 2.dp)
-            .size(15.dp)
+            .size(if (isApple) 15.5.dp else 15.dp)
             .let { mod ->
                 if (onClick != null) mod.clickable { onClick(badge) } else mod
             }
     ) {
         when (visual) {
             is ResolvedBadgeVisual.BitmapImage -> {
-                AsyncImage(
-                    model = visual.url,
-                    contentDescription = badge.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.size(14.dp)
-                )
+                var imgError by remember(visual.url) { mutableStateOf(false) }
+                if (imgError) {
+                    Icon(
+                        imageVector = fallbackVector,
+                        contentDescription = badge.name,
+                        tint = tierColor,
+                        modifier = Modifier.size(13.5.dp)
+                    )
+                } else {
+                    AsyncImage(
+                        model = visual.url,
+                        contentDescription = badge.name,
+                        contentScale = ContentScale.Fit,
+                        onError = { imgError = true },
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
             }
             is ResolvedBadgeVisual.SvgImage -> {
+                var svgLoaded by remember(visual.url) { mutableStateOf(false) }
+                if (!svgLoaded) {
+                    Icon(
+                        imageVector = fallbackVector,
+                        contentDescription = badge.name,
+                        tint = tierColor,
+                        modifier = Modifier.size(13.5.dp)
+                    )
+                }
                 AsyncImage(
                     model = visual.url,
                     contentDescription = badge.name,
                     contentScale = ContentScale.Fit,
-                    modifier = Modifier.size(14.dp)
+                    onSuccess = { svgLoaded = true },
+                    onError = { svgLoaded = false },
+                    modifier = Modifier
+                        .size(14.dp)
+                        .alpha(if (svgLoaded) 1f else 0f)
                 )
             }
             is ResolvedBadgeVisual.VectorGlyph -> {
                 Icon(
                     imageVector = visual.icon,
                     contentDescription = badge.name,
-                    tint = tierColor,
-                    modifier = Modifier.size(13.5.dp)
+                    tint = visual.tintColor,
+                    modifier = Modifier.size(if (isApple) 14.2.dp else 13.5.dp)
                 )
             }
             else -> {
                 Icon(
-                    imageVector = LinDoIcons.AwardBadge,
+                    imageVector = fallbackVector,
                     contentDescription = badge.name,
                     tint = tierColor,
                     modifier = Modifier.size(13.5.dp)

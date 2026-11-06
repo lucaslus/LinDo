@@ -144,8 +144,10 @@ import do_.linux.lindo.core.network.MentionCandidate
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UploadedMediaResult
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import do_.linux.lindo.core.badge.UniversalBadgeEngine
 import do_.linux.lindo.core.render.DiscourseAstParser
 import do_.linux.lindo.core.render.PostBlockNode
+import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
 import do_.linux.lindo.ui.components.PostGrantedBadgeIcon
@@ -731,6 +733,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
 
     fun syncUserProfile() {
         scope.launch {
+            launch { runCatching { LinuxDoRepository.syncSiteEmojis() } }
             val profile = LinuxDoRepository.fetchCurrentUserProfile()
             if (profile != null) {
                 fullUserProfile = profile
@@ -4764,9 +4767,9 @@ private fun CommunityPostFloor(
                     if (post.badgesGranted.isNotEmpty()) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
-                            post.badgesGranted.take(3).forEach { badge ->
+                            post.badgesGranted.take(4).forEach { badge ->
                                 PostGrantedBadgeIcon(
                                     badge = badge,
                                     onClick = { onInspectBadge(badge) }
@@ -4953,7 +4956,7 @@ private fun CommunityPostFloor(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // 按需展开的 Discourse 官方表情回应选择面板（放大尺寸，便于拇指点选 Boost/心心/火苗）
+        // 按需展开的 Discourse 官方表情回应选择面板（完整对齐 Linux.do 官方表态集合，支持横向滑动点选）
         AnimatedVisibility(visible = showReactionPopover) {
             Row(
                 modifier = Modifier
@@ -4961,21 +4964,14 @@ private fun CommunityPostFloor(
                     .clip(RoundedCornerShape(24.dp))
                     .background(palette.subtleSurface)
                     .border(0.5.dp, palette.hairline, RoundedCornerShape(24.dp))
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 10.dp, vertical = 5.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val officialReactions = listOf(
-                    "heart" to "❤️",
-                    "rocket" to "🚀",
-                    "+1" to "👍",
-                    "confetti_ball" to "🎉",
-                    "fire" to "🔥",
-                    "laughing" to "😂",
-                    "clap" to "👏",
-                    "hugs" to "🤗"
-                )
-                officialReactions.forEach { (rId, emo) ->
+                LinuxDoEmojiCatalog.officialReactions.forEach { reactionItem ->
+                    val rId = reactionItem.shortcode
+                    val emo = reactionItem.unicode ?: reactionItem.markdownCode
                     val isMine = myReactionId == rId
                     Box(
                         modifier = Modifier
@@ -5356,9 +5352,13 @@ private fun PostReactionGlyph(
     isSelected: Boolean,
     size: Dp = 15.dp
 ) {
-    val normalized = reactionId.lowercase().trim()
+    val normalized = reactionId.lowercase().trim().removeSurrounding(":")
+    val resolvedUnicode = remember(normalized, emojiFallback) {
+        LinuxDoEmojiCatalog.shortcodeToUnicode(normalized)
+            ?: emojiFallback.takeUnless { it.startsWith(":") }
+    }
     when {
-        normalized == "heart" || normalized == "love" || emojiFallback == "❤️" || emojiFallback == "❤" -> {
+        normalized == "heart" || normalized == "love" -> {
             Icon(
                 imageVector = LinDoIcons.HeartFilled,
                 contentDescription = "心心",
@@ -5366,7 +5366,7 @@ private fun PostReactionGlyph(
                 tint = Color(0xFFE11D48)
             )
         }
-        normalized == "rocket" || normalized == "launch" || emojiFallback == "🚀" -> {
+        normalized == "rocket" || normalized == "launch" -> {
             Icon(
                 imageVector = LinDoIcons.Rocket,
                 contentDescription = "小火箭",
@@ -5374,7 +5374,7 @@ private fun PostReactionGlyph(
                 tint = if (isSelected) Color(0xFF2563EB) else Color(0xFF3B82F6)
             )
         }
-        normalized == "+1" || normalized == "thumbsup" || normalized == "thumb_up" || emojiFallback == "👍" -> {
+        normalized == "+1" || normalized == "thumbsup" || normalized == "thumb_up" -> {
             Icon(
                 imageVector = LinDoIcons.ThumbUp,
                 contentDescription = "赞同",
@@ -5382,7 +5382,7 @@ private fun PostReactionGlyph(
                 tint = Color(0xFFF59E0B)
             )
         }
-        normalized == "fire" || normalized == "flame" || emojiFallback == "🔥" -> {
+        normalized == "fire" || normalized == "flame" -> {
             Icon(
                 imageVector = LinDoIcons.Flame,
                 contentDescription = "火热",
@@ -5390,7 +5390,7 @@ private fun PostReactionGlyph(
                 tint = Color(0xFFF97316)
             )
         }
-        normalized == "confetti_ball" || normalized == "tada" || normalized == "party_popper" || emojiFallback == "🎉" || emojiFallback == "🎊" -> {
+        normalized == "confetti_ball" || normalized == "tada" || normalized == "party_popper" -> {
             Icon(
                 imageVector = LinDoIcons.Sparkles,
                 contentDescription = "庆祝",
@@ -5398,9 +5398,28 @@ private fun PostReactionGlyph(
                 tint = Color(0xFFEC4899)
             )
         }
+        LinuxDoEmojiCatalog.isCustomImageEmoji(normalized) || resolvedUnicode == null -> {
+            val imageUrl = remember(normalized) { LinuxDoEmojiCatalog.resolveReactionImageUrl(normalized) }
+            var imgError by remember(imageUrl) { mutableStateOf(false) }
+            if (imgError) {
+                Text(
+                    text = resolvedUnicode ?: "✨",
+                    fontSize = (size.value * 0.85f).sp,
+                    lineHeight = size.value.sp
+                )
+            } else {
+                AsyncImage(
+                    model = imageUrl,
+                    contentDescription = normalized,
+                    contentScale = ContentScale.Fit,
+                    onError = { imgError = true },
+                    modifier = Modifier.size(size)
+                )
+            }
+        }
         else -> {
             Text(
-                text = emojiFallback,
+                text = resolvedUnicode,
                 fontSize = (size.value * 0.88f).sp,
                 lineHeight = size.value.sp
             )
@@ -7576,6 +7595,7 @@ private fun BadgeDetailBottomSheet(
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
+    val isApple = remember(badge) { UniversalBadgeEngine.isAppleBadge(badge) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = palette.cardSurface
@@ -7585,10 +7605,33 @@ private fun BadgeDetailBottomSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 24.dp, vertical = 16.dp)
         ) {
-            UniversalBadgeChip(badge = badge, compact = false)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                UniversalBadgeChip(badge = badge, compact = false)
+                if (badge.isFirstTimeGrant || isApple) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(palette.subtleSurface)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = if (badge.isFirstTimeGrant) "🎉 首次获取解锁" else "Apple 专属徽章",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.brandGold
+                        )
+                    }
+                }
+            }
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = badge.plainDescription.ifBlank { "Linux.do 社区荣誉徽章" },
+                text = badge.plainDescription.ifBlank {
+                    if (isApple) "Linux.do 官方「Only Apple Can Do」Apple 生态专属徽章"
+                    else "Linux.do 社区荣誉徽章"
+                },
                 fontSize = 14.sp,
                 lineHeight = 21.sp,
                 color = palette.inkSecondary
@@ -9120,6 +9163,13 @@ private fun compileMarkdownAndBbcodeToPreviewHtml(raw: String): String {
         "<pre><code class=\"lang-$lang\">${m.groupValues[2]}</code></pre>"
     }
 
+    // 4.5 官方表情与社区自定义表情包 `:shortcode:` 实时转换为 `<img class="emoji" .../>`
+    working = Regex(""":([a-zA-Z0-9_+-]{2,36}):""").replace(working) { m ->
+        val code = m.groupValues[1]
+        val imgUrl = LinuxDoEmojiCatalog.resolveReactionImageUrl(code)
+        "<img class=\"emoji\" title=\":$code:\" alt=\":$code:\" src=\"$imgUrl\"/>"
+    }
+
     // 5. 逐行处理标题、Callout、引用、列表与普通段落
     val out = StringBuilder()
     val lines = working.lines()
@@ -9591,21 +9641,121 @@ private fun WorkbenchInteractiveSubPanel(
             }
 
             WorkbenchSubPanel.EMOJI -> {
-                Text("常用表情与 Linux.do 社区 Shortcode", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = palette.inkSecondary)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    listOf(
-                        "👍", "🎉", "🔥", "❤️", "🚀", "😂", "🤔", "👀", "🙏", "✨", "💯", "😭",
-                        ":thumbsup:", ":tada:", ":rocket:", ":heart:", ":fire:", ":thinking:", ":100:", ":sparkles:"
-                    ).forEach { emo ->
-                        WorkbenchToolChip(
-                            label = emo,
-                            onClick = { onInsertSnippet("$emo ") }
-                        )
+                var emojiQuery by remember { mutableStateOf("") }
+                var selectedGroupIdx by remember { mutableIntStateOf(0) }
+                var syncTrigger by remember { mutableIntStateOf(0) }
+
+                LaunchedEffect(Unit) {
+                    if (LinuxDoRepository.syncSiteEmojis()) {
+                        syncTrigger++
+                    }
+                }
+
+                val groups = remember(syncTrigger) { LinuxDoEmojiCatalog.getPickerGroups() }
+                val activeItems = remember(emojiQuery, selectedGroupIdx, groups) {
+                    if (emojiQuery.isNotBlank()) {
+                        LinuxDoEmojiCatalog.searchEmojis(emojiQuery)
+                    } else {
+                        groups.getOrNull(selectedGroupIdx.coerceIn(0, (groups.size - 1).coerceAtLeast(0)))?.items.orEmpty()
+                    }
+                }
+
+                WorkbenchCompactInputBox(
+                    value = emojiQuery,
+                    onValueChange = { emojiQuery = it },
+                    placeholder = "搜索官方表情或热梗（如：滑稽、融化、哭、火箭...）",
+                    leadingIcon = LinDoIcons.Search,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (emojiQuery.isBlank() && groups.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        groups.forEachIndexed { idx, group ->
+                            WorkbenchToolChip(
+                                label = group.labelZh,
+                                active = selectedGroupIdx == idx,
+                                onClick = { selectedGroupIdx = idx }
+                            )
+                        }
+                    }
+                }
+
+                if (activeItems.isEmpty()) {
+                    Text(
+                        text = "未找到匹配的表情",
+                        fontSize = 11.5.sp,
+                        color = palette.inkTertiary,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                } else {
+                    val rows = remember(activeItems) { activeItems.chunked(7) }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 188.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        rows.forEach { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                rowItems.forEach { item ->
+                                    val isCustomImage = !item.customUrl.isNullOrBlank() || item.unicode == null
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(36.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(palette.subtleSurface.copy(alpha = 0.45f))
+                                            .clickable {
+                                                val snippet = if (isCustomImage) {
+                                                    ":${item.shortcode}: "
+                                                } else {
+                                                    "${item.unicode} "
+                                                }
+                                                onInsertSnippet(snippet)
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (isCustomImage) {
+                                            var imgFailed by remember(item.resolvedImageUrl) { mutableStateOf(false) }
+                                            if (imgFailed) {
+                                                Text(
+                                                    text = item.unicode ?: item.shortcode.take(3),
+                                                    fontSize = 11.sp,
+                                                    color = palette.inkSecondary,
+                                                    maxLines = 1
+                                                )
+                                            } else {
+                                                AsyncImage(
+                                                    model = item.resolvedImageUrl,
+                                                    contentDescription = item.shortcode,
+                                                    contentScale = ContentScale.Fit,
+                                                    onError = { imgFailed = true },
+                                                    modifier = Modifier.size(23.dp)
+                                                )
+                                            }
+                                        } else {
+                                            Text(
+                                                text = item.unicode.orEmpty(),
+                                                fontSize = 19.sp
+                                            )
+                                        }
+                                    }
+                                }
+                                repeat((7 - rowItems.size).coerceAtLeast(0)) {
+                                    Spacer(modifier = Modifier.weight(1f).height(36.dp))
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -11003,6 +11153,16 @@ private fun PublicUserCardSheet(
                             color = palette.inkPrimary,
                             maxLines = 1
                         )
+                        if (p != null && p.badges.isNotEmpty()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                p.badges.take(3).forEach { b ->
+                                    PostGrantedBadgeIcon(badge = b)
+                                }
+                            }
+                        }
                         if (p != null) {
                             Text(
                                 text = p.trustLevelName,

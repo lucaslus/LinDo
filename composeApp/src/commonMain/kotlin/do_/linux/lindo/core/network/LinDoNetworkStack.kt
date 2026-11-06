@@ -18,6 +18,7 @@ import do_.linux.lindo.core.model.TopicUser
 import do_.linux.lindo.core.model.UserActivityItem
 import do_.linux.lindo.core.model.UserFullProfileSummary
 import do_.linux.lindo.core.model.UserNotificationItem
+import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -1152,6 +1153,7 @@ object LinuxDoRepository {
         val url = "https://linux.do/t/$topicId/posts.json?$query"
         try {
             val root = readApiObject(executeHttp(url = url, method = "GET", preserveFailure = true))
+            BadgeInjector.parseAndCacheUserBadges(root)
             val postStream = root["post_stream"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
             val postsArr = postStream.requireArray("posts")
             val rawPosts = postsArr.mapIndexedNotNull { idx, elem ->
@@ -2267,34 +2269,14 @@ object LinuxDoRepository {
         val replyToUsername = replyToUserObj?.get("username")?.jsonPrimitive?.contentOrNull
         val reads = pObj["reads"]?.jsonPrimitive?.intOrNull ?: 0
 
-        val emojiMap = mapOf(
-            "heart" to "❤️",
-            "+1" to "👍",
-            "thumbsup" to "👍",
-            "confetti_ball" to "🎉",
-            "tada" to "🎉",
-            "fire" to "🔥",
-            "laughing" to "😂",
-            "joy" to "😂",
-            "open_mouth" to "😮",
-            "clap" to "👏",
-            "hugs" to "🤗",
-            "thinking" to "🤔",
-            "cry" to "😢",
-            "sob" to "😭",
-            "rocket" to "🚀",
-            "eyes" to "👀",
-            "pray" to "🙏"
-        )
-
         val parsedReactions = (pObj["reactions"] as? JsonArray)?.mapNotNull { rElem ->
             val rObj = rElem as? JsonObject ?: return@mapNotNull null
-            val rId = rObj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val rId = rObj["id"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
             val cnt = rObj["count"]?.jsonPrimitive?.intOrNull ?: 0
             if (cnt <= 0) return@mapNotNull null
             PostReactionItem(
                 id = rId,
-                emoji = emojiMap[rId] ?: "❤️",
+                emoji = LinuxDoEmojiCatalog.shortcodeToUnicode(rId) ?: ":$rId:",
                 count = cnt
             )
         }.orEmpty()
@@ -2335,7 +2317,22 @@ object LinuxDoRepository {
         val canEdit = pObj["can_edit"]?.jsonPrimitive?.booleanOrNull ?: true
         val canDelete = pObj["can_delete"]?.jsonPrimitive?.booleanOrNull ?: false
         val rawMarkdown = pObj["raw"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-        val inlineBadges = parseInlinePostBadges(pObj["user_badges"])
+
+        // 同时解析本楼首次获授徽章 (`badges_granted`) 与行内用户徽章 (`user_badges` / `post_badges`)，
+        // 以及佩戴 `Only Apple Can Do` 头衔时的苹果 Logo 徽章注入
+        val firstGrantedBadges = parseInlinePostBadges(pObj["badges_granted"], isFirstGrant = true)
+        val inlineUserBadges = parseInlinePostBadges(pObj["user_badges"], isFirstGrant = false)
+        val inlinePostBadges = parseInlinePostBadges(pObj["post_badges"], isFirstGrant = false)
+        val appleTitleBadge = if (userTitle?.contains("only apple can do", ignoreCase = true) == true) {
+            listOf(UniversalBadgeEngine.createOnlyAppleCanDoBadge(isFirstGrant = false))
+        } else {
+            emptyList()
+        }
+        val inlineBadges = (firstGrantedBadges + inlineUserBadges + inlinePostBadges + appleTitleBadge)
+            .distinctBy { badge ->
+                if (UniversalBadgeEngine.isAppleBadge(badge)) "only-apple-can-do"
+                else "${badge.id}_${badge.name.trim().lowercase()}"
+            }
 
         return PostItemModel(
             id = pid,
@@ -2390,6 +2387,9 @@ object LinuxDoRepository {
         val bookmarked = root["bookmarked"]?.jsonPrimitive?.booleanOrNull ?: false
         val lastReadPostNumber = root["last_read_post_number"]?.jsonPrimitive?.intOrNull
 
+        // 预先将顶层 badges / user_badges 缓存进 BadgeInjector，以便 parseSinglePostObject 内解析 badges_granted 的 badge_id 引用
+        BadgeInjector.parseAndCacheUserBadges(root)
+
         val postStream = root["post_stream"] as? JsonObject
         val postsArr = postStream?.get("posts") as? JsonArray ?: JsonArray(emptyList())
         val streamIds = (postStream?.get("stream") as? JsonArray)?.mapNotNull {
@@ -2421,21 +2421,29 @@ object LinuxDoRepository {
         )
     }
 
-    private fun parseInlinePostBadges(element: JsonElement?): List<GrantedBadge> {
-        val arr = element as? JsonArray ?: return emptyList()
-        return arr.mapNotNull { item ->
-            val obj = item as? JsonObject ?: return@mapNotNull null
-            val id = obj["id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
-            val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            GrantedBadge(
-                id = id,
-                name = name,
-                description = obj["description"]?.jsonPrimitive?.contentOrNull ?: "",
-                badgeTypeId = obj["badge_type_id"]?.jsonPrimitive?.intOrNull ?: 3,
-                icon = obj["icon"]?.jsonPrimitive?.contentOrNull,
-                imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull ?: obj["image"]?.jsonPrimitive?.contentOrNull,
-                slug = obj["slug"]?.jsonPrimitive?.contentOrNull ?: ""
-            )
+    private fun parseInlinePostBadges(element: JsonElement?, isFirstGrant: Boolean = false): List<GrantedBadge> {
+        return when (element) {
+            is JsonArray -> element.mapNotNull { item ->
+                when (item) {
+                    is JsonObject -> BadgeInjector.parseGrantedBadge(item, isFirstGrant = isFirstGrant)
+                    is JsonPrimitive -> item.intOrNull?.let { bid ->
+                        BadgeInjector.lookupBadgeById(bid)?.copy(isFirstTimeGrant = isFirstGrant)
+                    }
+                    else -> null
+                }
+            }
+            is JsonObject -> {
+                val badgesObj = element["badges"] as? JsonObject
+                if (badgesObj != null) {
+                    badgesObj.entries.mapNotNull { (k, v) ->
+                        val bObj = v as? JsonObject ?: return@mapNotNull null
+                        BadgeInjector.parseGrantedBadge(bObj, fallbackId = k.toIntOrNull() ?: 0, isFirstGrant = isFirstGrant)
+                    }
+                } else {
+                    listOf(BadgeInjector.parseGrantedBadge(element, isFirstGrant = isFirstGrant))
+                }
+            }
+            else -> emptyList()
         }
     }
 
@@ -2996,6 +3004,42 @@ object LinuxDoRepository {
             text?.trim()?.takeIf { it.isNotBlank() }
         } catch (_: Throwable) {
             null
+        }
+    }
+
+    /**
+     * 动态同步站点全量自定义表情包 (`GET /emojis.json`)，将飞书、B站、贴吧等官方分组注入 `LinuxDoEmojiCatalog`
+     */
+    suspend fun syncSiteEmojis(): Boolean = withContext(Dispatchers.IO) {
+        if (LinuxDoEmojiCatalog.hasSyncedServerEmojis()) return@withContext true
+        val res = executeHttp(
+            url = "https://linux.do/emojis.json",
+            method = "GET"
+        ) ?: return@withContext false
+        if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withContext false
+        try {
+            val root = json.parseToJsonElement(res.second).jsonObject
+            val parsedGroups = LinkedHashMap<String, List<Pair<String, String>>>()
+            for ((groupName, groupElement) in root) {
+                val arr = groupElement as? JsonArray ?: continue
+                val pairs = arr.mapNotNull { item ->
+                    val obj = item as? JsonObject ?: return@mapNotNull null
+                    val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
+                    val url = obj["url"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
+                    if (name.isNotEmpty() && url.isNotEmpty()) name to url else null
+                }
+                if (pairs.isNotEmpty()) {
+                    parsedGroups[groupName] = pairs
+                }
+            }
+            if (parsedGroups.isNotEmpty()) {
+                LinuxDoEmojiCatalog.registerDynamicServerEmojis(parsedGroups)
+                true
+            } else {
+                false
+            }
+        } catch (_: Throwable) {
+            false
         }
     }
 }

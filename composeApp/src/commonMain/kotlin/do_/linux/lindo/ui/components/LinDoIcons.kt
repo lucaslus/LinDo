@@ -1857,4 +1857,36 @@ object LinDoIcons {
             }
         }
     }
+
+    /**
+     * 官方 `Only Apple Can Do` 徽章专属苹果 Logo (`fab fa-apple`) 实心矢量图标
+     */
+    val AppleLogo: ImageVector by lazy {
+        lucideIcon("AppleLogo") {
+            path(fill = SolidColor(Color.Black)) {
+                // 顶部苹果叶
+                moveTo(15.65f, 2.0f)
+                curveTo(15.77f, 3.19f, 15.28f, 4.35f, 14.51f, 5.21f)
+                curveTo(13.72f, 6.1f, 12.46f, 6.79f, 11.23f, 6.69f)
+                curveTo(11.09f, 5.53f, 11.66f, 4.33f, 12.4f, 3.51f)
+                curveTo(13.19f, 2.62f, 14.53f, 2.04f, 15.65f, 2.0f)
+                close()
+                // 苹果主体剪影
+                moveTo(19.06f, 16.92f)
+                curveTo(18.57f, 18.04f, 18.06f, 18.99f, 17.27f, 19.98f)
+                curveTo(16.29f, 21.2f, 15.11f, 22.02f, 13.88f, 22.04f)
+                curveTo(12.6f, 22.06f, 11.98f, 21.29f, 10.51f, 21.29f)
+                curveTo(9.03f, 21.29f, 8.36f, 22.02f, 7.12f, 22.06f)
+                curveTo(5.86f, 22.1f, 4.82f, 21.14f, 3.84f, 19.92f)
+                curveTo(2.04f, 17.68f, 0.87f, 13.6f, 2.37f, 10.61f)
+                curveTo(3.38f, 8.6f, 5.19f, 7.37f, 7.11f, 7.34f)
+                curveTo(8.43f, 7.31f, 9.67f, 8.21f, 10.48f, 8.21f)
+                curveTo(11.29f, 8.21f, 12.78f, 7.12f, 14.37f, 7.28f)
+                curveTo(15.04f, 7.31f, 16.91f, 7.55f, 18.11f, 9.29f)
+                curveTo(18.01f, 9.35f, 15.88f, 10.59f, 15.9f, 13.17f)
+                curveTo(15.93f, 16.26f, 18.61f, 17.29f, 19.06f, 16.92f)
+                close()
+            }
+        }
+    }
 }

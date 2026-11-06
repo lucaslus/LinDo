@@ -125,10 +125,70 @@ object UniversalBadgeEngine {
     }
 
     /**
+     * 识别是否为官方新上线的 `Only Apple Can Do` 苹果生态专属徽章
+     */
+    fun isAppleBadge(badge: GrantedBadge): Boolean {
+        val nameLower = badge.name.trim().lowercase()
+        val slugLower = badge.slug.trim().lowercase()
+        val iconKey = normalizeIconKey(badge.icon)
+        val imgLower = badge.imageUrl?.trim()?.lowercase().orEmpty()
+        return nameLower.contains("only apple can do") ||
+            nameLower == "apple" ||
+            slugLower.contains("only-apple-can-do") ||
+            slugLower == "apple" ||
+            iconKey == "apple" ||
+            iconKey.endsWith("-apple") ||
+            iconKey.contains("fab-apple") ||
+            imgLower.contains("only-apple-can-do") ||
+            imgLower.endsWith("/apple.svg") ||
+            imgLower.endsWith("/apple.png")
+    }
+
+    /**
+     * 创建官方 `Only Apple Can Do` 徽章对象（用于首次获取或头衔匹配注入）
+     */
+    fun createOnlyAppleCanDoBadge(isFirstGrant: Boolean = false): GrantedBadge {
+        return GrantedBadge(
+            id = 9991,
+            name = "Only Apple Can Do",
+            description = if (isFirstGrant) {
+                "首次获取「Only Apple Can Do」官方徽章 · Apple 生态专属纪念"
+            } else {
+                "Linux.do 官方「Only Apple Can Do」Apple 生态专属徽章"
+            },
+            badgeTypeId = 2,
+            icon = "fab-apple",
+            slug = "only-apple-can-do",
+            allowTitle = true,
+            isFirstTimeGrant = isFirstGrant
+        )
+    }
+
+    /**
+     * 当位图或 SVG 远程图片加载失败时的矢量图标兜底
+     */
+    fun resolveFallbackIcon(badge: GrantedBadge): ImageVector {
+        if (isAppleBadge(badge)) return LinDoIcons.AppleLogo
+        val key = normalizeIconKey(badge.icon)
+        if (key.isNotEmpty()) {
+            matchVectorIcon(key)?.let { return it }
+        }
+        val nameKey = badge.name.trim().lowercase()
+        matchVectorIcon(nameKey)?.let { return it }
+        return LinDoIcons.AwardBadge
+    }
+
+    /**
      * 决议任意徽章的渲染形态（保证 100% 可视，零丢失）
      */
     fun resolveBadgeVisual(badge: GrantedBadge, isDark: Boolean = true): ResolvedBadgeVisual {
         val tierColor = badgeTierColor(badge.badgeType, isDark)
+
+        // 0. 优先识别官方 `Only Apple Can Do` 徽章，直接渲染高精度苹果 Logo 矢量图标（彻底避免 .svg 位图解码失败）
+        if (isAppleBadge(badge)) {
+            val appleTint = if (isDark) Color(0xFFF5F5F7) else Color(0xFF1D1D1F)
+            return ResolvedBadgeVisual.VectorGlyph(icon = LinDoIcons.AppleLogo, tintColor = appleTint)
+        }
 
         // 1. 优先处理 image_url（自动区分 SVG 与位图）
         if (!badge.imageUrl.isNullOrBlank()) {
@@ -175,6 +235,7 @@ object UniversalBadgeEngine {
 
     private fun matchVectorIcon(key: String): ImageVector? {
         return when {
+            key.contains("apple") -> LinDoIcons.AppleLogo
             key.contains("crown") || key.contains("king") -> LinDoIcons.Crown
             key.contains("trophy") || key.contains("champion") -> LinDoIcons.Trophy
             key.contains("certificate") || key.contains("verified") || key.contains("id-card") -> LinDoIcons.VerifiedBadge

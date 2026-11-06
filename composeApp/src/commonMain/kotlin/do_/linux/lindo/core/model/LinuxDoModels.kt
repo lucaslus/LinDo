@@ -39,7 +39,8 @@ data class GrantedBadge(
     @SerialName("image_url") val imageUrl: String? = null,
     val slug: String = "",
     @SerialName("grant_count") val grantCount: Int = 0,
-    val allowTitle: Boolean = false
+    val allowTitle: Boolean = false,
+    val isFirstTimeGrant: Boolean = false
 ) {
     val badgeType: BadgeType get() = BadgeType.fromId(badgeTypeId)
 
@@ -373,35 +374,69 @@ data class CommunitySearchResult(
  */
 object BadgeInjector {
     private val userBadgesMemoryCache = mutableMapOf<Int, List<GrantedBadge>>()
+    private val knownBadgesById = mutableMapOf<Int, GrantedBadge>()
 
-    fun parseAndCacheUserBadges(rootJson: JsonObject): Map<Int, List<GrantedBadge>> {
-        val container = rootJson["user_badges"] as? JsonObject ?: return userBadgesMemoryCache
-        val badgesById = mutableMapOf<Int, GrantedBadge>()
+    fun lookupBadgeById(badgeId: Int): GrantedBadge? = knownBadgesById[badgeId]
 
-        when (val badgesRaw = container["badges"]) {
+    private fun ingestBadgesCollection(badgesRaw: JsonElement?, targetMap: MutableMap<Int, GrantedBadge>) {
+        when (badgesRaw) {
             is JsonObject -> {
                 for ((key, value) in badgesRaw) {
-                    val badgeId = key.toIntOrNull() ?: continue
                     val obj = value as? JsonObject ?: continue
-                    badgesById[badgeId] = parseGrantedBadge(obj, fallbackId = badgeId)
+                    val badgeId = key.toIntOrNull() ?: obj["id"]?.jsonPrimitive?.intOrNull ?: continue
+                    val parsed = parseGrantedBadge(obj, fallbackId = badgeId)
+                    targetMap[badgeId] = parsed
+                    knownBadgesById[badgeId] = parsed
                 }
             }
             is JsonArray -> {
                 for (element in badgesRaw) {
                     val obj = element as? JsonObject ?: continue
                     val badgeId = obj["id"]?.jsonPrimitive?.intOrNull ?: continue
-                    badgesById[badgeId] = parseGrantedBadge(obj, fallbackId = badgeId)
+                    val parsed = parseGrantedBadge(obj, fallbackId = badgeId)
+                    targetMap[badgeId] = parsed
+                    knownBadgesById[badgeId] = parsed
                 }
             }
             else -> Unit
         }
+    }
+
+    fun parseAndCacheUserBadges(rootJson: JsonObject): Map<Int, List<GrantedBadge>> {
+        val badgesById = mutableMapOf<Int, GrantedBadge>()
+        badgesById.putAll(knownBadgesById)
+
+        // 1. 收集顶层 `badges` 数组/字典（Discourse 首次授予徽章或完整徽章字典常位于 root["badges"]）
+        ingestBadgesCollection(rootJson["badges"], badgesById)
+
+        val rawUserBadges = rootJson["user_badges"] ?: return userBadgesMemoryCache
+        if (rawUserBadges is JsonArray) {
+            val groupedByUser = mutableMapOf<Int, MutableList<GrantedBadge>>()
+            for (elem in rawUserBadges) {
+                val ubObj = elem as? JsonObject ?: continue
+                val uid = ubObj["user_id"]?.jsonPrimitive?.intOrNull ?: continue
+                val nestedBadge = (ubObj["badge"] as? JsonObject)?.let { parseGrantedBadge(it) }
+                val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: ubObj["id"]?.jsonPrimitive?.intOrNull
+                val resolved = nestedBadge ?: bid?.let { badgesById[it] } ?: parseGrantedBadge(ubObj)
+                groupedByUser.getOrPut(uid) { mutableListOf() }.add(resolved)
+            }
+            for ((uid, list) in groupedByUser) {
+                if (list.isNotEmpty()) {
+                    userBadgesMemoryCache[uid] = list.distinctBy { "${it.id}_${it.name.lowercase()}" }
+                }
+            }
+            return userBadgesMemoryCache
+        }
+
+        val container = rawUserBadges as? JsonObject ?: return userBadgesMemoryCache
+        ingestBadgesCollection(container["badges"], badgesById)
 
         val userBadgeIds = mutableMapOf<Int, List<Int>>()
         when (val usersRaw = container["users"]) {
             is JsonObject -> {
                 for ((key, value) in usersRaw) {
-                    val userId = key.toIntOrNull() ?: continue
                     val obj = value as? JsonObject ?: continue
+                    val userId = key.toIntOrNull() ?: obj["id"]?.jsonPrimitive?.intOrNull ?: continue
                     val ids = (obj["badge_ids"] as? JsonArray)
                         ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
                         .orEmpty()
@@ -421,6 +456,14 @@ object BadgeInjector {
             else -> Unit
         }
 
+        // 兼容 container["user_badges"] 数组格式
+        (container["user_badges"] as? JsonArray)?.forEach { elem ->
+            val ubObj = elem as? JsonObject ?: return@forEach
+            val uid = ubObj["user_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            userBadgeIds[uid] = (userBadgeIds[uid].orEmpty() + bid).distinct()
+        }
+
         for ((userId, ids) in userBadgeIds) {
             val resolved = ids.mapNotNull { badgesById[it] }
             if (resolved.isNotEmpty()) {
@@ -436,27 +479,100 @@ object BadgeInjector {
 
     fun injectTopLevelUserBadges(posts: List<PostItemModel>, rootJson: JsonObject): List<PostItemModel> {
         parseAndCacheUserBadges(rootJson)
+
+        // 同时收集顶层 user_badges 中指定了 post_number 的首次获授徽章（例如本楼首次触发 Only Apple Can Do）
+        val postLevelGrants = mutableMapOf<Int, MutableList<GrantedBadge>>()
+        val topUserBadgesArr = (rootJson["user_badges"] as? JsonArray)
+            ?: ((rootJson["user_badges"] as? JsonObject)?.get("user_badges") as? JsonArray)
+        topUserBadgesArr?.forEach { elem ->
+            val ubObj = elem as? JsonObject ?: return@forEach
+            val pNum = ubObj["post_number"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            val nested = (ubObj["badge"] as? JsonObject)?.let { parseGrantedBadge(it, isFirstGrant = true) }
+            val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull
+            val badge = nested ?: bid?.let { knownBadgesById[it]?.copy(isFirstTimeGrant = true) }
+            if (badge != null) {
+                postLevelGrants.getOrPut(pNum) { mutableListOf() }.add(badge)
+            }
+        }
+
         return posts.map { post ->
-            if (post.badgesGranted.isNotEmpty()) {
-                post
+            val cachedUserBadges = getBadgesForUser(post.userId)
+            val floorGrants = postLevelGrants[post.postNumber].orEmpty()
+            val appleTitleBadge = if (
+                post.userTitle?.contains("only apple can do", ignoreCase = true) == true
+            ) {
+                listOf(
+                    GrantedBadge(
+                        id = 9991,
+                        name = "Only Apple Can Do",
+                        description = "Linux.do 官方「Only Apple Can Do」Apple 生态专属徽章",
+                        badgeTypeId = 2,
+                        icon = "fab-apple",
+                        slug = "only-apple-can-do",
+                        allowTitle = true
+                    )
+                )
             } else {
-                val cached = getBadgesForUser(post.userId)
-                if (cached.isNotEmpty()) post.copy(badgesGranted = cached) else post
+                emptyList()
+            }
+
+            val merged = (floorGrants + post.badgesGranted + cachedUserBadges + appleTitleBadge)
+                .distinctBy { badge ->
+                    if (badge.name.contains("only apple can do", ignoreCase = true) || badge.slug.contains("only-apple-can-do", ignoreCase = true)) {
+                        "only-apple-can-do"
+                    } else {
+                        "${badge.id}_${badge.name.trim().lowercase()}"
+                    }
+                }
+                .sortedByDescending { badge ->
+                    when {
+                        badge.isFirstTimeGrant -> 2
+                        badge.name.contains("only apple can do", ignoreCase = true) ||
+                            badge.slug.contains("only-apple-can-do", ignoreCase = true) ||
+                            badge.icon?.contains("apple", ignoreCase = true) == true -> 1
+                        else -> 0
+                    }
+                }
+
+            if (merged != post.badgesGranted) {
+                post.copy(badgesGranted = merged)
+            } else {
+                post
             }
         }
     }
 
-    fun parseGrantedBadge(obj: JsonObject, fallbackId: Int = 0): GrantedBadge {
+    fun parseGrantedBadge(obj: JsonObject, fallbackId: Int = 0, isFirstGrant: Boolean = false): GrantedBadge {
+        val target = (obj["badge"] as? JsonObject) ?: obj
+        val resolvedId = target["id"]?.jsonPrimitive?.intOrNull
+            ?: obj["badge_id"]?.jsonPrimitive?.intOrNull
+            ?: obj["id"]?.jsonPrimitive?.intOrNull
+            ?: fallbackId
+        val known = knownBadgesById[resolvedId]
+        val rawName = target["name"]?.jsonPrimitive?.contentOrNull
+            ?: obj["badge_name"]?.jsonPrimitive?.contentOrNull
+            ?: known?.name
+            ?: "徽章 #$resolvedId"
+        val rawSlug = target["slug"]?.jsonPrimitive?.contentOrNull
+            ?: obj["badge_slug"]?.jsonPrimitive?.contentOrNull
+            ?: known?.slug
+            ?: ""
+        val rawIcon = target["icon"]?.jsonPrimitive?.contentOrNull
+            ?: known?.icon
+            ?: if (rawName.contains("only apple can do", ignoreCase = true) || rawSlug.contains("only-apple-can-do", ignoreCase = true)) "fab-apple" else null
         return GrantedBadge(
-            id = obj["id"]?.jsonPrimitive?.intOrNull ?: fallbackId,
-            name = obj["name"]?.jsonPrimitive?.contentOrNull ?: "徽章 #$fallbackId",
-            description = obj["description"]?.jsonPrimitive?.contentOrNull ?: "",
-            badgeTypeId = obj["badge_type_id"]?.jsonPrimitive?.intOrNull ?: 3,
-            icon = obj["icon"]?.jsonPrimitive?.contentOrNull,
-            imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull,
-            slug = obj["slug"]?.jsonPrimitive?.contentOrNull ?: "",
-            grantCount = obj["grant_count"]?.jsonPrimitive?.intOrNull ?: 0,
-            allowTitle = obj["allow_title"]?.jsonPrimitive?.booleanOrNull ?: false
+            id = resolvedId,
+            name = rawName,
+            description = target["description"]?.jsonPrimitive?.contentOrNull ?: known?.description ?: "",
+            badgeTypeId = target["badge_type_id"]?.jsonPrimitive?.intOrNull ?: known?.badgeTypeId ?: 3,
+            icon = rawIcon,
+            imageUrl = target["image_url"]?.jsonPrimitive?.contentOrNull
+                ?: target["image"]?.jsonPrimitive?.contentOrNull
+                ?: known?.imageUrl,
+            slug = rawSlug,
+            grantCount = target["grant_count"]?.jsonPrimitive?.intOrNull ?: known?.grantCount ?: 0,
+            allowTitle = target["allow_title"]?.jsonPrimitive?.booleanOrNull ?: known?.allowTitle ?: false,
+            isFirstTimeGrant = isFirstGrant
         )
     }
 }

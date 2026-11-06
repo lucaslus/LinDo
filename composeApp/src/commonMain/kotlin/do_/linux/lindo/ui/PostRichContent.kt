@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import do_.linux.lindo.core.render.*
+import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 
 @Composable
 internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
@@ -58,12 +59,13 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
         rich.runs.mapIndexedNotNull { index, run -> run.imageUrl?.let { url ->
             val failed = failures[url] == true
             val fallbackGlyph = shortcodeToUnicodeEmoji(run.text)
-            val width = if (failed && fallbackGlyph == null) run.text.length.coerceIn(2, 12).toFloat() else 1.22f
-            "emoji-$index" to InlineTextContent(Placeholder(width.em, 1.22.em, PlaceholderVerticalAlign.TextCenter)) {
+            val baseEm = if (run.largeEmoji) 1.65f else 1.25f
+            val width = if (failed && fallbackGlyph == null) run.text.length.coerceIn(2, 10).toFloat() else baseEm
+            "emoji-$index" to InlineTextContent(Placeholder(width.em, baseEm.em, PlaceholderVerticalAlign.TextCenter)) {
                 if (failed) {
                     Text(
                         text = fallbackGlyph ?: run.text,
-                        fontSize = 13.5.sp,
+                        fontSize = if (run.largeEmoji) 20.sp else 14.5.sp,
                         maxLines = 1,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
@@ -331,21 +333,5 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
 }
 
 private fun shortcodeToUnicodeEmoji(raw: String): String? {
-    return when (raw.trim().removeSurrounding(":").lowercase()) {
-        "heart", "red_heart" -> "❤️"
-        "rocket" -> "🚀"
-        "+1", "thumbsup", "thumbs_up" -> "👍"
-        "tada", "confetti_ball", "party_popper" -> "🎉"
-        "fire", "flame" -> "🔥"
-        "clap" -> "👏"
-        "laughing", "joy", "rofl", "smile", "grin" -> "😄"
-        "hugs", "hugging" -> "🤗"
-        "thinking", "thinking_face" -> "🤔"
-        "eyes" -> "👀"
-        "pray", "folded_hands" -> "🙏"
-        "100" -> "💯"
-        "sparkles", "star" -> "✨"
-        "sob", "cry" -> "😭"
-        else -> null
-    }
+    return LinuxDoEmojiCatalog.shortcodeToUnicode(raw)
 }

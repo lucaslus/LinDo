@@ -7,7 +7,7 @@ import org.jsoup.nodes.TextNode
 import java.net.URI
 
 data class InlineRun(val text: String, val bold: Boolean = false, val italic: Boolean = false,
-    val code: Boolean = false, val strike: Boolean = false, val underline: Boolean = false, val href: String? = null, val imageUrl: String? = null)
+    val code: Boolean = false, val strike: Boolean = false, val underline: Boolean = false, val href: String? = null, val imageUrl: String? = null, val largeEmoji: Boolean = false)
 data class RichText(val runs: List<InlineRun>) {
     val text: String get() = runs.joinToString("") { it.text }
     companion object { fun plain(text: String) = RichText(listOf(InlineRun(text))) }
@@ -272,8 +272,17 @@ object DiscourseAstParser {
                         result += PostBlockNode.Paragraph(node.text().trim())
                     }
                 }
-                tag == "img" && (node.hasClass("emoji") || node.attr("src").contains("/emoji/") || node.attr("src").contains("twemoji")) ->
-                    pending.add(style.copy(text = node.attr("alt").ifBlank { node.attr("title").ifBlank { "[表情]" } }, imageUrl = safeUrl(node.attr("src"), allowMailto = false)))
+                tag == "img" && (node.hasClass("emoji") || node.attr("src").contains("/emoji/") || node.attr("src").contains("twemoji") || node.attr("data-src").contains("/emoji/")) -> {
+                    val rawEmojiSrc = node.attr("src").ifBlank { node.attr("data-src") }
+                    val emojiLabel = node.attr("title").ifBlank { node.attr("alt") }.ifBlank { "[表情]" }
+                    pending.add(
+                        style.copy(
+                            text = emojiLabel,
+                            imageUrl = safeUrl(rawEmojiSrc, allowMailto = false),
+                            largeEmoji = node.hasClass("only-emoji")
+                        )
+                    )
+                }
                 tag == "img" -> {
                     flush(); val raw = node.attr("src").ifBlank { node.attr("data-src") }
                     safeUrl(raw, allowMailto = false)?.let { result += PostBlockNode.ImageGallery(listOf(it), listOf(node.attr("alt"))) }
