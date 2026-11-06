@@ -183,7 +183,10 @@ data class PostItemModel(
     val reactions: List<PostReactionItem> = emptyList(),
     val bookmarkedByMe: Boolean = false,
     val isSmallAction: Boolean = false,
-    val actionCode: String? = null
+    val actionCode: String? = null,
+    val canEdit: Boolean = true,
+    val canDelete: Boolean = false,
+    val raw: String? = null
 )
 
 /**

@@ -432,7 +432,7 @@ object UserApiKeyAuthManager {
      * - `otp=true`（随回调返回一次性登录兑换令牌）
      */
     fun generateAuthorizationUrl(
-        applicationName: String = "LinDo",
+        applicationName: String = "Lindo",
         scopes: String = "one_time_password"
     ): Pair<String, String> {
         val kpg = KeyPairGenerator.getInstance("RSA")
@@ -670,7 +670,7 @@ object LinuxDoRepository {
         coerceInputValues = true
     }
 
-    val categories: List<LinuxDoCategoryMeta> = listOf(
+    val defaultCategories: List<LinuxDoCategoryMeta> = listOf(
         LinuxDoCategoryMeta(4, "开发调优", "develop", "0E76BD", "软件开发与开源实践"),
         LinuxDoCategoryMeta(14, "资源荟萃", "resource", "12A89D", "软件工具与数字资源"),
         LinuxDoCategoryMeta(42, "文档共建", "wiki", "25AAE2", "技术沉淀与教程指南"),
@@ -684,8 +684,12 @@ object LinuxDoRepository {
         LinuxDoCategoryMeta(2, "运营反馈", "feedback", "808281", "社区站务与功能建议")
     )
 
-    private val categoryLookup: Map<Int, Pair<String, String>> = buildMap {
-        categories.forEach { put(it.id, it.name to it.colorHex) }
+    @Volatile
+    var categories: List<LinuxDoCategoryMeta> = defaultCategories
+        private set
+
+    private val categoryLookup = java.util.concurrent.ConcurrentHashMap<Int, Pair<String, String>>().apply {
+        defaultCategories.forEach { put(it.id, it.name to it.colorHex) }
         put(20, "开发调优" to "0E76BD")
         put(21, "资源荟萃" to "12A89D")
         put(30, "搞七捻三" to "9EB83B")
@@ -698,6 +702,52 @@ object LinuxDoRepository {
 
     fun resolveCategoryMeta(categoryId: Int): Pair<String, String> {
         return categoryLookup[categoryId] ?: ("技术讨论" to "0E76BD")
+    }
+
+    private fun mergeCategoriesFromSiteRoot(root: JsonObject) {
+        val catArr = root["categories"] as? JsonArray ?: return
+        val mergedById = LinkedHashMap<Int, LinuxDoCategoryMeta>()
+        defaultCategories.forEach { mergedById[it.id] = it }
+        catArr.forEach { elem ->
+            val cObj = elem as? JsonObject ?: return@forEach
+            val id = cObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            val name = cObj["name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@forEach
+            val slug = cObj["slug"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: "cat-$id"
+            val color = cObj["color"]?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
+                ?: mergedById[id]?.colorHex ?: "0E76BD"
+            val desc = cObj["description_text"]?.jsonPrimitive?.contentOrNull?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: cObj["description_excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                ?: mergedById[id]?.description
+                ?: name
+            val existing = mergedById[id]
+            val preferredName = if (existing != null && existing.name.any { it.code > 127 } && name.all { it.code < 128 }) {
+                existing.name
+            } else {
+                name
+            }
+            val parentId = cObj["parent_category_id"]?.jsonPrimitive?.intOrNull
+            val existingLookup = categoryLookup[id]
+            val lookupName = if (existingLookup != null && existingLookup.first.any { it.code > 127 } && preferredName.all { it.code < 128 }) {
+                existingLookup.first
+            } else {
+                preferredName
+            }
+            categoryLookup[id] = lookupName to color
+            if (parentId == null || mergedById.containsKey(id)) {
+                mergedById[id] = LinuxDoCategoryMeta(
+                    id = id,
+                    name = preferredName,
+                    slug = slug,
+                    colorHex = color,
+                    description = desc.take(28)
+                )
+            }
+        }
+        if (mergedById.isNotEmpty()) {
+            categories = mergedById.values.toList()
+        }
     }
 
     private val dohBootstrapClient: okhttp3.OkHttpClient by lazy {
@@ -814,8 +864,10 @@ object LinuxDoRepository {
         extraHeaders: Map<String, String> = emptyMap(),
         preserveFailure: Boolean = false
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
-        val hasWebCookie = CookieSentinel.resolveWinningCookies().containsKey("_t")
-        val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || hasWebCookie
+        val winningCookies = CookieSentinel.resolveWinningCookies()
+        val rawT = winningCookies["_t"]?.value.orEmpty()
+        val hasWebCookie = rawT.isNotBlank() && rawT != "demo_session_token"
+        val isLoggedIn = hasWebCookie
         val presenceHeaders = UserPresenceService.buildPresenceHeaders(
             isBackgroundTimingRequest = extraHeaders["Discourse-Background"] == "true",
             isLoggedIn = isLoggedIn
@@ -831,12 +883,10 @@ object LinuxDoRepository {
             extraHeaders.forEach { (k, v) -> put(k, v) }
         }
 
-        suspend fun viaWebView(): Pair<Int, String>? {
+        suspend fun callWebView(): Pair<Int, String>? {
             val executor = UserApiKeyAuthManager.webViewHttpExecutor ?: return null
             return try {
-                executor(url, method, formParams, mergedHeaders)?.takeIf {
-                    preserveFailure || isSuccessfulApiResponse(it.first, it.second)
-                }
+                executor(url, method, formParams, mergedHeaders)?.takeIf { it.first != 0 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -845,17 +895,50 @@ object LinuxDoRepository {
         }
         // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
         if (!method.equals("GET", true) && !method.equals("HEAD", true) && UserApiKeyAuthManager.webViewHttpExecutor != null) {
-            return@withContext viaWebView()
+            val writeResult = callWebView()
+            return@withContext writeResult?.takeIf {
+                preserveFailure || isSuccessfulApiResponse(it.first, it.second)
+            }
         }
+
+        // 只要平台已挂载同源 Chromium WebView 通道（Android），所有请求一律优先走 WebView BoringSSL 通道，
+        // 严禁先用 OkHttp (Java TLS JA3/JA4 指纹) 携带 Chrome UA 或 cf_clearance 访问 linux.do，从而彻底避免触发 Cloudflare 指纹不一致风控！
+        var firstBrowserResult: Pair<Int, String>? = null
+        if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
+            firstBrowserResult = callWebView()
+            if (firstBrowserResult != null && isSuccessfulApiResponse(firstBrowserResult.first, firstBrowserResult.second)) {
+                if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
+                return@withContext firstBrowserResult
+            }
+        }
+
         var lastResponse: Pair<Int, String>? = null
         try {
-            val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
+            val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
+            val cookieHeader = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+                .entries
+                .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
+                // 若当前平台存在 WebView，禁止将绑定了 Chromium TLS 指纹的 cf_clearance 放到 OkHttp 请求上发送，防止被 Cloudflare 判定指纹劫持而吊销
+                .filterNot { UserApiKeyAuthManager.webViewHttpExecutor != null && it.key in cfTlsBoundCookies }
+                .joinToString("; ") { "${it.key}=${it.value.value}" }
             val requestHeaders = mergedHeaders.toMutableMap()
-            UserApiKeyAuthManager.customUserAgent?.let { requestHeaders["User-Agent"] = it }
+            if (!hasWebCookie) {
+                requestHeaders.remove("Discourse-Logged-In")
+            }
+            if (UserApiKeyAuthManager.webViewHttpExecutor == null) {
+                UserApiKeyAuthManager.customUserAgent?.let { requestHeaders["User-Agent"] = it }
+            }
             if (cookieHeader.isNotEmpty()) requestHeaders["Cookie"] = cookieHeader
-            val response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
-            val status = response.status.value
-            val text = response.bodyAsText()
+            var response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+            var status = response.status.value
+            var text = response.bodyAsText()
+            // 若携带 Discourse-Logged-In 头遭遇 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次
+            if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In") && method.equals("GET", true)) {
+                requestHeaders.remove("Discourse-Logged-In")
+                response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+                status = response.status.value
+                text = response.bodyAsText()
+            }
             lastResponse = status to text
             if (isSuccessfulApiResponse(status, text)) {
                 if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
@@ -866,13 +949,19 @@ object LinuxDoRepository {
         } catch (_: Exception) {
             // A read can safely fall back to the existing authenticated browser transport.
         }
-        val browserResult = viaWebView()
-        if (browserResult != null && browserResult.first != 0) {
+        val browserResult = firstBrowserResult ?: callWebView()
+        if (browserResult != null && isSuccessfulApiResponse(browserResult.first, browserResult.second)) {
             if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
             return@withContext browserResult
         }
 
-        if (preserveFailure) lastResponse ?: browserResult else null
+        if (preserveFailure) {
+            val candidates = listOfNotNull(browserResult, lastResponse)
+            candidates.firstOrNull { it.second.trimStart().startsWith("{") || it.second.trimStart().startsWith("[") }
+                ?: candidates.firstOrNull()
+        } else {
+            null
+        }
     }
 
     /**
@@ -979,13 +1068,19 @@ object LinuxDoRepository {
         topicId: Int,
         summaryFallback: TopicSummary? = null,
         trackVisit: Boolean = true,
-        filterUsername: String? = null
+        filterUsername: String? = null,
+        targetPostNumber: Int? = null
     ): TopicDetailModel = withContext(Dispatchers.IO) {
         val queryParts = mutableListOf<String>()
         if (trackVisit) queryParts.add("track_visit=true")
         if (!filterUsername.isNullOrBlank()) queryParts.add("username_filters=$filterUsername")
         val querySuffix = if (queryParts.isNotEmpty()) "?${queryParts.joinToString("&")}" else ""
-        val url = "https://linux.do/t/$topicId.json$querySuffix"
+        val pathSegment = if (targetPostNumber != null && targetPostNumber > 1) {
+            "$topicId/$targetPostNumber.json"
+        } else {
+            "$topicId.json"
+        }
+        val url = "https://linux.do/t/$pathSegment$querySuffix"
         val extraHeaders = if (trackVisit) {
             mapOf(
                 "Discourse-Track-View" to "1",
@@ -1296,6 +1391,33 @@ object LinuxDoRepository {
     }
 
     /**
+     * 拉取帖子原始 Markdown 源文（用于无损二次编辑，优先请求 `/posts/{id}.json`，兜底 `/raw/{topicId}/{postNumber}`）
+     */
+    suspend fun fetchPostRawMarkdown(
+        postId: Int,
+        topicId: Int? = null,
+        postNumber: Int? = null
+    ): String? = withContext(Dispatchers.IO) {
+        val res = executeHttp("https://linux.do/posts/$postId.json", method = "GET")
+        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
+            val raw = runCatching {
+                val root = json.parseToJsonElement(res.second).jsonObject
+                val pObj = (root["post"] as? JsonObject) ?: root
+                pObj["raw"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            }.getOrNull()
+            if (!raw.isNullOrBlank()) return@withContext raw
+        }
+        if (topicId != null && topicId > 0 && postNumber != null && postNumber > 0) {
+            val rawRes = executeHttp("https://linux.do/raw/$topicId/$postNumber", method = "GET")
+            if (rawRes != null && rawRes.first in 200..299 && !rawRes.second.trimStart().startsWith("<!DOCTYPE", ignoreCase = true)) {
+                val text = rawRes.second.trim()
+                if (text.isNotEmpty()) return@withContext text
+            }
+        }
+        null
+    }
+
+    /**
      * 删除自己发布的评论楼层 (`DELETE /posts/{id}.json`)
      */
     suspend fun deletePost(postId: Int): Boolean = withContext(Dispatchers.IO) {
@@ -1493,17 +1615,14 @@ object LinuxDoRepository {
     private var cachedCategoryTemplates: Map<Int, String>? = null
 
     /**
-     * 从 Discourse `/site.json` 拉取各版块真实的 `topic_template`（服务端配置的发帖模板）
+     * 从 Discourse `/site.json` 同步动态版块目录与各版块真实的 `topic_template`（服务端配置的发帖模板）
      */
-    suspend fun fetchCategoryTopicTemplate(categoryId: Int): String? = withContext(Dispatchers.IO) {
-        val existing = cachedCategoryTemplates
-        if (existing != null) {
-            return@withContext existing[categoryId]?.takeIf { it.isNotBlank() }
-        }
+    suspend fun syncSiteCategories(): List<LinuxDoCategoryMeta> = withContext(Dispatchers.IO) {
         val res = executeHttp("https://linux.do/site.json", method = "GET")
         if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(res.second).jsonObject
+                mergeCategoriesFromSiteRoot(root)
                 val map = mutableMapOf<Int, String>()
                 (root["categories"] as? JsonArray)?.forEach { cElem ->
                     val cObj = cElem as? JsonObject ?: return@forEach
@@ -1514,11 +1633,19 @@ object LinuxDoRepository {
                     }
                 }
                 cachedCategoryTemplates = map
-                return@withContext map[categoryId]?.takeIf { it.isNotBlank() }
             } catch (_: Throwable) {
             }
         }
-        null
+        categories
+    }
+
+    suspend fun fetchCategoryTopicTemplate(categoryId: Int): String? = withContext(Dispatchers.IO) {
+        val existing = cachedCategoryTemplates
+        if (existing != null) {
+            return@withContext existing[categoryId]?.takeIf { it.isNotBlank() }
+        }
+        syncSiteCategories()
+        cachedCategoryTemplates?.get(categoryId)?.takeIf { it.isNotBlank() }
     }
 
     /**
@@ -1583,47 +1710,61 @@ object LinuxDoRepository {
         null
     }
 
-    /**
-     * 全局社区搜索 (`/search.json?q=...`)，支持排序筛选 (`latest`、`likes`、`views`)
-     */
-    suspend fun searchCommunity(
-        query: String,
-        order: String? = null
-    ): List<CommunitySearchResult> = withContext(Dispatchers.IO) {
-        val cleanQ = query.trim()
-        if (cleanQ.isBlank()) return@withContext emptyList()
-        val fullQuery = if (!order.isNullOrBlank()) "$cleanQ order:$order" else cleanQ
-        val encoded = java.net.URLEncoder.encode(fullQuery, "UTF-8")
-        val res = executeHttp("https://linux.do/search.json?q=$encoded", method = "GET", preserveFailure = true)
-            ?: throw ApiReadException(ApiFailureKind.Connection)
-        try {
-            val root = readApiObject(res)
-            val topicsMap = mutableMapOf<Int, JsonObject>()
-            (root["topics"] as? JsonArray)?.forEach { tElem ->
-                val tObj = tElem as? JsonObject ?: return@forEach
-                val tid = tObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                topicsMap[tid] = tObj
-            }
-            val postsArr = root.requireArray("posts")
-            postsArr.mapNotNull { pElem ->
-                val pObj = pElem as? JsonObject ?: return@mapNotNull null
-                val tid = pObj["topic_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
-                val tObj = topicsMap[tid]
-                val title = tObj?.get("title")?.jsonPrimitive?.contentOrNull
-                    ?: pObj["topic_title_headline"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")
-                    ?: "话题 #$tid"
-                val catId = tObj?.get("category_id")?.jsonPrimitive?.intOrNull ?: 4
-                val (catName, catColor) = resolveCategoryMeta(catId)
-                val blurb = pObj["blurb"]?.jsonPrimitive?.contentOrNull
-                    ?.replace(Regex("<[^>]+>"), "")?.trim() ?: ""
-                val rawTpl = pObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
-                val avatarUrl = if (rawTpl.isNotBlank()) {
-                    if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "96")
-                    else "https://linux.do${rawTpl.replace("{size}", "96")}"
-                } else ""
+    private fun cleanSearchSnippet(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
+        return raw
+            .replace(Regex("<[^>]+>"), "")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&hellip;", "...")
+            .replace("&nbsp;", " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun parseSearchResponseRoot(root: JsonObject): List<CommunitySearchResult> {
+        val topicsMap = LinkedHashMap<Int, JsonObject>()
+        (root["topics"] as? JsonArray)?.forEach { tElem ->
+            val tObj = tElem as? JsonObject ?: return@forEach
+            val tid = tObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            topicsMap[tid] = tObj
+        }
+        val postsArr = root["posts"] as? JsonArray
+        val hasGrouped = root.containsKey("grouped_search_result") || root.containsKey("users") || root.containsKey("topics")
+        if (postsArr == null && !hasGrouped) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload)
+        }
+        val seenTopicPostKeys = HashSet<String>()
+        val results = mutableListOf<CommunitySearchResult>()
+
+        postsArr?.forEach { pElem ->
+            val pObj = pElem as? JsonObject ?: return@forEach
+            val tid = pObj["topic_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            val postNum = pObj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
+            val tObj = topicsMap[tid]
+            val rawTitle = tObj?.get("title")?.jsonPrimitive?.contentOrNull
+                ?: tObj?.get("fancy_title")?.jsonPrimitive?.contentOrNull
+                ?: pObj["topic_title_headline"]?.jsonPrimitive?.contentOrNull
+                ?: "话题 #$tid"
+            val title = cleanSearchSnippet(rawTitle).ifBlank { "话题 #$tid" }
+            val catId = tObj?.get("category_id")?.jsonPrimitive?.intOrNull ?: 4
+            val (catName, catColor) = resolveCategoryMeta(catId)
+            val blurb = cleanSearchSnippet(pObj["blurb"]?.jsonPrimitive?.contentOrNull)
+            val rawTpl = pObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
+            val avatarUrl = if (rawTpl.isNotBlank()) {
+                if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "96")
+                else "https://linux.do${rawTpl.replace("{size}", "96")}"
+            } else ""
+            seenTopicPostKeys.add("${tid}_$postNum")
+            seenTopicPostKeys.add("${tid}_1")
+            results.add(
                 CommunitySearchResult(
                     topicId = tid,
-                    postNumber = pObj["post_number"]?.jsonPrimitive?.intOrNull ?: 1,
+                    postNumber = postNum,
                     title = title,
                     blurb = blurb,
                     username = pObj["username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo",
@@ -1634,14 +1775,153 @@ object LinuxDoRepository {
                     likeCount = pObj["like_count"]?.jsonPrimitive?.intOrNull ?: 0,
                     postsCount = tObj?.get("posts_count")?.jsonPrimitive?.intOrNull ?: 1
                 )
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: ApiReadException) {
-            throw error
-        } catch (error: Exception) {
-            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
+            )
         }
+
+        // 补充仅出现在 topics 数组中（例如标题命中或 /search/query.json 返回）的话题条目
+        topicsMap.forEach { (tid, tObj) ->
+            if ("${tid}_1" !in seenTopicPostKeys) {
+                val rawTitle = tObj["title"]?.jsonPrimitive?.contentOrNull
+                    ?: tObj["fancy_title"]?.jsonPrimitive?.contentOrNull
+                    ?: "话题 #$tid"
+                val title = cleanSearchSnippet(rawTitle).ifBlank { "话题 #$tid" }
+                val catId = tObj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
+                val (catName, catColor) = resolveCategoryMeta(catId)
+                val tagsText = (tObj["tags"] as? JsonArray)
+                    ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.joinToString(" ") { "#$it" }
+                    .orEmpty()
+                val excerpt = cleanSearchSnippet(tObj["excerpt"]?.jsonPrimitive?.contentOrNull).ifBlank { tagsText }
+                results.add(
+                    CommunitySearchResult(
+                        topicId = tid,
+                        postNumber = 1,
+                        title = title,
+                        blurb = excerpt,
+                        username = tObj["last_poster_username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo",
+                        avatarTemplate = "",
+                        createdAtText = formatRelativeTime(
+                            tObj["created_at"]?.jsonPrimitive?.contentOrNull
+                                ?: tObj["last_posted_at"]?.jsonPrimitive?.contentOrNull
+                        ),
+                        categoryName = catName,
+                        categoryColorHex = catColor,
+                        likeCount = tObj["like_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        postsCount = tObj["posts_count"]?.jsonPrimitive?.intOrNull ?: 1
+                    )
+                )
+            }
+        }
+
+        return results
+    }
+
+    /**
+     * 全局社区搜索（双通道：优先联动 `/search/query.json?term=...` 与 `/search.json?q=...`，
+     * 若未登录或站点搜索限流，自动回退检索最新与热门话题池，确保全站搜索在任何状态下可用）
+     */
+    suspend fun searchCommunity(
+        query: String,
+        order: String? = null
+    ): List<CommunitySearchResult> = withContext(Dispatchers.IO) {
+        val cleanQ = query.trim()
+        if (cleanQ.isBlank()) return@withContext emptyList()
+        val fullQuery = if (!order.isNullOrBlank()) "$cleanQ order:$order" else cleanQ
+        val encoded = java.net.URLEncoder.encode(fullQuery, "UTF-8")
+
+        val endpoints = if (order.isNullOrBlank()) {
+            listOf(
+                "https://linux.do/search/query.json?term=$encoded",
+                "https://linux.do/search.json?q=$encoded"
+            )
+        } else {
+            listOf(
+                "https://linux.do/search.json?q=$encoded",
+                "https://linux.do/search/query.json?term=$encoded"
+            )
+        }
+
+        var lastApiError: ApiReadException? = null
+        for (endpoint in endpoints) {
+            val res = executeHttp(endpoint, method = "GET", preserveFailure = true)
+            if (res != null) {
+                try {
+                    val root = readApiObject(res)
+                    val parsed = parseSearchResponseRoot(root)
+                    if (parsed.isNotEmpty()) {
+                        return@withContext parsed
+                    }
+                    lastApiError = null
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (apiErr: ApiReadException) {
+                    lastApiError = apiErr
+                } catch (err: Exception) {
+                    lastApiError = ApiReadException(ApiFailureKind.InvalidPayload, err)
+                }
+            }
+        }
+
+        // 若因未登录 / Cloudflare 搜索接口 403 / 429 限流导致主搜索接口被拦截，自动通过公开话题流 (latest + top + tag) 进行兜底检索
+        if (lastApiError != null) {
+            val fallbackPool = LinkedHashMap<Int, TopicSummary>()
+            runCatching {
+                fetchTopics("latest.json").forEach { fallbackPool[it.id] = it }
+            }
+            runCatching {
+                fetchTopics("top.json", topPeriod = "weekly").forEach { fallbackPool.putIfAbsent(it.id, it) }
+            }
+            if (!cleanQ.contains(" ") && cleanQ.length <= 16) {
+                runCatching {
+                    fetchTopics("latest.json", tag = cleanQ.removePrefix("#")).forEach { fallbackPool.putIfAbsent(it.id, it) }
+                }
+            }
+            if (fallbackPool.isNotEmpty()) {
+                val keywords = cleanQ.lowercase()
+                    .removePrefix("@")
+                    .removePrefix("#")
+                    .split(Regex("\\s+"))
+                    .filter { it.isNotBlank() }
+                val matched = fallbackPool.values.filter { t ->
+                    val hay = buildString {
+                        append(t.title).append(' ')
+                        append(t.excerpt.orEmpty()).append(' ')
+                        append(t.originalPoster.username).append(' ')
+                        append(t.originalPoster.name.orEmpty()).append(' ')
+                        append(t.categoryName).append(' ')
+                        t.tags.forEach { append(it).append(' ') }
+                    }.lowercase()
+                    keywords.all { kw -> hay.contains(kw) }
+                }
+                val sorted = when (order) {
+                    "latest" -> matched
+                    "likes" -> matched.sortedByDescending { it.likeCount }
+                    else -> matched.sortedByDescending {
+                        val titleHit = if (it.title.contains(cleanQ, ignoreCase = true)) 10000 else 0
+                        titleHit + it.likeCount * 3 + it.postsCount
+                    }
+                }
+                return@withContext sorted.map { t ->
+                    CommunitySearchResult(
+                        topicId = t.id,
+                        postNumber = 1,
+                        title = t.title,
+                        blurb = t.excerpt.orEmpty().ifBlank { t.tags.joinToString(" ") { "#$it" } },
+                        username = t.originalPoster.username,
+                        avatarTemplate = t.originalPoster.avatarTemplate,
+                        createdAtText = t.lastPostedAt,
+                        categoryName = t.categoryName,
+                        categoryColorHex = t.categoryColorHex,
+                        likeCount = t.likeCount,
+                        postsCount = t.postsCount
+                    )
+                }
+            }
+            throw lastApiError
+        }
+
+        emptyList()
     }
 
     /**
@@ -1956,6 +2236,9 @@ object LinuxDoRepository {
         val likedByMe = !myReactionId.isNullOrBlank()
 
         val bookmarkedByMe = pObj["bookmarked"]?.jsonPrimitive?.booleanOrNull ?: false
+        val canEdit = pObj["can_edit"]?.jsonPrimitive?.booleanOrNull ?: true
+        val canDelete = pObj["can_delete"]?.jsonPrimitive?.booleanOrNull ?: false
+        val rawMarkdown = pObj["raw"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
         val inlineBadges = parseInlinePostBadges(pObj["user_badges"])
 
         return PostItemModel(
@@ -1991,7 +2274,10 @@ object LinuxDoRepository {
             likedByMe = likedByMe,
             myReactionId = myReactionId,
             reactions = parsedReactions,
-            bookmarkedByMe = bookmarkedByMe
+            bookmarkedByMe = bookmarkedByMe,
+            canEdit = canEdit,
+            canDelete = canDelete,
+            raw = rawMarkdown
         )
     }
 
@@ -2246,6 +2532,9 @@ object LinuxDoRepository {
                 val dataStr = obj["data"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 var title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 var rawReply = ""
+                var draftCategoryId: Int? = obj["category_id"]?.jsonPrimitive?.intOrNull
+                var draftTags: List<String> = emptyList()
+                var replyToPostNumber: Int? = null
                 if (dataStr.trimStart().startsWith("{")) {
                     runCatching {
                         val dObj = json.parseToJsonElement(dataStr).jsonObject
@@ -2253,9 +2542,18 @@ object LinuxDoRepository {
                             title = dObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
                         }
                         rawReply = dObj["reply"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                        if (draftCategoryId == null) {
+                            draftCategoryId = dObj["categoryId"]?.jsonPrimitive?.intOrNull
+                                ?: dObj["category_id"]?.jsonPrimitive?.intOrNull
+                        }
+                        draftTags = parseTagsArray(dObj["tags"] as? JsonArray)
+                        replyToPostNumber = dObj["postId"]?.jsonPrimitive?.intOrNull
+                            ?: dObj["replyToPostNumber"]?.jsonPrimitive?.intOrNull
                     }
                 }
-                val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
+                val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull
+                    ?: draftKey.removePrefix("topic_").toIntOrNull()
+                    ?: 0
                 val createdAt = formatRelativeTime(obj["created_at"]?.jsonPrimitive?.contentOrNull)
                 CloudDraftItem(
                     draftKey = draftKey,
@@ -2263,7 +2561,11 @@ object LinuxDoRepository {
                     title = title.ifBlank { if (topicId > 0) "回复话题 #$topicId" else "未命名新话题草稿" },
                     excerpt = rawReply.replace(Regex("<[^>]+>"), "").trim(),
                     topicId = topicId,
-                    createdAtText = createdAt
+                    createdAtText = createdAt,
+                    raw = rawReply,
+                    categoryId = draftCategoryId,
+                    tags = draftTags,
+                    replyToPostNumber = replyToPostNumber
                 )
             }
         } catch (cancelled: CancellationException) {
@@ -2585,5 +2887,9 @@ data class CloudDraftItem(
     val title: String,
     val excerpt: String,
     val topicId: Int,
-    val createdAtText: String
+    val createdAtText: String,
+    val raw: String = "",
+    val categoryId: Int? = null,
+    val tags: List<String> = emptyList(),
+    val replyToPostNumber: Int? = null
 )

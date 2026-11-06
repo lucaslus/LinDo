@@ -21,9 +21,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -188,19 +185,18 @@ fun FlairBadgeOverlay(
     val bgColor = LinuxDoSiteRules.parseHexColor(flair.bgColorHex, fallback = Color.Transparent)
     val fgColor = LinuxDoSiteRules.parseHexColor(flair.fgColorHex, fallback = Color.White)
 
-    if (isImageUrl && !rawUrl.endsWith(".svg", ignoreCase = true)) {
+    if (isImageUrl) {
         val fullImgUrl = LinuxDoSiteRules.resolveUrl(rawUrl)
         Box(
             modifier = modifier
                 .size(badgeSize)
-                .clip(CircleShape)
-                .let { m -> if (hasCustomBg) m.background(bgColor) else m },
+                .let { m -> if (hasCustomBg) m.clip(CircleShape).background(bgColor) else m },
             contentAlignment = Alignment.Center
         ) {
             AsyncImage(
                 model = fullImgUrl,
                 contentDescription = flair.name,
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -332,6 +328,15 @@ fun PostGrantedBadgeIcon(
                 AsyncImage(
                     model = visual.url,
                     contentDescription = badge.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+            is ResolvedBadgeVisual.SvgImage -> {
+                AsyncImage(
+                    model = visual.url,
+                    contentDescription = badge.name,
+                    contentScale = ContentScale.Fit,
                     modifier = Modifier.size(14.dp)
                 )
             }
@@ -345,7 +350,7 @@ fun PostGrantedBadgeIcon(
             }
             else -> {
                 Icon(
-                    imageVector = Icons.Default.Star,
+                    imageVector = LinDoIcons.AwardBadge,
                     contentDescription = badge.name,
                     tint = tierColor,
                     modifier = Modifier.size(13.5.dp)

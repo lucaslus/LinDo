@@ -1,0 +1,327 @@
+{
+  "date": "2026-11-06",
+  "commit": "af0db5a0ca4d67bfcbc4bbdae16601b9c4e4305b",
+  "source_inventory": [
+    {
+      "path": "composeApp/src/androidMain/AndroidManifest.xml",
+      "sha256": "595465bb7296bbe33dd2ab16274eb1a10b39069a94c353775ecfd1b26443a2f1"
+    },
+    {
+      "path": "composeApp/src/androidMain/kotlin/do_/linux/lindo/InstalledIconPreview.kt",
+      "sha256": "29cf9bfe4d1c5b8409d1dc54699b60544242fbc9e9c32b85ee5f35881988cfaf"
+    },
+    {
+      "path": "composeApp/src/androidMain/kotlin/do_/linux/lindo/MainActivity.kt",
+      "sha256": "609a94859724db3c51b72424704da792e9ae47cff72a42c12437ff107dec708b"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/drawable/ic_lindo_foreground.xml",
+      "sha256": "cddc9eda28b4ab6e49e6f02570b9791f3797772968cfa775c2c55432ea69310b"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-anydpi-v26/ic_launcher.xml",
+      "sha256": "e381076a7350b5cb60962314ccc79a02ecf0c5af49fe368d88235637eaeb2705"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-anydpi-v26/ic_launcher_round.xml",
+      "sha256": "e381076a7350b5cb60962314ccc79a02ecf0c5af49fe368d88235637eaeb2705"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-hdpi/ic_launcher.png",
+      "sha256": "701d662403a2e2a08c3b8f4ef6bbd457d883759b79614fbb38ef613b55579366"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-hdpi/ic_launcher_round.png",
+      "sha256": "f5474d5ba487cbd79fcdb0cbf3631bd8c185209c0e4c95f9a39e26fd6f81bea8"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-mdpi/ic_launcher.png",
+      "sha256": "b44ab28229d03aaad07debb98fe29c99c57a3bec7559ec4c0c8a75de51d2ef8f"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-mdpi/ic_launcher_round.png",
+      "sha256": "c72a71283987fe313c5282aa4011d2299d0133f167e6a40490d76be343df7998"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-xhdpi/ic_launcher.png",
+      "sha256": "d6f50c81c5a84174ebbf004a4956e9083241bdd1c1adffd6ad665880334d7ba0"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-xhdpi/ic_launcher_round.png",
+      "sha256": "aa570faa27a47a77a1cf957ab3cabbde81ba764ac6bd2f3b354095e81af2ceb8"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-xxhdpi/ic_launcher.png",
+      "sha256": "18c61ac7351cfcdf07a0f68dec61ce9d942f9c4b05a64835a29e853f35606258"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-xxhdpi/ic_launcher_round.png",
+      "sha256": "5c974eb1139fa17e7e09d8e882de718baff2ffa5a8216a4be9d30a3863c4825f"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-xxxhdpi/ic_launcher.png",
+      "sha256": "3232a97912134f3686714cc569024e2a64e8bae58154b3689255c208426639eb"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/mipmap-xxxhdpi/ic_launcher_round.png",
+      "sha256": "a66235cc15f5f2c9f57be7e953f1122fff22f61070cea268d1606349ed602f16"
+    },
+    {
+      "path": "composeApp/src/androidMain/res/values/colors.xml",
+      "sha256": "f2812b3677abadda68cbd1ab8b4829000d28fbca8681607fb32770f83a6882ef"
+    },
+    {
+      "path": "composeApp/src/commonMain/composeResources/drawable/lindo_brand_mark.xml",
+      "sha256": "97a826dc9a7b22d9fb7bd0b8b4391a4d5ce9a92377f9a813a0af71660eb26d6d"
+    },
+    {
+      "path": "composeApp/src/commonMain/composeResources/drawable/lindo_mascot_connecting.xml",
+      "sha256": "aff6db1a6459dbbf1f690efb170b69d99cfd94316305a958c1353cec2272ee64"
+    },
+    {
+      "path": "composeApp/src/commonMain/composeResources/drawable/lindo_mascot_welcome.xml",
+      "sha256": "98ca1226f81f79d729717c71a10b8b13f54b1a87f3dbb06f75a0e7efd74b90d2"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/badge/UniversalBadgeEngine.kt",
+      "sha256": "5fe8eda857dbe536215ca73c1fe8b28274ae1e2eeb0f2076675b2b17e3462e29"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/connect/ConnectAndActivityEngine.kt",
+      "sha256": "56ada72cc3d6c4ff9660f8781c1959c3949ac7b82f39f9e128c120e23dfd941c"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/model/LinuxDoModels.kt",
+      "sha256": "608cea26d410c9fcf96a486ea1ed2190fac2953e03ea05bd3b66a9e061309409"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/ApiReadResult.kt",
+      "sha256": "e57eba1a057b32bd20e29a89804280c685a1ffaa9ff385c92659acd83938bc13"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/ApiTransport.kt",
+      "sha256": "0d06d7803aba8af57f14a5967b64baf548eca139f234bbb508f6a9ce30f8b7ac"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+      "sha256": "33f46c1c8c33dd1fd7644199c434e36f42bfa47eb2c5be01882e82ec9c759ca0"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/render/DiscourseAstRenderer.kt",
+      "sha256": "529e184cb222bc059bc21c2e0d3b0ba29db0a6d8b002136c44b20142adf9ed14"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/site/LinuxDoSiteRules.kt",
+      "sha256": "9d09a4f911f401f4c33ed3d49ecb629d15fdd391bbeba00192bffc7db73fedbd"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LinDoApp.kt",
+      "sha256": "c3275d40845f7cb1a6e0cea7728d6d01251b4e377e153c81f1793efbe353dabe"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LinDoBrand.kt",
+      "sha256": "4705628fabb24a9b56b780e7cf2b828521b4172e97d5097fc20c7cb8eee555c9"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LinDoMascot.kt",
+      "sha256": "d653507d912639b764e17288f8109203f91f4bbb73ef8f53f08b9ee62af6b64d"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/PostRichContent.kt",
+      "sha256": "5bfa341fc5ffb45791fee35d737a8e06ff87432e3bb00ea1b632d70ff269a2ed"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/components/LinDoIcons.kt",
+      "sha256": "ab8e206470bceacf2c366f6b04686491992884647507af9f4a71688ef03f5f36"
+    },
+    {
+      "path": "composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/components/SmartAvatarAndBadges.kt",
+      "sha256": "6b8bb1b87a30290f31113c06ecbabde476f0bb15dd758e14494873cc96521183"
+    },
+    {
+      "path": "composeApp/src/commonTest/kotlin/do_/linux/lindo/LinDoCoreTest.kt",
+      "sha256": "ce679e1ee46bbcdb87e2fe6b58b5573021985e501927b21cf1e60e381581cd77"
+    },
+    {
+      "path": "composeApp/src/commonTest/kotlin/do_/linux/lindo/LinDoRegressionTest.kt",
+      "sha256": "37b7b5b95dae1d0d23672e3f501cc866530c7bb7d137052d5f132e722ad1cbfb"
+    },
+    {
+      "path": "composeApp/src/commonTest/kotlin/do_/linux/lindo/RichContentAndLoadingTest.kt",
+      "sha256": "803f1cf250c7976d142f81ec08311ba99f10766b7ac51a7067a9d3b8e30e19ec"
+    },
+    {
+      "path": "composeApp/src/commonTest/resources/connect-current-layout.html",
+      "sha256": "4773d1449898afd785f959556ec19d2340c459e42d837d5644a956ad0ba36426"
+    },
+    {
+      "path": "composeApp/src/commonTest/resources/rich-content.html",
+      "sha256": "215119024b91469fe42662dc1d5fccab0c20212aa14d5279ce6c21b725168fd9"
+    },
+    {
+      "path": "composeApp/src/desktopMain/kotlin/do_/linux/lindo/Main.kt",
+      "sha256": "b967ccf6fbb4da36d81a52c8e06da6fa982772ef82eb95984e1c0651b960dc39"
+    }
+  ],
+  "symbol_usage": {
+    "toggleFollowUser": [
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 2293,
+        "text": "suspend fun toggleFollowUser(username: String, follow: Boolean = true): Boolean = withContext(Dispatchers.IO) {"
+      }
+    ],
+    "voteInPoll": [
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 2306,
+        "text": "suspend fun voteInPoll(postId: Int, pollName: String, options: List<String>): Boolean = withContext(Dispatchers.IO) {"
+      }
+    ],
+    "acceptPostSolution": [
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 2325,
+        "text": "suspend fun acceptPostSolution(postId: Int): Boolean = withContext(Dispatchers.IO) {"
+      }
+    ],
+    "flagPost": [
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 2338,
+        "text": "suspend fun flagPost(postId: Int, flagTypeId: Int = 4, message: String = \"\"): Boolean = withContext(Dispatchers.IO) {"
+      }
+    ]
+  },
+  "searches": {
+    "Boost业务候选": [],
+    "Web文件选择桥": [],
+    "Web下载桥": [],
+    "Web媒体权限桥": [],
+    "通知系统权限": [],
+    "分享接收": [],
+    "实时客户端": [],
+    "删除能力": [],
+    "编辑原始正文请求": [
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 1267,
+        "text": "* 编辑自己发布的帖子/评论楼层 (`PUT /posts/{id}.json`)"
+      },
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 1281,
+        "text": "url = \"https://linux.do/posts/$postId.json\","
+      },
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 1299,
+        "text": "* 删除自己发布的评论楼层 (`DELETE /posts/{id}.json`)"
+      },
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 1303,
+        "text": "url = \"https://linux.do/posts/$postId.json\","
+      },
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 1320,
+        "text": "val reactionUrl = \"https://linux.do/discourse-reactions/posts/$postId/custom-reactions/heart/toggle.json\""
+      },
+      {
+        "file": "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/LinDoNetworkStack.kt",
+        "line": 1676,
+        "text": "val url = \"https://linux.do/discourse-reactions/posts/$postId/custom-reactions/$reactionId/toggle.json\""
+      }
+    ]
+  },
+  "tests": {
+    "testDebugUnitTest": {
+      "tests": 32,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "cases": [
+        "testCookieSentinelDeduplicatesCriticalSessionCookies",
+        "testSvgBadgeAndDynamicSpriteNeverDrop",
+        "testTopLevelUserBadgesInjectionSupportsBothMapAndList",
+        "testDiscourseAstParserExtractsBlocksAndCaches",
+        "testSvgMagicByteSniffing",
+        "testSiteRulesNeoSquareAvatarAndHolographicTitle",
+        "testUserPresenceAndScreenTrackAndConnectStats",
+        "identicalFloorNumbersInDifferentTopicsAreDistinctReads",
+        "profileTotalsAreNeverPresentedAsLiveConnectQualification",
+        "mutatingRequestsPreserveTheirActualHttpVerb",
+        "pollingTheSameViewportDoesNotFabricateContinuousScrolling",
+        "missingConnectDataHasNoInventedMinimumCounts",
+        "leavingATopicRetainsUnsentReadingTime",
+        "fractionalReadingTicksAccumulateWithoutRoundingEachTick",
+        "currentOfficialThemeGroupsAndTitlesAreRecognized",
+        "backgroundTimeIsExcludedWhenReadingResumes",
+        "htmlChallengesAndRedirectsAreNotSuccessfulApiResponses",
+        "differentContentsWithIdenticalHashesNeverShareParsedPosts",
+        "negativeQualificationBadgeCannotMatchPositiveChineseSubstring",
+        "concurrentCookieReadsAndWritesDoNotCorruptTheSharedStore",
+        "officialConnectLayoutIncludesAllTenMetricsAndUpperBoundQuotas",
+        "quotesAndDetailsKeepRichChildren",
+        "onlyExplicitEmptyArraysCountAsEmptySuccess",
+        "unsupportedInteractiveContentGetsAnExplicitNode",
+        "invalidResponsesNeverBecomeSuccessfulEmptyResults",
+        "imagesOutsideParagraphsAndNestedLightboxesRetainOrder",
+        "tablesAndMergedCellFallbackKeepAllContent",
+        "preservesNestedInlineStylesAndSafeLinks",
+        "entitiesEmojiAndCodeWhitespaceArePreserved",
+        "nestedListsAndOrderedOffsetsSurvive",
+        "realisticCookedFixtureContainsAllImportantBlocks",
+        "unsafeUrlsCannotBecomeClickableOrLoadable"
+      ]
+    },
+    "desktopTest": {
+      "tests": 32,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "cases": [
+        "testCookieSentinelDeduplicatesCriticalSessionCookies[desktop]",
+        "testSvgBadgeAndDynamicSpriteNeverDrop[desktop]",
+        "testTopLevelUserBadgesInjectionSupportsBothMapAndList[desktop]",
+        "testDiscourseAstParserExtractsBlocksAndCaches[desktop]",
+        "testSvgMagicByteSniffing[desktop]",
+        "testSiteRulesNeoSquareAvatarAndHolographicTitle[desktop]",
+        "testUserPresenceAndScreenTrackAndConnectStats[desktop]",
+        "identicalFloorNumbersInDifferentTopicsAreDistinctReads[desktop]",
+        "profileTotalsAreNeverPresentedAsLiveConnectQualification[desktop]",
+        "mutatingRequestsPreserveTheirActualHttpVerb[desktop]",
+        "pollingTheSameViewportDoesNotFabricateContinuousScrolling[desktop]",
+        "missingConnectDataHasNoInventedMinimumCounts[desktop]",
+        "leavingATopicRetainsUnsentReadingTime[desktop]",
+        "fractionalReadingTicksAccumulateWithoutRoundingEachTick[desktop]",
+        "currentOfficialThemeGroupsAndTitlesAreRecognized[desktop]",
+        "backgroundTimeIsExcludedWhenReadingResumes[desktop]",
+        "htmlChallengesAndRedirectsAreNotSuccessfulApiResponses[desktop]",
+        "differentContentsWithIdenticalHashesNeverShareParsedPosts[desktop]",
+        "negativeQualificationBadgeCannotMatchPositiveChineseSubstring[desktop]",
+        "concurrentCookieReadsAndWritesDoNotCorruptTheSharedStore[desktop]",
+        "officialConnectLayoutIncludesAllTenMetricsAndUpperBoundQuotas[desktop]",
+        "quotesAndDetailsKeepRichChildren[desktop]",
+        "onlyExplicitEmptyArraysCountAsEmptySuccess[desktop]",
+        "unsupportedInteractiveContentGetsAnExplicitNode[desktop]",
+        "invalidResponsesNeverBecomeSuccessfulEmptyResults[desktop]",
+        "imagesOutsideParagraphsAndNestedLightboxesRetainOrder[desktop]",
+        "tablesAndMergedCellFallbackKeepAllContent[desktop]",
+        "preservesNestedInlineStylesAndSafeLinks[desktop]",
+        "entitiesEmojiAndCodeWhitespaceArePreserved[desktop]",
+        "nestedListsAndOrderedOffsetsSurvive[desktop]",
+        "realisticCookedFixtureContainsAllImportantBlocks[desktop]",
+        "unsafeUrlsCannotBecomeClickableOrLoadable[desktop]"
+      ]
+    }
+  },
+  "build": {
+    "command": "./gradlew :composeApp:testDebugUnitTest :composeApp:desktopTest :composeApp:assembleDebug --console=plain",
+    "java_home": "/Users/lucas/Library/Java/JavaVirtualMachines/sdkman-21.0.12+1.1-zulu.jdk/Contents/Home",
+    "result": "BUILD SUCCESSFUL",
+    "note": "Android Studio 自带Java25首次启动不兼容，改用现有Java21后完整通过；同32个逻辑测试在Android/desktop分别执行。构建警告不等于业务已验收。",
+    "log_sha256": "9e5845a26ec68634275a798e944b17a65331e3a433d32f58d93426c0f09baada"
+  }
+}

@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.ui.components.LinDoIcons
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_brand_mark
 import lindo.composeapp.generated.resources.lindo_mascot_welcome
@@ -117,30 +118,48 @@ fun LinDoStatePanel(
     title: String = state.title,
     detail: String? = state.detail,
     onRetry: (() -> Unit)? = null,
-    actionLabel: String = "再试一次",
+    actionLabel: String = "刷新",
     modifier: Modifier = Modifier
 ) {
     val dark = LocalLinDoDarkTheme.current
+    val secondaryText = if (dark) Color(0xFFB8AFA2) else Color(0xFF746C61)
+    val displayText = detail?.takeIf { it.isNotBlank() } ?: title
     Column(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 14.dp)
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        LinDoMascot(state = state)
-        Spacer(Modifier.height(12.dp))
-        Text(title, color = if (dark) Color(0xFFF5F0E8) else Color(0xFF342820),
-            fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, lineHeight = 23.sp)
-        if (!detail.isNullOrBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Text(detail, color = if (dark) Color(0xFFB8AFA2) else Color(0xFF746C61),
-                fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 19.sp)
-        }
+        LinDoMascot(state = state, size = 64.dp)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = displayText,
+            color = secondaryText,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Normal,
+            textAlign = TextAlign.Center,
+            lineHeight = 18.sp
+        )
         if (onRetry != null) {
-            Spacer(Modifier.height(16.dp))
-            Button(onClick = onRetry, modifier = Modifier.heightIn(min = 48.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF6B73C), contentColor = Color(0xFF342820)),
-                shape = RoundedCornerShape(15.dp)) {
-                Text(actionLabel, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            TextButton(
+                onClick = onRetry,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.Refresh,
+                    contentDescription = "刷新",
+                    modifier = Modifier.size(13.5.dp),
+                    tint = secondaryText
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = "刷新",
+                    color = secondaryText,
+                    fontSize = 11.8.sp,
+                    fontWeight = FontWeight.Medium
+                )
             }
         }
     }
@@ -220,11 +239,32 @@ fun LinDoMascotGallery(onClose: () -> Unit, onThemeChanged: (Boolean) -> Unit = 
 /** Inline failure is never represented by the successful-empty illustration. */
 @Composable
 fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        LinDoMascot(LinDoMascotState.NetworkError, size = 24.dp, compact = true, animate = false)
-        Spacer(Modifier.width(8.dp))
-        Text(message, Modifier.weight(1f), fontSize = 13.sp, lineHeight = 20.sp,
-            color = if (LocalLinDoDarkTheme.current) Color(0xFFF0D4B0) else Color(0xFF765020))
-        TextButton(onClick = onRetry, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
+    val secondaryText = if (LocalLinDoDarkTheme.current) Color(0xFFB8AFA2) else Color(0xFF746C61)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LinDoMascot(LinDoMascotState.NetworkError, size = 20.dp, compact = true, animate = false)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = message,
+            modifier = Modifier.weight(1f),
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+            color = secondaryText
+        )
+        TextButton(
+            onClick = onRetry,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+        ) {
+            Icon(
+                imageVector = LinDoIcons.Refresh,
+                contentDescription = "刷新",
+                modifier = Modifier.size(13.dp),
+                tint = secondaryText
+            )
+            Spacer(Modifier.width(4.dp))
+            Text("刷新", fontSize = 11.8.sp, color = secondaryText)
+        }
     }
 }

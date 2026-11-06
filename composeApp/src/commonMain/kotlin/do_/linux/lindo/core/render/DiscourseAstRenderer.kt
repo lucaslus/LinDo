@@ -25,7 +25,24 @@ sealed interface PostBlockNode {
     data class ImageGallery(val urls: List<String>, val captions: List<String> = emptyList()) : PostBlockNode
     data class Table(val rows: List<List<List<PostBlockNode>>>, val headerRows: Set<Int>) : PostBlockNode
     data class Media(val label: String, val url: String?, val kind: String) : PostBlockNode
-    data class Unsupported(val label: String, val text: String) : PostBlockNode
+    data class OneboxCard(
+        val title: String,
+        val description: String,
+        val url: String,
+        val domain: String,
+        val imageUrl: String? = null
+    ) : PostBlockNode
+    data class CalloutBlock(
+        val kind: String,
+        val title: String,
+        val children: List<PostBlockNode> = emptyList()
+    ) : PostBlockNode
+    data class Unsupported(
+        val label: String,
+        val text: String,
+        val options: List<String> = emptyList(),
+        val kind: String = "generic"
+    ) : PostBlockNode
     data object Divider : PostBlockNode
 }
 
@@ -91,9 +108,80 @@ object DiscourseAstParser {
             val tag = node.normalName()
             when {
                 tag in setOf("script", "style", "noscript", "template") || node.hasAttr("hidden") || node.hasClass("meta") -> Unit
-                node.hasClass("poll") -> { flush(); result += PostBlockNode.Unsupported("投票", node.wholeText().trim()) }
+                node.hasClass("poll") -> {
+                    flush()
+                    val title = node.attr("data-poll-title")
+                        .ifBlank { node.selectFirst(".poll-title, p, h3, h4")?.text().orEmpty() }
+                        .ifBlank { "社区投票" }
+                    val liOptions = node.select("li").map { it.text().trim() }.filter { it.isNotBlank() }
+                    result += PostBlockNode.Unsupported(
+                        label = title,
+                        text = node.wholeText().trim(),
+                        options = liOptions,
+                        kind = "poll"
+                    )
+                }
                 node.hasClass("math") || node.hasClass("math-container") || node.hasClass("katex") -> {
-                    flush(); result += PostBlockNode.Unsupported("数学公式", node.attr("data-math").ifBlank { node.text() })
+                    flush()
+                    result += PostBlockNode.Unsupported(
+                        label = "数学公式",
+                        text = node.attr("data-math").ifBlank { node.text() },
+                        kind = "math"
+                    )
+                }
+                tag == "aside" && node.hasClass("onebox") -> {
+                    flush()
+                    val rawUrl = node.attr("data-onebox-src")
+                        .ifBlank { node.selectFirst("header a[href], h3 a[href], h4 a[href], a[href]")?.attr("href").orEmpty() }
+                    val safeLink = safeUrl(rawUrl, allowMailto = false).orEmpty()
+                    val title = node.selectFirst("h3, h4, .onebox-body h3, .onebox-body h4, header a")?.text().orEmpty()
+                        .ifBlank { safeLink.ifBlank { "引用链接" } }
+                    val desc = node.selectFirst(".onebox-body p, p")?.text().orEmpty()
+                        .ifBlank { node.text().removePrefix(title).trim().take(180) }
+                    val domain = node.selectFirst("header .source, header a")?.text().orEmpty()
+                        .ifBlank { runCatching { URI(safeLink).host.orEmpty() }.getOrDefault("") }
+                    val thumb = node.selectFirst("img.thumbnail, .onebox-body img")?.let {
+                        safeUrl(it.attr("src").ifBlank { it.attr("data-src") }, allowMailto = false)
+                    }
+                    if (safeLink.isNotBlank()) {
+                        result += PostBlockNode.OneboxCard(
+                            title = title,
+                            description = desc,
+                            url = safeLink,
+                            domain = domain,
+                            imageUrl = thumb
+                        )
+                    } else {
+                        node.childNodes().forEach { visit(it, style, nesting + 1) }
+                        flush()
+                    }
+                }
+                node.hasClass("markdown-alert") || node.hasClass("admonition") ||
+                    node.attr("data-wrap").equals("lottery", ignoreCase = true) ||
+                    node.hasClass("linuxdo-lottery") -> {
+                    flush()
+                    val isLottery = node.attr("data-wrap").equals("lottery", ignoreCase = true) || node.hasClass("linuxdo-lottery")
+                    val kind = when {
+                        isLottery -> "lottery"
+                        node.classNames().any { it.contains("warning") || it.contains("caution") } -> "warning"
+                        node.classNames().any { it.contains("tip") || it.contains("important") } -> "tip"
+                        else -> "note"
+                    }
+                    val titleEl = node.selectFirst(".markdown-alert-title, .admonition-title, .lottery-title")
+                    val title = titleEl?.text()?.trim().orEmpty().ifBlank {
+                        when (kind) {
+                            "lottery" -> "社区抽奖活动"
+                            "warning" -> "注意"
+                            "tip" -> "提示"
+                            else -> "说明"
+                        }
+                    }
+                    val childrenNodes = blocks(node.childNodes().filter { it !== titleEl }, nesting + 1)
+                    result += PostBlockNode.CalloutBlock(
+                        kind = kind,
+                        title = title,
+                        children = childrenNodes.ifEmpty { listOf(PostBlockNode.Paragraph(node.text().trim())) }
+                    )
                 }
                 tag == "pre" -> {
                     flush(); val code = node.selectFirst("code") ?: node
@@ -119,13 +207,71 @@ object DiscourseAstParser {
                     flush(); val rows = node.select("tr").filter { it.closest("table") === node }
                     result += PostBlockNode.Table(rows.map { row -> row.children().filter { it.normalName() in setOf("td", "th") }.map { blocks(it.childNodes(), nesting + 1) } },
                         rows.mapIndexedNotNull { i, row -> if (row.children().any { it.normalName() == "th" }) i else null }.toSet())
-                    if (node.select("[rowspan], [colspan]").isNotEmpty()) result += PostBlockNode.Unsupported("合并单元格表格", "单元格内容已按顺序展示，可在原网页查看合并布局。")
+                    if (node.select("[rowspan], [colspan]").isNotEmpty()) {
+                        result += PostBlockNode.Unsupported(
+                            label = "合并单元格表格",
+                            text = "单元格内容已按顺序展示，可在原网页查看合并布局。",
+                            kind = "merged_table"
+                        )
+                    }
                 }
                 tag in setOf("video", "audio", "iframe", "object", "embed") -> {
                     flush(); val raw = node.attr("src").ifBlank { node.attr("data") }.ifBlank { node.selectFirst("source")?.attr("src").orEmpty() }
                     result += PostBlockNode.Media(node.attr("title").ifBlank { if (tag == "audio") "音频" else "视频或嵌入内容" }, safeUrl(raw, allowMailto = false), tag)
                 }
-                tag == "svg" || tag == "canvas" || tag == "form" -> { flush(); result += PostBlockNode.Unsupported("互动内容", node.text()) }
+                tag == "input" && node.attr("type").equals("checkbox", ignoreCase = true) -> {
+                    val isChecked = node.hasAttr("checked") || node.attr("checked").equals("true", ignoreCase = true)
+                    pending.add(style.copy(text = if (isChecked) "☑️ " else "⬜ "))
+                }
+                tag == "svg" -> {
+                    // Discourse 行内 FontAwesome / 标签 / 勾选框 SVG 图标原生内联映射，绝不打断段落或报“互动内容需原网页查看”
+                    val classes = node.classNames().joinToString(" ").lowercase()
+                    val useHref = node.selectFirst("use")?.let {
+                        it.attr("href").ifBlank { it.attr("xlink:href") }
+                    }.orEmpty().lowercase()
+                    val parentIsHashtag = node.parents().any { it.hasClass("hashtag-cooked") }
+                    val inlineSymbol = when {
+                        parentIsHashtag || classes.contains("d-icon-tag") || useHref.contains("tag") -> "#"
+                        classes.contains("check-square") || classes.contains("square-check") ||
+                            useHref.contains("check-square") || useHref.contains("square-check") -> "☑️ "
+                        classes.contains("far-square") || useHref == "#far-square" || useHref == "#square" -> "⬜ "
+                        classes.contains("d-icon-lock") || useHref.contains("lock") -> "🔒 "
+                        classes.contains("d-icon-thumbtack") || useHref.contains("thumbtack") -> "📌 "
+                        else -> null
+                    }
+                    if (inlineSymbol != null) {
+                        val prevText = pending.lastOrNull()?.text.orEmpty()
+                        if (inlineSymbol != "#" || !prevText.endsWith("#")) {
+                            pending.add(style.copy(text = inlineSymbol))
+                        }
+                    } else {
+                        val svgText = node.text().trim()
+                        val isDecorativeIcon = svgText.isEmpty() ||
+                            node.hasClass("d-icon") ||
+                            node.hasClass("svg-icon") ||
+                            node.hasClass("fa") ||
+                            node.hasClass("octicon") ||
+                            node.parents().any { it.hasClass("anchor") || it.hasClass("chckbx-box") }
+                        if (!isDecorativeIcon) {
+                            flush()
+                            result += PostBlockNode.CalloutBlock(
+                                kind = "svg",
+                                title = "图表内容",
+                                children = listOf(PostBlockNode.Paragraph(svgText))
+                            )
+                        }
+                    }
+                }
+                tag == "canvas" || tag == "form" -> {
+                    val inner = blocks(node.childNodes(), nesting + 1)
+                    if (inner.isNotEmpty()) {
+                        flush()
+                        result += inner
+                    } else if (node.text().isNotBlank()) {
+                        flush()
+                        result += PostBlockNode.Paragraph(node.text().trim())
+                    }
+                }
                 tag == "img" && (node.hasClass("emoji") || node.attr("src").contains("/emoji/") || node.attr("src").contains("twemoji")) ->
                     pending.add(style.copy(text = node.attr("alt").ifBlank { node.attr("title").ifBlank { "[表情]" } }, imageUrl = safeUrl(node.attr("src"), allowMailto = false)))
                 tag == "img" -> {

@@ -11,6 +11,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
@@ -28,28 +29,13 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -123,6 +109,40 @@ class MainActivity : ComponentActivity() {
     private var apiWebViewReady = CompletableDeferred<Boolean>()
     private val pendingHttpCallbacks = ConcurrentHashMap<String, CompletableDeferred<Pair<Int, String>>>()
     private var pendingMediaPickCallback: ((fileName: String, mimeType: String, bytes: ByteArray) -> Unit)? = null
+    private var pendingWebFileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    private val webFileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val callback = pendingWebFileChooserCallback
+        pendingWebFileChooserCallback = null
+        if (callback == null) return@registerForActivityResult
+        val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            ?: result.data?.clipData?.let { clip ->
+                Array(clip.itemCount) { idx -> clip.getItemAt(idx).uri }
+            }
+            ?: result.data?.data?.let { arrayOf(it) }
+        callback.onReceiveValue(uris)
+    }
+
+    private fun launchWebFileChooser(
+        filePathCallback: ValueCallback<Array<Uri>>?,
+        fileChooserParams: WebChromeClient.FileChooserParams?
+    ): Boolean {
+        if (filePathCallback == null) return false
+        pendingWebFileChooserCallback?.onReceiveValue(null)
+        pendingWebFileChooserCallback = filePathCallback
+        return runCatching {
+            val intent = fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+            }
+            webFileChooserLauncher.launch(intent)
+            true
+        }.getOrElse {
+            pendingWebFileChooserCallback = null
+            filePathCallback.onReceiveValue(null)
+            false
+        }
+    }
 
     private val mediaPickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         val callback = pendingMediaPickCallback
@@ -287,14 +307,18 @@ class MainActivity : ComponentActivity() {
                 onDismiss = onDismiss,
                 onLoginSuccess = {
                     persistSessionToDisk()
-                    // 刷新常驻 apiWebView 以同步最新 Cookie 与 CSRF
-                    apiWebView?.reload()
+                    // 同步最新 Cookie 至内存守卫（严禁调用 apiWebView.reload() 整页导航，避免 1x1 后台视口触发 Cloudflare 风控）
+                    val latestCookies = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
+                    if (latestCookies.isNotBlank()) {
+                        CookieSentinel.ingestRawCookieString(latestCookies)
+                    }
                     activityScope.launch {
                         LinuxDoRepository.fetchCurrentUserProfile()
                         persistSessionToDisk()
                     }
                     onLoginSuccess()
-                }
+                },
+                onLaunchFileChooser = ::launchWebFileChooser
             )
         }
 
@@ -362,7 +386,7 @@ class MainActivity : ComponentActivity() {
             } else if (debugPreview in listOf("rich", "search", "bookmarks", "notifications", "drafts", "history", "activity", "messages")) {
                 var openedLink by remember { mutableStateOf<String?>(null) }
                 val cooked = remember { java.io.File(filesDir, "lindo-rich-preview.html").takeIf { it.isFile && it.length() < 262144 }?.readText().orEmpty() }
-                if (openedLink != null) AndroidWebLoginModal(openedLink!!, { openedLink = null }, { openedLink = null })
+                if (openedLink != null) AndroidWebLoginModal(openedLink!!, { openedLink = null }, { openedLink = null }, ::launchWebFileChooser)
                 else LinDoReadRegressionPreview(debugPreview!!, cooked, closePreview, { openedLink = it })
             } else if (debugPreview in listOf("web", "web_crash", "connect")) {
                 AndroidWebLoginModal(initialUrl = when (debugPreview) {
@@ -370,7 +394,7 @@ class MainActivity : ComponentActivity() {
                     "connect" -> "https://connect.linux.do/"
                     else -> "https://linux.do/"
                 },
-                    onDismiss = closePreview, onLoginSuccess = closePreview)
+                    onDismiss = closePreview, onLoginSuccess = closePreview, onLaunchFileChooser = ::launchWebFileChooser)
             } else if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
                 currentIntent.getBooleanExtra("lindo.brand_preview", false)) {
                 LinDoMascotGallery(onClose = {
@@ -389,14 +413,22 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Attach 1x1 invisible apiWebView to window so Chromium keeps timers & fetch active
+        // Attach transparent apiWebView with realistic mobile viewport dimensions so Chromium keeps timers & fetch active
+        // without ever exposing a 1x1 headless viewport dimension to scripts.
         window.decorView.post {
             runCatching {
                 val root = window.decorView.findViewById<ViewGroup>(android.R.id.content)
                 val wv = apiWebView
                 if (root != null && wv != null && wv.parent == null) {
-                    val lp = FrameLayout.LayoutParams(1, 1)
-                    wv.visibility = View.INVISIBLE
+                    val dm = resources.displayMetrics
+                    val lp = FrameLayout.LayoutParams(
+                        dm.widthPixels.coerceAtLeast(360),
+                        dm.heightPixels.coerceAtLeast(640)
+                    )
+                    wv.alpha = 0f
+                    wv.isClickable = false
+                    wv.isFocusable = false
+                    wv.visibility = View.VISIBLE
                     root.addView(wv, 0, lp)
                 }
             }
@@ -407,15 +439,14 @@ class MainActivity : ComponentActivity() {
     private fun initPersistentApiWebView() {
         runCatching {
             val wv = WebView(this)
-            val cleanUa = wv.settings.userAgentString
-            UserApiKeyAuthManager.customUserAgent = cleanUa
+            // 严禁手动删改 "; wv" 或覆盖 userAgentString：
+            // 保持所有 WebView 实例的 User-Agent 与底层 Sec-CH-UA Client Hints 100% 原生一致，确保 cf_clearance 签名永不因 UA 差异失效
+            val nativeUa = wv.settings.userAgentString
+            UserApiKeyAuthManager.customUserAgent = nativeUa
             wv.settings.apply {
-                // Use the same UA as the visible browser and the native HTTP transport.
-                userAgentString = cleanUa
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
-                // 保持 WebView 原生 User-Agent 与 Sec-CH-UA Client Hints 100% 一致，避免 Cloudflare 识别出伪造 UA 指纹
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             }
             val cm = CookieManager.getInstance()
@@ -437,8 +468,19 @@ class MainActivity : ComponentActivity() {
                             val fresh = apiWebView
                             val parent = window.decorView.findViewById<ViewGroup>(android.R.id.content)
                             if (fresh != null && fresh.parent == null && parent != null) {
-                                fresh.visibility = View.INVISIBLE
-                                parent.addView(fresh, 0, FrameLayout.LayoutParams(1, 1))
+                                val dm = resources.displayMetrics
+                                fresh.alpha = 0f
+                                fresh.isClickable = false
+                                fresh.isFocusable = false
+                                fresh.visibility = View.VISIBLE
+                                parent.addView(
+                                    fresh,
+                                    0,
+                                    FrameLayout.LayoutParams(
+                                        dm.widthPixels.coerceAtLeast(360),
+                                        dm.heightPixels.coerceAtLeast(640)
+                                    )
+                                )
                             }
                         }
                     }
@@ -456,13 +498,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
             apiWebView = wv
-            // 使用轻量级同源空文档初始化 https://linux.do 上下文，瞬时就绪且避免触发整页 HTML 导航的 Cloudflare Turnstile 质询
+            // 使用轻量级同源空文档初始化 https://linux.do 上下文（historyUrl 传 null 避免 reload 触发整页 HTML 请求）
             wv.loadDataWithBaseURL(
                 "https://linux.do/",
                 "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
                 "text/html",
                 "UTF-8",
-                "https://linux.do/"
+                null
             )
         }
     }
@@ -474,7 +516,7 @@ class MainActivity : ComponentActivity() {
         headers: Map<String, String>
     ): Pair<Int, String>? {
         val wv = apiWebView ?: return null
-        withTimeoutOrNull(1500L) { apiWebViewReady.await() }
+        withTimeoutOrNull(3500L) { apiWebViewReady.await() }
 
         val reqId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Pair<Int, String>>()
@@ -488,8 +530,18 @@ class MainActivity : ComponentActivity() {
             ""
         }
 
+        // 过滤浏览器禁止脚本篡改的受保护头（Origin / Referer / Sec-Fetch-* / Cookie / User-Agent），
+        // 且不在同源 WebView fetch 中强制注入 Discourse-Logged-In（避免 Cookie 尚未同步或失效时触发 Discourse 403 InvalidAccess）
+        val forbiddenJsHeaders = setOf(
+            "origin", "referer", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site",
+            "cookie", "user-agent", "discourse-logged-in"
+        )
         val headersJson = JSONObject().apply {
-            headers.forEach { (k, v) -> put(k, v) }
+            headers.forEach { (k, v) ->
+                if (k.lowercase() !in forbiddenJsHeaders) {
+                    put(k, v)
+                }
+            }
         }.toString()
 
         val jsCode = """
@@ -563,7 +615,7 @@ class MainActivity : ComponentActivity() {
         base64Bytes: String
     ): Pair<Int, String>? {
         val wv = apiWebView ?: return null
-        withTimeoutOrNull(1500L) { apiWebViewReady.await() }
+        withTimeoutOrNull(3500L) { apiWebViewReady.await() }
 
         val reqId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Pair<Int, String>>()
@@ -656,7 +708,7 @@ class MainActivity : ComponentActivity() {
                 wv.settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
-                    UserApiKeyAuthManager.customUserAgent?.let { userAgentString = it }
+                    // 保持原生 User-Agent 与 Sec-CH-UA 完全一致
                 }
                 wv.webViewClient = object : WebViewClient() {
                     override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
@@ -709,10 +761,21 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                // Attach the temporary browser so Chromium can run navigation and JS normally.
+                // Attach the temporary browser with realistic mobile viewport dimensions so Cloudflare never sees a 1x1 viewport.
                 val parent = window.decorView.findViewById<ViewGroup>(android.R.id.content)
-                wv.visibility = View.INVISIBLE
-                parent.addView(wv, 0, FrameLayout.LayoutParams(1, 1))
+                val dm = resources.displayMetrics
+                wv.alpha = 0f
+                wv.isClickable = false
+                wv.isFocusable = false
+                wv.visibility = View.VISIBLE
+                parent.addView(
+                    wv,
+                    0,
+                    FrameLayout.LayoutParams(
+                        dm.widthPixels.coerceAtLeast(360),
+                        dm.heightPixels.coerceAtLeast(640)
+                    )
+                )
                 wv.loadUrl("https://connect.linux.do/")
             }.onFailure {
                 if (!deferred.isCompleted) deferred.complete(null)
@@ -784,7 +847,44 @@ class MainActivity : ComponentActivity() {
             cookieManager.setAcceptCookie(true)
             val webKitCookies = cookieManager.getCookie("https://linux.do").orEmpty()
             val savedCookies = prefs.getString("raw_cookies", "").orEmpty()
-            val mergedCookies = if (webKitCookies.contains("_t=")) webKitCookies else savedCookies
+            val mergedCookies = if (webKitCookies.contains("_t=") && !webKitCookies.contains("_t=demo_session_token")) {
+                webKitCookies
+            } else {
+                savedCookies.ifBlank { webKitCookies }
+            }
+            // 将持久化在磁盘中的会话 Cookie 反向写回系统 CookieManager，严格保持原生的 HttpOnly 与 Host-only/Domain 边界：
+            // 1) _t 与 _forum_session 为 Host-only + HttpOnly Cookie（绝不添加 Domain=linux.do，并清理旧版误加的 .linux.do 重复项）；
+            // 2) cf_clearance / __cf_bm / _cfuvid 为 .linux.do + HttpOnly Cookie（必须带 HttpOnly，严禁让 document.cookie 读到明文 cf_clearance 触发 Turnstile 重验）。
+            if (mergedCookies.isNotBlank()) {
+                val cfCookieNames = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
+                val discourseHostOnlyNames = setOf("_t", "_forum_session")
+                mergedCookies.split(";").forEach { segment ->
+                    val pair = segment.trim()
+                    if (pair.contains("=") && !pair.startsWith("_t=demo_session_token")) {
+                        val name = pair.substringBefore("=").trim()
+                        when (name) {
+                            in discourseHostOnlyNames -> {
+                                // 清理可能残留的 .linux.do 宽域重名 Cookie，确保仅保留唯一 Host-only HttpOnly Cookie
+                                cookieManager.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure")
+                                cookieManager.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure")
+                                cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure; HttpOnly; SameSite=Lax")
+                            }
+                            in cfCookieNames -> {
+                                // 仅当系统 CookieManager 尚未持有该 Cloudflare 凭证时才以 HttpOnly 恢复，避免破坏原生的 Partitioned 属性
+                                if (!webKitCookies.contains("$name=")) {
+                                    cookieManager.setCookie("https://linux.do", "$pair; Domain=.linux.do; Path=/; Secure; HttpOnly; SameSite=None")
+                                }
+                            }
+                            else -> {
+                                if (!webKitCookies.contains("$name=")) {
+                                    cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure")
+                                }
+                            }
+                        }
+                    }
+                }
+                cookieManager.flush()
+            }
 
             val savedApiKey = prefs.getString("api_key", null)
             val username = prefs.getString("username", null)
@@ -898,6 +998,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         activityScope.cancel()
         pendingMediaPickCallback = null
+        pendingWebFileChooserCallback?.onReceiveValue(null)
+        pendingWebFileChooserCallback = null
         pendingHttpCallbacks.values.forEach { it.cancel() }
         pendingHttpCallbacks.clear()
         UserApiKeyAuthManager.onPersistPendingKey = null
@@ -1001,7 +1103,8 @@ private val EXTRACT_PRELOADED_USER_JS = """
 private fun AndroidWebLoginModal(
     initialUrl: String,
     onDismiss: () -> Unit,
-    onLoginSuccess: () -> Unit
+    onLoginSuccess: () -> Unit,
+    onLaunchFileChooser: ((ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Boolean)? = null
 ) {
     val isLoginFlow = remember(initialUrl) {
         initialUrl.contains("/login") ||
@@ -1187,7 +1290,22 @@ private fun AndroidWebLoginModal(
                         // Rebuilding these as Domain=.linux.do would widen host-only session cookies.
                         cookieManager.flush()
 
-                        webChromeClient = WebChromeClient()
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onShowFileChooser(
+                                webView: WebView?,
+                                filePathCallback: ValueCallback<Array<Uri>>?,
+                                fileChooserParams: FileChooserParams?
+                            ): Boolean {
+                                val handler = onLaunchFileChooser ?: return false
+                                return handler(filePathCallback, fileChooserParams)
+                            }
+                        }
+
+                        setDownloadListener { url, _, _, _, _ ->
+                            if (!url.isNullOrBlank()) {
+                                UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
+                            }
+                        }
 
                         webViewClient = object : WebViewClient() {
                             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
@@ -1221,6 +1339,11 @@ private fun AndroidWebLoginModal(
                                             tryExtractSessionAndComplete(view)
                                         }
                                     }
+                                    return true
+                                }
+                                val scheme = request.url?.scheme?.lowercase().orEmpty()
+                                if (scheme.isNotBlank() && scheme != "http" && scheme != "https" && scheme != "about" && scheme != "javascript") {
+                                    UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(target)
                                     return true
                                 }
                                 return false

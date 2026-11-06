@@ -1,41 +1,11 @@
 package do_.linux.lindo.core.badge
 
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Comment
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.Book
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.Cake
-import androidx.compose.material.icons.filled.CalendarMonth
-import androidx.compose.material.icons.filled.CardGiftcard
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.EmojiEvents
-import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Handshake
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.filled.LocalFireDepartment
-import androidx.compose.material.icons.filled.MilitaryTech
-import androidx.compose.material.icons.filled.MonetizationOn
-import androidx.compose.material.icons.filled.Park
-import androidx.compose.material.icons.filled.RocketLaunch
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.ThumbUp
-import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import do_.linux.lindo.core.model.BadgeType
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.site.LinuxDoSiteRules
+import do_.linux.lindo.ui.components.LinDoIcons
 
 /**
  * 徽章渲染决议结果（绝不静默丢失任何一枚新徽章）
@@ -205,36 +175,36 @@ object UniversalBadgeEngine {
 
     private fun matchVectorIcon(key: String): ImageVector? {
         return when {
-            key.contains("crown") || key.contains("king") -> Icons.Default.WorkspacePremium
-            key.contains("trophy") || key.contains("champion") -> Icons.Default.EmojiEvents
-            key.contains("certificate") || key.contains("verified") || key.contains("id-card") -> Icons.Default.Verified
-            key.contains("shield") || key.contains("halved") || key.contains("security") -> Icons.Default.Shield
-            key.contains("seedling") || key.contains("leaf") || key.contains("tree") -> Icons.Default.Park
-            key.contains("rocket") || key.contains("shuttle") -> Icons.Default.RocketLaunch
-            key.contains("fire") || key.contains("flame") || key.contains("hot") -> Icons.Default.LocalFireDepartment
-            key.contains("bolt") || key.contains("lightning") || key.contains("flash") -> Icons.Default.Bolt
-            key.contains("heart") || key.contains("love") -> Icons.Default.Favorite
-            key.contains("star") || key.contains("sparkles") || key.contains("wand") || key.contains("magic") -> Icons.Default.AutoAwesome
-            key.contains("gem") || key.contains("diamond") -> Icons.Default.Star
-            key.contains("code") || key.contains("terminal") -> Icons.Default.Code
-            key.contains("bug") || key.contains("spider") -> Icons.Default.BugReport
-            key.contains("book") || key.contains("reader") || key.contains("graduation") -> Icons.Default.Book
-            key.contains("calendar") || key.contains("clock") -> Icons.Default.CalendarMonth
-            key.contains("cake") || key.contains("birthday") -> Icons.Default.Cake
-            key.contains("gift") || key.contains("present") -> Icons.Default.CardGiftcard
-            key.contains("coin") || key.contains("wallet") || key.contains("credit") || key.contains("ldc") -> Icons.Default.MonetizationOn
-            key.contains("compass") || key.contains("map") -> Icons.Default.Explore
-            key.contains("eye") || key.contains("view") -> Icons.Default.Visibility
-            key.contains("thumbs-up") || key.contains("like") -> Icons.Default.ThumbUp
-            key.contains("comment") || key.contains("reply") || key.contains("chat") -> Icons.AutoMirrored.Filled.Comment
-            key.contains("share") || key.contains("retweet") -> Icons.Default.Share
-            key.contains("link") || key.contains("anchor") -> Icons.Default.Link
-            key.contains("pen") || key.contains("edit") || key.contains("pencil") -> Icons.Default.Edit
-            key.contains("globe") || key.contains("earth") -> Icons.Default.Language
-            key.contains("handshake") || key.contains("friend") || key.contains("user") -> Icons.Default.Handshake
-            key.contains("check") -> Icons.Default.CheckCircle
-            key.contains("lock") -> Icons.Default.Security
-            key.contains("medal") || key.contains("award") || key.contains("ribbon") -> Icons.Default.MilitaryTech
+            key.contains("crown") || key.contains("king") -> LinDoIcons.Crown
+            key.contains("trophy") || key.contains("champion") -> LinDoIcons.Trophy
+            key.contains("certificate") || key.contains("verified") || key.contains("id-card") -> LinDoIcons.VerifiedBadge
+            key.contains("shield") || key.contains("halved") || key.contains("security") -> LinDoIcons.ShieldCheck
+            key.contains("seedling") || key.contains("leaf") || key.contains("tree") -> LinDoIcons.Seedling
+            key.contains("rocket") || key.contains("shuttle") -> LinDoIcons.Rocket
+            key.contains("fire") || key.contains("flame") || key.contains("hot") -> LinDoIcons.Flame
+            key.contains("bolt") || key.contains("lightning") || key.contains("flash") -> LinDoIcons.Bolt
+            key.contains("heart") || key.contains("love") -> LinDoIcons.Heart
+            key.contains("star") || key.contains("sparkles") || key.contains("wand") || key.contains("magic") -> LinDoIcons.Sparkles
+            key.contains("gem") || key.contains("diamond") -> LinDoIcons.Star
+            key.contains("code") || key.contains("terminal") -> LinDoIcons.Code
+            key.contains("bug") || key.contains("spider") -> LinDoIcons.Bug
+            key.contains("book") || key.contains("reader") || key.contains("graduation") -> LinDoIcons.BookOpen
+            key.contains("calendar") || key.contains("clock") -> LinDoIcons.Calendar
+            key.contains("cake") || key.contains("birthday") -> LinDoIcons.Gift
+            key.contains("gift") || key.contains("present") -> LinDoIcons.Gift
+            key.contains("coin") || key.contains("wallet") || key.contains("credit") || key.contains("ldc") -> LinDoIcons.Coins
+            key.contains("compass") || key.contains("map") -> LinDoIcons.Compass
+            key.contains("eye") || key.contains("view") -> LinDoIcons.Eye
+            key.contains("thumbs-up") || key.contains("like") -> LinDoIcons.ThumbUp
+            key.contains("comment") || key.contains("reply") || key.contains("chat") -> LinDoIcons.MessageCircle
+            key.contains("share") || key.contains("retweet") -> LinDoIcons.Share
+            key.contains("link") || key.contains("anchor") -> LinDoIcons.Link
+            key.contains("pen") || key.contains("edit") || key.contains("pencil") -> LinDoIcons.Edit
+            key.contains("globe") || key.contains("earth") -> LinDoIcons.Globe
+            key.contains("handshake") || key.contains("friend") || key.contains("user") -> LinDoIcons.Users
+            key.contains("check") -> LinDoIcons.Check
+            key.contains("lock") -> LinDoIcons.Lock
+            key.contains("medal") || key.contains("award") || key.contains("ribbon") -> LinDoIcons.AwardBadge
             else -> null
         }
     }

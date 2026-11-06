@@ -77,7 +77,13 @@ object LinDoIcons {
 
     val HomeSelected: ImageVector by lazy {
         lucideIcon("HomeSelected") {
-            strokePath(2.3f) {
+            path(
+                fill = SolidColor(Color.Black.copy(alpha = 0.14f)),
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2.2f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round
+            ) {
                 moveTo(3f, 10.2f)
                 lineTo(12f, 3f)
                 lineTo(21f, 10.2f)
@@ -87,10 +93,12 @@ object LinDoIcons {
                 curveTo(3.45f, 21f, 3f, 20.55f, 3f, 20f)
                 close()
             }
-            strokePath(2.3f) {
+            strokePath(2.2f) {
                 moveTo(9.5f, 21f)
                 verticalLineTo(14.5f)
-                horizontalLineTo(14.5f)
+                curveTo(9.5f, 13.95f, 9.95f, 13.5f, 10.5f, 13.5f)
+                horizontalLineTo(13.5f)
+                curveTo(14.05f, 13.5f, 14.5f, 13.95f, 14.5f, 14.5f)
                 verticalLineTo(21f)
             }
         }
@@ -98,7 +106,7 @@ object LinDoIcons {
 
     val Compass: ImageVector by lazy {
         lucideIcon("Compass") {
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 moveTo(12f, 21f)
                 curveTo(16.97f, 21f, 21f, 16.97f, 21f, 12f)
                 curveTo(21f, 7.03f, 16.97f, 3f, 12f, 3f)
@@ -106,7 +114,7 @@ object LinDoIcons {
                 curveTo(3f, 16.97f, 7.03f, 21f, 12f, 21f)
                 close()
             }
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 moveTo(16.24f, 7.76f)
                 lineTo(14.12f, 14.12f)
                 lineTo(7.76f, 16.24f)
@@ -118,7 +126,13 @@ object LinDoIcons {
 
     val CompassSelected: ImageVector by lazy {
         lucideIcon("CompassSelected") {
-            strokePath(2.3f) {
+            path(
+                fill = SolidColor(Color.Black.copy(alpha = 0.14f)),
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2.2f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round
+            ) {
                 moveTo(12f, 21f)
                 curveTo(16.97f, 21f, 21f, 16.97f, 21f, 12f)
                 curveTo(21f, 7.03f, 16.97f, 3f, 12f, 3f)
@@ -126,7 +140,7 @@ object LinDoIcons {
                 curveTo(3f, 16.97f, 7.03f, 21f, 12f, 21f)
                 close()
             }
-            strokePath(2.3f) {
+            strokePath(2.2f) {
                 moveTo(16.24f, 7.76f)
                 lineTo(14.12f, 14.12f)
                 lineTo(7.76f, 16.24f)
@@ -149,7 +163,7 @@ object LinDoIcons {
 
     val Bell: ImageVector by lazy {
         lucideIcon("Bell") {
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 moveTo(18f, 8f)
                 curveTo(18f, 4.69f, 15.31f, 2f, 12f, 2f)
                 curveTo(8.69f, 2f, 6f, 4.69f, 6f, 8f)
@@ -158,7 +172,7 @@ object LinDoIcons {
                 curveTo(21f, 17f, 18f, 15f, 18f, 8f)
                 close()
             }
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 moveTo(13.73f, 21f)
                 curveTo(13.37f, 21.6f, 12.71f, 22f, 12f, 22f)
                 curveTo(11.29f, 22f, 10.63f, 21.6f, 10.27f, 21f)
@@ -168,7 +182,13 @@ object LinDoIcons {
 
     val BellSelected: ImageVector by lazy {
         lucideIcon("BellSelected") {
-            strokePath(2.3f) {
+            path(
+                fill = SolidColor(Color.Black.copy(alpha = 0.14f)),
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2.2f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round
+            ) {
                 moveTo(18f, 8f)
                 curveTo(18f, 4.69f, 15.31f, 2f, 12f, 2f)
                 curveTo(8.69f, 2f, 6f, 4.69f, 6f, 8f)
@@ -177,7 +197,7 @@ object LinDoIcons {
                 curveTo(21f, 17f, 18f, 15f, 18f, 8f)
                 close()
             }
-            strokePath(2.3f) {
+            strokePath(2.2f) {
                 moveTo(13.73f, 21f)
                 curveTo(13.37f, 21.6f, 12.71f, 22f, 12f, 22f)
                 curveTo(11.29f, 22f, 10.63f, 21.6f, 10.27f, 21f)
@@ -187,7 +207,7 @@ object LinDoIcons {
 
     val User: ImageVector by lazy {
         lucideIcon("User") {
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 moveTo(20f, 21f)
                 verticalLineTo(19f)
                 curveTo(20f, 16.79f, 18.21f, 15f, 16f, 15f)
@@ -195,7 +215,7 @@ object LinDoIcons {
                 curveTo(5.79f, 15f, 4f, 16.79f, 4f, 19f)
                 verticalLineTo(21f)
             }
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 moveTo(12f, 11f)
                 curveTo(14.21f, 11f, 16f, 9.21f, 16f, 7f)
                 curveTo(16f, 4.79f, 14.21f, 3f, 12f, 3f)
@@ -208,7 +228,7 @@ object LinDoIcons {
 
     val UserSelected: ImageVector by lazy {
         lucideIcon("UserSelected") {
-            strokePath(2.3f) {
+            strokePath(2.2f) {
                 moveTo(20f, 21f)
                 verticalLineTo(19f)
                 curveTo(20f, 16.79f, 18.21f, 15f, 16f, 15f)
@@ -216,7 +236,13 @@ object LinDoIcons {
                 curveTo(5.79f, 15f, 4f, 16.79f, 4f, 19f)
                 verticalLineTo(21f)
             }
-            strokePath(2.3f) {
+            path(
+                fill = SolidColor(Color.Black.copy(alpha = 0.14f)),
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2.2f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round
+            ) {
                 moveTo(12f, 11f)
                 curveTo(14.21f, 11f, 16f, 9.21f, 16f, 7f)
                 curveTo(16f, 4.79f, 14.21f, 3f, 12f, 3f)
@@ -249,15 +275,27 @@ object LinDoIcons {
     val LayoutCards: ImageVector by lazy {
         lucideIcon("LayoutCards") {
             strokePath(1.8f) {
-                moveTo(4f, 4f)
-                horizontalLineTo(20f)
-                verticalLineTo(10f)
-                horizontalLineTo(4f)
+                // 上卡片（圆角矩形）
+                moveTo(5.5f, 4f)
+                horizontalLineTo(18.5f)
+                curveTo(19.6f, 4f, 20.5f, 4.9f, 20.5f, 6f)
+                verticalLineTo(8.5f)
+                curveTo(20.5f, 9.6f, 19.6f, 10.5f, 18.5f, 10.5f)
+                horizontalLineTo(5.5f)
+                curveTo(4.4f, 10.5f, 3.5f, 9.6f, 3.5f, 8.5f)
+                verticalLineTo(6f)
+                curveTo(3.5f, 4.9f, 4.4f, 4f, 5.5f, 4f)
                 close()
-                moveTo(4f, 14f)
-                horizontalLineTo(20f)
-                verticalLineTo(20f)
-                horizontalLineTo(4f)
+                // 下卡片（圆角矩形）
+                moveTo(5.5f, 13.5f)
+                horizontalLineTo(18.5f)
+                curveTo(19.6f, 13.5f, 20.5f, 14.4f, 20.5f, 15.5f)
+                verticalLineTo(18f)
+                curveTo(20.5f, 19.1f, 19.6f, 20f, 18.5f, 20f)
+                horizontalLineTo(5.5f)
+                curveTo(4.4f, 20f, 3.5f, 19.1f, 3.5f, 18f)
+                verticalLineTo(15.5f)
+                curveTo(3.5f, 14.4f, 4.4f, 13.5f, 5.5f, 13.5f)
                 close()
             }
         }
@@ -266,11 +304,18 @@ object LinDoIcons {
     val LayoutCompact: ImageVector by lazy {
         lucideIcon("LayoutCompact") {
             strokePath(1.8f) {
+                // 紧凑列表视图：左侧短标 + 右侧长条目线（三行高密度列表）
                 moveTo(4f, 6f)
+                horizontalLineTo(5.5f)
+                moveTo(9f, 6f)
                 horizontalLineTo(20f)
                 moveTo(4f, 12f)
+                horizontalLineTo(5.5f)
+                moveTo(9f, 12f)
                 horizontalLineTo(20f)
                 moveTo(4f, 18f)
+                horizontalLineTo(5.5f)
+                moveTo(9f, 18f)
                 horizontalLineTo(20f)
             }
         }
@@ -279,15 +324,14 @@ object LinDoIcons {
     val Heart: ImageVector by lazy {
         lucideIcon("Heart") {
             strokePath(1.8f) {
-                moveTo(20.84f, 4.61f)
-                curveTo(19.32f, 3.09f, 16.86f, 3.09f, 15.34f, 4.61f)
-                lineTo(12f, 7.95f)
-                lineTo(8.66f, 4.61f)
-                curveTo(7.14f, 3.09f, 4.68f, 3.09f, 3.16f, 4.61f)
-                curveTo(1.64f, 6.13f, 1.64f, 8.59f, 3.16f, 10.11f)
-                lineTo(12f, 18.95f)
-                lineTo(20.84f, 10.11f)
-                curveTo(22.36f, 8.59f, 22.36f, 6.13f, 20.84f, 4.61f)
+                moveTo(19f, 14f)
+                curveTo(20.49f, 12.54f, 22f, 10.79f, 22f, 8.5f)
+                curveTo(22f, 5.46f, 19.54f, 3f, 16.5f, 3f)
+                curveTo(14.74f, 3f, 13.5f, 3.5f, 12f, 5.1f)
+                curveTo(10.5f, 3.5f, 9.26f, 3f, 7.5f, 3f)
+                curveTo(4.46f, 3f, 2f, 5.46f, 2f, 8.5f)
+                curveTo(2f, 10.8f, 3.5f, 12.55f, 5f, 14f)
+                lineTo(12f, 21f)
                 close()
             }
         }
@@ -298,19 +342,18 @@ object LinDoIcons {
             path(
                 fill = SolidColor(Color.Black),
                 stroke = SolidColor(Color.Black),
-                strokeLineWidth = 1.5f,
+                strokeLineWidth = 1.6f,
                 strokeLineCap = StrokeCap.Round,
                 strokeLineJoin = StrokeJoin.Round
             ) {
-                moveTo(20.84f, 4.61f)
-                curveTo(19.32f, 3.09f, 16.86f, 3.09f, 15.34f, 4.61f)
-                lineTo(12f, 7.95f)
-                lineTo(8.66f, 4.61f)
-                curveTo(7.14f, 3.09f, 4.68f, 3.09f, 3.16f, 4.61f)
-                curveTo(1.64f, 6.13f, 1.64f, 8.59f, 3.16f, 10.11f)
-                lineTo(12f, 18.95f)
-                lineTo(20.84f, 10.11f)
-                curveTo(22.36f, 8.59f, 22.36f, 6.13f, 20.84f, 4.61f)
+                moveTo(19f, 14f)
+                curveTo(20.49f, 12.54f, 22f, 10.79f, 22f, 8.5f)
+                curveTo(22f, 5.46f, 19.54f, 3f, 16.5f, 3f)
+                curveTo(14.74f, 3f, 13.5f, 3.5f, 12f, 5.1f)
+                curveTo(10.5f, 3.5f, 9.26f, 3f, 7.5f, 3f)
+                curveTo(4.46f, 3f, 2f, 5.46f, 2f, 8.5f)
+                curveTo(2f, 10.8f, 3.5f, 12.55f, 5f, 14f)
+                lineTo(12f, 21f)
                 close()
             }
         }
@@ -319,14 +362,13 @@ object LinDoIcons {
     val MessageCircle: ImageVector by lazy {
         lucideIcon("MessageCircle") {
             strokePath(1.8f) {
-                moveTo(21f, 11.5f)
-                curveTo(21f, 16.19f, 16.97f, 20f, 12f, 20f)
-                curveTo(10.66f, 20f, 9.38f, 19.72f, 8.23f, 19.22f)
-                lineTo(3f, 20.5f)
-                lineTo(4.45f, 15.8f)
-                curveTo(3.53f, 14.55f, 3f, 13.08f, 3f, 11.5f)
-                curveTo(3f, 6.81f, 7.03f, 3f, 12f, 3f)
-                curveTo(16.97f, 3f, 21f, 6.81f, 21f, 11.5f)
+                moveTo(7.9f, 20f)
+                curveTo(9.18f, 20.65f, 10.6f, 21f, 12.1f, 21f)
+                curveTo(17.07f, 21f, 21.1f, 16.97f, 21.1f, 12f)
+                curveTo(21.1f, 7.03f, 17.07f, 3f, 12.1f, 3f)
+                curveTo(7.13f, 3f, 3.1f, 7.03f, 3.1f, 12f)
+                curveTo(3.1f, 13.5f, 3.45f, 14.92f, 4.1f, 16.2f)
+                lineTo(2.6f, 21f)
                 close()
             }
         }
@@ -377,26 +419,36 @@ object LinDoIcons {
                 curveTo(7.03f, 3f, 3f, 7.03f, 3f, 12f)
                 curveTo(3f, 16.97f, 7.03f, 21f, 12f, 21f)
                 close()
-                moveTo(8.5f, 14.5f)
-                curveTo(9.3f, 15.8f, 10.5f, 16.5f, 12f, 16.5f)
-                curveTo(13.5f, 16.5f, 14.7f, 15.8f, 15.5f, 14.5f)
-                moveTo(9f, 9.5f)
-                horizontalLineTo(9.02f)
-                moveTo(15f, 9.5f)
-                horizontalLineTo(15.02f)
+                moveTo(8.5f, 14.2f)
+                curveTo(9.4f, 15.5f, 10.6f, 16.1f, 12f, 16.1f)
+                curveTo(13.4f, 16.1f, 14.6f, 15.5f, 15.5f, 14.2f)
+            }
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(9.2f, 8.6f)
+                curveTo(9.8f, 8.6f, 10.3f, 9.1f, 10.3f, 9.7f)
+                curveTo(10.3f, 10.3f, 9.8f, 10.8f, 9.2f, 10.8f)
+                curveTo(8.6f, 10.8f, 8.1f, 10.3f, 8.1f, 9.7f)
+                curveTo(8.1f, 9.1f, 8.6f, 8.6f, 9.2f, 8.6f)
+                close()
+                moveTo(14.8f, 8.6f)
+                curveTo(15.4f, 8.6f, 15.9f, 9.1f, 15.9f, 9.7f)
+                curveTo(15.9f, 10.3f, 15.4f, 10.8f, 14.8f, 10.8f)
+                curveTo(14.2f, 10.8f, 13.7f, 10.3f, 13.7f, 9.7f)
+                curveTo(13.7f, 9.1f, 14.2f, 8.6f, 14.8f, 8.6f)
+                close()
             }
         }
     }
 
     val Reply: ImageVector by lazy {
         lucideIcon("Reply") {
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 moveTo(9f, 14f)
                 lineTo(4f, 9f)
                 lineTo(9f, 4f)
-                moveTo(20f, 20f)
-                verticalLineTo(13f)
-                curveTo(20f, 10.79f, 18.21f, 9f, 16f, 9f)
+                moveTo(20f, 19f)
+                verticalLineTo(14f)
+                curveTo(20f, 11.24f, 17.76f, 9f, 15f, 9f)
                 horizontalLineTo(4f)
             }
         }
@@ -406,17 +458,23 @@ object LinDoIcons {
         lucideIcon("Quote") {
             strokePath(1.8f) {
                 moveTo(10f, 11f)
-                horizontalLineTo(6f)
-                verticalLineTo(7f)
-                horizontalLineTo(10f)
-                verticalLineTo(13f)
-                curveTo(10f, 15.2f, 8.2f, 17f, 6f, 17f)
-                moveTo(18f, 11f)
-                horizontalLineTo(14f)
-                verticalLineTo(7f)
-                horizontalLineTo(18f)
-                verticalLineTo(13f)
-                curveTo(18f, 15.2f, 16.2f, 17f, 14f, 17f)
+                horizontalLineTo(6.5f)
+                curveTo(5.67f, 11f, 5f, 10.33f, 5f, 9.5f)
+                verticalLineTo(7.5f)
+                curveTo(5f, 6.67f, 5.67f, 6f, 6.5f, 6f)
+                horizontalLineTo(8.5f)
+                curveTo(9.33f, 6f, 10f, 6.67f, 10f, 7.5f)
+                verticalLineTo(12.5f)
+                curveTo(10f, 15f, 8.2f, 17f, 5.8f, 17.5f)
+                moveTo(19f, 11f)
+                horizontalLineTo(15.5f)
+                curveTo(14.67f, 11f, 14f, 10.33f, 14f, 9.5f)
+                verticalLineTo(7.5f)
+                curveTo(14f, 6.67f, 14.67f, 6f, 15.5f, 6f)
+                horizontalLineTo(17.5f)
+                curveTo(18.33f, 6f, 19f, 6.67f, 19f, 7.5f)
+                verticalLineTo(12.5f)
+                curveTo(19f, 15f, 17.2f, 17f, 14.8f, 17.5f)
             }
         }
     }
@@ -855,7 +913,7 @@ object LinDoIcons {
 
     val Settings: ImageVector by lazy {
         lucideIcon("Settings") {
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 // Center gear circle
                 moveTo(15f, 12f)
                 curveTo(15f, 13.66f, 13.66f, 15f, 12f, 15f)
@@ -863,23 +921,39 @@ object LinDoIcons {
                 curveTo(9f, 10.34f, 10.34f, 9f, 12f, 9f)
                 curveTo(13.66f, 9f, 15f, 10.34f, 15f, 12f)
                 close()
-                // Outer hexagon/gear teeth
-                moveTo(12f, 2.5f)
-                verticalLineTo(4.8f)
-                moveTo(12f, 19.2f)
-                verticalLineTo(21.5f)
-                moveTo(4.93f, 4.93f)
-                lineTo(6.55f, 6.55f)
-                moveTo(17.45f, 17.45f)
-                lineTo(19.07f, 19.07f)
-                moveTo(2.5f, 12f)
-                horizontalLineTo(4.8f)
-                moveTo(19.2f, 12f)
-                horizontalLineTo(21.5f)
-                moveTo(4.93f, 19.07f)
-                lineTo(6.55f, 17.45f)
-                moveTo(17.45f, 6.55f)
-                lineTo(19.07f, 4.93f)
+                // True octagon/gear contour (never confused with Sun rays)
+                moveTo(10.3f, 3f)
+                horizontalLineTo(13.7f)
+                lineTo(14.4f, 5.2f)
+                lineTo(16.4f, 6.1f)
+                lineTo(18.5f, 5.1f)
+                lineTo(20.9f, 7.5f)
+                lineTo(19.9f, 9.6f)
+                lineTo(20.8f, 11.6f)
+                lineTo(23f, 12.3f)
+                verticalLineTo(11.7f)
+                moveTo(10.3f, 3f)
+                lineTo(9.6f, 5.2f)
+                lineTo(7.6f, 6.1f)
+                lineTo(5.5f, 5.1f)
+                lineTo(3.1f, 7.5f)
+                lineTo(4.1f, 9.6f)
+                lineTo(3.2f, 11.6f)
+                lineTo(3.2f, 12.4f)
+                lineTo(4.1f, 14.4f)
+                lineTo(3.1f, 16.5f)
+                lineTo(5.5f, 18.9f)
+                lineTo(7.6f, 17.9f)
+                lineTo(9.6f, 18.8f)
+                lineTo(10.3f, 21f)
+                horizontalLineTo(13.7f)
+                lineTo(14.4f, 18.8f)
+                lineTo(16.4f, 17.9f)
+                lineTo(18.5f, 18.9f)
+                lineTo(20.9f, 16.5f)
+                lineTo(19.9f, 14.4f)
+                lineTo(20.8f, 12.4f)
+                lineTo(20.8f, 11.6f)
             }
         }
     }
@@ -1220,7 +1294,7 @@ object LinDoIcons {
 
     val Moon: ImageVector by lazy {
         lucideIcon("Moon") {
-            strokePath(1.8f) {
+            strokePath(1.85f) {
                 moveTo(21f, 12.79f)
                 curveTo(20.42f, 16.49f, 17.24f, 19.32f, 13.4f, 19.32f)
                 curveTo(9.15f, 19.32f, 5.68f, 15.85f, 5.68f, 11.6f)
@@ -1229,6 +1303,429 @@ object LinDoIcons {
                 curveTo(11.42f, 12.79f, 14.21f, 15.58f, 17.65f, 16.1f)
                 curveTo(18.88f, 16.29f, 20.06f, 16.03f, 21f, 15.42f)
                 close()
+            }
+        }
+    }
+
+    val LogOut: ImageVector by lazy {
+        lucideIcon("LogOut") {
+            strokePath(1.85f) {
+                moveTo(9f, 21f)
+                horizontalLineTo(5f)
+                curveTo(3.9f, 21f, 3f, 20.1f, 3f, 19f)
+                verticalLineTo(5f)
+                curveTo(3f, 3.9f, 3.9f, 3f, 5f, 3f)
+                horizontalLineTo(9f)
+                moveTo(16f, 17f)
+                lineTo(21f, 12f)
+                lineTo(16f, 7f)
+                moveTo(21f, 12f)
+                horizontalLineTo(9f)
+            }
+        }
+    }
+
+    val Flame: ImageVector by lazy {
+        lucideIcon("Flame") {
+            strokePath(1.85f) {
+                moveTo(8.5f, 14.5f)
+                curveTo(8.5f, 16.99f, 10.51f, 19f, 13f, 19f)
+                curveTo(16.31f, 19f, 19f, 16.31f, 19f, 13f)
+                curveTo(19f, 8.5f, 15f, 5.5f, 13.5f, 2.5f)
+                curveTo(12.8f, 5.5f, 10.5f, 7.5f, 10.5f, 10f)
+                curveTo(9.1f, 9.4f, 8.2f, 8.2f, 8f, 7f)
+                curveTo(6.2f, 9f, 5f, 11.2f, 5f, 13.5f)
+                curveTo(5f, 17.64f, 8.36f, 21f, 12.5f, 21f)
+            }
+        }
+    }
+
+    val Palette: ImageVector by lazy {
+        lucideIcon("Palette") {
+            strokePath(1.85f) {
+                moveTo(12f, 2f)
+                curveTo(6.48f, 2f, 2f, 6.48f, 2f, 12f)
+                curveTo(2f, 17.52f, 6.48f, 22f, 12f, 22f)
+                curveTo(13.38f, 22f, 14.5f, 20.88f, 14.5f, 19.5f)
+                curveTo(14.5f, 18.89f, 14.26f, 18.35f, 13.86f, 17.91f)
+                curveTo(13.48f, 17.48f, 13.25f, 16.93f, 13.25f, 16.3f)
+                curveTo(13.25f, 14.92f, 14.37f, 13.8f, 15.75f, 13.8f)
+                horizontalLineTo(17.5f)
+                curveTo(19.99f, 13.8f, 22f, 11.79f, 22f, 9.3f)
+                curveTo(22f, 5.27f, 17.52f, 2f, 12f, 2f)
+                close()
+                moveTo(7.5f, 10.5f)
+                horizontalLineTo(7.52f)
+                moveTo(10.5f, 7.5f)
+                horizontalLineTo(10.52f)
+                moveTo(14.5f, 7.5f)
+                horizontalLineTo(14.52f)
+                moveTo(17.5f, 10.5f)
+                horizontalLineTo(17.52f)
+            }
+        }
+    }
+
+    val Sliders: ImageVector by lazy {
+        lucideIcon("Sliders") {
+            strokePath(1.85f) {
+                moveTo(4f, 21f)
+                verticalLineTo(14f)
+                moveTo(4f, 10f)
+                verticalLineTo(3f)
+                moveTo(12f, 21f)
+                verticalLineTo(12f)
+                moveTo(12f, 8f)
+                verticalLineTo(3f)
+                moveTo(20f, 21f)
+                verticalLineTo(16f)
+                moveTo(20f, 12f)
+                verticalLineTo(3f)
+                moveTo(1f, 14f)
+                horizontalLineTo(7f)
+                moveTo(9f, 8f)
+                horizontalLineTo(15f)
+                moveTo(17f, 16f)
+                horizontalLineTo(23f)
+            }
+        }
+    }
+
+    val ExternalLink: ImageVector by lazy {
+        lucideIcon("ExternalLink") {
+            strokePath(1.85f) {
+                moveTo(18f, 13f)
+                verticalLineTo(19f)
+                curveTo(18f, 20.1f, 17.1f, 21f, 16f, 21f)
+                horizontalLineTo(5f)
+                curveTo(3.9f, 21f, 3f, 20.1f, 3f, 19f)
+                verticalLineTo(8f)
+                curveTo(3f, 6.9f, 3.9f, 6f, 5f, 6f)
+                horizontalLineTo(11f)
+                moveTo(15f, 3f)
+                horizontalLineTo(21f)
+                verticalLineTo(9f)
+                moveTo(10f, 14f)
+                lineTo(21f, 3f)
+            }
+        }
+    }
+
+    val ArrowRight: ImageVector by lazy {
+        lucideIcon("ArrowRight") {
+            strokePath(2.0f) {
+                moveTo(5f, 12f)
+                horizontalLineTo(19f)
+                moveTo(13f, 6f)
+                lineTo(19f, 12f)
+                lineTo(13f, 18f)
+            }
+        }
+    }
+
+    val ShieldCheck: ImageVector by lazy {
+        lucideIcon("ShieldCheck") {
+            strokePath(1.85f) {
+                moveTo(12f, 2.5f)
+                lineTo(4.5f, 5.8f)
+                verticalLineTo(11.4f)
+                curveTo(4.5f, 16.5f, 7.7f, 20.5f, 12f, 21.8f)
+                curveTo(16.3f, 20.5f, 19.5f, 16.5f, 19.5f, 11.4f)
+                verticalLineTo(5.8f)
+                close()
+                moveTo(9f, 12.2f)
+                lineTo(11.1f, 14.3f)
+                lineTo(15.2f, 10.2f)
+            }
+        }
+    }
+
+    val WifiSpeed: ImageVector by lazy {
+        lucideIcon("WifiSpeed") {
+            strokePath(1.85f) {
+                moveTo(2.5f, 9f)
+                curveTo(7.8f, 4.3f, 16.2f, 4.3f, 21.5f, 9f)
+                moveTo(5.8f, 12.5f)
+                curveTo(9.3f, 9.4f, 14.7f, 9.4f, 18.2f, 12.5f)
+                moveTo(9.2f, 16f)
+                curveTo(10.8f, 14.6f, 13.2f, 14.6f, 14.8f, 16f)
+                moveTo(12f, 19.2f)
+                lineTo(12.01f, 19.2f)
+            }
+        }
+    }
+
+    val Rocket: ImageVector by lazy {
+        lucideIcon("Rocket") {
+            strokePath(1.8f) {
+                // 火箭主舱体 (比例修长对称)
+                moveTo(12f, 15f)
+                lineTo(9f, 12f)
+                curveTo(9.8f, 10.4f, 10.8f, 8.9f, 12f, 7.6f)
+                curveTo(14.8f, 4.5f, 18.3f, 2.5f, 21.5f, 2.5f)
+                curveTo(21.5f, 5.7f, 19.5f, 9.2f, 16.4f, 12f)
+                curveTo(15.1f, 13.2f, 13.6f, 14.2f, 12f, 15f)
+                close()
+                // 舷窗
+                moveTo(15.5f, 8.5f)
+                lineTo(15.52f, 8.5f)
+                // 左翼与下翼
+                moveTo(9f, 12f)
+                horizontalLineTo(4.5f)
+                curveTo(5f, 9.5f, 6.2f, 8f, 8.2f, 7.5f)
+                moveTo(12f, 15f)
+                verticalLineTo(19.5f)
+                curveTo(14.5f, 19f, 16f, 17.8f, 16.5f, 15.8f)
+                // 尾焰
+                moveTo(4.5f, 16.5f)
+                curveTo(3.2f, 17.8f, 2.8f, 21.2f, 2.8f, 21.2f)
+                curveTo(2.8f, 21.2f, 6.2f, 20.8f, 7.5f, 19.5f)
+                curveTo(8.3f, 18.7f, 8.3f, 17.3f, 7.5f, 16.5f)
+                curveTo(6.7f, 15.7f, 5.3f, 15.7f, 4.5f, 16.5f)
+                close()
+            }
+        }
+    }
+
+    val ThumbUp: ImageVector by lazy {
+        lucideIcon("ThumbUp") {
+            strokePath(1.8f) {
+                moveTo(7f, 10f)
+                verticalLineTo(20f)
+                moveTo(15f, 5.88f)
+                lineTo(14f, 10f)
+                horizontalLineTo(19.83f)
+                curveTo(21.02f, 10f, 21.92f, 11.07f, 21.7f, 12.24f)
+                lineTo(20.3f, 19.24f)
+                curveTo(20.11f, 20.26f, 19.22f, 21f, 18.18f, 21f)
+                horizontalLineTo(5f)
+                curveTo(3.9f, 21f, 3f, 20.1f, 3f, 19f)
+                verticalLineTo(12f)
+                curveTo(3f, 10.9f, 3.9f, 10f, 5f, 10f)
+                horizontalLineTo(7.76f)
+                curveTo(8.56f, 10f, 9.29f, 9.52f, 9.6f, 8.78f)
+                lineTo(12f, 3f)
+                curveTo(13.66f, 3f, 15f, 4.34f, 15f, 6f)
+                close()
+            }
+        }
+    }
+
+    val Crown: ImageVector by lazy {
+        lucideIcon("Crown") {
+            strokePath(1.8f) {
+                moveTo(3f, 18f)
+                horizontalLineTo(21f)
+                moveTo(4f, 15f)
+                lineTo(2.5f, 6.5f)
+                lineTo(8.2f, 10.5f)
+                lineTo(12f, 4.5f)
+                lineTo(15.8f, 10.5f)
+                lineTo(21.5f, 6.5f)
+                lineTo(20f, 15f)
+                close()
+            }
+        }
+    }
+
+    val Trophy: ImageVector by lazy {
+        lucideIcon("Trophy") {
+            strokePath(1.8f) {
+                moveTo(6f, 9f)
+                horizontalLineTo(4.5f)
+                curveTo(3.12f, 9f, 2f, 7.88f, 2f, 6.5f)
+                verticalLineTo(5f)
+                horizontalLineTo(6f)
+                moveTo(18f, 9f)
+                horizontalLineTo(19.5f)
+                curveTo(20.88f, 9f, 22f, 7.88f, 22f, 6.5f)
+                verticalLineTo(5f)
+                horizontalLineTo(18f)
+                moveTo(6f, 3f)
+                horizontalLineTo(18f)
+                verticalLineTo(9f)
+                curveTo(18f, 12.31f, 15.31f, 15f, 12f, 15f)
+                curveTo(8.69f, 15f, 6f, 12.31f, 6f, 9f)
+                close()
+                moveTo(12f, 15f)
+                verticalLineTo(20f)
+                moveTo(8f, 20f)
+                horizontalLineTo(16f)
+            }
+        }
+    }
+
+    val VerifiedBadge: ImageVector by lazy {
+        lucideIcon("VerifiedBadge") {
+            strokePath(1.8f) {
+                moveTo(12f, 2.5f)
+                lineTo(14.8f, 4.6f)
+                lineTo(18.3f, 4.2f)
+                lineTo(19.2f, 7.6f)
+                lineTo(21.8f, 10f)
+                lineTo(20.5f, 13.3f)
+                lineTo(21.5f, 16.7f)
+                lineTo(18.3f, 18.4f)
+                lineTo(16.8f, 21.5f)
+                lineTo(13.3f, 20.8f)
+                lineTo(10.7f, 20.8f)
+                lineTo(7.2f, 21.5f)
+                lineTo(5.7f, 18.4f)
+                lineTo(2.5f, 16.7f)
+                lineTo(3.5f, 13.3f)
+                lineTo(2.2f, 10f)
+                lineTo(4.8f, 7.6f)
+                lineTo(5.7f, 4.2f)
+                lineTo(9.2f, 4.6f)
+                close()
+                moveTo(9f, 12.2f)
+                lineTo(11.1f, 14.3f)
+                lineTo(15.3f, 10.1f)
+            }
+        }
+    }
+
+    val Seedling: ImageVector by lazy {
+        lucideIcon("Seedling") {
+            strokePath(1.8f) {
+                moveTo(12f, 21f)
+                verticalLineTo(10f)
+                moveTo(12f, 14f)
+                curveTo(7.5f, 14f, 4f, 10.5f, 4f, 6f)
+                curveTo(8.5f, 6f, 12f, 9.5f, 12f, 14f)
+                close()
+                moveTo(12f, 12f)
+                curveTo(16.5f, 12f, 20f, 8.5f, 20f, 4f)
+                curveTo(15.5f, 4f, 12f, 7.5f, 12f, 12f)
+                close()
+            }
+        }
+    }
+
+    val Bolt: ImageVector by lazy {
+        lucideIcon("Bolt") {
+            strokePath(1.8f) {
+                moveTo(13f, 2f)
+                lineTo(4f, 14f)
+                horizontalLineTo(11f)
+                lineTo(10f, 22f)
+                lineTo(20f, 10f)
+                horizontalLineTo(13f)
+                close()
+            }
+        }
+    }
+
+    val Star: ImageVector by lazy {
+        lucideIcon("Star") {
+            strokePath(1.8f) {
+                moveTo(12f, 2.5f)
+                lineTo(14.9f, 8.4f)
+                lineTo(21.4f, 9.3f)
+                lineTo(16.7f, 13.9f)
+                lineTo(17.8f, 20.4f)
+                lineTo(12f, 17.3f)
+                lineTo(6.2f, 20.4f)
+                lineTo(7.3f, 13.9f)
+                lineTo(2.6f, 9.3f)
+                lineTo(9.1f, 8.4f)
+                close()
+            }
+        }
+    }
+
+    val Bug: ImageVector by lazy {
+        lucideIcon("Bug") {
+            strokePath(1.8f) {
+                moveTo(8f, 2f)
+                lineTo(9.88f, 3.88f)
+                moveTo(16f, 2f)
+                lineTo(14.12f, 3.88f)
+                moveTo(9f, 7.13f)
+                verticalLineTo(6f)
+                curveTo(9f, 4.34f, 10.34f, 3f, 12f, 3f)
+                curveTo(13.66f, 3f, 15f, 4.34f, 15f, 6f)
+                verticalLineTo(7.13f)
+                moveTo(12f, 20f)
+                curveTo(8.69f, 20f, 6f, 17.31f, 6f, 14f)
+                verticalLineTo(10f)
+                curveTo(6f, 8.34f, 7.34f, 7f, 9f, 7f)
+                horizontalLineTo(15f)
+                curveTo(16.66f, 7f, 18f, 8.34f, 18f, 10f)
+                verticalLineTo(14f)
+                curveTo(18f, 17.31f, 15.31f, 20f, 12f, 20f)
+                close()
+                moveTo(12f, 20f)
+                verticalLineTo(11f)
+                moveTo(2f, 13f)
+                horizontalLineTo(6f)
+                moveTo(18f, 13f)
+                horizontalLineTo(22f)
+            }
+        }
+    }
+
+    val Coins: ImageVector by lazy {
+        lucideIcon("Coins") {
+            strokePath(1.8f) {
+                moveTo(9.5f, 15f)
+                curveTo(12.54f, 15f, 15f, 12.54f, 15f, 9.5f)
+                curveTo(15f, 6.46f, 12.54f, 4f, 9.5f, 4f)
+                curveTo(6.46f, 4f, 4f, 6.46f, 4f, 9.5f)
+                curveTo(4f, 12.54f, 6.46f, 15f, 9.5f, 15f)
+                close()
+                moveTo(15.2f, 8.2f)
+                curveTo(17.95f, 8.78f, 20f, 11.2f, 20f, 14.1f)
+                curveTo(20f, 17.41f, 17.31f, 20.1f, 14f, 20.1f)
+                curveTo(11.1f, 20.1f, 8.68f, 18.05f, 8.1f, 15.3f)
+            }
+        }
+    }
+
+    val Eye: ImageVector by lazy {
+        lucideIcon("Eye") {
+            strokePath(1.8f) {
+                moveTo(2f, 12f)
+                curveTo(3.8f, 7.5f, 7.5f, 5f, 12f, 5f)
+                curveTo(16.5f, 5f, 20.2f, 7.5f, 22f, 12f)
+                curveTo(20.2f, 16.5f, 16.5f, 19f, 12f, 19f)
+                curveTo(7.5f, 19f, 3.8f, 16.5f, 2f, 12f)
+                close()
+                moveTo(12f, 15f)
+                curveTo(13.66f, 15f, 15f, 13.66f, 15f, 12f)
+                curveTo(15f, 10.34f, 13.66f, 9f, 12f, 9f)
+                curveTo(10.34f, 9f, 9f, 10.34f, 9f, 12f)
+                curveTo(9f, 13.66f, 10.34f, 15f, 12f, 15f)
+                close()
+            }
+        }
+    }
+
+    val Share: ImageVector by lazy {
+        lucideIcon("Share") {
+            strokePath(1.8f) {
+                moveTo(18f, 8f)
+                curveTo(19.66f, 8f, 21f, 6.66f, 21f, 5f)
+                curveTo(21f, 3.34f, 19.66f, 2f, 18f, 2f)
+                curveTo(16.34f, 2f, 15f, 3.34f, 15f, 5f)
+                curveTo(15f, 6.66f, 16.34f, 8f, 18f, 8f)
+                close()
+                moveTo(6f, 15f)
+                curveTo(7.66f, 15f, 9f, 13.66f, 9f, 12f)
+                curveTo(9f, 10.34f, 7.66f, 9f, 6f, 9f)
+                curveTo(4.34f, 9f, 3f, 10.34f, 3f, 12f)
+                curveTo(3f, 13.66f, 4.34f, 15f, 6f, 15f)
+                close()
+                moveTo(18f, 22f)
+                curveTo(19.66f, 22f, 21f, 20.66f, 21f, 19f)
+                curveTo(21f, 17.34f, 19.66f, 16f, 18f, 16f)
+                curveTo(16.34f, 16f, 15f, 17.34f, 15f, 19f)
+                curveTo(15f, 20.66f, 16.34f, 22f, 18f, 22f)
+                close()
+                moveTo(8.59f, 13.51f)
+                lineTo(15.42f, 17.49f)
+                moveTo(15.41f, 6.51f)
+                lineTo(8.59f, 10.49f)
             }
         }
     }

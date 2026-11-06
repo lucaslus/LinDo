@@ -16,7 +16,7 @@ fun main() = application {
     Window(
         onCloseRequest = ::exitApplication,
         state = windowState,
-        title = "LinDo — Linux.do High-Performance Client (macOS / Windows / Android)"
+        title = "Lindo — Linux.do High-Performance Client (macOS / Windows / Android)"
     ) {
         LinDoApp()
     }

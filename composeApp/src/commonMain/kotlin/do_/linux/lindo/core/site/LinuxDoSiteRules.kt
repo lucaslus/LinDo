@@ -14,6 +14,10 @@ import androidx.compose.ui.graphics.Color
  */
 object LinuxDoSiteRules {
     const val BASE_URL = "https://linux.do"
+    const val MIN_TOPIC_TITLE_LENGTH = 5
+    const val MIN_POST_RAW_LENGTH = 5
+    const val LOTTERY_TAG = "抽奖"
+    const val LOTTERY_TOPIC_COST_POINTS = 20
 
     private val squareAvatarUsernames = setOf("neo")
     private val holographicTitles = setOf("种子用户", "破界者", "premium")
@@ -99,5 +103,42 @@ object LinuxDoSiteRules {
             else -> return fallback
         }
         return normalized.toLongOrNull(16)?.let { Color(it) } ?: fallback
+    }
+
+    /**
+     * 判断话题标签是否包含抽奖扣分提示（发布带 `抽奖` 标签的话题需消耗 20 积分）
+     */
+    fun requiresTopicCostConfirmation(tags: List<String>): Boolean {
+        return tags.any { it.trim().equals(LOTTERY_TAG, ignoreCase = true) }
+    }
+
+    /**
+     * 判断当前登录用户是否可删除指定楼层（主楼 #1 不可作为普通楼层删除，回复楼层遵循服务端 `can_delete` 或管理员权限）
+     */
+    fun canDeletePost(
+        postNumber: Int,
+        isOwnPost: Boolean,
+        serverCanDelete: Boolean = false,
+        isStaff: Boolean = false
+    ): Boolean {
+        if (isStaff) return true
+        if (postNumber <= 1) return false
+        return isOwnPost && serverCanDelete
+    }
+
+    fun canDeletePost(
+        postNumber: Int,
+        postUsername: String,
+        currentUsername: String?,
+        serverCanDelete: Boolean = false,
+        isStaff: Boolean = false
+    ): Boolean {
+        val isOwn = !currentUsername.isNullOrBlank() && postUsername.equals(currentUsername, ignoreCase = true)
+        return canDeletePost(
+            postNumber = postNumber,
+            isOwnPost = isOwn,
+            serverCanDelete = serverCanDelete,
+            isStaff = isStaff
+        )
     }
 }

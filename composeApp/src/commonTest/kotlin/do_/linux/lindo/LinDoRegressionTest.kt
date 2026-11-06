@@ -5,6 +5,7 @@ import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.CookieVariant
+import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.network.executeApiRequest
 import do_.linux.lindo.core.network.isSuccessfulApiResponse
 import do_.linux.lindo.core.render.DiscourseAstParser
@@ -180,5 +181,24 @@ class LinDoRegressionTest {
         assertNull(failure.get())
         assertEquals(6, CookieSentinel.resolveWinningCookies().size)
         CookieSentinel.clear()
+    }
+
+    @Test
+    fun siteRulesLengthDeleteAndLotteryCostConfirmationAlignWithDiscourse() {
+        assertEquals(5, LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH)
+        assertEquals(5, LinuxDoSiteRules.MIN_POST_RAW_LENGTH)
+        assertEquals(20, LinuxDoSiteRules.LOTTERY_TOPIC_COST_POINTS)
+        assertTrue(LinuxDoSiteRules.requiresTopicCostConfirmation(listOf("抽奖")))
+        assertFalse(LinuxDoSiteRules.requiresTopicCostConfirmation(listOf("人工智能", "开源项目")))
+        assertFalse(LinuxDoSiteRules.canDeletePost(postNumber = 1, isOwnPost = true, serverCanDelete = true))
+        assertFalse(LinuxDoSiteRules.canDeletePost(postNumber = 2, isOwnPost = true, serverCanDelete = false))
+        assertTrue(LinuxDoSiteRules.canDeletePost(postNumber = 2, isOwnPost = true, serverCanDelete = true))
+    }
+
+    @Test
+    fun userApiKeyAuthUrlUsesLindoApplicationBrandName() {
+        val (url, _) = UserApiKeyAuthManager.generateAuthorizationUrl()
+        assertTrue(url.contains("application_name=Lindo"), "Expected application_name=Lindo in $url")
+        assertFalse(url.contains("application_name=LinDo"))
     }
 }

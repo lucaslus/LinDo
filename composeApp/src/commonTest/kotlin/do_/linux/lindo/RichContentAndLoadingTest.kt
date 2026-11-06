@@ -80,4 +80,16 @@ class RichContentAndLoadingTest {
         assertTrue(nodes.any { it is PostBlockNode.Unsupported })
         assertTrue(nodes.any { it is PostBlockNode.Media })
     }
+    @Test fun inlineSvgHashtagsAndCheckboxesNeverEmitUnsupportedPlaceholder() {
+        val html = """
+            <ul>
+              <li>我的帖子已经打上 <a class="hashtag-cooked" href="/tag/开源推广"><svg class="fa d-icon d-icon-tag svg-icon svg-node"><use href="#tag"></use></svg><span>开源推广</span></a> 标签：是</li>
+              <li><span class="chckbx-box"><svg class="fa d-icon d-icon-far-check-square svg-icon"><use href="#far-check-square"></use></svg></span>已完成开源验证</li>
+            </ul>
+        """.trimIndent()
+        val list = DiscourseAstParser.parseCookedHtml(html).single() as PostBlockNode.BulletList
+        assertTrue(list.itemBlocks.flatten().none { it is PostBlockNode.Unsupported })
+        val firstItemText = (list.itemBlocks[0].single() as PostBlockNode.Paragraph).text
+        assertEquals("我的帖子已经打上 #开源推广 标签：是", firstItemText)
+    }
 }

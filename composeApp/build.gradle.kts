@@ -116,9 +116,9 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
-            packageName = "LinDo"
+            packageName = "Lindo"
             packageVersion = "1.0.0"
-            description = "LinDo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
+            description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
         }
     }
 }

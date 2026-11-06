@@ -7,12 +7,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.outlined.DarkMode
-import androidx.compose.material.icons.outlined.LightMode
-import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -21,11 +15,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.ui.components.LinDoIcons
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_brand_mark
 import lindo.composeapp.generated.resources.lindo_mascot_welcome
@@ -42,20 +40,81 @@ private fun brandSecondary(dark: Boolean) = if (dark) Color(0xFFB8AFA2) else Col
 internal fun LinDoGlassAppIcon(tileSize: Dp = 84.dp, isCircle: Boolean = false, modifier: Modifier = Modifier) {
     Image(
         painter = painterResource(Res.drawable.lindo_brand_mark),
-        contentDescription = "LinDo 零度娘",
+        contentDescription = "Lindo 零度娘",
         modifier = modifier.size(tileSize).clip(if (isCircle) CircleShape else RoundedCornerShape(tileSize * 0.25f))
             .background(BrandGold).padding(tileSize * 0.07f),
         contentScale = ContentScale.Fit
     )
 }
 
+/**
+ * Lindo 经典 Linux.do 双色品牌字标 (`Lin` + `do`)，字距舒展、克制耐看
+ */
 @Composable
-fun LinDoBrandWordmark(isDark: Boolean = false, fontSizeSp: Float = 24f, modifier: Modifier = Modifier) {
-    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Image(painterResource(Res.drawable.lindo_brand_mark), contentDescription = null,
-            modifier = Modifier.size((fontSizeSp * 1.5f).dp), contentScale = ContentScale.Fit)
-        Text("LinDo", fontSize = fontSizeSp.sp, fontWeight = FontWeight.ExtraBold,
-            letterSpacing = (-0.8).sp, color = brandText(isDark), maxLines = 1)
+fun LindoColorWordmarkText(
+    isDark: Boolean = false,
+    fontSizeSp: Float = 22f,
+    modifier: Modifier = Modifier
+) {
+    val styled = buildAnnotatedString {
+        withStyle(SpanStyle(color = if (isDark) Color(0xFFF8FAFC) else Color(0xFF201D19))) {
+            append("Lin")
+        }
+        withStyle(SpanStyle(color = if (isDark) Color(0xFFF6B73C) else Color(0xFFF0A020))) {
+            append("do")
+        }
+    }
+    Text(
+        text = styled,
+        fontSize = fontSizeSp.sp,
+        fontWeight = FontWeight.ExtraBold,
+        letterSpacing = 0.4.sp,
+        maxLines = 1,
+        modifier = modifier
+    )
+}
+
+@Composable
+fun LinDoBrandWordmark(
+    isDark: Boolean = false,
+    fontSizeSp: Float = 22f,
+    iconSize: Dp = 34.dp,
+    showMotto: Boolean = true,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(
+            modifier = Modifier.size(iconSize),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = painterResource(Res.drawable.lindo_brand_mark),
+                contentDescription = "零度娘",
+                modifier = Modifier.size(iconSize * 1.12f),
+                contentScale = ContentScale.Fit
+            )
+        }
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            LindoColorWordmarkText(isDark = isDark, fontSizeSp = fontSizeSp)
+            if (showMotto) {
+                Text(
+                    text = "真诚 · 友善 · 团结 · 专业",
+                    fontSize = 10.2.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 0.15.sp,
+                    color = brandSecondary(isDark),
+                    maxLines = 1,
+                    modifier = Modifier.padding(bottom = 2.5.dp)
+                )
+            }
+        }
     }
 }
 
@@ -75,7 +134,7 @@ internal fun LinDoWelcomeScreen(
                 LinDoBrandWordmark(isDark = isDark)
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onToggleDark, modifier = Modifier.size(48.dp)) {
-                    Icon(if (isDark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
+                    Icon(if (isDark) LinDoIcons.Sun else LinDoIcons.Moon,
                         contentDescription = if (isDark) "切换至浅色模式" else "切换至深色模式",
                         tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
                 }
@@ -89,7 +148,7 @@ internal fun LinDoWelcomeScreen(
                     Text("你好，佬友。", fontSize = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp,
                         color = brandText(isDark), textAlign = TextAlign.Center, lineHeight = 36.sp)
                     Spacer(Modifier.height(10.dp))
-                    Text("连接 LINUX DO，发现有趣的讨论。", fontSize = 14.sp, lineHeight = 23.sp,
+                    Text("欢迎来到 Lindo · 连接 LINUX DO，发现有趣的讨论。", fontSize = 14.sp, lineHeight = 23.sp,
                         color = brandSecondary(isDark), textAlign = TextAlign.Center)
                 }
             }
@@ -98,12 +157,12 @@ internal fun LinDoWelcomeScreen(
                 shape = RoundedCornerShape(18.dp), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)) {
                 Text("使用 LINUX DO 登录", fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(12.dp))
-                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(19.dp))
+                Icon(LinDoIcons.ArrowRight, contentDescription = null, modifier = Modifier.size(19.dp))
             }
             Spacer(Modifier.height(8.dp))
             TextButton(onClick = onBrowserOneClickAuth, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 colors = ButtonDefaults.textButtonColors(contentColor = brandSecondary(isDark))) {
-                Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(15.dp))
+                Icon(LinDoIcons.ExternalLink, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(7.dp))
                 Text("使用系统浏览器授权", fontSize = 13.sp)
             }
@@ -132,24 +191,36 @@ fun LinDoMascotLoginTransitionView(
                 LinDoBrandWordmark(isDark = isDark)
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onCancel, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Filled.Close, "取消登录", tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
+                    Icon(LinDoIcons.Close, "取消登录", tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
                 }
             }
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(Modifier.widthIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(vertical = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    LinDoMascot(state = if (onRetry != null) LinDoMascotState.NetworkError else LinDoMascotState.Loading, size = 88.dp)
-                    Spacer(Modifier.height(24.dp))
-                    Text(statusTitle.removeSuffix("..."), color = brandText(isDark), fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, lineHeight = 29.sp)
-                    Spacer(Modifier.height(10.dp))
-                    Text(statusSubtitle, color = brandSecondary(isDark), fontSize = 13.sp,
-                        textAlign = TextAlign.Center, lineHeight = 21.sp)
+                    LinDoMascot(state = if (onRetry != null) LinDoMascotState.NetworkError else LinDoMascotState.Loading, size = 76.dp)
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        text = statusSubtitle.ifBlank { statusTitle.removeSuffix("...") },
+                        color = brandSecondary(isDark),
+                        fontSize = 12.2.sp,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 19.sp
+                    )
                     if (onRetry != null) {
-                        Spacer(Modifier.height(20.dp))
-                        Button(onClick = onRetry, modifier = Modifier.heightIn(min = 48.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandGold, contentColor = BrandInk),
-                            shape = RoundedCornerShape(15.dp)) { Text("重新连接") }
+                        Spacer(Modifier.height(14.dp))
+                        TextButton(
+                            onClick = onRetry,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                imageVector = LinDoIcons.Refresh,
+                                contentDescription = "刷新",
+                                modifier = Modifier.size(14.dp),
+                                tint = brandSecondary(isDark)
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text("刷新", fontSize = 12.sp, color = brandSecondary(isDark))
+                        }
                     } else if (progress.isFinite()) {
                         Spacer(Modifier.height(22.dp))
                         // Actual WebView progress only. Session verification has no measured percentage.
