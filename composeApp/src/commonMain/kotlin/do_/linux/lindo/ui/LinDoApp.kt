@@ -1986,14 +1986,13 @@ private fun DesktopSideRail(
             modifier = Modifier
                 .size(40.dp)
                 .clip(CircleShape)
-                .background(palette.cardSurface)
                 .clickable { onToggleTheme() },
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = if (isDarkTheme) LinDoIcons.Sun else LinDoIcons.Moon,
                 contentDescription = "深色模式",
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(19.dp),
                 tint = palette.inkSecondary
             )
         }
@@ -4262,19 +4261,17 @@ private fun TonalCircleIconButton(
     tint: Color,
     onClick: () -> Unit
 ) {
-    val palette = LocalPalette.current
-    androidx.compose.material3.IconButton(
-        onClick = onClick,
+    Box(
         modifier = Modifier
-            .size(48.dp)
-            .padding(6.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(palette.subtleSurface)
+            .size(36.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            modifier = Modifier.size(17.dp),
+            modifier = Modifier.size(19.dp),
             tint = tint
         )
     }
@@ -6514,20 +6511,12 @@ private fun ProfileQuickEntryTile(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (highlightBadge) palette.tonalPill else palette.subtleSurface),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = title,
-                    modifier = Modifier.size(15.dp),
-                    tint = if (highlightBadge) palette.brandGold else palette.inkPrimary
-                )
-            }
+            Icon(
+                imageVector = icon,
+                contentDescription = title,
+                modifier = Modifier.size(18.dp),
+                tint = if (highlightBadge) palette.brandGold else palette.inkPrimary
+            )
             Spacer(modifier = Modifier.weight(1f))
             Icon(
                 imageVector = LinDoIcons.ChevronRight,
@@ -6606,20 +6595,12 @@ private fun GoogleSegmentedSwitchTile(
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .clip(CircleShape)
-                .background(palette.subtleSurface),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(19.dp),
-                tint = palette.accent
-            )
-        }
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = palette.accent
+        )
 
         Spacer(modifier = Modifier.width(14.dp))
 
@@ -6676,20 +6657,12 @@ private fun GoogleSegmentedActionTile(
             .padding(horizontal = 16.dp, vertical = 15.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .clip(CircleShape)
-                .background(palette.subtleSurface),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(19.dp),
-                tint = palette.accent
-            )
-        }
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = palette.accent
+        )
 
         Spacer(modifier = Modifier.width(14.dp))
 
@@ -7113,14 +7086,13 @@ private fun TopicReplyComposerSheet(
                     modifier = Modifier
                         .size(34.dp)
                         .clip(CircleShape)
-                        .background(palette.subtleSurface)
                         .clickable { onDismiss() },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Close,
                         contentDescription = "取消",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(18.dp),
                         tint = palette.inkPrimary
                     )
                 }
@@ -7343,14 +7315,13 @@ private fun CreateTopicModalSheet(
                     modifier = Modifier
                         .size(34.dp)
                         .clip(CircleShape)
-                        .background(palette.subtleSurface)
                         .clickable { onDismiss() },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Close,
                         contentDescription = "关闭",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(18.dp),
                         tint = palette.inkPrimary
                     )
                 }
@@ -8911,9 +8882,8 @@ private fun GlobalSearchModalSheet(
                         Spacer(modifier = Modifier.width(6.dp))
                         Box(
                             modifier = Modifier
-                                .size(20.dp)
+                                .size(22.dp)
                                 .clip(CircleShape)
-                                .background(palette.hairline)
                                 .clickable {
                                     query = ""
                                     submittedQuery = ""
@@ -8925,7 +8895,7 @@ private fun GlobalSearchModalSheet(
                             Icon(
                                 imageVector = LinDoIcons.Close,
                                 contentDescription = "清空",
-                                modifier = Modifier.size(12.dp),
+                                modifier = Modifier.size(14.dp),
                                 tint = palette.inkSecondary
                             )
                         }
