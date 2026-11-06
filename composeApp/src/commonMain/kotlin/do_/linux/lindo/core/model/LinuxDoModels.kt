@@ -262,10 +262,15 @@ data class UserNotificationItem(
     val createdAtText: String,
     val topicId: Int = 0,
     val postNumber: Int = 1,
+    val slug: String = "",
     val title: String,
     val actingUsername: String = "",
     val actingAvatarTemplate: String? = null,
-    val excerpt: String = ""
+    val excerpt: String = "",
+    val count: Int = 0,
+    val badgeId: Int = 0,
+    val badgeName: String = "",
+    val chatChannelId: Int = 0
 ) {
     val typeLabel: String
         get() = when (notificationType) {
@@ -273,11 +278,40 @@ data class UserNotificationItem(
             2 -> "回复了你"
             3 -> "引用了你"
             4 -> "编辑了帖子"
-            5, 25 -> "赞了你的帖子"
+            5 -> "赞了你的帖子"
             6 -> "发来私信"
+            7 -> "邀请你参与私信"
+            8 -> "接受了你的邀请"
             9 -> "回复了话题"
+            10 -> "移动了帖子"
+            11 -> "链接了你的帖子"
             12 -> "授予徽章"
-            else -> "社区通知"
+            13 -> "邀请你参与话题"
+            14 -> "系统通知"
+            15 -> "提及了群组"
+            16 -> "群组消息汇总"
+            17 -> "发布了新话题"
+            18 -> "话题提醒"
+            19 -> if (count > 1) "赞了你的 $count 条帖子" else "赞了你的多条帖子"
+            20 -> "帖子已通过审核"
+            21 -> "代码审查已通过"
+            22 -> "群组申请已通过"
+            23 -> "群组加入申请"
+            24 -> "书签提醒"
+            25 -> if (count > 1) "回应了你的 $count 条帖子" else "赞了你的帖子"
+            26 -> "投票额度已归还"
+            27 -> "活动提醒"
+            28 -> "活动邀请"
+            29 -> "在聊天中提及了你"
+            30 -> "发来聊天消息"
+            31 -> "邀请你加入聊天"
+            32 -> "在聊天中提及群组"
+            33 -> "在聊天中引用了你"
+            34 -> "指派了话题给你"
+            36, 800 -> "关注了你"
+            37, 801 -> "发布了新话题"
+            38, 802 -> "发表了新回复"
+            else -> if (topicId > 0) "参与了话题互动" else "互动了你的动态"
         }
 }
 

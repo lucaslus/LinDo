@@ -1071,6 +1071,21 @@ object LinuxDoRepository {
         filterUsername: String? = null,
         targetPostNumber: Int? = null
     ): TopicDetailModel = withContext(Dispatchers.IO) {
+        val s = summaryFallback
+        if (topicId <= 0) {
+            return@withContext TopicDetailModel(
+                id = 0,
+                title = s?.title ?: "互动详情",
+                categoryName = s?.categoryName ?: "社区通知",
+                categoryColorHex = s?.categoryColorHex ?: "0E76BD",
+                tags = s?.tags.orEmpty(),
+                views = s?.views ?: 0,
+                likeCount = s?.likeCount ?: 0,
+                postsCount = 1,
+                posts = emptyList(),
+                loadError = "该通知不关联具体话题。"
+            )
+        }
         val queryParts = mutableListOf<String>()
         if (trackVisit) queryParts.add("track_visit=true")
         if (!filterUsername.isNullOrBlank()) queryParts.add("username_filters=$filterUsername")
@@ -1090,9 +1105,10 @@ object LinuxDoRepository {
             emptyMap()
         }
 
-        val res = executeHttp(url = url, method = "GET", extraHeaders = extraHeaders)
+        val res = executeHttp(url = url, method = "GET", extraHeaders = extraHeaders, preserveFailure = true)
+        val statusCode = res?.first ?: 0
         val text = res?.second
-        if (text != null && text.trimStart().startsWith("{")) {
+        if (statusCode in 200..299 && text != null && text.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(text).jsonObject
                 val detail = parseLiveTopicDetail(root, summaryFallback)
@@ -1103,8 +1119,13 @@ object LinuxDoRepository {
             }
         }
 
+        val specificError = when (statusCode) {
+            404, 410 -> "该话题不存在，或已被作者与管理员删除。"
+            403 -> "当前账号暂无访问该话题的权限（可能属于高信任等级或私密板块）。"
+            else -> "网络连接异常，请点击下方按钮重试。"
+        }
+
         // Preserve the real summary, but never fabricate a first post from an excerpt on failure.
-        val s = summaryFallback
         TopicDetailModel(
             id = s?.id ?: topicId,
             title = s?.title ?: "话题 #$topicId",
@@ -1115,7 +1136,7 @@ object LinuxDoRepository {
             likeCount = s?.likeCount ?: 0,
             postsCount = s?.postsCount ?: 1,
             posts = emptyList(),
-            loadError = "网络请求失败，或当前账号没有访问此话题的权限。"
+            loadError = specificError
         )
     }
 
@@ -1490,17 +1511,58 @@ object LinuxDoRepository {
                 val postNumber = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
                 val slug = obj["slug"]?.jsonPrimitive?.contentOrNull ?: ""
                 val dataObj = obj["data"] as? JsonObject
-                val title = dataObj?.get("topic_title")?.jsonPrimitive?.contentOrNull
-                    ?: dataObj?.get("badge_name")?.jsonPrimitive?.contentOrNull
-                    ?: obj["fancy_title"]?.jsonPrimitive?.contentOrNull
-                    ?: "社区互动通知"
-                val actor = dataObj?.get("display_username")?.jsonPrimitive?.contentOrNull
-                    ?: dataObj?.get("original_username")?.jsonPrimitive?.contentOrNull
-                    ?: obj["acting_user_name"]?.jsonPrimitive?.contentOrNull
+                val count = dataObj?.get("count")?.jsonPrimitive?.intOrNull
+                    ?: dataObj?.get("inbox_count")?.jsonPrimitive?.intOrNull
+                    ?: 0
+                val badgeId = dataObj?.get("badge_id")?.jsonPrimitive?.intOrNull ?: 0
+                val badgeName = dataObj?.get("badge_name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val chatChannelId = dataObj?.get("chat_channel_id")?.jsonPrimitive?.intOrNull ?: 0
+                val primaryActor = dataObj?.get("display_username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("original_username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("mentioned_by_username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: obj["acting_user_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     ?: "系统"
+                val secondActor = dataObj?.get("username2")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val actor = if (secondActor != null && secondActor != primaryActor) "$primaryActor、$secondActor" else primaryActor
+                val cleanFancyTitle = obj["fancy_title"]?.jsonPrimitive?.contentOrNull
+                    ?.takeIf { it.isNotBlank() }
+                    ?.replace(Regex("<[^>]+>"), "")
+                    ?.replace("&quot;", "\"")
+                    ?.replace("&#39;", "'")
+                    ?.replace("&lt;", "<")
+                    ?.replace("&gt;", ">")
+                    ?.replace("&amp;", "&")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                val rawTopicTitle = dataObj?.get("topic_title")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: cleanFancyTitle
+                    ?: dataObj?.get("title")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("bookmark_name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val chatChannelTitle = dataObj?.get("chat_channel_title")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val groupName = dataObj?.get("group_name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val customMessage = dataObj?.get("message")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val slugTitle = slug.takeIf { it.isNotBlank() && it != "topic" }?.replace('-', ' ')
+                val title = when {
+                    rawTopicTitle != null -> rawTopicTitle
+                    badgeName.isNotBlank() -> "获得社区徽章「$badgeName」"
+                    chatChannelTitle != null -> "聊天频道：$chatChannelTitle"
+                    groupName != null -> if (count > 0) "群组「$groupName」有 $count 条消息" else "群组：$groupName"
+                    customMessage != null -> customMessage
+                    nType == 19 || (nType == 25 && topicId <= 0) ->
+                        if (count > 1) "累计赞了你的 $count 条帖子 · 点击查看 @$primaryActor 的主页"
+                        else "赞了你的多条社区内容 · 点击查看 @$primaryActor 的主页"
+                    nType == 36 || nType == 800 -> "成为了你的关注者 · 点击查看 @$primaryActor 的主页"
+                    nType == 8 -> "已接受你的社区邀请 · 点击查看 @$primaryActor 的主页"
+                    nType in 29..33 -> "收到一条实时聊天消息 · 点击打开聊天"
+                    slugTitle != null -> slugTitle
+                    topicId > 0 -> "话题 #$topicId"
+                    primaryActor != "系统" -> "来自 @$primaryActor 的互动 · 点击查看主页"
+                    else -> "系统消息通知"
+                }
                 val actingAvatarTemplate = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull
                     ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull
-                val excerpt = dataObj?.get("message")?.jsonPrimitive?.contentOrNull ?: ""
+                val excerpt = customMessage.orEmpty()
                 UserNotificationItem(
                     id = id,
                     notificationType = nType,
@@ -1508,10 +1570,15 @@ object LinuxDoRepository {
                     createdAtText = createdAt,
                     topicId = topicId,
                     postNumber = postNumber,
+                    slug = slug,
                     title = title,
                     actingUsername = actor,
                     actingAvatarTemplate = actingAvatarTemplate,
-                    excerpt = excerpt
+                    excerpt = excerpt,
+                    count = count,
+                    badgeId = badgeId,
+                    badgeName = badgeName,
+                    chatChannelId = chatChannelId
                 )
             }
         } catch (cancelled: CancellationException) {

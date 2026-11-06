@@ -981,12 +981,12 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
 
     var detailLoadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     fun openTopic(topic: TopicSummary, targetPostNumber: Int? = null) {
+        if (topic.id <= 0) return
         detailLoadJob?.cancel()
         activeTopicDetail = null
         activeTopicSummary = topic
         activeTargetPostNumber = targetPostNumber
         mobileShowingDetail = true
-        currentTab = MainTab.HOME
         detailLoadJob = scope.launch {
             isLoadingDetail = true
             try {
@@ -1007,6 +1007,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
         fallbackTitle: String = "话题 #$topicId",
         targetPostNumber: Int? = null
     ) {
+        if (topicId <= 0) return
         val existing = topics.firstOrNull { it.id == topicId } ?: TopicSummary(
             id = topicId,
             title = fallbackTitle,
@@ -1426,14 +1427,28 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                         isAuthorized = isAuthorized,
                                         username = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
                                         onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" },
-                                        onSelectTopicId = { tid, title, postNum -> openTopicById(tid, title, postNum) },
-                                        onSelectMessageTopic = { topic -> openTopic(topic) },
+                                        onSelectTopicId = { tid, title, postNum ->
+                                            currentTab = MainTab.HOME
+                                            openTopicById(tid, title, postNum)
+                                        },
+                                        onSelectMessageTopic = { topic ->
+                                            currentTab = MainTab.HOME
+                                            openTopic(topic)
+                                        },
+                                        onInspectUser = { uname -> inspectedUsername = uname },
+                                        onInspectBadge = { badge -> inspectedBadge = badge },
+                                        onUnreadCountSynced = { unread ->
+                                            fullUserProfile = fullUserProfile?.copy(unreadNotifications = unread)
+                                        },
                                         onOpenNewPrivateMessage = {
                                             pmInitialRecipient = null
                                             showPrivateMessagesSheet = true
                                         },
                                         onOpenWebUrl = { openSmartUrl(it) },
-                                        onMarkedAllRead = { syncUserProfile() }
+                                        onMarkedAllRead = {
+                                            fullUserProfile = fullUserProfile?.copy(unreadNotifications = 0)
+                                            syncUserProfile()
+                                        }
                                     )
                                 }
 
@@ -1481,7 +1496,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                         }
                     } else {
                         // 移动端布局（沉浸式全屏阅读或底部 5-Tab 理想型社区导航栏）
-                        if (currentTab == MainTab.HOME && mobileShowingDetail && activeTopicSummary != null) {
+                        if (mobileShowingDetail && activeTopicSummary != null) {
                             CommunityTopicReaderPane(
                                 summary = activeTopicSummary,
                                 detail = activeTopicDetail,
@@ -1588,7 +1603,6 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                                     loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
                                                 },
                                                 onSelectTopic = { topic ->
-                                                    currentTab = MainTab.HOME
                                                     openTopic(topic)
                                                 },
                                                 onOpenGlobalSearch = { showGlobalSearchSheet = true },
@@ -1603,12 +1617,20 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                                 onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" },
                                                 onSelectTopicId = { tid, title, postNum -> openTopicById(tid, title, postNum) },
                                                 onSelectMessageTopic = { topic -> openTopic(topic) },
+                                                onInspectUser = { uname -> inspectedUsername = uname },
+                                                onInspectBadge = { badge -> inspectedBadge = badge },
+                                                onUnreadCountSynced = { unread ->
+                                                    fullUserProfile = fullUserProfile?.copy(unreadNotifications = unread)
+                                                },
                                                 onOpenNewPrivateMessage = {
                                                     pmInitialRecipient = null
                                                     showPrivateMessagesSheet = true
                                                 },
                                                 onOpenWebUrl = { openSmartUrl(it) },
-                                                onMarkedAllRead = { syncUserProfile() }
+                                                onMarkedAllRead = {
+                                                    fullUserProfile = fullUserProfile?.copy(unreadNotifications = 0)
+                                                    syncUserProfile()
+                                                }
                                             )
                                         }
 
@@ -1658,7 +1680,10 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                 GoogleM3NavigationBar(
                                     currentTab = currentTab,
                                     unreadCount = fullUserProfile?.unreadNotifications ?: 0,
-                                    onSelectTab = { currentTab = it },
+                                    onSelectTab = {
+                                        mobileShowingDetail = false
+                                        currentTab = it
+                                    },
                                     onPublishClick = {
                                         pendingNewTopicDraft = null
                                         showCreateTopicSheet = true
@@ -1747,6 +1772,10 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                         onSelectNotification = { tid, title, postNum ->
                             showNotificationsSheet = false
                             if (tid > 0) openTopicById(tid, title, postNum)
+                        },
+                        onInspectUser = { uname ->
+                            showNotificationsSheet = false
+                            inspectedUsername = uname
                         }
                     )
                 }
@@ -2100,26 +2129,32 @@ private fun GoogleM3NavigationBar(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    if (tab == MainTab.HOME) {
-                        Image(
-                            painter = painterResource(Res.drawable.lindo_brand_mark),
-                            contentDescription = tab.title,
-                            modifier = Modifier.size(22.dp),
-                            alpha = if (selected) 1f else 0.72f,
-                            contentScale = ContentScale.Fit
-                        )
-                    } else {
-                        Icon(
-                            imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                            contentDescription = tab.title,
-                            modifier = Modifier.size(20.dp),
-                            tint = if (selected) palette.inkPrimary else palette.inkSecondary
-                        )
+                    Box(
+                        modifier = Modifier.size(width = 34.dp, height = 22.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (tab == MainTab.HOME) {
+                            Image(
+                                painter = painterResource(Res.drawable.lindo_brand_mark),
+                                contentDescription = tab.title,
+                                modifier = Modifier.size(22.dp),
+                                alpha = if (selected) 1f else 0.72f,
+                                contentScale = ContentScale.Fit
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                contentDescription = tab.title,
+                                modifier = Modifier.size(20.dp),
+                                tint = if (selected) palette.inkPrimary else palette.inkSecondary
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.height(3.dp))
                     Text(
                         text = tab.title,
                         fontSize = 10.5.sp,
+                        lineHeight = 12.sp,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                         color = if (selected) palette.inkPrimary else palette.inkSecondary,
                         maxLines = 1
@@ -2140,16 +2175,22 @@ private fun GoogleM3NavigationBar(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Icon(
-                    imageVector = LinDoIcons.Plus,
-                    contentDescription = "发布",
-                    modifier = Modifier.size(22.dp),
-                    tint = palette.tabIndicatorColor
-                )
-                Spacer(modifier = Modifier.height(2.5.dp))
+                Box(
+                    modifier = Modifier.size(width = 34.dp, height = 22.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Plus,
+                        contentDescription = "发布",
+                        modifier = Modifier.size(22.dp),
+                        tint = palette.tabIndicatorColor
+                    )
+                }
+                Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = "发布",
                     fontSize = 10.5.sp,
+                    lineHeight = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = palette.tabIndicatorColor,
                     maxLines = 1
@@ -2204,7 +2245,10 @@ private fun GoogleM3NavigationBar(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
+                    Box(
+                        modifier = Modifier.size(width = 34.dp, height = 22.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(
                             imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
                             contentDescription = tab.title,
@@ -2212,21 +2256,34 @@ private fun GoogleM3NavigationBar(
                             tint = if (selected) palette.inkPrimary else palette.inkSecondary
                         )
                         if (tab == MainTab.MESSAGES && unreadCount > 0) {
+                            val badgeText = if (unreadCount > 99) "99+" else unreadCount.toString()
+                            val isSingleDigit = badgeText.length == 1
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
-                                    .offset(x = 7.dp, y = (-3).dp)
-                                    .clip(RoundedCornerShape(99.dp))
+                                    .offset(x = if (isSingleDigit) (-1).dp else 2.dp, y = (-2).dp)
+                                    .then(
+                                        if (isSingleDigit) {
+                                            Modifier.size(15.dp)
+                                        } else {
+                                            Modifier
+                                                .height(15.dp)
+                                                .widthIn(min = 19.dp)
+                                        }
+                                    )
+                                    .clip(CircleShape)
                                     .background(palette.logoDoColor)
-                                    .padding(horizontal = 4.dp, vertical = 0.5.dp),
+                                    .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = if (unreadCount > 99) "99+" else unreadCount.toString(),
-                                    fontSize = 8.5.sp,
+                                    text = badgeText,
+                                    fontSize = 9.sp,
+                                    lineHeight = 9.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (palette.themeOption == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }
@@ -2235,6 +2292,7 @@ private fun GoogleM3NavigationBar(
                     Text(
                         text = tab.title,
                         fontSize = 10.5.sp,
+                        lineHeight = 12.sp,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                         color = if (selected) palette.inkPrimary else palette.inkSecondary,
                         maxLines = 1
@@ -5297,6 +5355,9 @@ private fun CommunityMessagesScreen(
     onRequestLogin: () -> Unit,
     onSelectTopicId: (Int, String, Int?) -> Unit,
     onSelectMessageTopic: (TopicSummary) -> Unit,
+    onInspectUser: (String) -> Unit = {},
+    onInspectBadge: (GrantedBadge) -> Unit = {},
+    onUnreadCountSynced: (Int) -> Unit = {},
     onOpenNewPrivateMessage: () -> Unit,
     onOpenWebUrl: (String) -> Unit,
     onMarkedAllRead: () -> Unit
@@ -5317,7 +5378,9 @@ private fun CommunityMessagesScreen(
         loadError = null
         try {
             if (subTab == 0) {
-                notifications = LinuxDoRepository.fetchUserNotifications()
+                val loaded = LinuxDoRepository.fetchUserNotifications()
+                notifications = loaded
+                onUnreadCountSynced(loaded.count { !it.read })
             } else if (subTab == 1) {
                 val effectiveUsername = username.ifBlank {
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
@@ -5337,10 +5400,10 @@ private fun CommunityMessagesScreen(
 
     val filteredNotifications = remember(notifications, categoryFilter) {
         when (categoryFilter) {
-            1 -> notifications.filter { it.notificationType in setOf(2, 3, 9) } // 回复/引用
-            2 -> notifications.filter { it.notificationType in setOf(5, 25) }    // 点赞/回应
-            3 -> notifications.filter { it.notificationType in setOf(1, 15) }    // @提及
-            4 -> notifications.filter { it.notificationType !in setOf(1, 2, 3, 5, 9, 15, 25) }
+            1 -> notifications.filter { it.notificationType in setOf(2, 3, 9, 11, 38, 802) } // 回复/引用/链接
+            2 -> notifications.filter { it.notificationType in setOf(5, 19, 25) }            // 点赞/合并赞/回应
+            3 -> notifications.filter { it.notificationType in setOf(1, 15, 29, 32, 33) }    // @提及
+            4 -> notifications.filter { it.notificationType !in setOf(1, 2, 3, 5, 9, 11, 15, 19, 25, 29, 32, 33, 38, 802) }
             else -> notifications
         }
     }
@@ -5624,25 +5687,67 @@ private fun CommunityMessagesScreen(
                     }
                 } else {
                     itemsIndexed(filteredNotifications, key = { _, item -> item.id }) { _, item ->
+                        val primaryActor = item.actingUsername.substringBefore("、").trim()
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onSelectTopicId(item.topicId, item.title, item.postNumber) }
+                                .clickable {
+                                    if (!item.read) {
+                                        val updated = notifications.map {
+                                            if (it.id == item.id) it.copy(read = true) else it
+                                        }
+                                        notifications = updated
+                                        onUnreadCountSynced(updated.count { !it.read })
+                                    }
+                                    when {
+                                        item.topicId > 0 -> {
+                                            onSelectTopicId(item.topicId, item.title, item.postNumber)
+                                        }
+                                        item.badgeId > 0 -> {
+                                            onInspectBadge(
+                                                GrantedBadge(
+                                                    id = item.badgeId,
+                                                    name = item.badgeName.ifBlank { item.title },
+                                                    description = "LINUX DO 社区授予徽章"
+                                                )
+                                            )
+                                        }
+                                        item.notificationType in 29..33 -> {
+                                            val chatUrl = if (item.chatChannelId > 0) {
+                                                "https://linux.do/chat/c/-/${item.chatChannelId}"
+                                            } else {
+                                                "https://linux.do/chat"
+                                            }
+                                            onOpenWebUrl(chatUrl)
+                                        }
+                                        primaryActor.isNotBlank() && primaryActor != "系统" -> {
+                                            onInspectUser(primaryActor)
+                                        }
+                                    }
+                                }
                                 .padding(horizontal = 16.dp, vertical = 12.dp)
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.Top
                             ) {
-                                SmartAvatar(
-                                    username = item.actingUsername.ifBlank { "L" },
-                                    avatarTemplate = item.actingAvatarTemplate,
-                                    animatedAvatar = null,
-                                    primaryGroupName = null,
-                                    flair = null,
-                                    size = 38.dp,
-                                    enableAnimations = false
-                                )
+                                Box(
+                                    modifier = Modifier.clickable(
+                                        enabled = primaryActor.isNotBlank() && primaryActor != "系统"
+                                    ) {
+                                        onInspectUser(primaryActor)
+                                    }
+                                ) {
+                                    SmartAvatar(
+                                        username = item.actingUsername.ifBlank { "L" },
+                                        avatarTemplate = item.actingAvatarTemplate,
+                                        animatedAvatar = null,
+                                        primaryGroupName = null,
+                                        flair = null,
+                                        size = 38.dp,
+                                        enableAnimations = false
+                                    )
+                                }
 
                                 Spacer(modifier = Modifier.width(12.dp))
 
@@ -9103,7 +9208,8 @@ private fun GlobalSearchModalSheet(
 @Composable
 private fun UserNotificationsSheet(
     onDismiss: () -> Unit,
-    onSelectNotification: (Int, String, Int?) -> Unit
+    onSelectNotification: (Int, String, Int?) -> Unit,
+    onInspectUser: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -9130,8 +9236,8 @@ private fun UserNotificationsSheet(
     val filtered = remember(notifications, filterTab) {
         when (filterTab) {
             1 -> notifications.filter { !it.read }
-            2 -> notifications.filter { it.notificationType in setOf(1, 2, 3, 6, 9) }
-            3 -> notifications.filter { it.notificationType in setOf(5, 25) }
+            2 -> notifications.filter { it.notificationType in setOf(1, 2, 3, 6, 9, 11, 15, 29, 32, 33, 38, 802) }
+            3 -> notifications.filter { it.notificationType in setOf(5, 19, 25) }
             else -> notifications
         }
     }
@@ -9226,7 +9332,16 @@ private fun UserNotificationsSheet(
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(if (!item.read) palette.subtleSurface else palette.canvas)
                                 .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                .clickable { onSelectNotification(item.topicId, item.title, item.postNumber) }
+                                .clickable {
+                                    if (item.topicId > 0) {
+                                        onSelectNotification(item.topicId, item.title, item.postNumber)
+                                    } else {
+                                        val primaryActor = item.actingUsername.substringBefore("、").trim()
+                                        if (primaryActor.isNotBlank() && primaryActor != "系统") {
+                                            onInspectUser(primaryActor)
+                                        }
+                                    }
+                                }
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
