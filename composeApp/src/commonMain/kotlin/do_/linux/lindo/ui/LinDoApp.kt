@@ -2655,7 +2655,8 @@ private fun CommunityHomeFeedPane(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                        .background(palette.cardSurface)
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(
@@ -2685,11 +2686,12 @@ private fun CommunityHomeFeedPane(
                 }
             }
 
-            // 5. 话题流（外包独立 Box 承载下拉刷新手势与顶部悬浮零度娘提示，绝不挤压首帖布局导致点击误触）
+            // 5. 话题流（通栏无框流式列表：整页一体底色 + 0.5dp 极淡内缩细线分隔，彻底告别碎片化圆角卡片盒子感）
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
+                    .background(palette.cardSurface)
                     .nestedScroll(pullNestedScroll)
             ) {
                 if (isLoading && topics.isEmpty()) {
@@ -2707,33 +2709,30 @@ private fun CommunityHomeFeedPane(
                 } else {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(palette.cardSurface),
                         contentPadding = PaddingValues(
-                            start = 12.dp,
-                            end = 12.dp,
-                            top = 6.dp,
+                            top = 2.dp,
                             bottom = 128.dp
-                        ),
-                        verticalArrangement = Arrangement.spacedBy(if (isCompact) 5.dp else 8.dp)
+                        )
                     ) {
-                        // QQ音乐级无框置顶公告条（纯色差圆角容器，无机械外框线）
+                        // 通栏无框置顶公告条（融入整体流式背景，底部极淡细线分隔）
                         if (pinnedTopics.isNotEmpty()) {
                             item(key = "pinned_banner_group") {
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clip(RoundedCornerShape(14.dp))
                                         .background(palette.cardSurface)
-                                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     pinnedTopics.take(2).forEach { pinned ->
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .clip(RoundedCornerShape(6.dp))
                                                 .clickable { onSelectTopic(pinned) }
-                                                .padding(vertical = 2.dp),
+                                                .padding(vertical = 3.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Text(
@@ -2747,7 +2746,7 @@ private fun CommunityHomeFeedPane(
                                             Spacer(modifier = Modifier.width(8.dp))
                                             Text(
                                                 text = pinned.title,
-                                                fontSize = 12.8.sp,
+                                                fontSize = 13.sp,
                                                 fontWeight = FontWeight.Medium,
                                                 color = palette.inkPrimary,
                                                 maxLines = 1,
@@ -2763,10 +2762,15 @@ private fun CommunityHomeFeedPane(
                                         }
                                     }
                                 }
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    thickness = 0.5.dp,
+                                    color = palette.hairline.copy(alpha = 0.5f)
+                                )
                             }
                         }
 
-                        itemsIndexed(regularTopics, key = { _, item -> item.id }) { _, topic ->
+                        itemsIndexed(regularTopics, key = { _, item -> item.id }) { idx, topic ->
                             CommunityTopicItem(
                                 topic = topic,
                                 isSelected = topic.id == selectedTopicId,
@@ -2775,6 +2779,13 @@ private fun CommunityHomeFeedPane(
                                 onSelectTag = { tag -> onSelectTag(tag) },
                                 onClick = { onSelectTopic(topic) }
                             )
+                            if (idx < regularTopics.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    thickness = 0.5.dp,
+                                    color = palette.hairline.copy(alpha = 0.45f)
+                                )
+                            }
                         }
 
                         // 底部波浪呼吸脉冲分页加载栏（触底无更多时展示零度娘“没有更多了”）
@@ -2906,64 +2917,48 @@ private fun CommunityTopicItem(
     val (_, morandiFg) = remember(topic.categoryName, palette.isDark) {
         resolveMorandiCategoryColors(topic.categoryName, palette.isDark)
     }
-    val cornerRadius = if (isCompact) 12.dp else 15.dp
     val replies = maxOf(0, topic.postsCount - 1).coerceAtLeast(topic.replyCount)
-    val cardBorderModifier = if (isSelected) {
-        Modifier.border(1.dp, palette.tabIndicatorColor, RoundedCornerShape(cornerRadius))
-    } else {
-        Modifier
-    }
+    val rowBgColor = if (isSelected) palette.subtleSurface else palette.cardSurface
 
     if (isCompact) {
-        // 模式 B：紧凑高密模式（~66dp，无框纯白/深色圆角卡片，■ 版块名 · 标题 + 底部头像/作者/#Tag/互动数）
+        // 模式 B：通栏无框紧凑流式模式（标题独占首行完整展示，底栏聚合头像/作者/●分类/#Tag与互动指标）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(cornerRadius))
-                .background(palette.cardSurface)
-                .then(cardBorderModifier)
+                .background(rowBgColor)
                 .clickable(onClick = onClick)
-                .padding(horizontal = 13.dp, vertical = 9.dp)
+                .padding(horizontal = 16.dp, vertical = 11.dp)
         ) {
+            // 第一行：标题独占整行（不再被长分类名挤压截断）+ 尾部官方未读蓝点
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(6.5.dp)
-                        .clip(CircleShape)
-                        .background(catDotColor)
-                )
-                Spacer(modifier = Modifier.width(5.dp))
-                Text(
-                    text = topic.categoryName,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = morandiFg,
-                    maxLines = 1,
-                    softWrap = false
-                )
-
-                Text(
-                    text = " · ",
-                    fontSize = 12.sp,
-                    color = palette.inkTertiary
-                )
-
                 Text(
                     text = topic.title,
-                    fontSize = 14.2.sp,
+                    fontSize = 14.8.sp,
                     fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.15).sp,
                     color = palette.inkPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
+
+                if (topic.unseen || topic.unreadPosts > 0) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(6.5.dp)
+                            .clip(CircleShape)
+                            .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.height(5.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
+            // 第二行：头像 + 作者 + ● 分类 + #Tag | 右侧点赞/评论/浏览/时间
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -2974,7 +2969,7 @@ private fun CommunityTopicItem(
                     animatedAvatar = op.animatedAvatar,
                     primaryGroupName = op.primaryGroupName,
                     flair = null,
-                    size = 16.dp,
+                    size = 15.dp,
                     enableAnimations = false
                 )
 
@@ -2988,14 +2983,37 @@ private fun CommunityTopicItem(
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 100.dp)
+                    modifier = Modifier.widthIn(max = 86.dp)
                 )
 
+                Spacer(modifier = Modifier.width(8.dp))
+
+                // ● 分类圆点 + 分类名
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(catDotColor)
+                    )
+                    Text(
+                        text = topic.categoryName,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = morandiFg,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+
                 if (topic.tags.isNotEmpty()) {
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(7.dp))
                     Row(
                         modifier = Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         topic.tags.take(2).forEach { tag ->
@@ -3080,17 +3098,15 @@ private fun CommunityTopicItem(
             }
         }
     } else {
-        // 模式 A：精巧卡片模式（无框纯色差卡片，1:1 还原 Linux.do Web 视觉元素：■ 版块色块 + 纯文字 Tag）
+        // 模式 A：通栏无框舒适流式模式（无圆角盒子外框，整页一体底色 + 0.5dp 极淡细线分隔）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(cornerRadius))
-                .background(palette.cardSurface)
-                .then(cardBorderModifier)
+                .background(rowBgColor)
                 .clickable(onClick = onClick)
-                .padding(horizontal = 15.dp, vertical = 13.dp)
+                .padding(horizontal = 16.dp, vertical = 13.dp)
         ) {
-            // 第一行：头像 + 作者名 + 发布时间 | 右侧 Linux.do Web 标志性 `■ 版块名`
+            // 第一行：头像 + 作者名 + 发布时间 | 右侧 `● 版块名`
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -3105,7 +3121,7 @@ private fun CommunityTopicItem(
                         animatedAvatar = op.animatedAvatar,
                         primaryGroupName = op.primaryGroupName,
                         flair = null,
-                        size = 22.dp,
+                        size = 20.dp,
                         enableAnimations = enableAnimations
                     )
 
@@ -3113,7 +3129,7 @@ private fun CommunityTopicItem(
 
                     Text(
                         text = authorDisplay,
-                        fontSize = 13.sp,
+                        fontSize = 12.8.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = palette.inkPrimary,
                         maxLines = 1,
@@ -3138,7 +3154,7 @@ private fun CommunityTopicItem(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(7.dp)
+                            .size(6.5.dp)
                             .clip(CircleShape)
                             .background(catDotColor)
                     )
@@ -3156,17 +3172,32 @@ private fun CommunityTopicItem(
 
             Spacer(modifier = Modifier.height(7.dp))
 
-            // 第二行：加粗清晰标题
-            Text(
-                text = topic.title,
-                fontSize = 15.5.sp,
-                fontWeight = FontWeight.Bold,
-                lineHeight = 21.5.sp,
-                letterSpacing = (-0.2).sp,
-                color = palette.inkPrimary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+            // 第二行：加粗清晰标题 + 尾部官方未读蓝点
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = topic.title,
+                    fontSize = 15.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 21.5.sp,
+                    letterSpacing = (-0.2).sp,
+                    color = palette.inkPrimary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (topic.unseen || topic.unreadPosts > 0) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(6.5.dp)
+                            .clip(CircleShape)
+                            .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
+                    )
+                }
+            }
 
             // 单行精炼摘要预览
             val cleanExcerpt = topic.excerpt?.trim()?.takeIf { it.isNotEmpty() && it != topic.title }
