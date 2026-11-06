@@ -2977,6 +2977,27 @@ object LinuxDoRepository {
             null
         }
     }
+
+    /**
+     * 获取 Discourse AI 官方话题智能总结 (`GET /discourse-ai/summarization/t/{id}.json`)
+     */
+    suspend fun fetchTopicAiSummary(topicId: Int): String? = withContext(Dispatchers.IO) {
+        if (topicId <= 0) return@withContext null
+        val res = executeHttp(
+            url = "https://linux.do/discourse-ai/summarization/t/$topicId.json",
+            method = "GET"
+        ) ?: return@withContext null
+        if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withContext null
+        try {
+            val root = json.parseToJsonElement(res.second).jsonObject
+            val summaryObj = root["ai_topic_summary"] as? JsonObject
+            val text = summaryObj?.get("summarized_text")?.jsonPrimitive?.contentOrNull
+                ?: root["summarized_text"]?.jsonPrimitive?.contentOrNull
+            text?.trim()?.takeIf { it.isNotBlank() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
 }
 
 /**
