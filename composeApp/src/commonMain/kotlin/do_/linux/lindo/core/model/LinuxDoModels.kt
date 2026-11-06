@@ -188,6 +188,112 @@ data class PostReactionItem(
 )
 
 /**
+ * Discourse Boosts (`discourse-boosts` / 小火箭助力弹幕) 单条助力气泡
+ * 对应 `POST /discourse-boosts/posts/{postId}/boosts` 与 `post.boosts` 数组
+ */
+@Serializable
+data class PostBoostItem(
+    val id: Long,
+    val cookedHtml: String,
+    val plainText: String = "",
+    val userId: Int = 0,
+    val username: String = "",
+    val displayName: String? = null,
+    val avatarTemplate: String = "",
+    val canDelete: Boolean = false,
+    val canFlag: Boolean = false
+)
+
+/**
+ * 对齐官方 `DiscourseBoosts::Boost` (`MAX_VISIBLE_LENGTH = 16`, `MAX_EMOJI = 5`) 字数与表情统计：
+ * - 每个 `:shortcode:` 自定义表情与每个 Unicode Emoji 簇均计为 1 个可见字符 + 1 个表情；
+ * - 常规字符按 Unicode 字素簇（Grapheme Cluster）逐个计为 1 个可见字符。
+ */
+data class BoostInputStats(
+    val visibleLength: Int,
+    val emojiCount: Int,
+    val maxVisibleLength: Int = MAX_BOOST_VISIBLE_LENGTH,
+    val maxEmojiCount: Int = MAX_BOOST_EMOJI_COUNT
+) {
+    val canAddEmoji: Boolean
+        get() {
+            val spaceNeeded = if (visibleLength > 0) 2 else 1
+            return visibleLength + spaceNeeded <= maxVisibleLength && emojiCount < maxEmojiCount
+        }
+
+    val isWithinLimit: Boolean
+        get() = visibleLength <= maxVisibleLength && emojiCount <= maxEmojiCount
+
+    val canSubmit: Boolean
+        get() = visibleLength in 1..maxVisibleLength && emojiCount <= maxEmojiCount
+
+    val isEmpty: Boolean
+        get() = visibleLength == 0
+
+    val exceedsLength: Boolean
+        get() = visibleLength > maxVisibleLength
+
+    val exceedsEmojiLimit: Boolean
+        get() = emojiCount > maxEmojiCount
+
+    val isValid: Boolean
+        get() = canSubmit
+
+    companion object {
+        const val MAX_BOOST_VISIBLE_LENGTH = 16
+        const val MAX_BOOST_EMOJI_COUNT = 5
+        private val shortcodeRegex = Regex(":[a-zA-Z0-9_+-]+(?::t\\d)?:")
+
+        fun compute(raw: String): BoostInputStats {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return BoostInputStats(0, 0)
+            var shortcodeEmojiCount = 0
+            val replaced = shortcodeRegex.replace(trimmed) {
+                shortcodeEmojiCount++
+                "\uFFFC"
+            }
+            val iterator = java.text.BreakIterator.getCharacterInstance()
+            iterator.setText(replaced)
+            var clusterCount = 0
+            var unicodeEmojiCount = 0
+            var start = iterator.first()
+            var end = iterator.next()
+            while (end != java.text.BreakIterator.DONE) {
+                val cluster = replaced.substring(start, end)
+                clusterCount++
+                if (cluster != "\uFFFC" && isUnicodeEmojiCluster(cluster)) {
+                    unicodeEmojiCount++
+                }
+                start = end
+                end = iterator.next()
+            }
+            return BoostInputStats(
+                visibleLength = clusterCount,
+                emojiCount = shortcodeEmojiCount + unicodeEmojiCount
+            )
+        }
+
+        private fun isUnicodeEmojiCluster(cluster: String): Boolean {
+            var idx = 0
+            while (idx < cluster.length) {
+                val cp = cluster.codePointAt(idx)
+                if (cp in 0x1F000..0x1FAFF ||
+                    cp in 0x2600..0x27BF ||
+                    cp in 0x2300..0x23FF ||
+                    cp == 0x2B50 ||
+                    cp == 0x2764 ||
+                    cp == 0xFE0F
+                ) {
+                    return true
+                }
+                idx += Character.charCount(cp)
+            }
+            return false
+        }
+    }
+}
+
+/**
  * 话题详情中的单层楼 (Post)
  */
 @Serializable
@@ -223,6 +329,8 @@ data class PostItemModel(
     val isRead: Boolean = false,
     val myReactionId: String? = null,
     val reactions: List<PostReactionItem> = emptyList(),
+    val boosts: List<PostBoostItem> = emptyList(),
+    val canBoost: Boolean = true,
     val bookmarkedByMe: Boolean = false,
     val isSmallAction: Boolean = false,
     val actionCode: String? = null,

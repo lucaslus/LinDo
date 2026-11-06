@@ -505,13 +505,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
             apiWebView = wv
-            // 使用轻量级同源空文档初始化 https://linux.do 上下文（historyUrl 传 null 避免 reload 触发整页 HTML 请求）
+            // 使用轻量级同源空文档初始化 https://linux.do 上下文（historyUrl 传 https://linux.do/ 确保 SiteForCookies 与 SameSite=Lax Cookie 100% 生效）
             wv.loadDataWithBaseURL(
                 "https://linux.do/",
                 "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
                 "text/html",
                 "UTF-8",
-                null
+                "https://linux.do/"
             )
         }
     }
@@ -554,42 +554,63 @@ class MainActivity : ComponentActivity() {
         val jsCode = """
             (async function() {
                 const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 5500);
+                const timer = setTimeout(() => controller.abort(), 10000);
                 try {
                     const method = ${JSONObject.quote(method.uppercase())};
                     const hdrs = $headersJson;
                     hdrs['Accept'] = 'application/json, text/javascript, */*; q=0.01';
                     hdrs['X-Requested-With'] = 'XMLHttpRequest';
-                    const metaCsrf = document.querySelector('meta[name="csrf-token"]');
-                    if (metaCsrf && metaCsrf.content) {
-                        hdrs['X-CSRF-Token'] = metaCsrf.content;
-                    } else if (method !== 'GET') {
+                    async function refreshCsrfToken() {
                         try {
                             const csrfResp = await fetch('https://linux.do/session/csrf.json', {
                                 headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
                                 credentials: 'include',
+                                cache: 'no-store',
                                 signal: controller.signal
                             });
                             if (csrfResp.ok) {
                                 const csrfData = await csrfResp.json();
-                                if (csrfData && csrfData.csrf) hdrs['X-CSRF-Token'] = csrfData.csrf;
+                                if (csrfData && csrfData.csrf) {
+                                    window.__lindoCsrf = csrfData.csrf;
+                                    return csrfData.csrf;
+                                }
                             }
                         } catch (_) {}
+                        return null;
                     }
-                    const opts = {
-                        method: method,
-                        headers: hdrs,
-                        credentials: 'include',
-                        cache: 'no-store',
-                        signal: controller.signal
-                    };
+                    if (method !== 'GET' && method !== 'HEAD') {
+                        const metaCsrf = document.querySelector('meta[name="csrf-token"]');
+                        const cachedCsrf = (metaCsrf && metaCsrf.content) ? metaCsrf.content : window.__lindoCsrf;
+                        const token = cachedCsrf || (await refreshCsrfToken());
+                        if (token) hdrs['X-CSRF-Token'] = token;
+                    }
                     const bodyStr = ${JSONObject.quote(formBodyEncoded)};
                     if (method !== 'GET' && method !== 'HEAD') {
                         hdrs['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
-                        opts.body = bodyStr;
                     }
-                    const resp = await fetch(${JSONObject.quote(url)}, opts);
-                    const text = await resp.text();
+                    function buildOpts() {
+                        const o = {
+                            method: method,
+                            headers: Object.assign({}, hdrs),
+                            credentials: 'include',
+                            cache: 'no-store',
+                            signal: controller.signal
+                        };
+                        if (method !== 'GET' && method !== 'HEAD') {
+                            o.body = bodyStr;
+                        }
+                        return o;
+                    }
+                    let resp = await fetch(${JSONObject.quote(url)}, buildOpts());
+                    let text = await resp.text();
+                    if (method !== 'GET' && method !== 'HEAD' && (resp.status === 403 || (resp.status === 422 && text.indexOf('CSRF') >= 0))) {
+                        const freshToken = await refreshCsrfToken();
+                        if (freshToken) {
+                            hdrs['X-CSRF-Token'] = freshToken;
+                            resp = await fetch(${JSONObject.quote(url)}, buildOpts());
+                            text = await resp.text();
+                        }
+                    }
                     clearTimeout(timer);
                     window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text);
                 } catch (err) {
@@ -600,17 +621,31 @@ class MainActivity : ComponentActivity() {
         """.trimIndent()
 
         withContext(Dispatchers.Main) {
-            val cookieStr = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
-            if (cookieStr.isNotBlank()) {
+            val cm = CookieManager.getInstance()
+            val cookieStr = cm.getCookie("https://linux.do").orEmpty()
+            val sentinelWinners = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+            val sentinelT = sentinelWinners["_t"]?.value
+            if (!sentinelT.isNullOrBlank() && sentinelT != "demo_session_token" && !cookieStr.contains("_t=")) {
+                cm.setCookie("https://linux.do", "_t=$sentinelT; Path=/; Secure; HttpOnly; SameSite=Lax")
+                sentinelWinners["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
+                    cm.setCookie("https://linux.do", "_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
+                }
+                cm.flush()
+            } else if (cookieStr.isNotBlank()) {
                 CookieSentinel.ingestRawCookieString(cookieStr)
             }
             wv.evaluateJavascript(jsCode, null)
         }
 
         return try {
-            withTimeoutOrNull(6000L) {
+            val res = withTimeoutOrNull(11000L) {
                 deferred.await()
             }
+            val latestCookies = runCatching { CookieManager.getInstance().getCookie("https://linux.do") }.getOrNull().orEmpty()
+            if (latestCookies.isNotBlank()) {
+                CookieSentinel.ingestRawCookieString(latestCookies)
+            }
+            res
         } finally {
             pendingHttpCallbacks.remove(reqId)
         }
@@ -854,38 +889,45 @@ class MainActivity : ComponentActivity() {
             cookieManager.setAcceptCookie(true)
             val webKitCookies = cookieManager.getCookie("https://linux.do").orEmpty()
             val savedCookies = prefs.getString("raw_cookies", "").orEmpty()
-            val mergedCookies = if (webKitCookies.contains("_t=") && !webKitCookies.contains("_t=demo_session_token")) {
+            val hasLiveWebKitSession = webKitCookies.contains("_t=") && !webKitCookies.contains("_t=demo_session_token")
+            val mergedCookies = if (hasLiveWebKitSession) {
                 webKitCookies
             } else {
                 savedCookies.ifBlank { webKitCookies }
             }
             // 将持久化在磁盘中的会话 Cookie 反向写回系统 CookieManager，严格保持原生的 HttpOnly 与 Host-only/Domain 边界：
-            // 1) _t 与 _forum_session 为 Host-only + HttpOnly Cookie（绝不添加 Domain=linux.do，并清理旧版误加的 .linux.do 重复项）；
+            // 1) _t 与 _forum_session 为 Host-only + HttpOnly Cookie（仅当系统 CookieManager 缺失会话时写回，避免误删在线会话）；
             // 2) cf_clearance / __cf_bm / _cfuvid 为 .linux.do + HttpOnly Cookie（必须带 HttpOnly，严禁让 document.cookie 读到明文 cf_clearance 触发 Turnstile 重验）。
             if (mergedCookies.isNotBlank()) {
                 val cfCookieNames = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
                 val discourseHostOnlyNames = setOf("_t", "_forum_session")
+                val dedupedPairs = LinkedHashMap<String, String>()
                 mergedCookies.split(";").forEach { segment ->
                     val pair = segment.trim()
                     if (pair.contains("=") && !pair.startsWith("_t=demo_session_token")) {
                         val name = pair.substringBefore("=").trim()
-                        when (name) {
-                            in discourseHostOnlyNames -> {
-                                // 清理可能残留的 .linux.do 宽域重名 Cookie，确保仅保留唯一 Host-only HttpOnly Cookie
-                                cookieManager.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure")
-                                cookieManager.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure")
+                        val value = pair.substringAfter("=").trim()
+                        if (name.isNotEmpty() && value.isNotEmpty()) {
+                            dedupedPairs[name] = "$name=$value"
+                        }
+                    }
+                }
+                dedupedPairs.forEach { (name, pair) ->
+                    when (name) {
+                        in discourseHostOnlyNames -> {
+                            if (!hasLiveWebKitSession) {
                                 cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure; HttpOnly; SameSite=Lax")
                             }
-                            in cfCookieNames -> {
-                                // 仅当系统 CookieManager 尚未持有该 Cloudflare 凭证时才以 HttpOnly 恢复，避免破坏原生的 Partitioned 属性
-                                if (!webKitCookies.contains("$name=")) {
-                                    cookieManager.setCookie("https://linux.do", "$pair; Domain=.linux.do; Path=/; Secure; HttpOnly; SameSite=None")
-                                }
+                        }
+                        in cfCookieNames -> {
+                            // 仅当系统 CookieManager 尚未持有该 Cloudflare 凭证时才以 HttpOnly 恢复，避免破坏原生的 Partitioned 属性
+                            if (!webKitCookies.contains("$name=")) {
+                                cookieManager.setCookie("https://linux.do", "$pair; Domain=.linux.do; Path=/; Secure; HttpOnly; SameSite=None")
                             }
-                            else -> {
-                                if (!webKitCookies.contains("$name=")) {
-                                    cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure")
-                                }
+                        }
+                        else -> {
+                            if (!webKitCookies.contains("$name=")) {
+                                cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure")
                             }
                         }
                     }

@@ -8,9 +8,11 @@ import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.BadgeGranteeItem
 import do_.linux.lindo.core.model.BadgeInjector
+import do_.linux.lindo.core.model.BoostInputStats
 import do_.linux.lindo.core.model.CommunitySearchResult
 import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
+import do_.linux.lindo.core.model.PostBoostItem
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.PostReactionItem
 import do_.linux.lindo.core.model.TopicDetailModel
@@ -185,6 +187,7 @@ object CookieSentinel {
     ) {
         if (rawCookieHeader.isNullOrBlank()) return
         val now = System.currentTimeMillis()
+        val discourseHostOnlyNames = setOf("_t", "_forum_session")
         rawCookieHeader.split(";").forEach { segment ->
             val trimmed = segment.trim()
             val eqIdx = trimmed.indexOf('=')
@@ -192,13 +195,14 @@ object CookieSentinel {
                 val name = trimmed.substring(0, eqIdx).trim()
                 val value = trimmed.substring(eqIdx + 1).trim()
                 if (name.isNotEmpty() && value.isNotEmpty()) {
+                    val effectiveHostOnly = hostOnly || name in discourseHostOnlyNames
                     putCookie(
                         StoredCookieRecord(
                             key = CookieQuadrupleKey(
                                 name = name,
                                 domain = domain.trim().lowercase().trimStart('.'),
                                 path = "/",
-                                hostOnly = hostOnly
+                                hostOnly = effectiveHostOnly
                             ),
                             value = value,
                             updatedAtEpochMs = now
@@ -830,6 +834,37 @@ object LinuxDoRepository {
         )
     }
 
+    @Volatile
+    private var cachedCsrfToken: String? = null
+
+    private suspend fun fetchCsrfTokenViaSharedClient(forceRefresh: Boolean = false): String? {
+        if (!forceRefresh) {
+            cachedCsrfToken?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return try {
+            val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
+            val csrfResp = sharedClient.get("https://linux.do/session/csrf.json") {
+                header("Accept", "application/json")
+                header("X-Requested-With", "XMLHttpRequest")
+                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
+                if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+            }
+            csrfResp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                val pair = setCookie.substringBefore(';')
+                CookieSentinel.ingestRawCookieString(pair, domain = "linux.do")
+                UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke(setCookie)
+            }
+            val body = csrfResp.bodyAsText()
+            val token = runCatching {
+                json.parseToJsonElement(body).jsonObject["csrf"]?.jsonPrimitive?.contentOrNull
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+            if (token != null) cachedCsrfToken = token
+            token
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     /**
      * 统一 HTTP 执行器：
      * 1. 若平台已挂载 Chromium WebView 通道 (`webViewHttpExecutor`) 或 `webViewJsonFetcher`，优先走共享 TLS 指纹通道，天然携带 `cf_clearance`、`_t` 与 CSRF Token；
@@ -893,7 +928,7 @@ object LinuxDoRepository {
         var lastResponse: Pair<Int, String>? = null
         try {
             val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
-            val cookieHeader = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+            fun currentSafeCookieHeader(): String = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
                 .entries
                 .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
                 // 若当前平台存在 WebView，禁止将绑定了 Chromium TLS 指纹的 cf_clearance 放到 OkHttp 请求上发送，防止被 Cloudflare 判定指纹劫持而吊销
@@ -906,10 +941,29 @@ object LinuxDoRepository {
             if (UserApiKeyAuthManager.webViewHttpExecutor == null) {
                 UserApiKeyAuthManager.customUserAgent?.let { requestHeaders["User-Agent"] = it }
             }
+            val isMutation = !method.equals("GET", true) && !method.equals("HEAD", true)
+            if (isMutation && hasWebCookie && !requestHeaders.containsKey("X-CSRF-Token")) {
+                fetchCsrfTokenViaSharedClient(forceRefresh = false)?.let { requestHeaders["X-CSRF-Token"] = it }
+            }
+            val cookieHeader = currentSafeCookieHeader()
             if (cookieHeader.isNotEmpty()) requestHeaders["Cookie"] = cookieHeader
             var response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+            response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                CookieSentinel.ingestRawCookieString(setCookie.substringBefore(';'), domain = "linux.do")
+            }
             var status = response.status.value
             var text = response.bodyAsText()
+            if (isMutation && (status == 403 || (status == 422 && text.contains("CSRF", ignoreCase = true))) && hasWebCookie) {
+                val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
+                if (!freshCsrf.isNullOrBlank()) {
+                    requestHeaders["X-CSRF-Token"] = freshCsrf
+                    val updatedCookieHeader = currentSafeCookieHeader()
+                    if (updatedCookieHeader.isNotEmpty()) requestHeaders["Cookie"] = updatedCookieHeader
+                    response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+                    status = response.status.value
+                    text = response.bodyAsText()
+                }
+            }
             // 若携带 Discourse-Logged-In 头遭遇 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次
             if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In") && method.equals("GET", true)) {
                 requestHeaders.remove("Discourse-Logged-In")
@@ -1470,22 +1524,7 @@ object LinuxDoRepository {
     /**
      * 点赞 / 取消点赞指定楼层（优先调用 Discourse Reactions 插件接口，兼容标准 `post_actions`）
      */
-    suspend fun togglePostLike(postId: Int): Boolean = withContext(Dispatchers.IO) {
-        val reactionUrl = "https://linux.do/discourse-reactions/posts/$postId/custom-reactions/heart/toggle.json"
-        val res = executeHttp(url = reactionUrl, method = "PUT", formParams = emptyMap())
-        if (res != null && res.first in 200..299) {
-            return@withContext true
-        }
-        val fallbackRes = executeHttp(
-            url = "https://linux.do/post_actions.json",
-            method = "POST",
-            formParams = mapOf(
-                "id" to postId.toString(),
-                "post_action_type_id" to "2"
-            )
-        )
-        fallbackRes != null && fallbackRes.first in 200..299
-    }
+    suspend fun togglePostLike(postId: Int): Boolean = togglePostReactionDetailed(postId, "heart").ok
 
     /**
      * 收藏指定帖子/话题到个人书签 (`POST /bookmarks.json`)
@@ -2016,15 +2055,347 @@ object LinuxDoRepository {
         res != null && res.first in 200..299
     }
 
+    data class ReactionToggleResult(
+        val ok: Boolean,
+        val myReactionId: String? = null,
+        val reactions: List<PostReactionItem>? = null,
+        val errorMessage: String? = null
+    )
+
+    data class BoostMutationResult(
+        val ok: Boolean,
+        val boost: PostBoostItem? = null,
+        val errorMessage: String? = null
+    )
+
+    data class PostReactionSnapshot(
+        val myReactionId: String?,
+        val reactions: List<PostReactionItem>
+    )
+
+    data class PostBoostSnapshot(
+        val boosts: List<PostBoostItem>,
+        val canBoost: Boolean
+    )
+
+    private val postReactionSnapshots = java.util.concurrent.ConcurrentHashMap<Int, PostReactionSnapshot>()
+    private val postBoostSnapshots = java.util.concurrent.ConcurrentHashMap<Int, PostBoostSnapshot>()
+
+    fun getPostReactionSnapshot(postId: Int): PostReactionSnapshot? = postReactionSnapshots[postId]
+    fun getPostBoostSnapshot(postId: Int): PostBoostSnapshot? = postBoostSnapshots[postId]
+
+    private fun extractActionErrorMessage(res: Pair<Int, String>?, defaultMsg: String): String {
+        if (res == null || res.first == 0) {
+            return "网络或认证通道暂不可用，请检查网络或重新登录"
+        }
+        val (status, body) = res
+        val trimmed = body.trimStart()
+        if (trimmed.startsWith("{")) {
+            runCatching {
+                val root = json.parseToJsonElement(trimmed).jsonObject
+                val messages = when (val errs = root["errors"]) {
+                    is JsonArray -> errs.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) }
+                    is JsonPrimitive -> listOfNotNull(errs.contentOrNull?.takeIf(String::isNotBlank))
+                    else -> emptyList()
+                }.ifEmpty {
+                    listOfNotNull(
+                        (root["error"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank),
+                        (root["message"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                    )
+                }
+                if (messages.isNotEmpty()) {
+                    val rawText = org.jsoup.Jsoup.parse(messages.joinToString("；")).text().trim()
+                    if (rawText.equals("BAD CSRF", ignoreCase = true) || rawText.contains("CSRF", ignoreCase = true)) {
+                        return "会话安全令牌已过期，请刷新页面或重新登录后重试"
+                    }
+                    if (rawText.isNotEmpty()) {
+                        return rawText.take(180)
+                    }
+                }
+            }
+        }
+        return when (status) {
+            401 -> "登录状态已失效，请重新登录后操作"
+            403 -> "当前无权限执行该操作（不能给自己的帖子、已删除或已锁定的楼层操作）"
+            404, 410 -> "目标楼层不存在或已被作者删除"
+            422 -> "操作未生效（不能给自己的帖子操作，或表情不在站点白名单内）"
+            429 -> "操作过于频繁，请稍后再试"
+            else -> defaultMsg
+        }
+    }
+
+    private fun parsePostReactionsAndMine(pObj: JsonObject): Pair<List<PostReactionItem>, String?> {
+        val parsedReactions = (pObj["reactions"] as? JsonArray)?.mapNotNull { rElem ->
+            val rObj = rElem as? JsonObject ?: return@mapNotNull null
+            val rId = rObj["id"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
+            val cnt = rObj["count"]?.jsonPrimitive?.intOrNull ?: 0
+            if (cnt <= 0) return@mapNotNull null
+            PostReactionItem(
+                id = rId,
+                emoji = LinuxDoEmojiCatalog.shortcodeToUnicode(rId) ?: ":$rId:",
+                count = cnt
+            )
+        }.orEmpty()
+
+        val myReactionObj = pObj["current_user_reaction"] as? JsonObject
+        val myReactionId = myReactionObj?.get("id")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: if (
+                (pObj["actions_summary"] as? JsonArray)?.any { aElem ->
+                    val aObj = aElem as? JsonObject
+                    aObj?.get("id")?.jsonPrimitive?.intOrNull == 2 && aObj["acted"]?.jsonPrimitive?.booleanOrNull == true
+                } == true
+            ) "heart" else null
+
+        val finalReactions = if (parsedReactions.isNotEmpty()) {
+            parsedReactions
+        } else {
+            val likeActCount = (pObj["actions_summary"] as? JsonArray)?.firstOrNull { aElem ->
+                (aElem as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull == 2
+            }?.let { (it as? JsonObject)?.get("count")?.jsonPrimitive?.intOrNull } ?: 0
+            if (likeActCount > 0) {
+                listOf(PostReactionItem(id = "heart", emoji = "❤️", count = likeActCount))
+            } else {
+                emptyList()
+            }
+        }
+        return finalReactions to myReactionId
+    }
+
+    private fun cookedBoostToInlineText(cookedHtml: String): String {
+        if (cookedHtml.isBlank()) return ""
+        return try {
+            val doc = org.jsoup.Jsoup.parseBodyFragment(cookedHtml)
+            doc.select("img").forEach { img ->
+                val src = img.attr("src").trim()
+                val title = img.attr("title").trim()
+                val alt = img.attr("alt").trim()
+                val token = when {
+                    title.startsWith(":") && title.endsWith(":") && title.length > 2 -> title
+                    alt.startsWith(":") && alt.endsWith(":") && alt.length > 2 -> alt
+                    title.isNotEmpty() -> ":${title.removeSurrounding(":")}:"
+                    alt.isNotEmpty() -> alt
+                    else -> ""
+                }
+                if (token.startsWith(":") && token.endsWith(":") && src.isNotEmpty()) {
+                    LinuxDoEmojiCatalog.registerSingleEmojiUrl(token, src)
+                }
+                img.replaceWith(org.jsoup.nodes.TextNode(token))
+            }
+            doc.body().text().replace(Regex("\\s+"), " ").trim()
+        } catch (_: Throwable) {
+            cookedHtml.replace(Regex("<[^>]+>"), "").trim()
+        }
+    }
+
+    private fun parseSingleBoostObject(bObj: JsonObject): PostBoostItem? {
+        val bid = bObj["id"]?.jsonPrimitive?.longOrNull ?: return null
+        val cooked = bObj["cooked"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val rawFallback = bObj["raw"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val plain = cookedBoostToInlineText(cooked).ifBlank { rawFallback }
+        if (plain.isBlank() && cooked.isBlank()) return null
+        val uObj = bObj["user"] as? JsonObject
+        val uid = uObj?.get("id")?.jsonPrimitive?.intOrNull
+            ?: bObj["user_id"]?.jsonPrimitive?.intOrNull ?: 0
+        val uname = uObj?.get("username")?.jsonPrimitive?.contentOrNull
+            ?: bObj["username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo"
+        val dName = uObj?.get("name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val rawAvatar = uObj?.get("avatar_template")?.jsonPrimitive?.contentOrNull
+            ?: bObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
+        val avatarUrl = if (rawAvatar.isNotBlank()) LinuxDoSiteRules.resolveUrl(rawAvatar) else ""
+        val myUsername = UserApiKeyAuthManager.currentUser?.username
+        val isMine = !myUsername.isNullOrBlank() && uname.equals(myUsername, ignoreCase = true)
+        val canDelete = bObj["can_delete"]?.jsonPrimitive?.booleanOrNull ?: isMine
+        val canFlag = bObj["can_flag"]?.jsonPrimitive?.booleanOrNull ?: false
+        return PostBoostItem(
+            id = bid,
+            cookedHtml = cooked.ifBlank { plain },
+            plainText = plain,
+            userId = uid,
+            username = uname,
+            displayName = dName,
+            avatarTemplate = avatarUrl,
+            canDelete = canDelete,
+            canFlag = canFlag
+        )
+    }
+
+    private fun parsePostBoostsArray(element: JsonElement?): List<PostBoostItem> {
+        val arr = element as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { item ->
+            parseSingleBoostObject(item as? JsonObject ?: return@mapNotNull null)
+        }
+    }
+
     /**
-     * 多表情互动回应 (`heart`, `+1`, `laughing`, `open_mouth`, `clap`, `confetti_ball`, `hugs`)
+     * 多表情互动回应（严格对齐 Linux.do `discourse-reactions` 官方接口，解析服务端最新 `PostSerializer` 状态并持久化快照）
      */
-    suspend fun togglePostReaction(postId: Int, reactionId: String = "heart"): Boolean = withContext(Dispatchers.IO) {
-        val url = "https://linux.do/discourse-reactions/posts/$postId/custom-reactions/$reactionId/toggle.json"
-        val res = executeHttp(url = url, method = "PUT", formParams = emptyMap())
-        if (res != null && res.first in 200..299) return@withContext true
-        if (reactionId == "heart") return@withContext togglePostLike(postId)
-        false
+    suspend fun togglePostReactionDetailed(
+        postId: Int,
+        reactionId: String = "heart"
+    ): ReactionToggleResult = withContext(Dispatchers.IO) {
+        val cleanReaction = reactionId.trim().removeSurrounding(":").ifBlank { "heart" }
+        val encodedReaction = java.net.URLEncoder.encode(cleanReaction, "UTF-8")
+        val url = "https://linux.do/discourse-reactions/posts/$postId/custom-reactions/$encodedReaction/toggle.json"
+        val res = executeHttp(url = url, method = "PUT", formParams = emptyMap(), preserveFailure = true)
+        if (res != null && res.first in 200..299) {
+            val trimmed = res.second.trimStart()
+            if (trimmed.startsWith("{")) {
+                runCatching {
+                    val root = json.parseToJsonElement(trimmed).jsonObject
+                    val pObj = (root["post"] as? JsonObject) ?: root
+                    if (
+                        pObj.containsKey("reactions") ||
+                        pObj.containsKey("current_user_reaction") ||
+                        pObj.containsKey("actions_summary")
+                    ) {
+                        val (serverReactions, serverMyReaction) = parsePostReactionsAndMine(pObj)
+                        postReactionSnapshots[postId] = PostReactionSnapshot(
+                            myReactionId = serverMyReaction,
+                            reactions = serverReactions
+                        )
+                        return@withContext ReactionToggleResult(
+                            ok = true,
+                            myReactionId = serverMyReaction,
+                            reactions = serverReactions
+                        )
+                    }
+                }
+            }
+            return@withContext ReactionToggleResult(ok = true)
+        }
+
+        // 仅当站点未挂载 discourse-reactions 路由 (404) 且点击的是红心时，回退至标准 post_actions 点赞接口
+        if (cleanReaction == "heart" && res?.first == 404) {
+            val fallbackRes = executeHttp(
+                url = "https://linux.do/post_actions.json",
+                method = "POST",
+                formParams = mapOf(
+                    "id" to postId.toString(),
+                    "post_action_type_id" to "2"
+                ),
+                preserveFailure = true
+            )
+            if (fallbackRes != null && fallbackRes.first in 200..299) {
+                val trimmed = fallbackRes.second.trimStart()
+                if (trimmed.startsWith("{")) {
+                    runCatching {
+                        val root = json.parseToJsonElement(trimmed).jsonObject
+                        val pObj = (root["post"] as? JsonObject) ?: root
+                        if (pObj.containsKey("actions_summary") || pObj.containsKey("reactions")) {
+                            val (serverReactions, serverMyReaction) = parsePostReactionsAndMine(pObj)
+                            postReactionSnapshots[postId] = PostReactionSnapshot(
+                                myReactionId = serverMyReaction,
+                                reactions = serverReactions
+                            )
+                            return@withContext ReactionToggleResult(
+                                ok = true,
+                                myReactionId = serverMyReaction,
+                                reactions = serverReactions
+                            )
+                        }
+                    }
+                }
+                return@withContext ReactionToggleResult(ok = true)
+            }
+            return@withContext ReactionToggleResult(
+                ok = false,
+                errorMessage = extractActionErrorMessage(fallbackRes, "点赞未生效，请稍后重试")
+            )
+        }
+
+        ReactionToggleResult(
+            ok = false,
+            errorMessage = extractActionErrorMessage(res, "表态未生效，请稍后重试")
+        )
+    }
+
+    suspend fun togglePostReaction(postId: Int, reactionId: String = "heart"): Boolean =
+        togglePostReactionDetailed(postId, reactionId).ok
+
+    /**
+     * 发送小火箭 Boost (`POST /discourse-boosts/posts/{postId}/boosts.json`)
+     * 支持表情（含站点自定义 `:shortcode:`）+ 16 个可见字符以内的短评（最多 5 个表情）
+     */
+    suspend fun createPostBoost(postId: Int, raw: String): BoostMutationResult = withContext(Dispatchers.IO) {
+        val trimmed = raw.trim()
+        val stats = BoostInputStats.compute(trimmed)
+        if (stats.isEmpty) {
+            return@withContext BoostMutationResult(ok = false, errorMessage = "请输入 Boost 短评或选择表情")
+        }
+        if (stats.exceedsLength) {
+            return@withContext BoostMutationResult(
+                ok = false,
+                errorMessage = "Boost 内容最多 ${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH} 个字（当前 ${stats.visibleLength} 字）"
+            )
+        }
+        if (stats.exceedsEmojiLimit) {
+            return@withContext BoostMutationResult(
+                ok = false,
+                errorMessage = "单条 Boost 最多包含 ${BoostInputStats.MAX_BOOST_EMOJI_COUNT} 个表情（当前 ${stats.emojiCount} 个）"
+            )
+        }
+
+        val res = executeHttp(
+            url = "https://linux.do/discourse-boosts/posts/$postId/boosts.json",
+            method = "POST",
+            formParams = mapOf("raw" to trimmed),
+            preserveFailure = true
+        )
+        if (res != null && res.first in 200..299) {
+            val body = res.second.trimStart()
+            var createdBoost: PostBoostItem? = null
+            if (body.startsWith("{")) {
+                runCatching {
+                    val root = json.parseToJsonElement(body).jsonObject
+                    val bObj = (root["boost"] as? JsonObject) ?: root
+                    createdBoost = parseSingleBoostObject(bObj)
+                }
+            }
+            val currentUser = UserApiKeyAuthManager.currentUser
+            val resolvedBoost = createdBoost ?: PostBoostItem(
+                id = System.currentTimeMillis(),
+                cookedHtml = trimmed,
+                plainText = trimmed,
+                userId = currentUser?.userId ?: 0,
+                username = currentUser?.username ?: "me",
+                displayName = currentUser?.displayName,
+                avatarTemplate = currentUser?.avatarTemplate.orEmpty(),
+                canDelete = true,
+                canFlag = false
+            )
+            val existing = postBoostSnapshots[postId]?.boosts.orEmpty()
+            val updatedList = (existing.filterNot { it.id == resolvedBoost.id } + resolvedBoost)
+            postBoostSnapshots[postId] = PostBoostSnapshot(boosts = updatedList, canBoost = false)
+            return@withContext BoostMutationResult(ok = true, boost = resolvedBoost)
+        }
+        BoostMutationResult(
+            ok = false,
+            errorMessage = extractActionErrorMessage(res, "发送小火箭 Boost 失败，请稍后重试")
+        )
+    }
+
+    /**
+     * 删除自己发送的小火箭 Boost (`DELETE /discourse-boosts/boosts/{boostId}.json`)
+     */
+    suspend fun deletePostBoost(postId: Int, boostId: Long): BoostMutationResult = withContext(Dispatchers.IO) {
+        val res = executeHttp(
+            url = "https://linux.do/discourse-boosts/boosts/$boostId.json",
+            method = "DELETE",
+            preserveFailure = true
+        )
+        if (res != null && res.first in 200..299) {
+            postBoostSnapshots[postId]?.let { snap ->
+                postBoostSnapshots[postId] = snap.copy(
+                    boosts = snap.boosts.filterNot { it.id == boostId },
+                    canBoost = true
+                )
+            }
+            return@withContext BoostMutationResult(ok = true)
+        }
+        BoostMutationResult(
+            ok = false,
+            errorMessage = extractActionErrorMessage(res, "删除 Boost 失败，请稍后重试")
+        )
     }
 
     /**
@@ -2508,17 +2879,10 @@ object LinuxDoRepository {
         val replyToUsername = replyToUserObj?.get("username")?.jsonPrimitive?.contentOrNull
         val reads = pObj["reads"]?.jsonPrimitive?.intOrNull ?: 0
 
-        val parsedReactions = (pObj["reactions"] as? JsonArray)?.mapNotNull { rElem ->
-            val rObj = rElem as? JsonObject ?: return@mapNotNull null
-            val rId = rObj["id"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
-            val cnt = rObj["count"]?.jsonPrimitive?.intOrNull ?: 0
-            if (cnt <= 0) return@mapNotNull null
-            PostReactionItem(
-                id = rId,
-                emoji = LinuxDoEmojiCatalog.shortcodeToUnicode(rId) ?: ":$rId:",
-                count = cnt
-            )
-        }.orEmpty()
+        val (rawParsedReactions, rawMyReactionId) = parsePostReactionsAndMine(pObj)
+        val reactionSnap = postReactionSnapshots[pid]
+        val parsedReactions = reactionSnap?.reactions ?: rawParsedReactions
+        val myReactionId = if (reactionSnap != null) reactionSnap.myReactionId else rawMyReactionId
 
         val reactionsCount = if (parsedReactions.isNotEmpty()) {
             parsedReactions.sumOf { it.count }
@@ -2528,21 +2892,18 @@ object LinuxDoRepository {
             }?.let { (it as? JsonObject)?.get("count")?.jsonPrimitive?.intOrNull } ?: 0
         }
 
-        val myReactionObj = pObj["current_user_reaction"] as? JsonObject
-        val myReactionId = myReactionObj?.get("id")?.jsonPrimitive?.contentOrNull
-            ?: if (
-                (pObj["actions_summary"] as? JsonArray)?.any { aElem ->
-                    val aObj = aElem as? JsonObject
-                    aObj?.get("id")?.jsonPrimitive?.intOrNull == 2 && aObj["acted"]?.jsonPrimitive?.booleanOrNull == true
-                } == true
-            ) "heart" else null
-
         val likedByMe = !myReactionId.isNullOrBlank()
 
         val rawRead = pObj["read"]?.jsonPrimitive?.booleanOrNull
         val alreadyReadInSession = resolvedTopicId > 0 && ScreenTrackEngine.isPostRead(resolvedTopicId, postNumber)
         val myUsername = UserApiKeyAuthManager.currentUser?.username
         val isOwnPost = !myUsername.isNullOrBlank() && username.equals(myUsername, ignoreCase = true)
+        val rawBoosts = parsePostBoostsArray(pObj["boosts"])
+        val boostSnap = postBoostSnapshots[pid]
+        val finalBoosts = boostSnap?.boosts ?: rawBoosts
+        val alreadyBoostedByMe = !myUsername.isNullOrBlank() && finalBoosts.any { it.username.equals(myUsername, ignoreCase = true) }
+        val canBoost = boostSnap?.canBoost
+            ?: (pObj["can_boost"]?.jsonPrimitive?.booleanOrNull ?: (!isOwnPost && !alreadyBoostedByMe))
         val isRead = when {
             forceRead || alreadyReadInSession || isOwnPost -> true
             rawRead == false -> false
@@ -2609,6 +2970,8 @@ object LinuxDoRepository {
             isRead = isRead,
             myReactionId = myReactionId,
             reactions = parsedReactions,
+            boosts = finalBoosts,
+            canBoost = canBoost,
             bookmarkedByMe = bookmarkedByMe,
             canEdit = canEdit,
             canDelete = canDelete,
@@ -2992,7 +3355,12 @@ object LinuxDoRepository {
 
     private val pollVoteSnapshots = java.util.concurrent.ConcurrentHashMap<String, PollVoteSnapshot>()
     fun getPollVoteSnapshot(postId: Int, pollName: String): PollVoteSnapshot? = pollVoteSnapshots["$postId:$pollName"]
-    fun clearPollVoteState() { pollVoteSnapshots.clear() }
+    fun clearPollVoteState() {
+        pollVoteSnapshots.clear()
+        postReactionSnapshots.clear()
+        postBoostSnapshots.clear()
+        cachedCsrfToken = null
+    }
 
     /**
      * 帖内原生投票 (`PUT /polls/vote.json`)

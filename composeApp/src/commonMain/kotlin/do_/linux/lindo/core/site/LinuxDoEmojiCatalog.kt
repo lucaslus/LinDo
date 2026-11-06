@@ -41,7 +41,7 @@ data class LinuxDoEmojiGroup(
 object LinuxDoEmojiCatalog {
 
     /**
-     * Linux.do 官方楼层快捷表态集合（对齐站点 `discourse-reactions` 配置）
+     * Linux.do 官方楼层快捷表态集合（严格对齐站点 `discourse_reactions_enabled_reactions` 白名单）
      */
     val officialReactions: List<LinuxDoEmojiItem> = listOf(
         LinuxDoEmojiItem("heart", "❤️", keywordsZh = "爱心 点赞 喜欢 心心"),
@@ -52,16 +52,22 @@ object LinuxDoEmojiCatalog {
         LinuxDoEmojiItem("confetti_ball", "🎊", keywordsZh = "庆祝 撒花 恭喜 礼花"),
         LinuxDoEmojiItem("hugs", "🤗", keywordsZh = "抱抱 拥抱 贴贴 安慰"),
         LinuxDoEmojiItem("distorted_face", "🫠", keywordsZh = "融化 裂开 麻了 扭曲"),
-        LinuxDoEmojiItem("rocket", "🚀", keywordsZh = "火箭 冲 顶 起飞 Boost"),
-        LinuxDoEmojiItem("fire", "🔥", keywordsZh = "火 火热 前排 燃"),
-        LinuxDoEmojiItem("thinking", "🤔", keywordsZh = "思考 疑惑 为什么 嗯"),
-        LinuxDoEmojiItem("rofl", "🤣", keywordsZh = "笑滚 笑死 绷不住"),
-        LinuxDoEmojiItem("sob", "😭", keywordsZh = "大哭 暴风哭泣 泪目 破防"),
-        LinuxDoEmojiItem("eyes", "👀", keywordsZh = "围观 盯 暗中观察 看戏"),
-        LinuxDoEmojiItem("pray", "🙏", keywordsZh = "感谢 拜托 祈祷 谢谢大佬"),
-        LinuxDoEmojiItem("partying_face", "🥳", keywordsZh = "派对 庆祝 嗨起来"),
-        LinuxDoEmojiItem("saluting_face", "🫡", keywordsZh = "致敬 敬礼 收到 瑞思拜"),
-        LinuxDoEmojiItem("face_with_monocle", "🧐", keywordsZh = "端详 审视 细看 考据")
+        LinuxDoEmojiItem("tieba_087", null, keywordsZh = "贴吧 滑稽 狗头"),
+        LinuxDoEmojiItem("bili_057", null, keywordsZh = "B站 小电视 赞")
+    )
+
+    /**
+     * 小火箭 Boost (`discourse-boosts`) 一键快捷助力短语（表情 + 16 字内短评）
+     */
+    val quickBoostPresets: List<Pair<String, String>> = listOf(
+        "✋ 俺也一样" to "✋ 俺也一样",
+        "🚀 前排支持" to "🚀 前排支持",
+        "🎉 感谢分享" to "🎉 感谢分享",
+        "🔥 太强了" to "🔥 太强了",
+        "❤️ 学到了" to "❤️ 学到了",
+        "🫡 瑞思拜" to "🫡 瑞思拜",
+        "🤣 笑死" to "🤣 笑死",
+        "🫠 破防了" to "🫠 破防了"
     )
 
     private val dynamicCustomUrls = ConcurrentHashMap<String, String>()
@@ -70,6 +76,14 @@ object LinuxDoEmojiCatalog {
     private var dynamicServerGroups: List<LinuxDoEmojiGroup> = emptyList()
 
     fun hasSyncedServerEmojis(): Boolean = dynamicServerGroups.isNotEmpty()
+
+    fun registerSingleEmojiUrl(shortcode: String, rawUrl: String) {
+        val cleanName = shortcode.trim().removeSurrounding(":").lowercase()
+        val cleanUrl = rawUrl.trim()
+        if (cleanName.isNotEmpty() && cleanUrl.isNotEmpty()) {
+            dynamicCustomUrls[cleanName] = LinuxDoSiteRules.resolveUrl(cleanUrl)
+        }
+    }
 
     /**
      * 注册来自 `https://linux.do/emojis.json` 的站点自定义表情包分组

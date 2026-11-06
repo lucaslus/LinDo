@@ -211,4 +211,98 @@ class ComposerAndSafetyTest {
             assertNull(UserApiKeyAuthManager.exportPendingPrivateKeyBase64())
         } finally { UserApiKeyAuthManager.setApiKey(oldKey) }
     }
+
+    @Test fun boostInputStatsCountShortcodesAndUnicodeEmojisAccurately() {
+        val preset = BoostInputStats.compute("✋ 俺也一样")
+        assertTrue(preset.isValid)
+        assertEquals(6, preset.visibleLength)
+        assertEquals(1, preset.emojiCount)
+
+        val customEmojiStats = BoostInputStats.compute(":tieba_087: :bili_057: 太强了")
+        assertTrue(customEmojiStats.isValid)
+        assertEquals(7, customEmojiStats.visibleLength)
+        assertEquals(2, customEmojiStats.emojiCount)
+
+        val overLength = BoostInputStats.compute("一二三四五六七八九十十一十二十三十四十五十六十七")
+        assertTrue(overLength.exceedsLength)
+        assertFalse(overLength.isValid)
+
+        val overEmojis = BoostInputStats.compute("🚀🔥🎉❤️👍😆")
+        assertTrue(overEmojis.exceedsEmojiLimit)
+        assertFalse(overEmojis.isValid)
+    }
+
+    @Test fun reactionToggleParsesServerSnapshotAndSurfacesErrors() = runTest {
+        LinuxDoRepository.clearPollVoteState()
+        withTransport({ url, method, _ ->
+            assertEquals("PUT", method)
+            assertTrue(url.endsWith("/discourse-reactions/posts/501/custom-reactions/heart/toggle.json"))
+            200 to """{"id":501,"reactions":[{"id":"heart","type":"emoji","count":5}],"current_user_reaction":{"id":"heart","type":"emoji","can_undo":true}}"""
+        }) {
+            val res = LinuxDoRepository.togglePostReactionDetailed(501, "heart")
+            assertTrue(res.ok)
+            assertEquals("heart", res.myReactionId)
+            assertEquals(5, res.reactions?.single()?.count)
+            val snap = LinuxDoRepository.getPostReactionSnapshot(501)
+            assertNotNull(snap)
+            assertEquals("heart", snap.myReactionId)
+            assertEquals(5, snap.reactions.single().count)
+        }
+
+        withTransport({ _, _, _ ->
+            422 to """{"errors":["不能给自己的帖子表态"]}"""
+        }) {
+            val failed = LinuxDoRepository.togglePostReactionDetailed(502, "heart")
+            assertFalse(failed.ok)
+            assertEquals("不能给自己的帖子表态", failed.errorMessage)
+        }
+    }
+
+    @Test fun boostCreateAndDeleteSyncWithDiscourseBoostsRoutes() = runTest {
+        LinuxDoRepository.clearPollVoteState()
+        withTransport({ url, method, form ->
+            assertEquals("POST", method)
+            assertTrue(url.endsWith("/discourse-boosts/posts/601/boosts.json"))
+            assertEquals("✋ 俺也一样 :tieba_087:", form?.get("raw"))
+            200 to """{"boost":{"id":9001,"post_id":601,"cooked":"<p>✋ 俺也一样 <img src=\"/uploads/default/original/1X/tieba.png\" title=\":tieba_087:\" alt=\":tieba_087:\" class=\"emoji\"></p>","can_delete":true,"can_flag":false,"user":{"id":7,"username":"lucas","name":"Lucas","avatar_template":"/user_avatar/linux.do/lucas/{size}/1.png"}}}"""
+        }) {
+            val res = LinuxDoRepository.createPostBoost(601, "✋ 俺也一样 :tieba_087:")
+            assertTrue(res.ok)
+            assertNotNull(res.boost)
+            assertEquals(9001L, res.boost?.id)
+            assertEquals("✋ 俺也一样 :tieba_087:", res.boost?.plainText)
+            val snap = LinuxDoRepository.getPostBoostSnapshot(601)
+            assertNotNull(snap)
+            assertFalse(snap.canBoost)
+            assertEquals(1, snap.boosts.size)
+        }
+
+        withTransport({ url, method, _ ->
+            assertEquals("DELETE", method)
+            assertTrue(url.endsWith("/discourse-boosts/boosts/9001.json"))
+            204 to ""
+        }) {
+            val del = LinuxDoRepository.deletePostBoost(601, 9001L)
+            assertTrue(del.ok)
+            val snap = LinuxDoRepository.getPostBoostSnapshot(601)
+            assertNotNull(snap)
+            assertTrue(snap.canBoost)
+            assertTrue(snap.boosts.isEmpty())
+        }
+    }
+
+    @Test fun cookieSentinelPreservesFreshSessionCookiesOverOlderRecords() {
+        CookieSentinel.clearAll()
+        CookieSentinel.putCookie(
+            StoredCookieRecord(
+                key = CookieQuadrupleKey(name = "_t", domain = "linux.do", path = "/", hostOnly = true),
+                value = "old_expired_token",
+                updatedAtEpochMs = 1000L
+            )
+        )
+        CookieSentinel.ingestRawCookieString("_t=fresh_live_token; _forum_session=fresh_session", domain = "linux.do", hostOnly = false)
+        val winners = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+        assertEquals("fresh_live_token", winners["_t"]?.value)
+        assertEquals("fresh_session", winners["_forum_session"]?.value)
+    }
 }

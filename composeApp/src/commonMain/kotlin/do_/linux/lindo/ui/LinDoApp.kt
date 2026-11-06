@@ -127,12 +127,14 @@ import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.BadgeGranteeItem
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.BadgeType
+import do_.linux.lindo.core.model.BoostInputStats
 import do_.linux.lindo.core.model.CommunitySearchResult
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.model.mergeTopicPosts
 import do_.linux.lindo.core.model.previousUnloadedStreamIds
 import do_.linux.lindo.core.model.remainingUnloadedStreamIds
 import do_.linux.lindo.core.model.resolveJumpPostIndex
+import do_.linux.lindo.core.model.PostBoostItem
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.PostReactionItem
 import do_.linux.lindo.core.model.TopicDetailModel
@@ -4672,12 +4674,27 @@ private fun CommunityPostFloor(
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
+    val isOp = post.isTopicOwner || post.username.equals(opUsername, ignoreCase = true)
+    val accountUsername = LocalCurrentAccountUsername.current ?: UserApiKeyAuthManager.currentUser?.username
+    val isOwnPost = remember(post.username, accountUsername) {
+        val me = accountUsername
+        !me.isNullOrBlank() && post.username.equals(me, ignoreCase = true)
+    }
+    val isDeletedPost = remember(post.cookedHtml) {
+        post.cookedHtml.contains("帖子已被作者删除") ||
+            post.cookedHtml.contains("(post deleted by author)", ignoreCase = true)
+    }
+
+    val initialReactionSnap = LinuxDoRepository.getPostReactionSnapshot(post.id)
     var myReactionId by remember(post.id, post.myReactionId, post.likedByMe) {
-        mutableStateOf(post.myReactionId ?: if (post.likedByMe) "heart" else null)
+        mutableStateOf(
+            if (initialReactionSnap != null) initialReactionSnap.myReactionId
+            else (post.myReactionId ?: if (post.likedByMe) "heart" else null)
+        )
     }
     var localReactions by remember(post.id, post.reactions, post.likeCount) {
         mutableStateOf(
-            if (post.reactions.isNotEmpty()) {
+            initialReactionSnap?.reactions ?: if (post.reactions.isNotEmpty()) {
                 post.reactions
             } else if (post.likeCount > 0) {
                 listOf(PostReactionItem(id = "heart", emoji = "❤️", count = post.likeCount))
@@ -4686,17 +4703,67 @@ private fun CommunityPostFloor(
             }
         )
     }
+
+    val initialBoostSnap = LinuxDoRepository.getPostBoostSnapshot(post.id)
+    var localBoosts by remember(post.id, post.boosts) {
+        mutableStateOf(initialBoostSnap?.boosts ?: post.boosts)
+    }
+    var canBoostLocal by remember(post.id, post.canBoost, post.boosts, isOwnPost, accountUsername) {
+        val alreadyBoostedByMe = !accountUsername.isNullOrBlank() &&
+            (initialBoostSnap?.boosts ?: post.boosts).any { it.username.equals(accountUsername, ignoreCase = true) }
+        mutableStateOf(
+            if (isOwnPost || alreadyBoostedByMe) false
+            else (initialBoostSnap?.canBoost ?: post.canBoost)
+        )
+    }
+    var expandedBoostId by remember(post.id) { mutableStateOf<Long?>(null) }
+    var boostInputText by remember(post.id) { mutableStateOf("") }
+    var showBoostEmojiPicker by remember(post.id) { mutableStateOf(false) }
+    var selectedBoostEmojiGroupIdx by remember(post.id) { mutableIntStateOf(0) }
+    var syncedEmojiGroupsVersion by remember { mutableIntStateOf(0) }
+    var isSubmittingBoost by remember(post.id) { mutableStateOf(false) }
+    var isDeletingBoostId by remember(post.id) { mutableStateOf<Long?>(null) }
+    var isTogglingReaction by remember(post.id) { mutableStateOf(false) }
+    var floorActionError by remember(post.id) { mutableStateOf<String?>(null) }
+
     var showReactionPopover by remember(post.id) { mutableStateOf(false) }
     var showFloorMoreMenu by remember(post.id) { mutableStateOf(false) }
     var showInlineReplies by remember(post.id) { mutableStateOf(false) }
     var copiedFloorLink by remember(post.id) { mutableStateOf(false) }
+
+    LaunchedEffect(floorActionError) {
+        if (floorActionError != null) {
+            delay(4200L)
+            floorActionError = null
+        }
+    }
+
+    LaunchedEffect(showReactionPopover, showBoostEmojiPicker) {
+        if ((showReactionPopover || showBoostEmojiPicker) && !LinuxDoEmojiCatalog.hasSyncedServerEmojis()) {
+            if (LinuxDoRepository.syncSiteEmojis()) {
+                syncedEmojiGroupsVersion++
+            }
+        }
+    }
 
     fun toggleReaction(reactionId: String, emojiChar: String) {
         if (!UserApiKeyAuthManager.isAuthorized()) {
             onRequestLogin()
             return
         }
+        if (isOwnPost) {
+            floorActionError = "不能给自己的帖子点赞或表态"
+            return
+        }
+        if (isDeletedPost) {
+            floorActionError = "该楼层已被作者删除，无法点赞或表态"
+            return
+        }
+        if (isTogglingReaction) return
+        floorActionError = null
+
         val prevReaction = myReactionId
+        val prevReactionsSnapshot = localReactions.toList()
         val currentList = localReactions.toMutableList()
 
         // 若之前已点过某个表情，先扣减旧表情计数
@@ -4710,10 +4777,8 @@ private fun CommunityPostFloor(
         }
 
         if (prevReaction == reactionId) {
-            // 取消当前表情
             myReactionId = null
         } else {
-            // 新增或切换为新表情
             myReactionId = reactionId
             val idx = currentList.indexOfFirst { it.id == reactionId }
             if (idx >= 0) {
@@ -4723,24 +4788,122 @@ private fun CommunityPostFloor(
                 currentList.add(PostReactionItem(id = reactionId, emoji = emojiChar, count = 1))
             }
         }
-        val prevReactionsSnapshot = localReactions.toList()
         localReactions = currentList
         showReactionPopover = false
+        isTogglingReaction = true
 
         scope.launch {
-            val ok = LinuxDoRepository.togglePostReaction(post.id, reactionId)
-            if (!ok) {
-                myReactionId = prevReaction
-                localReactions = prevReactionsSnapshot
+            try {
+                val res = LinuxDoRepository.togglePostReactionDetailed(post.id, reactionId)
+                if (res.ok) {
+                    if (res.reactions != null) {
+                        myReactionId = res.myReactionId
+                        localReactions = res.reactions
+                    }
+                } else {
+                    myReactionId = prevReaction
+                    localReactions = prevReactionsSnapshot
+                    floorActionError = res.errorMessage ?: "点赞/表态未生效，请稍后重试"
+                }
+            } finally {
+                isTogglingReaction = false
             }
         }
     }
 
-    val isOp = post.isTopicOwner || post.username.equals(opUsername, ignoreCase = true)
-    val accountUsername = LocalCurrentAccountUsername.current ?: UserApiKeyAuthManager.currentUser?.username
-    val isOwnPost = remember(post.username, accountUsername) {
-        val me = accountUsername
-        !me.isNullOrBlank() && post.username.equals(me, ignoreCase = true)
+    fun submitBoost(rawText: String = boostInputText) {
+        if (!UserApiKeyAuthManager.isAuthorized()) {
+            onRequestLogin()
+            return
+        }
+        if (isOwnPost) {
+            floorActionError = "不能给自己的帖子发送小火箭 Boost"
+            return
+        }
+        if (isDeletedPost) {
+            floorActionError = "该楼层已被作者删除，无法发送小火箭 Boost"
+            return
+        }
+        val trimmed = rawText.trim()
+        val stats = BoostInputStats.compute(trimmed)
+        if (stats.isEmpty) {
+            floorActionError = "请输入小火箭短评或选择表情（限 ${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH} 字）"
+            return
+        }
+        if (stats.exceedsLength) {
+            floorActionError = "小火箭内容最多 ${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH} 个字（当前 ${stats.visibleLength} 字）"
+            return
+        }
+        if (stats.exceedsEmojiLimit) {
+            floorActionError = "单条小火箭最多包含 ${BoostInputStats.MAX_BOOST_EMOJI_COUNT} 个表情（当前 ${stats.emojiCount} 个）"
+            return
+        }
+        if (isSubmittingBoost) return
+        floorActionError = null
+        isSubmittingBoost = true
+
+        scope.launch {
+            try {
+                val res = LinuxDoRepository.createPostBoost(post.id, trimmed)
+                if (res.ok && res.boost != null) {
+                    localBoosts = localBoosts.filterNot { it.id == res.boost.id } + res.boost
+                    canBoostLocal = false
+                    boostInputText = ""
+                    showBoostEmojiPicker = false
+                    showReactionPopover = false
+                } else {
+                    floorActionError = res.errorMessage ?: "发送小火箭 Boost 失败，请稍后重试"
+                }
+            } finally {
+                isSubmittingBoost = false
+            }
+        }
+    }
+
+    fun deleteBoost(boostId: Long) {
+        if (isDeletingBoostId != null) return
+        floorActionError = null
+        isDeletingBoostId = boostId
+        scope.launch {
+            try {
+                val res = LinuxDoRepository.deletePostBoost(post.id, boostId)
+                if (res.ok) {
+                    localBoosts = localBoosts.filterNot { it.id == boostId }
+                    canBoostLocal = !isOwnPost
+                    if (expandedBoostId == boostId) expandedBoostId = null
+                } else {
+                    floorActionError = res.errorMessage ?: "删除小火箭 Boost 失败，请稍后重试"
+                }
+            } finally {
+                isDeletingBoostId = null
+            }
+        }
+    }
+
+    fun appendEmojiToBoostInput(token: String) {
+        val cleanToken = token.trim()
+        if (cleanToken.isEmpty()) return
+        val needsLeadingSpace = cleanToken.startsWith(":") &&
+            boostInputText.isNotEmpty() &&
+            !boostInputText.endsWith(" ")
+        val needsTrailingSpace = cleanToken.startsWith(":")
+        val candidate = buildString {
+            append(boostInputText)
+            if (needsLeadingSpace) append(' ')
+            append(cleanToken)
+            if (needsTrailingSpace) append(' ')
+        }
+        val candidateStats = BoostInputStats.compute(candidate)
+        if (candidateStats.exceedsLength) {
+            floorActionError = "已达小火箭 ${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH} 字上限"
+            return
+        }
+        if (candidateStats.exceedsEmojiLimit) {
+            floorActionError = "单条小火箭最多插入 ${BoostInputStats.MAX_BOOST_EMOJI_COUNT} 个表情"
+            return
+        }
+        floorActionError = null
+        boostInputText = candidate
     }
     val canDeleteThisPost = remember(isOwnPost, post.postNumber, post.canDelete) {
         LinuxDoSiteRules.canDeletePost(
@@ -5129,39 +5292,501 @@ private fun CommunityPostFloor(
 
         PostRichContent(astNodes, palette, onOpenWebUrl, originalUrl, post.id)
 
+        // 2.2 官方小火箭 Boost 气泡列表 (`discourse-boosts`：展示头像 + 16 字内短评与自定义表情，点击自己的气泡可一键删除)
+        if (localBoosts.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(10.dp))
+            @OptIn(ExperimentalLayoutApi::class)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp)
+            ) {
+                localBoosts.forEach { boost ->
+                    val isMyBoost = boost.canDelete ||
+                        (!accountUsername.isNullOrBlank() && boost.username.equals(accountUsername, ignoreCase = true))
+                    val isExpanded = expandedBoostId == boost.id
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (isMyBoost) palette.activeChipBg.copy(alpha = 0.55f)
+                                else palette.subtleSurface
+                            )
+                            .border(
+                                width = 0.6.dp,
+                                color = if (isMyBoost) palette.brandGold.copy(alpha = 0.45f) else palette.hairline,
+                                shape = RoundedCornerShape(16.dp)
+                            )
+                            .clickable {
+                                expandedBoostId = if (isExpanded) null else boost.id
+                            }
+                            .padding(horizontal = 8.5.dp, vertical = 4.5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        SmartAvatar(
+                            username = boost.username,
+                            avatarTemplate = boost.avatarTemplate,
+                            animatedAvatar = null,
+                            size = 17.dp,
+                            enableAnimations = enableAnimations
+                        )
+                        BoostInlineContent(
+                            plainText = boost.plainText,
+                            fontSize = 12.6.sp,
+                            emojiSize = 15.5.dp,
+                            textColor = palette.inkPrimary
+                        )
+                        if (isExpanded) {
+                            Text(
+                                text = "@${boost.username}",
+                                fontSize = 11.sp,
+                                color = palette.inkTertiary,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .clickable { onInspectUser(boost.username) }
+                                    .padding(horizontal = 2.dp)
+                            )
+                            if (isMyBoost) {
+                                Text(
+                                    text = if (isDeletingBoostId == boost.id) "删除中…" else "删除",
+                                    fontSize = 11.2.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFEF4444),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFFEF4444).copy(alpha = 0.12f))
+                                        .clickable(enabled = isDeletingBoostId == null) {
+                                            deleteBoost(boost.id)
+                                        }
+                                        .padding(horizontal = 5.dp, vertical = 1.5.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (!isOwnPost && !isDeletedPost && canBoostLocal) {
+                    Row(
+                        modifier = Modifier
+                            .height(27.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(palette.subtleSurface)
+                            .border(0.6.dp, palette.hairline, RoundedCornerShape(14.dp))
+                            .clickable { showReactionPopover = true }
+                            .padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Text(
+                            text = "+",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.inkSecondary
+                        )
+                        Icon(
+                            imageVector = LinDoIcons.Rocket,
+                            contentDescription = "添加小火箭 Boost",
+                            modifier = Modifier.size(13.dp),
+                            tint = palette.brandGold
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(12.dp))
 
-        // 按需展开的 Discourse 官方表情回应选择面板（完整对齐 Linux.do 官方表态集合，支持横向滑动点选）
-        AnimatedVisibility(visible = showReactionPopover) {
+        // 2.5 点赞/表态/小火箭操作反馈提示条（避免静默失败回退）
+        AnimatedVisibility(visible = floorActionError != null) {
+            val errMsg = floorActionError.orEmpty()
             Row(
                 modifier = Modifier
-                    .padding(bottom = 10.dp)
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(palette.subtleSurface)
-                    .border(0.5.dp, palette.hairline, RoundedCornerShape(24.dp))
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFFEF4444).copy(alpha = if (palette.isDark) 0.18f else 0.10f))
+                    .border(0.6.dp, Color(0xFFEF4444).copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+                    .clickable { floorActionError = null }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                LinuxDoEmojiCatalog.officialReactions.forEach { reactionItem ->
-                    val rId = reactionItem.shortcode
-                    val emo = reactionItem.unicode ?: reactionItem.markdownCode
-                    val isMine = myReactionId == rId
-                    Box(
+                Text(
+                    text = errMsg,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (palette.isDark) Color(0xFFFCA5A5) else Color(0xFFDC2626),
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "✕",
+                    fontSize = 11.5.sp,
+                    color = palette.inkTertiary,
+                    modifier = Modifier.padding(start = 8.dp)
+                )
+            }
+        }
+
+        // 2.8 按需展开的「快捷表情表态 + 小火箭 Boost 短评发送器」组合面板
+        AnimatedVisibility(visible = showReactionPopover) {
+            val boostStats = remember(boostInputText) { BoostInputStats.compute(boostInputText) }
+            val pickerGroups = remember(syncedEmojiGroupsVersion) { LinuxDoEmojiCatalog.getPickerGroups() }
+            val safeGroupIdx = selectedBoostEmojiGroupIdx.coerceIn(0, (pickerGroups.size - 1).coerceAtLeast(0))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(palette.subtleSurface)
+                    .border(0.6.dp, palette.hairline, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(9.dp)
+            ) {
+                // 第一部分：1-Tap 官方表情表态 (`discourse-reactions`)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "快捷表态",
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.inkSecondary
+                    )
+                    Text(
+                        text = "收起 ✕",
+                        fontSize = 11.2.sp,
+                        color = palette.inkTertiary,
                         modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(if (isMine) palette.activeChipBg else Color.Transparent)
-                            .clickable { toggleReaction(rId, emo) },
-                        contentAlignment = Alignment.Center
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                showBoostEmojiPicker = false
+                                showReactionPopover = false
+                            }
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    LinuxDoEmojiCatalog.officialReactions.forEach { reactionItem ->
+                        val rId = reactionItem.shortcode
+                        val emo = reactionItem.unicode ?: reactionItem.markdownCode
+                        val isMine = myReactionId == rId
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(if (isMine) palette.activeChipBg else palette.cardSurface)
+                                .border(
+                                    width = 0.5.dp,
+                                    color = if (isMine) palette.brandGold else palette.hairline,
+                                    shape = CircleShape
+                                )
+                                .clickable { toggleReaction(rId, emo) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            PostReactionGlyph(
+                                reactionId = rId,
+                                emojiFallback = emo,
+                                isSelected = isMine,
+                                size = 20.dp
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+                // 第二部分：🚀 小火箭 Boost 发送器 (`discourse-boosts`：支持表情 + 16 字内有限字数短评)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        PostReactionGlyph(
-                            reactionId = rId,
-                            emojiFallback = emo,
-                            isSelected = isMine,
-                            size = 22.dp
+                        Icon(
+                            imageVector = LinDoIcons.Rocket,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = palette.brandGold
                         )
+                        Text(
+                            text = "小火箭 Boost",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.inkPrimary
+                        )
+                        Text(
+                            text = "· 可发表情与短评",
+                            fontSize = 11.2.sp,
+                            color = palette.inkTertiary
+                        )
+                    }
+
+                    val counterOverLimit = boostStats.exceedsLength || boostStats.exceedsEmojiLimit
+                    Text(
+                        text = "${boostStats.visibleLength}/${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH} 字 · 表情 ${boostStats.emojiCount}/${BoostInputStats.MAX_BOOST_EMOJI_COUNT}",
+                        fontSize = 11.sp,
+                        fontWeight = if (counterOverLimit) FontWeight.Bold else FontWeight.Medium,
+                        color = if (counterOverLimit) Color(0xFFEF4444) else palette.inkTertiary
+                    )
+                }
+
+                when {
+                    isOwnPost -> {
+                        Text(
+                            text = "不能给自己的帖子发送小火箭 Boost",
+                            fontSize = 12.sp,
+                            color = palette.inkTertiary
+                        )
+                    }
+                    isDeletedPost -> {
+                        Text(
+                            text = "该楼层已被删除，无法发送小火箭 Boost",
+                            fontSize = 12.sp,
+                            color = palette.inkTertiary
+                        )
+                    }
+                    !canBoostLocal -> {
+                        Text(
+                            text = "你已为本楼发送过小火箭 Boost（点击上方你的小火箭气泡可删除后重发）",
+                            fontSize = 12.sp,
+                            color = palette.inkSecondary
+                        )
+                    }
+                    else -> {
+                        // 一键快捷助力短语
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            LinuxDoEmojiCatalog.quickBoostPresets.forEach { (label, rawPreset) ->
+                                val isPresetSelected = boostInputText.trim() == rawPreset
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(
+                                            if (isPresetSelected) palette.activeChipBg else palette.cardSurface
+                                        )
+                                        .border(
+                                            width = 0.5.dp,
+                                            color = if (isPresetSelected) palette.brandGold else palette.hairline,
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                        .clickable {
+                                            boostInputText = rawPreset
+                                            floorActionError = null
+                                        }
+                                        .padding(horizontal = 9.dp, vertical = 4.5.dp)
+                                ) {
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.8.sp,
+                                        color = if (isPresetSelected) palette.brandGold else palette.inkPrimary
+                                    )
+                                }
+                            }
+                        }
+
+                        // 输入框 + 表情包选择器按钮 + 发送按钮
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            // 展开/收起全量表情面板按钮
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (showBoostEmojiPicker) palette.activeChipBg else palette.cardSurface)
+                                    .border(
+                                        width = 0.6.dp,
+                                        color = if (showBoostEmojiPicker) palette.brandGold else palette.hairline,
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable { showBoostEmojiPicker = !showBoostEmojiPicker },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "😊",
+                                    fontSize = 16.sp
+                                )
+                            }
+
+                            // 紧凑单行输入框
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(36.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.cardSurface)
+                                    .border(
+                                        width = 0.6.dp,
+                                        color = if (boostStats.exceedsLength || boostStats.exceedsEmojiLimit) Color(0xFFEF4444) else palette.hairline,
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    .padding(horizontal = 10.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                if (boostInputText.isEmpty()) {
+                                    Text(
+                                        text = "发个小火箭助力 @${post.username}（限 16 字）…",
+                                        fontSize = 12.2.sp,
+                                        color = palette.inkTertiary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                BasicTextField(
+                                    value = boostInputText,
+                                    onValueChange = { next ->
+                                        boostInputText = next.replace("\n", " ")
+                                    },
+                                    singleLine = true,
+                                    textStyle = TextStyle(
+                                        fontSize = 12.8.sp,
+                                        color = palette.inkPrimary
+                                    ),
+                                    cursorBrush = SolidColor(palette.brandGold),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                                    keyboardActions = KeyboardActions(onSend = {
+                                        if (boostStats.isValid && !isSubmittingBoost) {
+                                            submitBoost(boostInputText)
+                                        }
+                                    }),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            val canSendNow = boostStats.isValid && !isSubmittingBoost
+                            Box(
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        if (canSendNow) palette.brandGold
+                                        else palette.hairline
+                                    )
+                                    .clickable(enabled = canSendNow) {
+                                        submitBoost(boostInputText)
+                                    }
+                                    .padding(horizontal = 12.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (isSubmittingBoost) "发送中…" else "发送",
+                                    fontSize = 12.2.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (canSendNow) Color(0xFF111827) else palette.inkTertiary
+                                )
+                            }
+                        }
+
+                        // 如果输入框中已包含 `:shortcode:`，实时预览渲染效果
+                        if (boostInputText.contains(":")) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                modifier = Modifier.padding(top = 2.dp)
+                            ) {
+                                Text(
+                                    text = "预览：",
+                                    fontSize = 11.sp,
+                                    color = palette.inkTertiary
+                                )
+                                BoostInlineContent(
+                                    plainText = boostInputText.trim(),
+                                    fontSize = 12.2.sp,
+                                    emojiSize = 15.dp,
+                                    textColor = palette.inkPrimary
+                                )
+                            }
+                        }
+
+                        // 可展开的全量表情包选择面板（含飞书/B站/贴吧等站点自定义表情包 + 标准表情）
+                        AnimatedVisibility(visible = showBoostEmojiPicker && pickerGroups.isNotEmpty()) {
+                            val activeGroup = pickerGroups[safeGroupIdx]
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(palette.cardSurface)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
+                                    .padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    pickerGroups.forEachIndexed { gIdx, grp ->
+                                        val isTabSelected = gIdx == safeGroupIdx
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(if (isTabSelected) palette.activeChipBg else Color.Transparent)
+                                                .clickable { selectedBoostEmojiGroupIdx = gIdx }
+                                                .padding(horizontal = 8.dp, vertical = 3.5.dp)
+                                        ) {
+                                            Text(
+                                                text = grp.labelZh,
+                                                fontSize = 11.2.sp,
+                                                fontWeight = if (isTabSelected) FontWeight.Bold else FontWeight.Medium,
+                                                color = if (isTabSelected) palette.brandGold else palette.inkSecondary
+                                            )
+                                        }
+                                    }
+                                }
+
+                                @OptIn(ExperimentalLayoutApi::class)
+                                FlowRow(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 136.dp)
+                                        .verticalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    activeGroup.items.take(60).forEach { emojiItem ->
+                                        val token = emojiItem.unicode ?: emojiItem.markdownCode
+                                        Box(
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(palette.subtleSurface)
+                                                .clickable { appendEmojiToBoostInput(token) },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            PostReactionGlyph(
+                                                reactionId = emojiItem.shortcode,
+                                                emojiFallback = emojiItem.unicode ?: emojiItem.markdownCode,
+                                                isSelected = false,
+                                                size = 19.dp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -5598,6 +6223,72 @@ private fun PostReactionGlyph(
                 fontSize = (size.value * 0.88f).sp,
                 lineHeight = size.value.sp
             )
+        }
+    }
+}
+
+private sealed interface BoostInlineSegment {
+    data class TextRun(val value: String) : BoostInlineSegment
+    data class EmojiRun(val shortcode: String) : BoostInlineSegment
+}
+
+@Composable
+private fun BoostInlineContent(
+    plainText: String,
+    fontSize: androidx.compose.ui.unit.TextUnit = 12.6.sp,
+    emojiSize: Dp = 15.5.dp,
+    textColor: Color
+) {
+    val segments = remember(plainText) {
+        val list = mutableListOf<BoostInlineSegment>()
+        val regex = Regex(":([a-zA-Z0-9_+\\-]+):")
+        var cursor = 0
+        for (match in regex.findAll(plainText)) {
+            if (match.range.first > cursor) {
+                val textPart = plainText.substring(cursor, match.range.first)
+                if (textPart.isNotEmpty()) {
+                    list.add(BoostInlineSegment.TextRun(textPart))
+                }
+            }
+            val code = match.groupValues.getOrNull(1)?.trim().orEmpty()
+            if (code.isNotEmpty()) {
+                list.add(BoostInlineSegment.EmojiRun(code))
+            }
+            cursor = match.range.last + 1
+        }
+        if (cursor < plainText.length) {
+            val tail = plainText.substring(cursor)
+            if (tail.isNotEmpty()) {
+                list.add(BoostInlineSegment.TextRun(tail))
+            }
+        }
+        list
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        segments.forEach { seg ->
+            when (seg) {
+                is BoostInlineSegment.TextRun -> {
+                    Text(
+                        text = seg.value,
+                        fontSize = fontSize,
+                        color = textColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                is BoostInlineSegment.EmojiRun -> {
+                    PostReactionGlyph(
+                        reactionId = seg.shortcode,
+                        emojiFallback = LinuxDoEmojiCatalog.shortcodeToUnicode(seg.shortcode) ?: ":${seg.shortcode}:",
+                        isSelected = false,
+                        size = emojiSize
+                    )
+                }
+            }
         }
     }
 }
@@ -9078,29 +9769,32 @@ private fun CreateTopicModalSheet(
 /**
  * ============================================================================
  * LinDo 全功能 Markdown & Discourse 扩展语法创作工作台 (`LinDoMarkdownWorkbench`)
- * 移动端优先重构：
- * 1. 顶部：极简操作栏（`编辑 / 预览` 切换 + 撤销/重做/中英空格）
- * 2. 中部核心：圆角规整正文编辑画布 (`defaultEditorHeight`)，单行清爽 Placeholder
- * 3. 底部拇指区：对称 6×2 等宽矢量图标工具栏（包含「链接 / 搜索社区帖子插入链接」）
+ * 移动端原生悬浮 Dock 架构：
+ * 1. 支持外部顶栏受控视图切换 (`externalViewMode`) 与弹性全高画布 (`fillAvailableHeight`)
+ * 2. 中部核心：无边框沉浸式正文编辑画布 / 实时 AST 渲染预览，彻底告别局促小黑框
+ * 3. 底部拇指区：紧贴软键盘上方的单行灵动创作 Dock 栏（左滑矢量工具 + 右侧固定撤销/重做/字数）
+ * 4. 抽屉式子面板：表情、链接、格式、引用/列表、代码块、折叠/剧透、投票/表格一键展开与收起
  * ============================================================================
  */
-private enum class WorkbenchViewMode(val label: String) {
+internal enum class WorkbenchViewMode(val label: String) {
     SOURCE("编辑"),
     PREVIEW("预览")
 }
 
-private enum class WorkbenchSubPanel {
-    NONE,
-    MORE_TOOLS,
-    HEADINGS,
-    CODE_LANG,
-    CALLOUT,
-    LINK,
-    DETAILS_SPOILER,
-    TABLE,
-    POLL,
-    EMOJI,
-    MENTION
+private enum class WorkbenchSubPanel(val title: String) {
+    NONE(""),
+    EMOJI("插入社区表情"),
+    MENTION("提及社区用户 (@)"),
+    LINK("插入帖子引用或链接"),
+    FORMAT("文本排版与标题格式"),
+    QUOTE_LIST("引用、列表与提示框"),
+    CODE_LANG("插入语法高亮代码块"),
+    DETAILS_SPOILER("折叠面板与剧透模糊"),
+    POLL("投票、表格与扩展语法"),
+    MORE_TOOLS("进阶语法工具"),
+    HEADINGS("标题层级"),
+    CALLOUT("提示框"),
+    TABLE("构建表格")
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -9112,7 +9806,11 @@ internal fun LinDoMarkdownWorkbench(
     enabled: Boolean = true,
     autofocus: Boolean = false,
     onUploadingChange: (Boolean) -> Unit = {},
-    defaultEditorHeight: Dp = 260.dp
+    defaultEditorHeight: Dp = 260.dp,
+    externalViewMode: WorkbenchViewMode? = null,
+    validationHint: String? = null,
+    fillAvailableHeight: Boolean = false,
+    modifier: Modifier = Modifier
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -9197,19 +9895,31 @@ internal fun LinDoMarkdownWorkbench(
     }
 
     // 盘古之白：中英文/数字混排自动补齐空格
-    fun optimizePanguSpacing() {
+    fun optimizePanguSpacing(): Boolean {
         val old = tfv.text
-        if (old.isBlank()) return
+        if (old.isBlank()) return false
         val optimized = old
             .replace(Regex("([\\u4e00-\\u9fa5])([A-Za-z0-9])"), "$1 $2")
             .replace(Regex("([A-Za-z0-9])([\\u4e00-\\u9fa5])"), "$1 $2")
         if (optimized != old) {
             updateTfv(TextFieldValue(text = optimized, selection = TextRange(optimized.length)))
+            return true
         }
+        return false
     }
 
-    var viewMode by remember { mutableStateOf(WorkbenchViewMode.SOURCE) }
+    var internalViewMode by remember { mutableStateOf(WorkbenchViewMode.SOURCE) }
+    val activeViewMode = externalViewMode ?: internalViewMode
     var activeSubPanel by remember { mutableStateOf(WorkbenchSubPanel.NONE) }
+
+    fun toggleSubPanel(target: WorkbenchSubPanel, hideKeyboardOnOpen: Boolean = false) {
+        if (activeSubPanel == target) {
+            activeSubPanel = WorkbenchSubPanel.NONE
+        } else {
+            if (hideKeyboardOnOpen) keyboard?.hide()
+            activeSubPanel = target
+        }
+    }
 
     // 媒体上传状态与最近上传的图片（支持一键调整 100% / 75% / 50% 缩放）
     var isUploadingMedia by remember { mutableStateOf(false) }
@@ -9241,32 +9951,66 @@ internal fun LinDoMarkdownWorkbench(
     }
 
     Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = if (fillAvailableHeight) Arrangement.Top else Arrangement.spacedBy(8.dp)
     ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            WorkbenchViewMode.entries.forEach { mode ->
-                TextButton(enabled = enabled, onClick = { viewMode = mode; if (mode == WorkbenchViewMode.PREVIEW) keyboard?.hide() }) {
-                    Text(mode.label, color = if (viewMode == mode) palette.inkPrimary else palette.inkSecondary,
-                        fontSize = 14.sp, fontWeight = if (viewMode == mode) FontWeight.Bold else FontWeight.Normal)
+        // 1. 仅在未提供外部顶栏切换器时（如私信弹窗内嵌），才展示紧凑内部切换条
+        if (externalViewMode == null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier
+                        .height(28.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(palette.subtleSurface)
+                        .border(0.5.dp, palette.hairline, RoundedCornerShape(999.dp))
+                        .padding(2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    WorkbenchViewMode.entries.forEach { mode ->
+                        val selected = activeViewMode == mode
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (selected) palette.cardSurface else Color.Transparent)
+                                .clickable(enabled = enabled) {
+                                    internalViewMode = mode
+                                    if (mode == WorkbenchViewMode.PREVIEW) keyboard?.hide()
+                                }
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = mode.label,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (selected) palette.inkPrimary else palette.inkTertiary
+                            )
+                        }
+                    }
                 }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "${tfv.text.length} 字",
+                    fontSize = 11.5.sp,
+                    color = palette.inkTertiary
+                )
             }
-            Spacer(Modifier.weight(1f))
-            androidx.compose.material3.IconButton(enabled = enabled && undoStack.isNotEmpty(), onClick = {
-                val previous = undoStack.removeAt(undoStack.lastIndex); redoStack.add(tfv); updateTfv(previous, false)
-            }) { Icon(LinDoIcons.Undo, "撤销", Modifier.size(20.dp), tint = if (undoStack.isEmpty()) palette.inkTertiary else palette.inkPrimary) }
-            androidx.compose.material3.IconButton(enabled = enabled && redoStack.isNotEmpty(), onClick = {
-                val next = redoStack.removeAt(redoStack.lastIndex); undoStack.add(tfv); updateTfv(next, false)
-            }) { Icon(LinDoIcons.Redo, "重做", Modifier.size(20.dp), tint = if (redoStack.isEmpty()) palette.inkTertiary else palette.inkPrimary) }
-        }
-        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
-            TextButton(enabled = enabled && tfv.text.isNotEmpty(), onClick = ::optimizePanguSpacing) { Text("中英空格", fontSize = 12.sp, color = palette.inkSecondary) }
-            TextButton(enabled = enabled, onClick = { activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.MORE_TOOLS) WorkbenchSubPanel.NONE else WorkbenchSubPanel.MORE_TOOLS }) { Text("更多排版", fontSize = 12.sp, color = palette.inkSecondary) }
-            Text("${tfv.text.length} 字", Modifier.padding(horizontal = 8.dp, vertical = 14.dp), fontSize = 12.sp, color = palette.inkSecondary)
         }
 
-        // 2. 规整圆角编辑画布 / 实时 AST 预览区
-        when (viewMode) {
+        // 2. 核心创作画布 / 实时 AST 预览区
+        val canvasModifier = if (fillAvailableHeight) {
+            Modifier.fillMaxWidth().weight(1f)
+        } else {
+            Modifier.fillMaxWidth().height(defaultEditorHeight)
+        }
+
+        when (activeViewMode) {
             WorkbenchViewMode.SOURCE -> {
                 WorkbenchSourceEditorBox(
                     tfv = tfv,
@@ -9282,25 +10026,29 @@ internal fun LinDoMarkdownWorkbench(
                     placeholder = placeholder,
                     enabled = enabled,
                     autofocus = autofocus,
-                    height = defaultEditorHeight
+                    immersiveCanvas = fillAvailableHeight,
+                    modifier = canvasModifier
                 )
             }
             WorkbenchViewMode.PREVIEW -> {
                 WorkbenchAstLivePreviewBox(
                     rawMarkdown = tfv.text,
-                    height = defaultEditorHeight
+                    immersiveCanvas = fillAvailableHeight,
+                    modifier = canvasModifier
                 )
             }
         }
 
-        // 3. 若刚刚上传了图片，提供 Discourse 原生图片缩放比例快捷条 (100% / 75% / 50%)
+        // 3. 若刚刚上传了图片/附件，提供紧凑状态条与 Discourse 原生图片缩放比例快捷按钮 (100% / 75% / 50%)
         val latestImg = lastUploadedImage
         if (latestImg != null || uploadStatusText != null) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
+                    .padding(horizontal = if (fillAvailableHeight) 12.dp else 0.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(10.dp))
                     .background(palette.subtleSurface)
+                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -9311,12 +10059,13 @@ internal fun LinDoMarkdownWorkbench(
                         isUploadingMedia -> LinDoMascotState.Loading
                         uploadStatusText?.contains("失败") == true -> LinDoMascotState.NetworkError
                         else -> LinDoMascotState.Success
-                    }, modifier = Modifier.weight(1f)
+                    },
+                    modifier = Modifier.weight(1f)
                 )
                 if (latestImg != null && latestImg.isImage && latestImg.width > 0 && latestImg.height > 0) {
                     listOf("100%", "75%", "50%").forEach { pct ->
-                        WorkbenchMiniActionChip(
-                            label = "缩放 $pct",
+                        WorkbenchToolChip(
+                            label = pct,
                             onClick = {
                                 val scaledTag = "![${latestImg.originalFilename}|${latestImg.width}x${latestImg.height}, $pct](${latestImg.shortUrl})"
                                 val replaced = tfv.text.replace(latestImg.markdownSnippet, scaledTag)
@@ -9326,11 +10075,32 @@ internal fun LinDoMarkdownWorkbench(
                         )
                     }
                 }
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .clickable {
+                            uploadStatusText = null
+                            lastUploadedImage = null
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "关闭提示",
+                        modifier = Modifier.size(12.dp),
+                        tint = palette.inkTertiary
+                    )
+                }
             }
         }
 
-        // 4. 动态展开的子工具面板（紧贴底部工具栏上方）
-        AnimatedVisibility(visible = activeSubPanel != WorkbenchSubPanel.NONE) {
+        // 4. 动态展开的抽屉式子工具面板（位于底部创作 Dock 栏正上方）
+        AnimatedVisibility(
+            visible = activeSubPanel != WorkbenchSubPanel.NONE,
+            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandVertically(),
+            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkVertically()
+        ) {
             WorkbenchInteractiveSubPanel(
                 subPanel = activeSubPanel,
                 mentionSearchTerm = mentionSearchTerm,
@@ -9341,181 +10111,242 @@ internal fun LinDoMarkdownWorkbench(
                 onRetryMention = { mentionReloadToken++ },
                 onToggleLinePrefix = { prefix ->
                     toggleLinePrefix(prefix)
-                    activeSubPanel = WorkbenchSubPanel.NONE
                 },
                 onWrapSelection = { prefix, suffix, ph ->
                     wrapSelection(prefix, suffix, ph)
-                    activeSubPanel = WorkbenchSubPanel.NONE
                 },
                 onInsertSnippet = { snippet ->
                     insertAtCursor(snippet, replaceMention = activeSubPanel == WorkbenchSubPanel.MENTION && snippet.startsWith("@"))
-                    activeSubPanel = WorkbenchSubPanel.NONE
+                    if (activeSubPanel == WorkbenchSubPanel.MENTION || activeSubPanel == WorkbenchSubPanel.LINK || activeSubPanel == WorkbenchSubPanel.POLL) {
+                        activeSubPanel = WorkbenchSubPanel.NONE
+                    }
                 },
-                onDismiss = { activeSubPanel = WorkbenchSubPanel.NONE }
+                onOptimizePangu = {
+                    val changed = optimizePanguSpacing()
+                    uploadStatusText = if (changed) "已自动优化中英文与数字混排空格" else "当前排版已符合中英空格规范"
+                },
+                onDismiss = { activeSubPanel = WorkbenchSubPanel.NONE },
+                modifier = Modifier.padding(
+                    horizontal = if (fillAvailableHeight) 10.dp else 0.dp,
+                    vertical = 4.dp
+                )
             )
         }
 
-        // 5. 底部拇指区：6×2 严整对称等宽工具栏（全 2 字标签对齐，内置「链接 / 搜索社区帖子插入链接」）
+        // 5. 底部拇指区：单行灵动创作 Dock 栏（左滑常用工具 + 右侧固定撤销/重做/字数提示）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color.Transparent)
-                .padding(horizontal = 6.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+                .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.92f else 0.96f))
         ) {
-            // 第一排 6 等分：图片 · 链接(支持搜帖链接) · 提及 · 表情 · 粗体 · 代码
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(46.dp)
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.Image,
-                    label = if (isUploadingMedia) "上传" else "图片",
-                    highlighted = true,
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        val picker = PlatformMediaPicker.launchPicker
-                        if (!enabled || isUploadingMedia) return@WorkbenchVectorToolButton
-                        if (picker != null) {
-                            picker("image/*") { fileName, mimeType, bytes ->
-                                scope.launch {
-                                    isUploadingMedia = true
-                                    onUploadingChange(true)
-                                    uploadStatusText = "正在上传图片 $fileName..."
-                                    val res = try { LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes) }
-                                    finally { isUploadingMedia = false; onUploadingChange(false) }
-                                    if (res != null) {
-                                        lastUploadedImage = res
-                                        uploadStatusText = "已上传 ${res.originalFilename}"
-                                        insertAtCursor("\n${res.markdownSnippet}\n")
-                                    } else {
-                                        uploadStatusText = "上传失败，请确认已登录并重试"
+                // 左侧可横向滑动的图标工具组
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    // 1. 图片上传
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.Image,
+                        label = "图片",
+                        active = isUploadingMedia,
+                        enabled = enabled && !isUploadingMedia,
+                        onClick = {
+                            val picker = PlatformMediaPicker.launchPicker
+                            if (!enabled || isUploadingMedia) return@WorkbenchDockIconButton
+                            if (picker != null) {
+                                picker("image/*") { fileName, mimeType, bytes ->
+                                    scope.launch {
+                                        isUploadingMedia = true
+                                        onUploadingChange(true)
+                                        uploadStatusText = "正在上传图片 $fileName..."
+                                        val res = try { LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes) }
+                                        finally { isUploadingMedia = false; onUploadingChange(false) }
+                                        if (res != null) {
+                                            lastUploadedImage = res
+                                            uploadStatusText = "已上传 ${res.originalFilename}"
+                                            insertAtCursor("\n${res.markdownSnippet}\n")
+                                        } else {
+                                            uploadStatusText = "上传失败，请确认已登录并重试"
+                                        }
                                     }
                                 }
+                            } else {
+                                uploadStatusText = "当前设备不支持选择图片，可通过链接插入"
                             }
-                        } else {
-                            uploadStatusText = "当前设备不支持选择图片，可通过链接插入"
                         }
-                    }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.Link,
-                    label = "链接",
-                    active = activeSubPanel == WorkbenchSubPanel.LINK,
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.LINK) WorkbenchSubPanel.NONE else WorkbenchSubPanel.LINK
-                    }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.AtSign,
-                    label = "提及",
-                    active = activeSubPanel == WorkbenchSubPanel.MENTION,
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.MENTION) WorkbenchSubPanel.NONE else WorkbenchSubPanel.MENTION
-                    }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.Smile,
-                    label = "表情",
-                    active = activeSubPanel == WorkbenchSubPanel.EMOJI,
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.EMOJI) WorkbenchSubPanel.NONE else WorkbenchSubPanel.EMOJI
-                    }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.Bold,
-                    label = "粗体",
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = { wrapSelection("**", "**", "粗体文本") }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.Terminal,
-                    label = "代码",
-                    active = activeSubPanel == WorkbenchSubPanel.CODE_LANG,
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.CODE_LANG) WorkbenchSubPanel.NONE else WorkbenchSubPanel.CODE_LANG
-                    }
-                )
-            }
+                    )
 
-            // 第二排 6 等分：引用 · 标题 · 列表 · 剧透 · 投票 · 附件
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.Quote,
-                    label = "引用",
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = { toggleLinePrefix("> ") }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.Heading,
-                    label = "标题",
-                    active = activeSubPanel == WorkbenchSubPanel.HEADINGS,
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.HEADINGS) WorkbenchSubPanel.NONE else WorkbenchSubPanel.HEADINGS
-                    }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.ListBullet,
-                    label = "列表",
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = { toggleLinePrefix("- ") }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.EyeOff,
-                    label = "剧透",
-                    active = activeSubPanel == WorkbenchSubPanel.DETAILS_SPOILER,
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.DETAILS_SPOILER) WorkbenchSubPanel.NONE else WorkbenchSubPanel.DETAILS_SPOILER
-                    }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.BarChartPoll,
-                    label = "投票",
-                    active = activeSubPanel == WorkbenchSubPanel.POLL,
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.POLL) WorkbenchSubPanel.NONE else WorkbenchSubPanel.POLL
-                    }
-                )
-                WorkbenchVectorToolButton(
-                    icon = LinDoIcons.Paperclip,
-                    label = "附件",
-                    modifier = Modifier.widthIn(min = 56.dp),
-                    onClick = {
-                        val picker = PlatformMediaPicker.launchPicker
-                        if (!enabled || isUploadingMedia) return@WorkbenchVectorToolButton
-                        if (picker != null) {
-                            picker("*/*") { fileName, mimeType, bytes ->
-                                scope.launch {
-                                    isUploadingMedia = true
-                                    onUploadingChange(true)
-                                    uploadStatusText = "正在上传附件 $fileName..."
-                                    val res = try { LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes) }
-                                    finally { isUploadingMedia = false; onUploadingChange(false) }
-                                    if (res != null) {
-                                        uploadStatusText = "已上传附件 ${res.originalFilename}"
-                                        insertAtCursor("\n${res.markdownSnippet}\n")
-                                    } else {
-                                        uploadStatusText = "附件上传失败，请检查文件格式与登录态"
+                    // 2. 社区表情包
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.Smile,
+                        label = "表情",
+                        active = activeSubPanel == WorkbenchSubPanel.EMOJI,
+                        enabled = enabled,
+                        onClick = { toggleSubPanel(WorkbenchSubPanel.EMOJI, hideKeyboardOnOpen = true) }
+                    )
+
+                    // 3. @提及用户
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.AtSign,
+                        label = "提及",
+                        active = activeSubPanel == WorkbenchSubPanel.MENTION,
+                        enabled = enabled,
+                        onClick = { toggleSubPanel(WorkbenchSubPanel.MENTION, hideKeyboardOnOpen = false) }
+                    )
+
+                    // 4. 插入帖子引用或外部链接
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.Link,
+                        label = "链接",
+                        active = activeSubPanel == WorkbenchSubPanel.LINK,
+                        enabled = enabled,
+                        onClick = { toggleSubPanel(WorkbenchSubPanel.LINK, hideKeyboardOnOpen = true) }
+                    )
+
+                    // 5. 文本排版（粗体 / 斜体 / 删除线 / 标题 H1~H4 / 行内代码 / 中英空格）
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.Bold,
+                        label = "排版",
+                        active = activeSubPanel == WorkbenchSubPanel.FORMAT || activeSubPanel == WorkbenchSubPanel.HEADINGS,
+                        enabled = enabled,
+                        onClick = { toggleSubPanel(WorkbenchSubPanel.FORMAT, hideKeyboardOnOpen = false) }
+                    )
+
+                    // 6. 引用、列表与 Callout 提示框
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.Quote,
+                        label = "列表与引用",
+                        active = activeSubPanel == WorkbenchSubPanel.QUOTE_LIST || activeSubPanel == WorkbenchSubPanel.CALLOUT,
+                        enabled = enabled,
+                        onClick = { toggleSubPanel(WorkbenchSubPanel.QUOTE_LIST, hideKeyboardOnOpen = false) }
+                    )
+
+                    // 7. 代码块
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.Terminal,
+                        label = "代码",
+                        active = activeSubPanel == WorkbenchSubPanel.CODE_LANG,
+                        enabled = enabled,
+                        onClick = { toggleSubPanel(WorkbenchSubPanel.CODE_LANG, hideKeyboardOnOpen = false) }
+                    )
+
+                    // 8. 折叠块与剧透模糊
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.EyeOff,
+                        label = "折叠与剧透",
+                        active = activeSubPanel == WorkbenchSubPanel.DETAILS_SPOILER,
+                        enabled = enabled,
+                        onClick = { toggleSubPanel(WorkbenchSubPanel.DETAILS_SPOILER, hideKeyboardOnOpen = false) }
+                    )
+
+                    // 9. 投票 / 表格 / 进阶语法
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.BarChartPoll,
+                        label = "投票与更多",
+                        active = activeSubPanel == WorkbenchSubPanel.POLL || activeSubPanel == WorkbenchSubPanel.TABLE || activeSubPanel == WorkbenchSubPanel.MORE_TOOLS,
+                        enabled = enabled,
+                        onClick = { toggleSubPanel(WorkbenchSubPanel.POLL, hideKeyboardOnOpen = true) }
+                    )
+
+                    // 10. 附件上传
+                    WorkbenchDockIconButton(
+                        icon = LinDoIcons.Paperclip,
+                        label = "附件",
+                        enabled = enabled && !isUploadingMedia,
+                        onClick = {
+                            val picker = PlatformMediaPicker.launchPicker
+                            if (!enabled || isUploadingMedia) return@WorkbenchDockIconButton
+                            if (picker != null) {
+                                picker("*/*") { fileName, mimeType, bytes ->
+                                    scope.launch {
+                                        isUploadingMedia = true
+                                        onUploadingChange(true)
+                                        uploadStatusText = "正在上传附件 $fileName..."
+                                        val res = try { LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes) }
+                                        finally { isUploadingMedia = false; onUploadingChange(false) }
+                                        if (res != null) {
+                                            uploadStatusText = "已上传附件 ${res.originalFilename}"
+                                            insertAtCursor("\n${res.markdownSnippet}\n")
+                                        } else {
+                                            uploadStatusText = "附件上传失败，请检查文件格式与登录态"
+                                        }
                                     }
                                 }
+                            } else {
+                                uploadStatusText = "当前设备不支持选择附件"
                             }
-                        } else {
-                            uploadStatusText = "当前设备不支持选择附件"
                         }
-                    }
+                    )
+                }
+
+                // 右侧固定操作簇：分隔线 + 撤销 + 重做 + 字数/校验提示
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .width(0.6.dp)
+                        .height(18.dp)
+                        .background(palette.hairline)
+                )
+
+                val canUndo = enabled && undoStack.isNotEmpty()
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = canUndo) {
+                            val previous = undoStack.removeAt(undoStack.lastIndex)
+                            redoStack.add(tfv)
+                            updateTfv(previous, false)
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Undo,
+                        contentDescription = "撤销",
+                        modifier = Modifier.size(16.dp),
+                        tint = if (canUndo) palette.inkSecondary else palette.inkTertiary.copy(alpha = 0.38f)
+                    )
+                }
+
+                val canRedo = enabled && redoStack.isNotEmpty()
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = canRedo) {
+                            val next = redoStack.removeAt(redoStack.lastIndex)
+                            undoStack.add(tfv)
+                            updateTfv(next, false)
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Redo,
+                        contentDescription = "重做",
+                        modifier = Modifier.size(16.dp),
+                        tint = if (canRedo) palette.inkSecondary else palette.inkTertiary.copy(alpha = 0.38f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(4.dp))
+                val showHint = !validationHint.isNullOrBlank() && tfv.text.isNotEmpty()
+                Text(
+                    text = if (showHint) validationHint.orEmpty() else "${tfv.text.length}字",
+                    fontSize = 10.5.sp,
+                    fontWeight = if (showHint) FontWeight.SemiBold else FontWeight.Medium,
+                    color = if (showHint) palette.brandGold else palette.inkTertiary,
+                    maxLines = 1
                 )
             }
         }
@@ -9523,43 +10354,36 @@ internal fun LinDoMarkdownWorkbench(
 }
 
 @Composable
-private fun WorkbenchVectorToolButton(
+private fun WorkbenchDockIconButton(
     icon: ImageVector,
     label: String,
     active: Boolean = false,
-    highlighted: Boolean = false,
-    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
     val fg = when {
-        active || highlighted -> palette.brandGold
-        else -> palette.inkPrimary
+        !enabled -> palette.inkTertiary.copy(alpha = 0.4f)
+        active -> palette.brandGold
+        else -> palette.inkSecondary
     }
-    Row(
-        modifier = modifier
-            .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
+    Box(
+        modifier = Modifier
+            .size(width = 36.dp, height = 34.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(if (active) palette.activeChipBg else Color.Transparent)
+            .then(
+                if (active) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
+                else Modifier
+            )
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = label,
-            modifier = Modifier.size(14.5.dp),
+            modifier = Modifier.size(17.5.dp),
             tint = fg
-        )
-        Spacer(modifier = Modifier.width(3.5.dp))
-        Text(
-            text = label,
-            fontSize = 11.5.sp,
-            fontWeight = if (active || highlighted) FontWeight.Bold else FontWeight.Medium,
-            color = fg,
-            maxLines = 1,
-            softWrap = false
         )
     }
 }
@@ -9571,14 +10395,20 @@ private fun WorkbenchSourceEditorBox(
     placeholder: String,
     enabled: Boolean = true,
     autofocus: Boolean = false,
-    height: Dp
+    immersiveCanvas: Boolean = false,
+    modifier: Modifier = Modifier
 ) {
     val palette = LocalPalette.current
     val focus = remember { FocusRequester() }
-    LaunchedEffect(autofocus) { if (autofocus) { delay(120); runCatching { focus.requestFocus() } } }
+    LaunchedEffect(autofocus) {
+        if (autofocus) {
+            delay(120)
+            runCatching { focus.requestFocus() }
+        }
+    }
     val editorTextStyle = TextStyle(
-        fontSize = 15.sp,
-        lineHeight = 22.5.sp,
+        fontSize = 15.8.sp,
+        lineHeight = 24.sp,
         color = palette.inkPrimary
     )
     BasicTextField(
@@ -9588,29 +10418,34 @@ private fun WorkbenchSourceEditorBox(
         textStyle = editorTextStyle,
         cursorBrush = SolidColor(palette.brandGold),
         decorationBox = { innerTextField ->
-            Box(
-                modifier = Modifier
+            val boxMod = if (immersiveCanvas) {
+                Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.38f else 0.55f))
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            } else {
+                Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.42f else 0.6f))
+                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+            }
+            Box(
+                modifier = boxMod,
                 contentAlignment = Alignment.TopStart
             ) {
                 if (tfv.text.isEmpty()) {
                     Text(
                         text = placeholder,
-                        style = editorTextStyle.copy(color = palette.inkTertiary),
-                        maxLines = 1,
+                        style = editorTextStyle.copy(color = palette.inkTertiary.copy(alpha = 0.75f)),
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
                 innerTextField()
             }
         },
-        modifier = Modifier
-            .focusRequester(focus)
-            .fillMaxWidth()
-            .height(height)
+        modifier = modifier.focusRequester(focus)
     )
 }
 
@@ -9620,7 +10455,8 @@ private fun WorkbenchSourceEditorBox(
 @Composable
 private fun WorkbenchAstLivePreviewBox(
     rawMarkdown: String,
-    height: Dp
+    immersiveCanvas: Boolean = false,
+    modifier: Modifier = Modifier
 ) {
     val palette = LocalPalette.current
     val previewHtml = remember(rawMarkdown) {
@@ -9632,37 +10468,25 @@ private fun WorkbenchAstLivePreviewBox(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(height)
+    val containerMod = if (immersiveCanvas) {
+        modifier
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 14.dp)
+    } else {
+        modifier
             .clip(RoundedCornerShape(12.dp))
             .background(palette.subtleSurface.copy(alpha = 0.5f))
+            .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
             .verticalScroll(rememberScrollState())
-            .padding(12.dp),
+            .padding(12.dp)
+    }
+
+    Column(
+        modifier = containerMod,
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = "内容预览",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkTertiary
-            )
-            Text(
-                text = "互动内容在发布后可用",
-                fontSize = 10.5.sp,
-                color = palette.inkTertiary
-            )
-        }
-        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-
         if (rawMarkdown.isBlank()) {
-            LinDoEmptyState("还没有预览内容，试着写点什么吧")
+            LinDoEmptyState("还没有预览内容，先写点什么吧")
         } else {
             val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
             PostRichContent(astNodes, palette, onOpenLink = { uriHandler.openUri(it) })
@@ -9688,42 +10512,93 @@ private fun WorkbenchInteractiveSubPanel(
     onToggleLinePrefix: (String) -> Unit,
     onWrapSelection: (String, String, String) -> Unit,
     onInsertSnippet: (String) -> Unit,
-    onDismiss: () -> Unit
+    onOptimizePangu: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val palette = LocalPalette.current
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(palette.cardSurface)
-            .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
-            .padding(10.dp),
+            .border(0.6.dp, palette.hairline, RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        when (subPanel) {
-            WorkbenchSubPanel.HEADINGS -> {
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+        // 统一抽屉标题栏 + 一键收起按钮
+        if (subPanel != WorkbenchSubPanel.NONE) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = subPanel.title,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkSecondary,
+                    modifier = Modifier.weight(1f)
+                )
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(palette.subtleSurface)
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
-                    listOf(
-                        "H1 一级" to "# ",
-                        "H2 二级" to "## ",
-                        "H3 三级" to "### ",
-                        "H4 四级" to "#### ",
-                        "H5 五级" to "##### "
-                    ).forEach { (label, prefix) ->
-                        WorkbenchToolChip(
-                            label = label,
-                            onClick = { onToggleLinePrefix(prefix) }
-                        )
-                    }
+                    Text(
+                        text = "收起",
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkTertiary
+                    )
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "收起面板",
+                        modifier = Modifier.size(11.dp),
+                        tint = palette.inkTertiary
+                    )
                 }
             }
+        }
 
-            WorkbenchSubPanel.CODE_LANG -> {
-                Text("选择代码块高亮语言", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = palette.inkSecondary)
+        when (subPanel) {
+            WorkbenchSubPanel.FORMAT, WorkbenchSubPanel.HEADINGS -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    WorkbenchToolChip(
+                        label = "B 粗体",
+                        onClick = { onWrapSelection("**", "**", "粗体文本") }
+                    )
+                    WorkbenchToolChip(
+                        label = "I 斜体",
+                        onClick = { onWrapSelection("*", "*", "斜体文本") }
+                    )
+                    WorkbenchToolChip(
+                        label = "S 删除线",
+                        onClick = { onWrapSelection("~~", "~~", "删除线") }
+                    )
+                    WorkbenchToolChip(
+                        label = "`行内代码`",
+                        onClick = { onWrapSelection("`", "`", "code") }
+                    )
+                    WorkbenchToolChip(
+                        label = "⌨ 按键 <kbd>",
+                        onClick = { onWrapSelection("<kbd>", "</kbd>", "Ctrl+C") }
+                    )
+                    WorkbenchToolChip(
+                        label = "✨ 中英空格排版",
+                        highlighted = true,
+                        onClick = onOptimizePangu
+                    )
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -9731,21 +10606,47 @@ private fun WorkbenchInteractiveSubPanel(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     listOf(
-                        "kotlin", "python", "bash", "javascript", "typescript",
-                        "json", "yaml", "rust", "go", "sql", "html", "dockerfile", "mermaid"
-                    ).forEach { lang ->
+                        "H1 一级标题" to "# ",
+                        "H2 二级标题" to "## ",
+                        "H3 三级标题" to "### ",
+                        "H4 四级标题" to "#### "
+                    ).forEach { (label, prefix) ->
                         WorkbenchToolChip(
-                            label = lang,
-                            onClick = {
-                                onWrapSelection("\n```$lang\n", "\n```\n", "// 在此输入 $lang 代码")
-                            }
+                            label = label,
+                            onClick = { onToggleLinePrefix(prefix) }
                         )
                     }
+                    WorkbenchToolChip(
+                        label = "― 分割线",
+                        onClick = { onInsertSnippet("\n\n---\n\n") }
+                    )
                 }
             }
 
-            WorkbenchSubPanel.CALLOUT -> {
-                Text("插入 GitHub / Discourse 风格 Callout 提示框", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = palette.inkSecondary)
+            WorkbenchSubPanel.QUOTE_LIST, WorkbenchSubPanel.CALLOUT -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    WorkbenchToolChip(
+                        label = "❝ 引用块",
+                        onClick = { onToggleLinePrefix("> ") }
+                    )
+                    WorkbenchToolChip(
+                        label = "• 无序列表",
+                        onClick = { onToggleLinePrefix("- ") }
+                    )
+                    WorkbenchToolChip(
+                        label = "1. 编号列表",
+                        onClick = { onToggleLinePrefix("1. ") }
+                    )
+                    WorkbenchToolChip(
+                        label = "☑ 待办任务",
+                        onClick = { onToggleLinePrefix("- [ ] ") }
+                    )
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -9763,6 +10664,34 @@ private fun WorkbenchInteractiveSubPanel(
                             label = label,
                             onClick = {
                                 onInsertSnippet("\n> [!$kind]\n> 在此输入提示内容...\n")
+                            }
+                        )
+                    }
+                }
+            }
+
+            WorkbenchSubPanel.CODE_LANG -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    WorkbenchToolChip(
+                        label = "插入通用代码块",
+                        highlighted = true,
+                        onClick = {
+                            onWrapSelection("\n```\n", "\n```\n", "// 在此输入代码")
+                        }
+                    )
+                    listOf(
+                        "kotlin", "python", "bash", "javascript", "typescript",
+                        "json", "yaml", "rust", "go", "sql", "html", "dockerfile", "mermaid"
+                    ).forEach { lang ->
+                        WorkbenchToolChip(
+                            label = lang,
+                            onClick = {
+                                onWrapSelection("\n```$lang\n", "\n```\n", "// 在此输入 $lang 代码")
                             }
                         )
                     }
@@ -9848,7 +10777,7 @@ private fun WorkbenchInteractiveSubPanel(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 156.dp)
+                                .heightIn(max = 148.dp)
                                 .verticalScroll(rememberScrollState()),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
@@ -9857,7 +10786,7 @@ private fun WorkbenchInteractiveSubPanel(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(8.dp))
-                                        .background(palette.cardSurface)
+                                        .background(palette.subtleSurface.copy(alpha = 0.55f))
                                         .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
                                         .clickable {
                                             val suffix = if (item.postNumber > 1) "/${item.postNumber}" else ""
@@ -9929,7 +10858,6 @@ private fun WorkbenchInteractiveSubPanel(
 
             WorkbenchSubPanel.DETAILS_SPOILER -> {
                 var summaryTitle by remember { mutableStateOf("点击展开详情") }
-                Text("插入折叠面板 [details]、剧透模糊 [spoiler] 或提示框", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = palette.inkSecondary)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -9942,7 +10870,7 @@ private fun WorkbenchInteractiveSubPanel(
                         modifier = Modifier.weight(1f)
                     )
                     WorkbenchToolChip(
-                        label = "折叠块",
+                        label = "+ 折叠面板",
                         highlighted = true,
                         onClick = {
                             onWrapSelection(
@@ -9953,146 +10881,187 @@ private fun WorkbenchInteractiveSubPanel(
                         }
                     )
                     WorkbenchToolChip(
-                        label = "剧透模糊",
+                        label = "+ 剧透模糊",
                         onClick = {
                             onWrapSelection("[spoiler]", "[/spoiler]", "剧透隐藏文字")
                         }
                     )
                 }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    listOf(
-                        "ℹ️ 说明" to "NOTE",
-                        "💡 技巧" to "TIP",
-                        "📌 重要" to "IMPORTANT",
-                        "⚠️ 警告" to "WARNING"
-                    ).forEach { (label, kind) ->
-                        WorkbenchToolChip(
-                            label = label,
-                            onClick = {
-                                onInsertSnippet("\n> [!$kind]\n> 在此输入提示内容...\n")
-                            }
-                        )
-                    }
-                }
             }
 
-            WorkbenchSubPanel.TABLE -> {
-                var cols by remember { mutableStateOf(3) }
-                var rows by remember { mutableStateOf(3) }
-                Text("可视化表格构建与行列快捷操作", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = palette.inkSecondary)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    WorkbenchToolChip(
-                        label = "列数: $cols (+)",
-                        onClick = { cols = if (cols >= 6) 2 else cols + 1 }
-                    )
-                    WorkbenchToolChip(
-                        label = "行数: $rows (+)",
-                        onClick = { rows = if (rows >= 8) 2 else rows + 1 }
-                    )
-                    WorkbenchToolChip(
-                        label = "生成 ${rows}×${cols} 表格",
-                        highlighted = true,
-                        onClick = {
-                            val header = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "列 $it" }
-                            val divider = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "---" }
-                            val body = (1..rows).joinToString("\n") { r ->
-                                (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { c -> "内容 ${r}-${c}" }
-                            }
-                            onInsertSnippet("\n$header\n$divider\n$body\n")
-                        }
-                    )
-                    WorkbenchToolChip(
-                        label = "+ 追加一行",
-                        onClick = {
-                            val rowStr = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "新单元格" }
-                            onInsertSnippet("\n$rowStr")
+            WorkbenchSubPanel.POLL, WorkbenchSubPanel.TABLE, WorkbenchSubPanel.MORE_TOOLS -> {
+                var advTab by remember(subPanel) {
+                    mutableIntStateOf(
+                        when (subPanel) {
+                            WorkbenchSubPanel.TABLE -> 1
+                            WorkbenchSubPanel.MORE_TOOLS -> 2
+                            else -> 0
                         }
                     )
                 }
-            }
-
-            WorkbenchSubPanel.POLL -> {
-                var pollTitle by remember { mutableStateOf("") }
-                var pollType by remember { mutableStateOf("regular") } // regular / multiple / number
-                var pollResults by remember { mutableStateOf("always") } // always / on_vote / on_close
-                var pollPublic by remember { mutableStateOf(true) }
-                var pollOptionsText by remember { mutableStateOf("选项一\n选项二\n选项三") }
-
-                Text("可视化投票构建器 (Discourse [poll])", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = palette.inkSecondary)
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    listOf("regular" to "单选投票", "multiple" to "多选投票", "number" to "数字评分").forEach { (k, lbl) ->
-                        WorkbenchToolChip(
-                            label = lbl,
-                            active = pollType == k,
-                            onClick = { pollType = k }
-                        )
-                    }
-                    listOf("always" to "始终可见结果", "on_vote" to "投票后可见", "on_close" to "结束后可见").forEach { (k, lbl) ->
-                        WorkbenchToolChip(
-                            label = lbl,
-                            active = pollResults == k,
-                            onClick = { pollResults = k }
-                        )
-                    }
                     WorkbenchToolChip(
-                        label = if (pollPublic) "✓ 公开投票人" else "匿名投票",
-                        active = pollPublic,
-                        onClick = { pollPublic = !pollPublic }
+                        label = "📊 发起投票",
+                        active = advTab == 0,
+                        onClick = { advTab = 0 }
+                    )
+                    WorkbenchToolChip(
+                        label = "📅 插入表格",
+                        active = advTab == 1,
+                        onClick = { advTab = 1 }
+                    )
+                    WorkbenchToolChip(
+                        label = "🧩 进阶语法",
+                        active = advTab == 2,
+                        onClick = { advTab = 2 }
                     )
                 }
-                OutlinedTextField(
-                    value = pollTitle,
-                    onValueChange = { pollTitle = it },
-                    singleLine = true,
-                    placeholder = { Text("投票标题（可选，如：你最常用的开发环境是？）", fontSize = 12.sp) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp)
-                )
-                OutlinedTextField(
-                    value = pollOptionsText,
-                    onValueChange = { pollOptionsText = it },
-                    placeholder = { Text("每行一个投票选项...", fontSize = 12.sp) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(78.dp),
-                    shape = RoundedCornerShape(8.dp)
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    WorkbenchToolChip(
-                        label = "插入投票组件",
-                        highlighted = true,
-                        onClick = {
-                            val opts = pollOptionsText.lines().map { it.trim() }.filter { it.isNotBlank() }
-                            val extraAttrs = buildString {
-                                append(" type=$pollType results=$pollResults")
-                                if (pollType == "multiple") append(" min=1 max=${opts.size.coerceAtLeast(2)}")
-                                if (pollPublic) append(" public=true")
-                                append(" chartType=bar")
+
+                when (advTab) {
+                    0 -> {
+                        var pollTitle by remember { mutableStateOf("") }
+                        var pollType by remember { mutableStateOf("regular") }
+                        var pollResults by remember { mutableStateOf("always") }
+                        var pollPublic by remember { mutableStateOf(true) }
+                        var pollOptionsText by remember { mutableStateOf("选项一\n选项二\n选项三") }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf("regular" to "单选", "multiple" to "多选", "number" to "评分").forEach { (k, lbl) ->
+                                WorkbenchToolChip(
+                                    label = lbl,
+                                    active = pollType == k,
+                                    onClick = { pollType = k }
+                                )
                             }
-                            val headerLine = if (pollTitle.isNotBlank()) "# ${pollTitle.trim()}\n" else ""
-                            val optLines = opts.joinToString("\n") { "- $it" }
-                            onInsertSnippet("\n[poll$extraAttrs]\n$headerLine$optLines\n[/poll]\n")
+                            listOf("always" to "始终可见结果", "on_vote" to "投票后可见", "on_close" to "结束后可见").forEach { (k, lbl) ->
+                                WorkbenchToolChip(
+                                    label = lbl,
+                                    active = pollResults == k,
+                                    onClick = { pollResults = k }
+                                )
+                            }
+                            WorkbenchToolChip(
+                                label = if (pollPublic) "✓ 公开投票人" else "匿名投票",
+                                active = pollPublic,
+                                onClick = { pollPublic = !pollPublic }
+                            )
                         }
-                    )
+                        WorkbenchCompactInputBox(
+                            value = pollTitle,
+                            onValueChange = { pollTitle = it },
+                            placeholder = "投票标题（可选，如：你最常用的开发环境是？）",
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = pollOptionsText,
+                            onValueChange = { pollOptionsText = it },
+                            placeholder = { Text("每行一个投票选项...", fontSize = 12.sp) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(72.dp),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            WorkbenchToolChip(
+                                label = "插入投票组件",
+                                highlighted = true,
+                                onClick = {
+                                    val opts = pollOptionsText.lines().map { it.trim() }.filter { it.isNotBlank() }
+                                    val extraAttrs = buildString {
+                                        append(" type=$pollType results=$pollResults")
+                                        if (pollType == "multiple") append(" min=1 max=${opts.size.coerceAtLeast(2)}")
+                                        if (pollPublic) append(" public=true")
+                                        append(" chartType=bar")
+                                    }
+                                    val headerLine = if (pollTitle.isNotBlank()) "# ${pollTitle.trim()}\n" else ""
+                                    val optLines = opts.joinToString("\n") { "- $it" }
+                                    onInsertSnippet("\n[poll$extraAttrs]\n$headerLine$optLines\n[/poll]\n")
+                                }
+                            )
+                        }
+                    }
+
+                    1 -> {
+                        var cols by remember { mutableStateOf(3) }
+                        var rows by remember { mutableStateOf(3) }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            WorkbenchToolChip(
+                                label = "列数: $cols (+)",
+                                onClick = { cols = if (cols >= 6) 2 else cols + 1 }
+                            )
+                            WorkbenchToolChip(
+                                label = "行数: $rows (+)",
+                                onClick = { rows = if (rows >= 8) 2 else rows + 1 }
+                            )
+                            WorkbenchToolChip(
+                                label = "生成 ${rows}×${cols} 表格",
+                                highlighted = true,
+                                onClick = {
+                                    val header = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "列 $it" }
+                                    val divider = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "---" }
+                                    val body = (1..rows).joinToString("\n") { r ->
+                                        (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { c -> "内容 ${r}-${c}" }
+                                    }
+                                    onInsertSnippet("\n$header\n$divider\n$body\n")
+                                }
+                            )
+                            WorkbenchToolChip(
+                                label = "+ 追加一行",
+                                onClick = {
+                                    val rowStr = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "新单元格" }
+                                    onInsertSnippet("\n$rowStr")
+                                }
+                            )
+                        }
+                    }
+
+                    2 -> {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            WorkbenchToolChip(
+                                label = "📑 自动目录 [toc]",
+                                onClick = { onInsertSnippet("\n[toc]\n") }
+                            )
+                            WorkbenchToolChip(
+                                label = "∑ 数学公式 $$",
+                                onClick = { onWrapSelection("\n$$\n", "\n$$\n", "E = mc^2") }
+                            )
+                            WorkbenchToolChip(
+                                label = "📈 Mermaid 流程图",
+                                onClick = {
+                                    onInsertSnippet("\n```mermaid\ngraph TD\n    A[开始] --> B[处理]\n    B --> C[完成]\n```\n")
+                                }
+                            )
+                            WorkbenchToolChip(
+                                label = "🕒 动态时间 [date]",
+                                onClick = {
+                                    val today = java.time.LocalDate.now().toString()
+                                    onInsertSnippet("[date=$today timezone=\"Asia/Shanghai\"] ")
+                                }
+                            )
+                        }
+                    }
                 }
             }
 
@@ -10217,7 +11186,6 @@ private fun WorkbenchInteractiveSubPanel(
             }
 
             WorkbenchSubPanel.MENTION -> {
-                Text("搜索并 @提及 社区用户或群组", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = palette.inkSecondary)
                 WorkbenchCompactInputBox(
                     value = mentionSearchTerm,
                     onValueChange = onMentionSearchTermChange,
@@ -10238,51 +11206,11 @@ private fun WorkbenchInteractiveSubPanel(
                     ) {
                         mentionCandidates.forEach { cand ->
                             WorkbenchToolChip(
-                                label = "@${cand.handle} (${cand.displayName})",
+                                label = "@${cand.handle}${if (cand.displayName.isNotBlank() && cand.displayName != cand.handle) " (${cand.displayName})" else ""}",
                                 onClick = { onInsertSnippet("@${cand.handle} ") }
                             )
                         }
                     }
-                }
-            }
-
-            WorkbenchSubPanel.MORE_TOOLS -> {
-                Text("Discourse 进阶语法与模板工具", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = palette.inkSecondary)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    WorkbenchToolChip(
-                        label = "📑 目录 [toc]",
-                        onClick = { onInsertSnippet("\n[toc]\n") }
-                    )
-                    WorkbenchToolChip(
-                        label = "∑ 数学公式 $$",
-                        onClick = { onWrapSelection("\n$$\n", "\n$$\n", "E = mc^2") }
-                    )
-                    WorkbenchToolChip(
-                        label = "📈 Mermaid 流程图",
-                        onClick = {
-                            onInsertSnippet("\n```mermaid\ngraph TD\n    A[开始] --> B[处理]\n    B --> C[完成]\n```\n")
-                        }
-                    )
-                    WorkbenchToolChip(
-                        label = "🕒 动态时间 [date]",
-                        onClick = {
-                            val today = java.time.LocalDate.now().toString()
-                            onInsertSnippet("[date=$today timezone=\"Asia/Shanghai\"] ")
-                        }
-                    )
-                    WorkbenchToolChip(
-                        label = "― 分割线 ---",
-                        onClick = { onInsertSnippet("\n\n---\n\n") }
-                    )
-                    WorkbenchToolChip(
-                        label = "⌨ 键盘按键 <kbd>",
-                        onClick = { onWrapSelection("<kbd>", "</kbd>", "Ctrl+C") }
-                    )
                 }
             }
 
@@ -10310,7 +11238,7 @@ private fun WorkbenchCompactInputBox(
         modifier = modifier
             .height(35.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(palette.cardSurface)
+            .background(palette.subtleSurface.copy(alpha = 0.7f))
             .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
             .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -10374,20 +11302,44 @@ private fun WorkbenchCompactInputBox(
 }
 
 @Composable
-private fun WorkbenchToolChip(label: String, active: Boolean = false, highlighted: Boolean = false, onClick: () -> Unit) {
+private fun WorkbenchToolChip(
+    label: String,
+    active: Boolean = false,
+    highlighted: Boolean = false,
+    onClick: () -> Unit
+) {
     val palette = LocalPalette.current
-    TextButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)) {
-        Text(label, color = if (active || highlighted) palette.inkPrimary else palette.inkSecondary,
-            fontSize = 13.sp, fontWeight = if (active || highlighted) FontWeight.Bold else FontWeight.Normal)
+    val isEmphasized = active || highlighted
+    val bg = when {
+        highlighted -> palette.brandGold.copy(alpha = if (palette.isDark) 0.22f else 0.16f)
+        active -> palette.activeChipBg
+        else -> palette.subtleSurface
     }
-}
-
-@Composable
-private fun WorkbenchMiniActionChip(label: String, enabled: Boolean = true, highlighted: Boolean = false, onClick: () -> Unit) {
-    val palette = LocalPalette.current
-    TextButton(enabled = enabled, onClick = onClick, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
-        Text(label, color = if (!enabled) palette.inkTertiary else if (highlighted) palette.inkPrimary else palette.inkSecondary,
-            fontSize = 12.sp, fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal)
+    val borderCol = when {
+        isEmphasized -> palette.brandGold.copy(alpha = 0.55f)
+        else -> palette.hairline
+    }
+    val textCol = when {
+        isEmphasized -> palette.brandGold
+        else -> palette.inkSecondary
+    }
+    Box(
+        modifier = Modifier
+            .height(29.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .border(0.5.dp, borderCol, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = textCol,
+            fontSize = 11.8.sp,
+            fontWeight = if (isEmphasized) FontWeight.Bold else FontWeight.Medium,
+            maxLines = 1
+        )
     }
 }
 
