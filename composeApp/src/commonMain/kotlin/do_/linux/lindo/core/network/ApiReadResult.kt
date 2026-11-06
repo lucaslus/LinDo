@@ -3,6 +3,27 @@ package do_.linux.lindo.core.network
 import kotlinx.serialization.json.*
 import java.io.IOException
 
+class ApiMutationException(message: String) : IOException(message)
+
+internal fun requireMutationSuccess(response: Pair<Int, String>?) {
+    if (response != null && response.first in 200..299 && response.second.isBlank()) return
+    requireMutationObject(response)
+}
+
+internal fun requireMutationObject(response: Pair<Int, String>?): JsonObject {
+    val root = response?.second?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
+    val messages = when (val errors = root?.get("errors")) {
+        is JsonArray -> errors.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        is JsonPrimitive -> listOfNotNull(errors.contentOrNull)
+        else -> emptyList()
+    }
+    if (messages.isNotEmpty()) {
+        throw ApiMutationException(org.jsoup.Jsoup.parse(messages.joinToString("；")).text().take(400))
+    }
+    if (response?.first == 409) throw ApiMutationException("草稿已在其他设备更新，当前内容已保存在本机。请重新打开草稿核对后继续。")
+    return readApiObject(response)
+}
+
 enum class ApiFailureKind { Connection, Authentication, Verification, RateLimited, Server, InvalidPayload }
 class ApiReadException(val kind: ApiFailureKind, cause: Throwable? = null) : IOException(when (kind) {
     ApiFailureKind.Connection -> "网络连接失败，请检查网络后重试"

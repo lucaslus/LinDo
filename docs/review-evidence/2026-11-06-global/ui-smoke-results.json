@@ -1,0 +1,65 @@
+{
+  "device": "emulator-5560",
+  "completed_at": "2026-11-06T18:37:18.969921",
+  "passed": 4,
+  "failed": 3,
+  "results": [
+    {
+      "name": "welcome-themes-and-touch-target",
+      "status": "passed",
+      "detail": {
+        "login_touch_height_dp": 54.18181818181818
+      },
+      "duration_seconds": 14.32
+    },
+    {
+      "name": "large-font-1.3",
+      "status": "passed",
+      "detail": {
+        "font_scale": 1.3
+      },
+      "duration_seconds": 8.98
+    },
+    {
+      "name": "large-font-1.6",
+      "status": "passed",
+      "detail": {
+        "font_scale": 1.6
+      },
+      "duration_seconds": 8.49
+    },
+    {
+      "name": "six-svg-states-light-dark",
+      "status": "failed",
+      "error": "UI element not found: 零度娘正在整理内容",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/lucas/Lushuo/lindo/scripts/android-ui-smoke.py\", line 118, in case\n    detail = function()\n  File \"/Users/lucas/Lushuo/lindo/scripts/android-ui-smoke.py\", line 171, in gallery\n    find(label, root)\n  File \"/Users/lucas/Lushuo/lindo/scripts/android-ui-smoke.py\", line 55, in find\n    raise AssertionError(f\"UI element not found: {label}\")\nAssertionError: UI element not found: 零度娘正在整理内容\n",
+      "screenshot": "build/global-review-ui/failure-six-svg-states-light-dark.png",
+      "duration_seconds": 10.89
+    },
+    {
+      "name": "reduced-motion-stops-animation",
+      "status": "passed",
+      "detail": {
+        "moving_frames_in_1_4s": 46,
+        "disabled_frames_in_1_4s": 8
+      },
+      "duration_seconds": 7.63
+    },
+    {
+      "name": "renderer-process-crash-recovery",
+      "status": "failed",
+      "error": "Timed out waiting for: 首页",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/lucas/Lushuo/lindo/scripts/android-ui-smoke.py\", line 118, in case\n    detail = function()\n  File \"/Users/lucas/Lushuo/lindo/scripts/android-ui-smoke.py\", line 270, in renderer_recovery\n    wait_for(\"首页\")\n  File \"/Users/lucas/Lushuo/lindo/scripts/android-ui-smoke.py\", line 65, in wait_for\n    raise AssertionError(f\"Timed out waiting for: {label}\")\nAssertionError: Timed out waiting for: 首页\n",
+      "screenshot": "build/global-review-ui/failure-renderer-process-crash-recovery.png",
+      "duration_seconds": 25.88
+    },
+    {
+      "name": "rich-content-structure-and-expansion",
+      "status": "failed",
+      "error": "Missing rendered content: {'单元格一', '配图测试', '投票选项测试', '复制代码', '表头 A'}",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/lucas/Lushuo/lindo/scripts/android-ui-smoke.py\", line 118, in case\n    detail = function()\n  File \"/Users/lucas/Lushuo/lindo/scripts/android-ui-smoke.py\", line 311, in rich_content\n    assert len(found) == 7, f\"Missing rendered content: {found}\"\nAssertionError: Missing rendered content: {'单元格一', '配图测试', '投票选项测试', '复制代码', '表头 A'}\n",
+      "screenshot": "build/global-review-ui/failure-rich-content-structure-and-expansion.png",
+      "duration_seconds": 31.06
+    }
+  ]
+}

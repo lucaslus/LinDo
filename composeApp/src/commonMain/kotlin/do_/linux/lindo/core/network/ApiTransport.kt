@@ -9,6 +9,11 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.http.HttpMethod
 import io.ktor.http.Parameters
 
+/** Rails arrays use repeated [] keys; timings[123] remains an indexed object. */
+fun formEntries(values: Map<String, String>): List<Pair<String, String>> = values.map { (key, value) ->
+    key.replace(Regex("^(tags|options|post_ids)\\[\\d+]$"), "$1[]") to value
+}
+
 internal suspend fun executeApiRequest(
     client: HttpClient,
     url: String,
@@ -19,6 +24,6 @@ internal suspend fun executeApiRequest(
     this.method = HttpMethod.parse(method.uppercase())
     headers.forEach { (key, value) -> header(key, value) }
     if (formParams != null) setBody(FormDataContent(Parameters.build {
-        formParams.forEach { (key, value) -> append(key, value) }
+        formEntries(formParams).forEach { (key, value) -> append(key, value) }
     }))
 }

@@ -48,6 +48,9 @@ kotlin {
             implementation(libs.coil.network.ktor3)
             implementation(libs.coil.svg)
             implementation(libs.jsoup)
+            implementation(libs.commonmark)
+            implementation(libs.commonmark.tables)
+            implementation(libs.commonmark.strikethrough)
         }
 
         commonTest.dependencies {
@@ -72,7 +75,7 @@ kotlin {
 android {
     sourceSets.getByName("test").resources.srcDir("src/commonTest/resources")
     namespace = "do_.linux.lindo"
-    compileSdk = 37
+    compileSdk = 36
     compileSdkMinor = 0
 
     defaultConfig {
@@ -104,10 +107,6 @@ android {
 
 dependencies {
     coreLibraryDesugaring(libs.android.desugar)
-}
-
-tasks.matching { it.name.contains("AarMetadata") }.configureEach {
-    enabled = false
 }
 
 compose.desktop {

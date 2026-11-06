@@ -1,0 +1,19 @@
+{
+  "unit": {
+    "desktopTest": {
+      "tests": 52,
+      "failures": 0,
+      "errors": 0
+    },
+    "testDebugUnitTest": {
+      "tests": 52,
+      "failures": 0,
+      "errors": 0
+    }
+  },
+  "debug": "passed",
+  "release": "passed, unsigned",
+  "lint": "completed, no Error/Fatal; existing warnings remain",
+  "jdk": "daemon JDK 21, launcher JBR 25",
+  "account_mutations": "fake transport only"
+}

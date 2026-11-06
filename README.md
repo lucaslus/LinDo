@@ -4,10 +4,10 @@
 
 ## 本地构建
 
-需要 JDK 21、Android SDK 和已启动的 Android 模拟器。macOS 可使用 Android Studio JBR：
+需要 JDK 21、Android SDK 和已启动的 Android 模拟器。Gradle daemon 固定使用 JDK 21；macOS 可选择本机安装的 JDK：
 
 ```sh
-export JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home'
+export JAVA_HOME="$(/usr/libexec/java_home -v 21)"
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 ./gradlew :composeApp:assembleDebug

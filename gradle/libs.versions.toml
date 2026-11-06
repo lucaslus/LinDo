@@ -1,14 +1,17 @@
 [versions]
 agp = "8.13.2"
-kotlin = "2.4.21"
-compose-multiplatform = "1.12.2"
-androidx-activityCompose = "1.12.4"
-kotlinx-coroutines = "1.11.0"
-kotlinx-serialization = "1.12.0"
-ktor = "3.6.1"
-coil3 = "3.6.3"
+kotlin = "2.2.21"
+compose-multiplatform = "1.9.3"
+androidx-activityCompose = "1.11.0"
+kotlinx-coroutines = "1.10.2"
+kotlinx-serialization = "1.9.0"
+ktor = "3.3.3"
+coil3 = "3.3.0"
 
 [libraries]
+commonmark = { module = "org.commonmark:commonmark", version = "0.24.0" }
+commonmark-tables = { module = "org.commonmark:commonmark-ext-gfm-tables", version = "0.24.0" }
+commonmark-strikethrough = { module = "org.commonmark:commonmark-ext-gfm-strikethrough", version = "0.24.0" }
 jsoup = { module = "org.jsoup:jsoup", version = "1.24.1" }
 android-desugar = { module = "com.android.tools:desugar_jdk_libs", version = "2.1.5" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }

@@ -167,7 +167,7 @@ def gallery():
     start("gallery")
     wait_for("零度娘 · SVG 状态提示")
     root = tree()
-    for label in ("零度娘正在整理内容", "正在同步最新内容", "连接暂时中断了", "这里还很安静", "已经准备好啦", "已经看到这里啦"):
+    for label in ("加载中", "刷新中", "网络异常", "暂无内容", "已完成", "没有更多了"):
         find(label, root)
     screen("states-light")
     tap("深色")
@@ -303,7 +303,7 @@ def rich_content():
     found = set()
     for _ in range(7):
         text = " ".join(n.get("text", "") for n in tree().iter("node"))
-        for marker in ("表头 A", "单元格一", "配图测试", "复制代码", "投票选项测试", "在原网页查看完整内容", "打开视频或网页"):
+        for marker in ("表头 A", "单元格一", "配图测试", "复制代码", "投票选项测试", "前往原帖投票", "播放媒体内容"):
             if marker in text:
                 found.add(marker)
         adb("shell", "input", "swipe", "360", "1260", "360", "550", "280")

@@ -129,6 +129,10 @@ import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.BadgeType
 import do_.linux.lindo.core.model.CommunitySearchResult
 import do_.linux.lindo.core.model.GrantedBadge
+import do_.linux.lindo.core.model.mergeTopicPosts
+import do_.linux.lindo.core.model.previousUnloadedStreamIds
+import do_.linux.lindo.core.model.remainingUnloadedStreamIds
+import do_.linux.lindo.core.model.resolveJumpPostIndex
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.PostReactionItem
 import do_.linux.lindo.core.model.TopicDetailModel
@@ -147,6 +151,7 @@ import do_.linux.lindo.core.network.MentionCandidate
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UploadedMediaResult
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import do_.linux.lindo.core.compose.*
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
 import do_.linux.lindo.core.render.DiscourseAstParser
 import do_.linux.lindo.core.render.PostBlockNode
@@ -286,10 +291,10 @@ private fun buildLinDoPalette(
             onTonalPill = Color(0xFF111827),
             inkPrimary = Color(0xFF111827),
             inkSecondary = Color(0xFF525866),
-            inkTertiary = Color(0xFF9499A3),
+            inkTertiary = Color(0xFF646B77),
             hairline = Color(0xFFEDEFF3),
             accent = if (option == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF18181B) else option.logoDoColor,
-            brandGold = option.logoDoColor,
+            brandGold = if (option == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF936000) else option.lightChipText,
             logoDoColor = option.logoDoColor,
             tabIndicatorColor = option.tabIndicatorColor,
             activeChipBg = option.lightChipBg,
@@ -312,10 +317,10 @@ private fun buildLinDoPalette(
             onTonalPill = Color(0xFFF3F4F6),
             inkPrimary = Color(0xFFF3F4F6),
             inkSecondary = Color(0xFF9CA3AF),
-            inkTertiary = Color(0xFF6B7280),
+            inkTertiary = Color(0xFF9CA3AF),
             hairline = Color(0xFF222630),
             accent = option.logoDoColor,
-            brandGold = option.logoDoColor,
+            brandGold = option.darkChipText,
             logoDoColor = option.logoDoColor,
             tabIndicatorColor = option.tabIndicatorColor,
             activeChipBg = option.darkChipBg,
@@ -355,7 +360,7 @@ private fun resolveMorandiCategoryColors(categoryName: String, isDark: Boolean):
 private val LightPalette = buildLinDoPalette(isDark = false, option = BrandThemeOption.OFFICIAL_GOLD)
 private val DarkPalette = buildLinDoPalette(isDark = true, option = BrandThemeOption.OFFICIAL_GOLD)
 
-private val LocalPalette = staticCompositionLocalOf { LightPalette }
+internal val LocalPalette = staticCompositionLocalOf { LightPalette }
 
 private val LightMaterialScheme = lightColorScheme(
     primary = LightPalette.accent,
@@ -702,6 +707,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
     var activeTargetPostNumber by remember { mutableStateOf<Int?>(null) }
     var pendingReplyDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
     var pendingNewTopicDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
+    var pendingEditDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
     var isLoadingDetail by remember { mutableStateOf(false) }
     var mobileShowingDetail by remember { mutableStateOf(false) }
 
@@ -723,6 +729,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
     var showPrivateMessagesSheet by remember { mutableStateOf(false) }
     var pmInitialRecipient by remember { mutableStateOf<String?>(null) }
     var showEditProfileSheet by remember { mutableStateOf(false) }
+    var showLogoutConfirm by remember { mutableStateOf(false) }
 
     // 认证状态与真实个人资料状态
     var authVersion by remember { mutableStateOf(0) }
@@ -1343,7 +1350,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                             showBackButton = false,
                                             onBack = {},
                                             onRefresh = { activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) } },
-                                            onDetailUpdated = { activeTopicDetail = it },
+                                            onDetailUpdated = { if (activeTopicSummary?.id == it.id) activeTopicDetail = it },
                                             onInspectBadge = { inspectedBadge = it },
                                             onInspectUser = { inspectedUsername = it },
                                             onSelectTag = { tag ->
@@ -1447,8 +1454,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                             activeWebLoginUrl = "https://linux.do/login"
                                         },
                                         onLogout = {
-                                            UserApiKeyAuthManager.logout()
-                                            fullUserProfile = null
+                                            showLogoutConfirm = true
                                         }
                                     )
                                 }
@@ -1468,7 +1474,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                 showBackButton = true,
                                 onBack = { mobileShowingDetail = false },
                                 onRefresh = { activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) } },
-                                onDetailUpdated = { activeTopicDetail = it },
+                                onDetailUpdated = { if (activeTopicSummary?.id == it.id) activeTopicDetail = it },
                                 onInspectBadge = { inspectedBadge = it },
                                 onInspectUser = { inspectedUsername = it },
                                 onSelectTag = { tag ->
@@ -1633,8 +1639,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                                     activeWebLoginUrl = "https://linux.do/login"
                                                 },
                                                 onLogout = {
-                                                    UserApiKeyAuthManager.logout()
-                                                    fullUserProfile = null
+                                                    showLogoutConfirm = true
                                                 }
                                             )
                                         }
@@ -1700,8 +1705,8 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                 if (showBadgesCenterSheet) {
                     CommunityBadgesSheet(
                         targetUsername = badgesCenterUsername ?: fullUserProfile?.username ?: currentUser?.username.orEmpty(),
-                        currentUserTitle = fullUserProfile?.title ?: currentUser?.userTitle.orEmpty(),
-                        initialEarnedBadges = fullUserProfile?.badges.orEmpty(),
+                        currentUserTitle = if (badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)) fullUserProfile?.title ?: currentUser?.userTitle.orEmpty() else "",
+                        initialEarnedBadges = if (badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)) fullUserProfile?.badges.orEmpty() else emptyList(),
                         onDismiss = { showBadgesCenterSheet = false },
                         onInspectBadge = { badge ->
                             inspectedBadge = badge
@@ -1733,6 +1738,18 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                     )
                 }
 
+                if (showLogoutConfirm) LinDoConfirmDialog("退出当前账号？", "本机草稿会保留在当前账号，下次登录后可继续编辑。", "退出登录",
+                    onDismiss = { showLogoutConfirm = false }, onConfirm = {
+                        showLogoutConfirm = false
+                        UserApiKeyAuthManager.logout()
+                        fullUserProfile = null
+                        topics = emptyList()
+                        activeTopicDetail = null
+                        activeTopicSummary = null
+                        mobileShowingDetail = false
+                        currentTab = MainTab.HOME
+                    })
+
                 if (showGlobalSearchSheet) {
                     GlobalSearchModalSheet(
                         initialQuery = searchQuery,
@@ -1759,6 +1776,16 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                             openTopicById(newTopicId, title)
                         }
                     )
+                }
+
+                pendingEditDraft?.let { draft ->
+                    ComposerSheet(ComposerAction.EDIT, topicId = draft.topicId.takeIf { it > 0 }, topicTitle = draft.title,
+                        initialDraft = draft, onDismiss = { pendingEditDraft = null }, onPublished = { result ->
+                            result.post?.let { updated -> activeTopicDetail = activeTopicDetail?.let { detail ->
+                                detail.copy(posts = detail.posts.map { if (it.id == updated.id) it.copy(raw = updated.raw, cookedHtml = updated.cookedHtml) else it })
+                            } }
+                            pendingEditDraft = null
+                        })
                 }
 
                 if (showNotificationsSheet) {
@@ -1817,7 +1844,9 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                         onDismiss = { showCloudDraftsSheet = false },
                         onOpenDraftTopic = { draft ->
                             showCloudDraftsSheet = false
-                            if (draft.topicId > 0) {
+                            if (draft.action.startsWith("edit") || draft.draftKey.startsWith("edit_post_")) {
+                                pendingEditDraft = draft
+                            } else if (draft.topicId > 0) {
                                 pendingReplyDraft = draft
                                 openTopicById(draft.topicId, draft.title, draft.replyToPostNumber)
                             } else {
@@ -1887,8 +1916,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                             }
                         },
                         onLogout = {
-                            UserApiKeyAuthManager.logout()
-                            fullUserProfile = null
+                            showLogoutConfirm = true
                             showAuthSheet = false
                         },
                         onDismiss = { showAuthSheet = false }
@@ -3428,7 +3456,7 @@ private fun formatCompactNumber(value: Int): String {
  * - 底栏：Gemini 标志性悬浮胶囊输入栏（Floating Prompt Pill）
  */
 @Composable
-private fun CommunityTopicReaderPane(
+internal fun CommunityTopicReaderPane(
     summary: TopicSummary?,
     detail: TopicDetailModel?,
     targetPostNumber: Int? = null,
@@ -3474,6 +3502,24 @@ private fun CommunityTopicReaderPane(
     var isBookmarked by remember(summary.id, detail?.bookmarked) {
         mutableStateOf(detail?.bookmarked ?: false)
     }
+    var showRemoveBookmark by remember(summary.id) { mutableStateOf(false) }
+    var bookmarkBusy by remember(summary.id) { mutableStateOf(false) }
+    var bookmarkError by remember(summary.id) { mutableStateOf<String?>(null) }
+    fun setBookmark(value: Boolean) {
+        if (bookmarkBusy) return
+        bookmarkBusy = true
+        bookmarkError = null
+        scope.launch {
+            try {
+                if (LinuxDoRepository.setTopicBookmark(summary.id, value)) {
+                    isBookmarked = value
+                    showRemoveBookmark = false
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { bookmarkError = error.message ?: "收藏操作失败，请重试" }
+            finally { bookmarkBusy = false }
+        }
+    }
     var onlyOpFilter by remember(summary.id) { mutableStateOf(false) }
     var notificationLevel by remember(summary.id) { mutableStateOf(1) } // 1=常规, 2=跟踪, 3=关注, 0=免扰
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
@@ -3486,28 +3532,58 @@ private fun CommunityTopicReaderPane(
     var replyTargetPostNumber by remember(summary.id) { mutableStateOf<Int?>(null) }
     var replyTargetUsername by remember(summary.id) { mutableStateOf<String?>(null) }
     var replyInitialQuote by remember(summary.id) { mutableStateOf("") }
+    var replyCloudDraft by remember(summary.id) { mutableStateOf<CloudDraftItem?>(null) }
+
+    var pendingDeletePost by remember(summary.id) { mutableStateOf<PostItemModel?>(null) }
+    var deletingPost by remember(summary.id) { mutableStateOf(false) }
+    var deletePostError by remember(summary.id) { mutableStateOf<String?>(null) }
 
     // 编辑本人已发楼层状态
     var editingPost by remember(summary.id) { mutableStateOf<PostItemModel?>(null) }
-    var editPostRawText by remember(summary.id) { mutableStateOf("") }
-    var isSavingPostEdit by remember(summary.id) { mutableStateOf(false) }
 
     val catColor = remember(detail?.categoryColorHex ?: summary.categoryColorHex) {
         LinuxDoSiteRules.parseHexColor(detail?.categoryColorHex ?: summary.categoryColorHex)
     }
     val op = summary.originalPoster
     val posts = detail?.posts.orEmpty()
-    val effectiveOpUsername = remember(posts, op.username) {
-        posts.firstOrNull { it.postNumber == 1 }?.username?.takeIf { it.isNotBlank() } ?: op.username
+    val effectiveOpUsername = remember(posts, op.username, detail?.originalPosterUsername) {
+        detail?.originalPosterUsername ?: posts.firstOrNull { it.postNumber == 1 }?.username?.takeIf { it.isNotBlank() } ?: op.username
     }
     val streamIds = detail?.streamIds.orEmpty()
     val loadedIds = remember(posts) { posts.map { it.id }.toSet() }
-    val remainingPostIds = remember(streamIds, loadedIds) {
-        streamIds.filterNot { it in loadedIds }
+    val latestDetail by androidx.compose.runtime.rememberUpdatedState(detail)
+    val remainingPostIds = remember(streamIds, loadedIds) { remainingUnloadedStreamIds(streamIds, loadedIds) }
+    val previousPostIds = remember(streamIds, loadedIds) { previousUnloadedStreamIds(streamIds, loadedIds) }
+    var pendingJumpFloor by remember(summary.id) { mutableStateOf<Int?>(null) }
+    var jumpFetchedWindow by remember(summary.id) { mutableStateOf(false) }
+    var navigationError by remember(summary.id) { mutableStateOf<String?>(null) }
+    fun jumpToFloor(number: Int) {
+        pendingJumpFloor = number
+        jumpFetchedWindow = false
+        navigationError = null
+        if (posts.any { it.postNumber == number }) return
+        scope.launch {
+            val window = LinuxDoRepository.fetchTopicDetail(summary.id, summary, trackVisit = false, targetPostNumber = number)
+            if (window.loadError != null) navigationError = window.loadError
+            else {
+                jumpFetchedWindow = true
+                latestDetail?.let { onDetailUpdated(it.copy(posts = mergeTopicPosts(it.posts, window.posts))) }
+            }
+        }
     }
     val totalFloorCount = maxOf(summary.postsCount, streamIds.size, posts.size)
 
     val readerListState = rememberLazyListState()
+    LaunchedEffect(pendingJumpFloor, jumpFetchedWindow, posts) {
+        val number = pendingJumpFloor ?: return@LaunchedEffect
+        val index = resolveJumpPostIndex(posts, number, allowNearestFallback = jumpFetchedWindow)
+        if (index != null) {
+            readerListState.animateScrollToItem(index + 1)
+            pendingJumpFloor = null
+            jumpFetchedWindow = false
+        }
+    }
+
 
     // 若从云端草稿恢复话题回复，自动填充并展开回复抽屉
     LaunchedEffect(initialReplyDraft, summary.id) {
@@ -3516,6 +3592,7 @@ private fun CommunityTopicReaderPane(
             replyTargetPostNumber = draft.replyToPostNumber
             replyTargetUsername = null
             replyInitialQuote = draft.raw.ifBlank { draft.excerpt }
+            replyCloudDraft = draft
             showReplySheet = true
             onConsumeReplyDraft()
         }
@@ -3538,18 +3615,18 @@ private fun CommunityTopicReaderPane(
         }
     }
 
-    fun loadMoreFloorBatch(batchSize: Int = 20) {
+    fun loadMoreFloorBatch(batchSize: Int = 20, earlier: Boolean = false) {
         val currentDetail = detail ?: return
-        if (isLoadingMorePosts || remainingPostIds.isEmpty()) return
+        if (isLoadingMorePosts || (if (earlier) previousPostIds else remainingPostIds).isEmpty()) return
         scope.launch {
             isLoadingMorePosts = true
             loadMorePostsError = false
             try {
-                val batchIds = remainingPostIds.take(batchSize)
+                val batchIds = if (earlier) previousPostIds.takeLast(batchSize) else remainingPostIds.take(batchSize)
                 val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds)
                 if (morePosts.isNotEmpty()) {
-                    val merged = (currentDetail.posts + morePosts).distinctBy { it.id }
-                    onDetailUpdated(currentDetail.copy(posts = merged))
+                    val merged = mergeTopicPosts(latestDetail?.posts.orEmpty(), morePosts)
+                    latestDetail?.let { onDetailUpdated(it.copy(posts = merged)) }
                 } else {
                     loadMorePostsError = true
                 }
@@ -3645,9 +3722,9 @@ private fun CommunityTopicReaderPane(
                     .trim()
                     .take(maxChars)
             }
-            val opPost = posts.first()
+            val opPost = posts.firstOrNull { it.postNumber == 1 } ?: return@remember ""
             val opText = cleanHtmlSnippet(opPost.cookedHtml, 180)
-            val topReplies = posts.drop(1)
+            val topReplies = posts.filter { it.postNumber != 1 }
                 .sortedByDescending { p -> p.likeCount + p.reactions.sumOf { it.count } }
                 .take(3)
             buildString {
@@ -3777,14 +3854,8 @@ private fun CommunityTopicReaderPane(
                         onRequestLogin()
                         return@TonalCircleIconButton
                     }
-                    val firstPostId = posts.firstOrNull()?.id ?: return@TonalCircleIconButton
-                    val previousBookmark = isBookmarked
-                    isBookmarked = !previousBookmark
-                    scope.launch {
-                        val ok = LinuxDoRepository.toggleTopicBookmark(firstPostId, summary.title)
-                        if (!ok) {
-                            isBookmarked = previousBookmark
-                        }
+                    if (!bookmarkBusy) {
+                        if (isBookmarked) { bookmarkError = null; showRemoveBookmark = true } else setBookmark(true)
                     }
                 }
             )
@@ -3940,6 +4011,8 @@ private fun CommunityTopicReaderPane(
 
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
+        if (!showRemoveBookmark) bookmarkError?.let { LinDoFeedbackRow(it, LinDoMascotState.NetworkError) }
+        navigationError?.let { message -> LinDoLoadFailure(message, { pendingJumpFloor?.let(::jumpToFloor) }) }
         LazyColumn(
             state = readerListState,
             modifier = Modifier
@@ -3956,6 +4029,11 @@ private fun CommunityTopicReaderPane(
                         .background(palette.cardSurface)
                         .padding(horizontal = 16.dp, vertical = 14.dp)
                 ) {
+                    if (previousPostIds.isNotEmpty()) {
+                        TextButton(enabled = !isLoadingMorePosts, onClick = { loadMoreFloorBatch(20, earlier = true) }) {
+                            Text("加载更早的楼层", color = palette.inkSecondary)
+                        }
+                    }
                     // 完整多行话题大标题（不截断，字号与行高贴合官方 Discourse 移动端阅读比例）
                     Text(
                         text = resolvedTitle,
@@ -4071,48 +4149,9 @@ private fun CommunityTopicReaderPane(
                     enableAnimations = enableAnimations,
                     onInspectBadge = onInspectBadge,
                     onInspectUser = onInspectUser,
-                    onJumpToFloorNumber = { targetPostNum ->
-                        val targetIdx = posts.indexOfFirst { it.postNumber == targetPostNum }
-                        if (targetIdx >= 0) {
-                            scope.launch {
-                                readerListState.animateScrollToItem(targetIdx + 1)
-                            }
-                        }
-                    },
-                    onEditPost = { targetPost ->
-                        editingPost = targetPost
-                        val fallbackText = targetPost.raw?.takeIf { it.isNotBlank() } ?: targetPost.cookedHtml
-                            .replace(Regex("<br\\s*/?>"), "\n")
-                            .replace(Regex("</p>"), "\n\n")
-                            .replace(Regex("<[^>]+>"), "")
-                            .trim()
-                        editPostRawText = fallbackText
-                        if (targetPost.raw.isNullOrBlank()) {
-                            scope.launch {
-                                val trueRaw = LinuxDoRepository.fetchPostRawMarkdown(
-                                    postId = targetPost.id,
-                                    topicId = summary.id,
-                                    postNumber = targetPost.postNumber
-                                )
-                                if (!trueRaw.isNullOrBlank() && editingPost?.id == targetPost.id) {
-                                    editPostRawText = trueRaw
-                                }
-                            }
-                        }
-                    },
-                    onDeletePost = { targetPost ->
-                        scope.launch {
-                            val ok = LinuxDoRepository.deletePost(targetPost.id)
-                            if (ok && detail != null) {
-                                onDetailUpdated(
-                                    detail.copy(
-                                        posts = detail.posts.filterNot { it.id == targetPost.id },
-                                        postsCount = maxOf(1, detail.postsCount - 1)
-                                    )
-                                )
-                            }
-                        }
-                    },
+                    onJumpToFloorNumber = ::jumpToFloor,
+                    onEditPost = { editingPost = it },
+                    onDeletePost = { targetPost -> pendingDeletePost = targetPost; deletePostError = null },
                     onReplyFloor = { targetPost ->
                         if (!UserApiKeyAuthManager.isAuthorized()) {
                             onRequestLogin()
@@ -4120,6 +4159,7 @@ private fun CommunityTopicReaderPane(
                             replyTargetPostNumber = targetPost.postNumber
                             replyTargetUsername = targetPost.username
                             replyInitialQuote = ""
+                            replyCloudDraft = null
                             showReplySheet = true
                         }
                     },
@@ -4127,13 +4167,15 @@ private fun CommunityTopicReaderPane(
                         if (!UserApiKeyAuthManager.isAuthorized()) {
                             onRequestLogin()
                         } else {
-                            val cleanSnippet = targetPost.cookedHtml
-                                .replace(Regex("<[^>]+>"), "")
+                            val cleanSnippet = org.jsoup.Jsoup.parseBodyFragment(targetPost.cookedHtml).body()
+                                .apply { select(".spoiler, .spoilered").remove() }
+                                .text()
                                 .trim()
                                 .take(160)
                             replyTargetPostNumber = targetPost.postNumber
                             replyTargetUsername = targetPost.username
                             replyInitialQuote = "[quote=\"${targetPost.username}, post:${targetPost.postNumber}, topic:${summary.id}\"]\n$cleanSnippet\n[/quote]\n\n"
+                            replyCloudDraft = null
                             showReplySheet = true
                         }
                     },
@@ -4141,7 +4183,7 @@ private fun CommunityTopicReaderPane(
                 )
 
                 // 对齐并全面超越官方 Linux.do 移动 Web：在 #1 主帖正下方呈现 Topic Map（浏览量 / 回复 / 用户 + 只看楼主 / 末楼 + ✦ 总结）
-                if (idx == 0) {
+                if (post.postNumber == 1) {
                     val metricNumberColor = if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0284C7)
                     val participantCount = remember(posts) {
                         maxOf(
@@ -4202,7 +4244,7 @@ private fun CommunityTopicReaderPane(
                                         color = metricNumberColor
                                     )
                                     Text(
-                                        text = "用户",
+                                        text = "已载用户",
                                         fontSize = 11.2.sp,
                                         color = palette.inkTertiary
                                     )
@@ -4233,9 +4275,7 @@ private fun CommunityTopicReaderPane(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(6.dp))
                                         .clickable {
-                                            scope.launch {
-                                                readerListState.animateScrollToItem(posts.size)
-                                            }
+                                            jumpToFloor(totalFloorCount)
                                         }
                                         .padding(horizontal = 6.dp, vertical = 4.dp)
                                 )
@@ -4350,7 +4390,7 @@ private fun CommunityTopicReaderPane(
                         loadingText = "正在同步后续楼层 (${posts.size}/$totalFloorCount)",
                         moreText = "加载后续评论 (剩余 ${remainingPostIds.size} 楼 · 已载入 ${posts.size}/$totalFloorCount)",
                         errorText = "评论加载异常 · 点击手动重试",
-                        doneText = "没有更多了 · 已看完本帖全部 ${posts.size} 楼",
+                        doneText = "已到话题末尾",
                         onLoadMore = { loadMoreFloorBatch(20) }
                     )
                 }
@@ -4376,11 +4416,11 @@ private fun CommunityTopicReaderPane(
                     color = palette.inkSecondary
                 )
                 val jumpTargets = listOf(
-                    "#1 首楼" to 0,
-                    "25%" to (posts.size / 4).coerceAtLeast(1),
-                    "50%" to (posts.size / 2).coerceAtLeast(1),
-                    "75%" to ((posts.size * 3) / 4).coerceAtLeast(1),
-                    "#${posts.size} 已载末楼" to posts.size
+                    "#1 首楼" to 1,
+                    "25%" to (totalFloorCount / 4).coerceAtLeast(1),
+                    "50%" to (totalFloorCount / 2).coerceAtLeast(1),
+                    "75%" to ((totalFloorCount * 3) / 4).coerceAtLeast(1),
+                    "#$totalFloorCount 末楼" to totalFloorCount
                 )
                 jumpTargets.forEach { (label, idx) ->
                     Box(
@@ -4389,9 +4429,7 @@ private fun CommunityTopicReaderPane(
                             .background(palette.subtleSurface)
                             .clickable {
                                 showFloorJumpBar = false
-                                scope.launch {
-                                    readerListState.animateScrollToItem(idx.coerceIn(0, posts.size))
-                                }
+                                jumpToFloor(idx)
                             }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
@@ -4449,6 +4487,7 @@ private fun CommunityTopicReaderPane(
                             replyTargetPostNumber = null
                             replyTargetUsername = null
                             replyInitialQuote = ""
+                            replyCloudDraft = null
                             showReplySheet = true
                         }
                         .padding(horizontal = 14.dp),
@@ -4511,89 +4550,40 @@ private fun CommunityTopicReaderPane(
         }
     }
 
-    // 编辑本人已发楼层弹窗
-    editingPost?.let { target ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.52f))
-                .clickable { if (!isSavingPostEdit) editingPost = null },
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(palette.cardSurface)
-                    .border(0.5.dp, palette.hairline, RoundedCornerShape(18.dp))
-                    .clickable(enabled = false) {}
-                    .padding(16.dp)
-            ) {
-                Text(
-                    text = "编辑第 #${target.postNumber} 楼内容",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                LinDoMarkdownWorkbench(
-                    rawValue = editPostRawText,
-                    onRawValueChange = { editPostRawText = it },
-                    placeholder = "编辑评论内容...",
-                    draftKey = "edit_post_${target.id}",
-                    replyToPostNumber = target.postNumber,
-                    defaultEditorHeight = 165.dp
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(palette.subtleSurface)
-                            .clickable(enabled = !isSavingPostEdit) { editingPost = null }
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                    ) {
-                        Text("取消", fontSize = 13.sp, color = palette.inkSecondary)
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(palette.tonalPill)
-                            .clickable(enabled = !isSavingPostEdit && editPostRawText.trim().length >= 5) {
-                                scope.launch {
-                                    isSavingPostEdit = true
-                                    val updatedPost = LinuxDoRepository.updatePost(
-                                        postId = target.id,
-                                        newRaw = editPostRawText.trim()
-                                    )
-                                    isSavingPostEdit = false
-                                    if (updatedPost != null && detail != null) {
-                                        val updatedList = detail.posts.map { p ->
-                                            if (p.id == target.id) p.copy(cookedHtml = updatedPost.cookedHtml) else p
-                                        }
-                                        onDetailUpdated(detail.copy(posts = updatedList))
-                                        editingPost = null
-                                    }
-                                }
-                            }
-                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Text(
-                            text = if (isSavingPostEdit) "保存中..." else "保存修改",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.brandGold
-                        )
+    if (showRemoveBookmark) LinDoConfirmDialog("移除话题收藏？", "这个话题中的书签将被移除，话题内容不会被删除。", "移除收藏", busy = bookmarkBusy, error = bookmarkError,
+        onDismiss = { showRemoveBookmark = false }, onConfirm = { setBookmark(false) })
+    pendingDeletePost?.let { target ->
+        LinDoConfirmDialog("删除第 #${target.postNumber} 楼？", "确认删除这条评论？删除后将从话题中移除。", "确认删除", busy = deletingPost,
+            error = deletePostError, onDismiss = { pendingDeletePost = null }, onConfirm = {
+                if (!deletingPost) {
+                    deletingPost = true
+                    scope.launch {
+                        try {
+                            if (LinuxDoRepository.deletePost(target.id)) {
+                                latestDetail?.let { current -> onDetailUpdated(current.copy(
+                                    posts = current.posts.filterNot { it.id == target.id },
+                                    streamIds = current.streamIds.filterNot { it == target.id },
+                                    postsCount = (current.postsCount - 1).coerceAtLeast(1))) }
+                                pendingDeletePost = null
+                            } else deletePostError = "删除失败，请重试。当前内容已保留。"
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                        catch (error: Exception) { deletePostError = error.message ?: "删除失败，请重试" }
+                        finally { deletingPost = false }
                     }
                 }
-            }
-        }
+            })
+    }
+
+    editingPost?.let { target ->
+        ComposerSheet(ComposerAction.EDIT, topicId = summary.id, topicTitle = detail?.title ?: summary.title,
+            post = target, onDismiss = { editingPost = null }, onPublished = { result ->
+                result.post?.let { updated ->
+                    detail?.let { current -> onDetailUpdated(current.copy(posts = current.posts.map {
+                        if (it.id == target.id) it.copy(cookedHtml = updated.cookedHtml, raw = updated.raw) else it
+                    })) }
+                }
+                editingPost = null
+            })
     }
 
     if (showReplySheet) {
@@ -4603,12 +4593,13 @@ private fun CommunityTopicReaderPane(
             replyToPostNumber = replyTargetPostNumber,
             replyToUsername = replyTargetUsername,
             initialRaw = replyInitialQuote,
+            initialDraft = replyCloudDraft,
             onDismiss = { showReplySheet = false },
             onPostCreated = { newPost ->
                 showReplySheet = false
                 val currentDetail = detail
                 if (currentDetail != null) {
-                    val updatedPosts = (currentDetail.posts + newPost).distinctBy { it.id }
+                    val updatedPosts = mergeTopicPosts(currentDetail.posts, listOf(newPost))
                     onDetailUpdated(
                         currentDetail.copy(
                             postsCount = currentDetail.postsCount + 1,
@@ -4746,8 +4737,9 @@ private fun CommunityPostFloor(
     }
 
     val isOp = post.isTopicOwner || post.username.equals(opUsername, ignoreCase = true)
-    val isOwnPost = remember(post.username) {
-        val me = UserApiKeyAuthManager.currentUser?.username
+    val accountUsername = LocalCurrentAccountUsername.current ?: UserApiKeyAuthManager.currentUser?.username
+    val isOwnPost = remember(post.username, accountUsername) {
+        val me = accountUsername
         !me.isNullOrBlank() && post.username.equals(me, ignoreCase = true)
     }
     val canDeleteThisPost = remember(isOwnPost, post.postNumber, post.canDelete) {
@@ -5135,7 +5127,7 @@ private fun CommunityPostFloor(
 
         Spacer(modifier = Modifier.height(11.dp))
 
-        PostRichContent(astNodes, palette, onOpenWebUrl, originalUrl)
+        PostRichContent(astNodes, palette, onOpenWebUrl, originalUrl, post.id)
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -6208,6 +6200,9 @@ private fun CommunityMessagesScreen(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    var showMarkAllConfirm by remember { mutableStateOf(false) }
+    var markingAll by remember { mutableStateOf(false) }
+    var markAllError by remember { mutableStateOf<String?>(null) }
     var subTab by remember { mutableStateOf(0) } // 0=通知, 1=私信, 2=聊天
     var categoryFilter by remember { mutableStateOf(0) } // 0=全部, 1=回复我的, 2=收到的赞, 3=@我的, 4=系统通知
     var notifications by remember { mutableStateOf<List<UserNotificationItem>>(emptyList()) }
@@ -6296,13 +6291,7 @@ private fun CommunityMessagesScreen(
                             if (!isAuthorized) {
                                 onRequestLogin()
                             } else {
-                                scope.launch {
-                                    val ok = LinuxDoRepository.markNotificationsRead()
-                                    if (ok) {
-                                        notifications = notifications.map { it.copy(read = true) }
-                                        onMarkedAllRead()
-                                    }
-                                }
+                                showMarkAllConfirm = true
                             }
                         },
                     contentAlignment = Alignment.Center
@@ -6935,6 +6924,28 @@ private fun CommunityMessagesScreen(
             }
         }
     }
+    if (showMarkAllConfirm) LinDoConfirmDialog("全部标为已读？", "当前账号的所有未读通知将标记为已读。", "确认标记", busy = markingAll, error = markAllError, destructive = false,
+        onDismiss = { showMarkAllConfirm = false; markAllError = null }, onConfirm = {
+            if (!markingAll) {
+                markingAll = true
+                markAllError = null
+                scope.launch {
+                    try {
+                        val ok = LinuxDoRepository.markNotificationsRead()
+                        if (ok) {
+                            showMarkAllConfirm = false
+                            notifications = notifications.map { it.copy(read = true) }
+                            onMarkedAllRead()
+                        } else {
+                            markAllError = "操作失败，请重试"
+                        }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (error: Exception) { markAllError = error.message ?: "操作失败，请重试" }
+                    finally { markingAll = false }
+                }
+            }
+        })
+
 }
 
 private fun formatReadDuration(seconds: Int): String {
@@ -6946,6 +6957,7 @@ private fun formatReadDuration(seconds: Int): String {
         hours > 0 -> "${hours}h ${mins}m"
         else -> "${mins.coerceAtLeast(1)}m"
     }
+
 }
 
 /**
@@ -8354,9 +8366,7 @@ private fun CommunityBadgesSheet(
             val mergedEarned = UniversalBadgeEngine.mergeBadgesPreservingRichness(
                 fetchedUserBadges + initialEarnedBadges + listOfNotNull(titleBadge)
             ).map { it.copy(isEarned = true) }
-            if (mergedEarned.isNotEmpty()) {
-                earnedBadges = mergedEarned
-            }
+            earnedBadges = mergedEarned
 
             val earnedByKey = mergedEarned.associateBy { UniversalBadgeEngine.badgeDedupeKey(it) }
             val siteCatalog = LinuxDoRepository.fetchAllSiteBadges().map { siteBadge ->
@@ -9041,130 +9051,13 @@ private fun GoogleWelcomeLoginScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TopicReplyComposerSheet(
-    topicId: Int,
-    topicTitle: String,
-    replyToPostNumber: Int?,
-    replyToUsername: String?,
-    initialRaw: String = "",
-    onDismiss: () -> Unit,
-    onPostCreated: (PostItemModel) -> Unit
-) {
-    val palette = LocalPalette.current
-    val scope = rememberCoroutineScope()
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var content by remember(initialRaw) { mutableStateOf(initialRaw) }
-    var isSubmitting by remember { mutableStateOf(false) }
-    var errorMsg by remember { mutableStateOf<String?>(null) }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        dragHandle = null,
-        containerColor = palette.cardSurface
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .windowInsetsPadding(WindowInsets.ime)
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            // 顶栏：左侧关闭 + 中部回复对象与话题标题 + 右侧发布按钮
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .clickable { onDismiss() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Close,
-                        contentDescription = "取消",
-                        modifier = Modifier.size(18.dp),
-                        tint = palette.inkPrimary
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(10.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = if (replyToPostNumber != null) {
-                            "回复 #$replyToPostNumber ${replyToUsername?.let { "@$it" } ?: ""}"
-                        } else {
-                            "发表回复"
-                        },
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.inkPrimary,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = topicTitle,
-                        fontSize = 11.5.sp,
-                        color = palette.inkSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                val canSend = content.trim().length >= LinuxDoSiteRules.MIN_POST_RAW_LENGTH && !isSubmitting
-                Box(
-                    modifier = Modifier
-                        .height(34.dp)
-                        .clip(RoundedCornerShape(17.dp))
-                        .background(if (canSend) palette.publishBtnBg else palette.subtleSurface)
-                        .clickable(enabled = canSend) {
-                            scope.launch {
-                                isSubmitting = true
-                                errorMsg = null
-                                val created = LinuxDoRepository.createPost(
-                                    topicId = topicId,
-                                    raw = content,
-                                    replyToPostNumber = replyToPostNumber
-                                )
-                                isSubmitting = false
-                                if (created != null) {
-                                    LinuxDoRepository.deleteCloudDraft("topic_$topicId", 0)
-                                    onPostCreated(created)
-                                } else {
-                                    errorMsg = "发送失败，请确认已登录且回复内容不少于 ${LinuxDoSiteRules.MIN_POST_RAW_LENGTH} 个字符"
-                                }
-                            }
-                        }
-                        .padding(horizontal = 16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LinDoBusyButtonLabel(busy = isSubmitting, busyLabel = "发送中...", label = "发布回复", color = if (canSend) palette.publishBtnContent else palette.inkTertiary)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-            Spacer(modifier = Modifier.height(10.dp))
-
-            LinDoMarkdownWorkbench(
-                rawValue = content,
-                onRawValueChange = { content = it },
-                placeholder = "写下你的回复...",
-                draftKey = "topic_$topicId",
-                replyToPostNumber = replyToPostNumber,
-                defaultEditorHeight = 250.dp
-            )
-
-            if (errorMsg != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                LinDoFeedbackRow(message = errorMsg!!, state = LinDoMascotState.NetworkError)
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-        }
-    }
-}
+    topicId: Int, topicTitle: String, replyToPostNumber: Int?, replyToUsername: String?,
+    initialRaw: String = "", initialDraft: CloudDraftItem? = null,
+    onDismiss: () -> Unit, onPostCreated: (PostItemModel) -> Unit
+) = ComposerSheet(ComposerAction.REPLY, topicId = topicId, topicTitle = topicTitle,
+    replyToPostNumber = replyToPostNumber, replyToUsername = replyToUsername,
+    initialRaw = initialRaw, initialDraft = initialDraft, onDismiss = onDismiss,
+    onPublished = { it.post?.let(onPostCreated) })
 
 /**
  * 官方功能 2：发布全新话题全屏级工作台抽屉 (`POST /posts.json`)
@@ -9176,335 +9069,11 @@ private fun TopicReplyComposerSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CreateTopicModalSheet(
-    initialCategoryId: Int,
-    initialDraft: CloudDraftItem? = null,
-    onDismiss: () -> Unit,
-    onTopicCreated: (Int, String) -> Unit
-) {
-    val palette = LocalPalette.current
-    val scope = rememberCoroutineScope()
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var title by remember(initialDraft?.draftKey) {
-        mutableStateOf(
-            initialDraft?.title?.takeUnless { it == "未命名草稿" }.orEmpty()
-        )
-    }
-    var rawContent by remember(initialDraft?.draftKey) {
-        mutableStateOf(initialDraft?.raw?.ifBlank { initialDraft.excerpt }.orEmpty())
-    }
-    var appliedTemplate by remember { mutableStateOf<String?>(null) }
-    var selectedTags by remember(initialDraft?.draftKey) {
-        mutableStateOf(initialDraft?.tags.orEmpty())
-    }
-    var availableTags by remember {
-        mutableStateOf(listOf("人工智能", "快问快答", "纯水", "病友", "抽奖"))
-    }
-    var categoryId by remember(initialDraft?.draftKey, initialCategoryId) {
-        mutableStateOf(initialDraft?.categoryId ?: initialCategoryId)
-    }
-    var isSubmitting by remember { mutableStateOf(false) }
-    var showLotteryCostConfirm by remember { mutableStateOf(false) }
-    var errorMsg by remember { mutableStateOf<String?>(null) }
-
-    fun submitNewTopic() {
-        scope.launch {
-            isSubmitting = true
-            errorMsg = null
-            val tid = LinuxDoRepository.createTopic(
-                title = title,
-                raw = rawContent,
-                categoryId = categoryId,
-                tags = selectedTags
-            )
-            isSubmitting = false
-            if (tid != null) {
-                LinuxDoRepository.deleteCloudDraft(initialDraft?.draftKey ?: "new_topic", initialDraft?.sequence ?: 0)
-                onTopicCreated(tid, title.trim())
-            } else {
-                errorMsg = "发布失败：标题或正文不少于 ${LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH} 个字符，并请确认已登录"
-            }
-        }
-    }
-
-    if (showLotteryCostConfirm) {
-        AlertDialog(
-            onDismissRequest = { showLotteryCostConfirm = false },
-            containerColor = palette.cardSurface,
-            title = {
-                Text(
-                    text = "确认发布抽奖话题",
-                    fontSize = 16.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary
-                )
-            },
-            text = {
-                Text(
-                    text = "根据社区规则，携带「#${LinuxDoSiteRules.LOTTERY_TAG}」标签发布新话题将扣除 ${LinuxDoSiteRules.LOTTERY_TOPIC_COST_POINTS} 社区积分。是否确认立即发布？",
-                    fontSize = 13.5.sp,
-                    lineHeight = 20.sp,
-                    color = palette.inkSecondary
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showLotteryCostConfirm = false
-                        submitNewTopic()
-                    }
-                ) {
-                    Text("确认扣除并发布", fontWeight = FontWeight.Bold, color = palette.brandGold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showLotteryCostConfirm = false }) {
-                    Text("取消", color = palette.inkSecondary)
-                }
-            }
-        )
-    }
-
-    // 切换版块时：
-    // 1. 对齐 Discourse 官方逻辑，从 `/site.json` 自动拉取该版块真实 `topic_template`（若正文仍为空或为旧模板则自动填入，无需多余的手动「套用模板」按钮）
-    // 2. 调用 `/tags/filter/search.json?filterForInput=true&categoryId=...` 拉取该版块允许选择的官方标签（Linux.do 禁止普通用户自造不存在的自定义标签）
-    LaunchedEffect(categoryId) {
-        val fetchedTags = LinuxDoRepository.fetchCategoryAllowedTags(categoryId)
-        if (fetchedTags.isNotEmpty()) {
-            availableTags = fetchedTags
-        }
-        val serverTpl = LinuxDoRepository.fetchCategoryTopicTemplate(categoryId)
-        val trimmedCurrent = rawContent.trim()
-        if (trimmedCurrent.isEmpty() || (appliedTemplate != null && trimmedCurrent == appliedTemplate!!.trim())) {
-            if (!serverTpl.isNullOrBlank()) {
-                rawContent = serverTpl
-                appliedTemplate = serverTpl
-            } else if (appliedTemplate != null && trimmedCurrent == appliedTemplate!!.trim()) {
-                rawContent = ""
-                appliedTemplate = null
-            }
-        }
-    }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        dragHandle = null,
-        containerColor = palette.cardSurface
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .windowInsetsPadding(WindowInsets.ime)
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            // 1. 顶部导航栏：取消按钮 + 标题 + 立即发布按钮（去除杂乱字数副标题）
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .clickable { onDismiss() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭",
-                        modifier = Modifier.size(18.dp),
-                        tint = palette.inkPrimary
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(10.dp))
-
-                Text(
-                    text = "发布新话题",
-                    fontSize = 16.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-
-                val canPublish =
-                    title.trim().length >= LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH &&
-                        rawContent.trim().length >= LinuxDoSiteRules.MIN_POST_RAW_LENGTH &&
-                        !isSubmitting
-                Box(
-                    modifier = Modifier
-                        .height(34.dp)
-                        .clip(RoundedCornerShape(17.dp))
-                        .background(if (canPublish) palette.publishBtnBg else palette.subtleSurface)
-                        .clickable(enabled = canPublish) {
-                            if (LinuxDoSiteRules.requiresTopicCostConfirmation(selectedTags)) {
-                                showLotteryCostConfirm = true
-                            } else {
-                                submitNewTopic()
-                            }
-                        }
-                        .padding(horizontal = 16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LinDoBusyButtonLabel(busy = isSubmitting, busyLabel = "发布中...", label = "立即发布", color = if (canPublish) palette.publishBtnContent else palette.inkTertiary)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 2. 顶部元数据区（版块选择 + 官方允许标签横滑条）
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "版块",
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.inkTertiary
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        LinuxDoRepository.categories.forEach { cat ->
-                            val selected = categoryId == cat.id
-                            val dotColor = LinuxDoSiteRules.parseHexColor(cat.colorHex)
-                            GoogleM3FilterPill(
-                                label = cat.name,
-                                dotColor = dotColor,
-                                selected = selected,
-                                onClick = { categoryId = cat.id }
-                            )
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "标签",
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.inkTertiary
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        selectedTags.forEach { tag ->
-                            Text(
-                                text = "#$tag ×",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.brandGold,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier
-                                    .clickable { selectedTags = selectedTags - tag }
-                                    .padding(vertical = 2.dp)
-                            )
-                        }
-
-                        availableTags.filter { it !in selectedTags }.forEach { preset ->
-                            Text(
-                                text = "#$preset",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = palette.inkSecondary,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier
-                                    .clickable {
-                                        if (selectedTags.size < 5) {
-                                            selectedTags = selectedTags + preset
-                                        }
-                                    }
-                                    .padding(vertical = 2.dp)
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 3. 沉浸式无边框大字号标题输入区（光标与 Placeholder 同轴对齐，文案极简清爽）
-            val titleTextStyle = TextStyle(
-                fontSize = 17.sp,
-                lineHeight = 22.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary
-            )
-            BasicTextField(
-                value = title,
-                onValueChange = { title = it },
-                singleLine = true,
-                textStyle = titleTextStyle,
-                cursorBrush = SolidColor(palette.brandGold),
-                decorationBox = { innerTextField ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 2.dp, vertical = 6.dp),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        if (title.isEmpty()) {
-                            Text(
-                                text = "输入话题标题...",
-                                style = titleTextStyle.copy(color = palette.inkTertiary),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        innerTextField()
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-            HorizontalDivider(thickness = 0.6.dp, color = palette.hairline)
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 4. 核心全功能 Markdown 工作台（结构规整的编辑画布在上，6×2 整齐矢量图标工具栏在下）
-            LinDoMarkdownWorkbench(
-                rawValue = rawContent,
-                onRawValueChange = { rawContent = it },
-                placeholder = "写下话题正文...",
-                draftKey = "new_topic",
-                draftTitle = title,
-                draftCategoryId = categoryId,
-                draftTags = selectedTags,
-                defaultEditorHeight = 270.dp
-            )
-
-            if (errorMsg != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                LinDoFeedbackRow(message = errorMsg!!, state = LinDoMascotState.NetworkError)
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-        }
-    }
-}
+    initialCategoryId: Int, initialDraft: CloudDraftItem? = null,
+    onDismiss: () -> Unit, onTopicCreated: (Int, String) -> Unit
+) = ComposerSheet(ComposerAction.NEW_TOPIC, initialCategoryId = initialCategoryId,
+    initialDraft = initialDraft, onDismiss = onDismiss,
+    onPublished = { onTopicCreated(it.topicId, it.title) })
 
 /**
  * ============================================================================
@@ -9534,31 +9103,29 @@ private enum class WorkbenchSubPanel {
     MENTION
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun LinDoMarkdownWorkbench(
+internal fun LinDoMarkdownWorkbench(
     rawValue: String,
     onRawValueChange: (String) -> Unit,
     placeholder: String,
-    draftKey: String = "new_topic",
-    draftTitle: String = "",
-    draftCategoryId: Int? = null,
-    draftTags: List<String> = emptyList(),
-    replyToPostNumber: Int? = null,
+    enabled: Boolean = true,
+    autofocus: Boolean = false,
+    onUploadingChange: (Boolean) -> Unit = {},
     defaultEditorHeight: Dp = 260.dp
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val keyboard = LocalSoftwareKeyboardController.current
 
     // TextFieldValue 维护真实光标位置与选区
     var tfv by remember {
         mutableStateOf(TextFieldValue(text = rawValue, selection = TextRange(rawValue.length)))
     }
+    val emittedValues = remember { linkedSetOf<String>() }
     LaunchedEffect(rawValue) {
-        if (rawValue != tfv.text) {
-            tfv = TextFieldValue(
-                text = rawValue,
-                selection = TextRange(rawValue.length.coerceAtLeast(0))
-            )
+        if (!emittedValues.remove(rawValue) && rawValue != tfv.text) {
+            tfv = TextFieldValue(rawValue, TextRange(rawValue.length))
         }
     }
 
@@ -9567,6 +9134,7 @@ private fun LinDoMarkdownWorkbench(
     val redoStack = remember { mutableStateListOf<TextFieldValue>() }
 
     fun updateTfv(newVal: TextFieldValue, recordHistory: Boolean = true) {
+        if (!enabled) return
         if (recordHistory && newVal.text != tfv.text) {
             if (undoStack.size >= 40) undoStack.removeAt(0)
             undoStack.add(tfv)
@@ -9574,6 +9142,8 @@ private fun LinDoMarkdownWorkbench(
         }
         tfv = newVal
         if (newVal.text != rawValue) {
+            if (emittedValues.size >= 128) emittedValues.remove(emittedValues.first())
+            emittedValues.add(newVal.text)
             onRawValueChange(newVal.text)
         }
     }
@@ -9601,7 +9171,7 @@ private fun LinDoMarkdownWorkbench(
     fun toggleLinePrefix(prefix: String) {
         val text = tfv.text
         val pos = tfv.selection.min.coerceIn(0, text.length)
-        val lineStart = text.lastIndexOf('\n', (pos - 1).coerceAtLeast(0)).let { if (it == -1) 0 else it + 1 }
+        val lineStart = if (pos == 0) 0 else text.lastIndexOf('\n', pos - 1) + 1
         val lineEnd = text.indexOf('\n', pos).let { if (it == -1) text.length else it }
         val currentLine = text.substring(lineStart, lineEnd)
         val updatedLine = if (currentLine.startsWith(prefix)) {
@@ -9615,9 +9185,11 @@ private fun LinDoMarkdownWorkbench(
     }
 
     // 在当前光标处直接插入块或短语
-    fun insertAtCursor(snippet: String) {
+    fun insertAtCursor(snippet: String, replaceMention: Boolean = false) {
         val text = tfv.text
-        val start = tfv.selection.min.coerceIn(0, text.length)
+        val cursor = tfv.selection.min.coerceIn(0, text.length)
+        val mention = if (replaceMention) Regex("@[\\p{L}\\p{N}_-]*$").find(text.substring(0, cursor)) else null
+        val start = mention?.range?.first ?: cursor
         val end = tfv.selection.max.coerceIn(0, text.length)
         val newText = text.replaceRange(start, end, snippet)
         val newCursor = (start + snippet.length).coerceIn(0, newText.length)
@@ -9643,30 +9215,6 @@ private fun LinDoMarkdownWorkbench(
     var isUploadingMedia by remember { mutableStateOf(false) }
     var uploadStatusText by remember { mutableStateOf<String?>(null) }
     var lastUploadedImage by remember { mutableStateOf<UploadedMediaResult?>(null) }
-
-    // 云端草稿防抖保存 (`POST /drafts.json`)：固定槽位长度与高度，绝不撑高或顶乱编辑栏
-    var draftSeq by remember { mutableStateOf(0) }
-    var isSyncingDraft by remember { mutableStateOf(false) }
-    var draftSynced by remember { mutableStateOf(false) }
-    LaunchedEffect(tfv.text, draftTitle, draftCategoryId) {
-        if (tfv.text.trim().length < 4 && draftTitle.trim().length < 4) return@LaunchedEffect
-        delay(2200L)
-        isSyncingDraft = true
-        val nextSeq = LinuxDoRepository.saveCloudDraft(
-            draftKey = draftKey,
-            sequence = draftSeq,
-            replyRaw = tfv.text,
-            title = draftTitle,
-            categoryId = draftCategoryId,
-            tags = draftTags,
-            replyToPostNumber = replyToPostNumber
-        )
-        isSyncingDraft = false
-        if (nextSeq != null) {
-            draftSeq = nextSeq
-            draftSynced = true
-        }
-    }
 
     // 检测光标前是否正在输入 `@xxx` 自动唤起提及搜索
     var mentionSearchTerm by remember { mutableStateOf("") }
@@ -9696,131 +9244,25 @@ private fun LinDoMarkdownWorkbench(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // 1. 顶部清爽模式与辅助操作栏（仅保留「编辑 / 预览」切换，右侧展示字数、撤销重做与中英空格）
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             WorkbenchViewMode.entries.forEach { mode ->
-                val selected = viewMode == mode
-                Column(
-                    modifier = Modifier
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { viewMode = mode }
-                        .padding(vertical = 2.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = mode.label,
-                        fontSize = if (selected) 14.2.sp else 13.sp,
-                        fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
-                        color = if (selected) palette.inkPrimary else palette.inkTertiary
-                    )
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Box(
-                        modifier = Modifier
-                            .width(12.dp)
-                            .height(2.5.dp)
-                            .clip(RoundedCornerShape(99.dp))
-                            .background(if (selected) palette.tabIndicatorColor else Color.Transparent)
-                    )
+                TextButton(enabled = enabled, onClick = { viewMode = mode; if (mode == WorkbenchViewMode.PREVIEW) keyboard?.hide() }) {
+                    Text(mode.label, color = if (viewMode == mode) palette.inkPrimary else palette.inkSecondary,
+                        fontSize = 14.sp, fontWeight = if (viewMode == mode) FontWeight.Bold else FontWeight.Normal)
                 }
             }
-
-            // 固定宽度（88dp）、固定单行高度（20dp）的云端草稿同步槽位，超出自动省略号 `...`，绝不撑高或挤压左右按钮
-            Row(
-                modifier = Modifier
-                    .width(88.dp)
-                    .height(20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (isSyncingDraft) {
-                    LinDoMascot(
-                        state = LinDoMascotState.Loading,
-                        compact = true,
-                        size = 15.dp,
-                        animate = true
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "同步草稿...",
-                        fontSize = 11.sp,
-                        lineHeight = 14.sp,
-                        color = palette.inkTertiary,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                } else if (draftSynced) {
-                    Text(
-                        text = "已存草稿",
-                        fontSize = 11.sp,
-                        lineHeight = 14.sp,
-                        color = palette.inkTertiary,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            if (tfv.text.isNotEmpty()) {
-                Text(
-                    text = "${tfv.text.length} 字",
-                    fontSize = 11.5.sp,
-                    color = palette.inkTertiary,
-                    maxLines = 1,
-                    softWrap = false
-                )
-            }
-
-            // 撤销 / 重做（无边框纯图标）
-            Icon(
-                imageVector = LinDoIcons.Undo,
-                contentDescription = "撤销",
-                modifier = Modifier
-                    .size(16.dp)
-                    .clickable(enabled = undoStack.isNotEmpty()) {
-                        if (undoStack.isNotEmpty()) {
-                            val prev = undoStack.removeAt(undoStack.lastIndex)
-                            redoStack.add(tfv)
-                            updateTfv(prev, recordHistory = false)
-                        }
-                    },
-                tint = if (undoStack.isNotEmpty()) palette.inkPrimary else palette.inkTertiary.copy(alpha = 0.35f)
-            )
-
-            Icon(
-                imageVector = LinDoIcons.Redo,
-                contentDescription = "重做",
-                modifier = Modifier
-                    .size(16.dp)
-                    .clickable(enabled = redoStack.isNotEmpty()) {
-                        if (redoStack.isNotEmpty()) {
-                            val next = redoStack.removeAt(redoStack.lastIndex)
-                            undoStack.add(tfv)
-                            updateTfv(next, recordHistory = false)
-                        }
-                    },
-                tint = if (redoStack.isNotEmpty()) palette.inkPrimary else palette.inkTertiary.copy(alpha = 0.35f)
-            )
-
-            if (tfv.text.isNotEmpty()) {
-                Text(
-                    text = "中英空格",
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.inkSecondary,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier.clickable { optimizePanguSpacing() }
-                )
-            }
+            Spacer(Modifier.weight(1f))
+            androidx.compose.material3.IconButton(enabled = enabled && undoStack.isNotEmpty(), onClick = {
+                val previous = undoStack.removeAt(undoStack.lastIndex); redoStack.add(tfv); updateTfv(previous, false)
+            }) { Icon(LinDoIcons.Undo, "撤销", Modifier.size(20.dp), tint = if (undoStack.isEmpty()) palette.inkTertiary else palette.inkPrimary) }
+            androidx.compose.material3.IconButton(enabled = enabled && redoStack.isNotEmpty(), onClick = {
+                val next = redoStack.removeAt(redoStack.lastIndex); undoStack.add(tfv); updateTfv(next, false)
+            }) { Icon(LinDoIcons.Redo, "重做", Modifier.size(20.dp), tint = if (redoStack.isEmpty()) palette.inkTertiary else palette.inkPrimary) }
+        }
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
+            TextButton(enabled = enabled && tfv.text.isNotEmpty(), onClick = ::optimizePanguSpacing) { Text("中英空格", fontSize = 12.sp, color = palette.inkSecondary) }
+            TextButton(enabled = enabled, onClick = { activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.MORE_TOOLS) WorkbenchSubPanel.NONE else WorkbenchSubPanel.MORE_TOOLS }) { Text("更多排版", fontSize = 12.sp, color = palette.inkSecondary) }
+            Text("${tfv.text.length} 字", Modifier.padding(horizontal = 8.dp, vertical = 14.dp), fontSize = 12.sp, color = palette.inkSecondary)
         }
 
         // 2. 规整圆角编辑画布 / 实时 AST 预览区
@@ -9830,13 +9272,16 @@ private fun LinDoMarkdownWorkbench(
                     tfv = tfv,
                     onValueChange = { newVal ->
                         updateTfv(newVal)
-                        val cursor = newVal.selection.min
-                        if (cursor > 0 && cursor <= newVal.text.length && newVal.text[cursor - 1] == '@') {
+                        val cursor = newVal.selection.min.coerceIn(0, newVal.text.length)
+                        val mention = Regex("(?:^|[\\s])@([\\p{L}\\p{N}_-]*)$").find(newVal.text.substring(0, cursor))
+                        if (mention != null) {
                             activeSubPanel = WorkbenchSubPanel.MENTION
-                            mentionSearchTerm = ""
+                            mentionSearchTerm = mention.groupValues[1]
                         }
                     },
                     placeholder = placeholder,
+                    enabled = enabled,
+                    autofocus = autofocus,
                     height = defaultEditorHeight
                 )
             }
@@ -9876,6 +9321,7 @@ private fun LinDoMarkdownWorkbench(
                                 val scaledTag = "![${latestImg.originalFilename}|${latestImg.width}x${latestImg.height}, $pct](${latestImg.shortUrl})"
                                 val replaced = tfv.text.replace(latestImg.markdownSnippet, scaledTag)
                                 updateTfv(tfv.copy(text = replaced))
+                                lastUploadedImage = latestImg.copy(markdownSnippet = scaledTag)
                             }
                         )
                     }
@@ -9902,7 +9348,7 @@ private fun LinDoMarkdownWorkbench(
                     activeSubPanel = WorkbenchSubPanel.NONE
                 },
                 onInsertSnippet = { snippet ->
-                    insertAtCursor(snippet)
+                    insertAtCursor(snippet, replaceMention = activeSubPanel == WorkbenchSubPanel.MENTION && snippet.startsWith("@"))
                     activeSubPanel = WorkbenchSubPanel.NONE
                 },
                 onDismiss = { activeSubPanel = WorkbenchSubPanel.NONE }
@@ -9914,29 +9360,32 @@ private fun LinDoMarkdownWorkbench(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
-                .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.68f else 0.78f))
+                .background(Color.Transparent)
                 .padding(horizontal = 6.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             // 第一排 6 等分：图片 · 链接(支持搜帖链接) · 提及 · 表情 · 粗体 · 代码
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 WorkbenchVectorToolButton(
                     icon = LinDoIcons.Image,
                     label = if (isUploadingMedia) "上传" else "图片",
                     highlighted = true,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         val picker = PlatformMediaPicker.launchPicker
-                        if (picker != null && !isUploadingMedia) {
+                        if (!enabled || isUploadingMedia) return@WorkbenchVectorToolButton
+                        if (picker != null) {
                             picker("image/*") { fileName, mimeType, bytes ->
                                 scope.launch {
                                     isUploadingMedia = true
+                                    onUploadingChange(true)
                                     uploadStatusText = "正在上传图片 $fileName..."
-                                    val res = LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes)
-                                    isUploadingMedia = false
+                                    val res = try { LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes) }
+                                    finally { isUploadingMedia = false; onUploadingChange(false) }
                                     if (res != null) {
                                         lastUploadedImage = res
                                         uploadStatusText = "已上传 ${res.originalFilename}"
@@ -9947,7 +9396,7 @@ private fun LinDoMarkdownWorkbench(
                                 }
                             }
                         } else {
-                            insertAtCursor("\n![图片描述|100%](https://)\n")
+                            uploadStatusText = "当前设备不支持选择图片，可通过链接插入"
                         }
                     }
                 )
@@ -9955,7 +9404,7 @@ private fun LinDoMarkdownWorkbench(
                     icon = LinDoIcons.Link,
                     label = "链接",
                     active = activeSubPanel == WorkbenchSubPanel.LINK,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.LINK) WorkbenchSubPanel.NONE else WorkbenchSubPanel.LINK
                     }
@@ -9964,7 +9413,7 @@ private fun LinDoMarkdownWorkbench(
                     icon = LinDoIcons.AtSign,
                     label = "提及",
                     active = activeSubPanel == WorkbenchSubPanel.MENTION,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.MENTION) WorkbenchSubPanel.NONE else WorkbenchSubPanel.MENTION
                     }
@@ -9973,7 +9422,7 @@ private fun LinDoMarkdownWorkbench(
                     icon = LinDoIcons.Smile,
                     label = "表情",
                     active = activeSubPanel == WorkbenchSubPanel.EMOJI,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.EMOJI) WorkbenchSubPanel.NONE else WorkbenchSubPanel.EMOJI
                     }
@@ -9981,14 +9430,14 @@ private fun LinDoMarkdownWorkbench(
                 WorkbenchVectorToolButton(
                     icon = LinDoIcons.Bold,
                     label = "粗体",
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = { wrapSelection("**", "**", "粗体文本") }
                 )
                 WorkbenchVectorToolButton(
                     icon = LinDoIcons.Terminal,
                     label = "代码",
                     active = activeSubPanel == WorkbenchSubPanel.CODE_LANG,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.CODE_LANG) WorkbenchSubPanel.NONE else WorkbenchSubPanel.CODE_LANG
                     }
@@ -9996,21 +9445,22 @@ private fun LinDoMarkdownWorkbench(
             }
 
             // 第二排 6 等分：引用 · 标题 · 列表 · 剧透 · 投票 · 附件
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 WorkbenchVectorToolButton(
                     icon = LinDoIcons.Quote,
                     label = "引用",
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = { toggleLinePrefix("> ") }
                 )
                 WorkbenchVectorToolButton(
                     icon = LinDoIcons.Heading,
                     label = "标题",
                     active = activeSubPanel == WorkbenchSubPanel.HEADINGS,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.HEADINGS) WorkbenchSubPanel.NONE else WorkbenchSubPanel.HEADINGS
                     }
@@ -10018,14 +9468,14 @@ private fun LinDoMarkdownWorkbench(
                 WorkbenchVectorToolButton(
                     icon = LinDoIcons.ListBullet,
                     label = "列表",
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = { toggleLinePrefix("- ") }
                 )
                 WorkbenchVectorToolButton(
                     icon = LinDoIcons.EyeOff,
                     label = "剧透",
                     active = activeSubPanel == WorkbenchSubPanel.DETAILS_SPOILER,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.DETAILS_SPOILER) WorkbenchSubPanel.NONE else WorkbenchSubPanel.DETAILS_SPOILER
                     }
@@ -10034,7 +9484,7 @@ private fun LinDoMarkdownWorkbench(
                     icon = LinDoIcons.BarChartPoll,
                     label = "投票",
                     active = activeSubPanel == WorkbenchSubPanel.POLL,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         activeSubPanel = if (activeSubPanel == WorkbenchSubPanel.POLL) WorkbenchSubPanel.NONE else WorkbenchSubPanel.POLL
                     }
@@ -10042,16 +9492,18 @@ private fun LinDoMarkdownWorkbench(
                 WorkbenchVectorToolButton(
                     icon = LinDoIcons.Paperclip,
                     label = "附件",
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.widthIn(min = 56.dp),
                     onClick = {
                         val picker = PlatformMediaPicker.launchPicker
-                        if (picker != null && !isUploadingMedia) {
+                        if (!enabled || isUploadingMedia) return@WorkbenchVectorToolButton
+                        if (picker != null) {
                             picker("*/*") { fileName, mimeType, bytes ->
                                 scope.launch {
                                     isUploadingMedia = true
+                                    onUploadingChange(true)
                                     uploadStatusText = "正在上传附件 $fileName..."
-                                    val res = LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes)
-                                    isUploadingMedia = false
+                                    val res = try { LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes) }
+                                    finally { isUploadingMedia = false; onUploadingChange(false) }
                                     if (res != null) {
                                         uploadStatusText = "已上传附件 ${res.originalFilename}"
                                         insertAtCursor("\n${res.markdownSnippet}\n")
@@ -10061,7 +9513,7 @@ private fun LinDoMarkdownWorkbench(
                                 }
                             }
                         } else {
-                            insertAtCursor("\n[附件名称|attachment](upload://)\n")
+                            uploadStatusText = "当前设备不支持选择附件"
                         }
                     }
                 )
@@ -10086,9 +9538,9 @@ private fun WorkbenchVectorToolButton(
     }
     Row(
         modifier = modifier
-            .height(32.dp)
+            .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(if (active) palette.activeChipBg.copy(alpha = 0.55f) else Color.Transparent)
+            .background(Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -10117,9 +9569,13 @@ private fun WorkbenchSourceEditorBox(
     tfv: TextFieldValue,
     onValueChange: (TextFieldValue) -> Unit,
     placeholder: String,
+    enabled: Boolean = true,
+    autofocus: Boolean = false,
     height: Dp
 ) {
     val palette = LocalPalette.current
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(autofocus) { if (autofocus) { delay(120); runCatching { focus.requestFocus() } } }
     val editorTextStyle = TextStyle(
         fontSize = 15.sp,
         lineHeight = 22.5.sp,
@@ -10127,6 +9583,7 @@ private fun WorkbenchSourceEditorBox(
     )
     BasicTextField(
         value = tfv,
+        enabled = enabled,
         onValueChange = onValueChange,
         textStyle = editorTextStyle,
         cursorBrush = SolidColor(palette.brandGold),
@@ -10151,6 +9608,7 @@ private fun WorkbenchSourceEditorBox(
             }
         },
         modifier = Modifier
+            .focusRequester(focus)
             .fillMaxWidth()
             .height(height)
     )
@@ -10190,13 +9648,13 @@ private fun WorkbenchAstLivePreviewBox(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "实时渲染预览 (Linux.do AST)",
+                text = "内容预览",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = palette.inkTertiary
             )
             Text(
-                text = "与发帖后展示效果一致",
+                text = "互动内容在发布后可用",
                 fontSize = 10.5.sp,
                 color = palette.inkTertiary
             )
@@ -10215,94 +9673,9 @@ private fun WorkbenchAstLivePreviewBox(
 /**
  * 将本地编辑中的 Markdown + Discourse BBCode 源码实时编译为可由 `DiscourseAstParser` 解析的 HTML
  */
-private fun compileMarkdownAndBbcodeToPreviewHtml(raw: String): String {
-    if (raw.isBlank()) return ""
-    var working = raw
+private fun compileMarkdownAndBbcodeToPreviewHtml(raw: String): String = do_.linux.lindo.core.render.MarkdownPreview.render(raw)
 
-    // 1. [poll ...] ... [/poll]
-    working = Regex("""\[poll([^\]]*)\]([\s\S]*?)\[/poll\]""", RegexOption.IGNORE_CASE).replace(working) { m ->
-        val body = m.groupValues[2].trim()
-        val lines = body.lines().map { it.trim() }.filter { it.isNotBlank() }
-        val title = lines.firstOrNull { it.startsWith("#") }?.removePrefix("#")?.trim() ?: "社区投票"
-        val opts = lines.filter { it.startsWith("-") || it.startsWith("*") }
-            .map { it.removePrefix("-").removePrefix("*").trim() }
-        val liHtml = opts.joinToString("") { "<li>$it</li>" }
-        "<div class=\"poll\" data-poll-title=\"$title\"><ul>$liHtml</ul></div>"
-    }
-
-    // 2. [details="摘要"] ... [/details]
-    working = Regex("""\[details=["']?([^\]"']+)["']?\]([\s\S]*?)\[/details\]""", RegexOption.IGNORE_CASE).replace(working) { m ->
-        "<details><summary>${m.groupValues[1]}</summary><p>${m.groupValues[2].trim()}</p></details>"
-    }
-
-    // 3. [spoiler] ... [/spoiler]
-    working = Regex("""\[spoiler\]([\s\S]*?)\[/spoiler\]""", RegexOption.IGNORE_CASE).replace(working) { m ->
-        "<div class=\"spoilered\">${m.groupValues[1].trim()}</div>"
-    }
-
-    // 4. 代码块 ```lang ... ```
-    working = Regex("""```([a-zA-Z0-9_-]*)\n([\s\S]*?)```""").replace(working) { m ->
-        val lang = m.groupValues[1].ifBlank { "text" }
-        "<pre><code class=\"lang-$lang\">${m.groupValues[2]}</code></pre>"
-    }
-
-    // 4.5 官方表情与社区自定义表情包 `:shortcode:` 实时转换为 `<img class="emoji" .../>`
-    working = Regex(""":([a-zA-Z0-9_+-]{2,36}):""").replace(working) { m ->
-        val code = m.groupValues[1]
-        val imgUrl = LinuxDoEmojiCatalog.resolveReactionImageUrl(code)
-        "<img class=\"emoji\" title=\":$code:\" alt=\":$code:\" src=\"$imgUrl\"/>"
-    }
-
-    // 5. 逐行处理标题、Callout、引用、列表与普通段落
-    val out = StringBuilder()
-    val lines = working.lines()
-    var i = 0
-    while (i < lines.size) {
-        val line = lines[i]
-        val trimmed = line.trim()
-        when {
-            trimmed.startsWith("<div") || trimmed.startsWith("<details") || trimmed.startsWith("<pre>") -> {
-                out.append(line).append("\n")
-            }
-            trimmed == "---" || trimmed == "***" -> {
-                out.append("<hr/>")
-            }
-            trimmed.startsWith("### ") -> out.append("<h3>${trimmed.removePrefix("### ")}</h3>")
-            trimmed.startsWith("## ") -> out.append("<h2>${trimmed.removePrefix("## ")}</h2>")
-            trimmed.startsWith("# ") -> out.append("<h1>${trimmed.removePrefix("# ")}</h1>")
-            trimmed.startsWith("> [!") -> {
-                val kind = trimmed.substringAfter("[!").substringBefore("]").ifBlank { "NOTE" }
-                val bodyLines = mutableListOf<String>()
-                var j = i + 1
-                while (j < lines.size && lines[j].trim().startsWith(">")) {
-                    bodyLines.add(lines[j].trim().removePrefix(">").trim())
-                    j++
-                }
-                out.append("<blockquote><p>[!$kind] ${bodyLines.joinToString(" ")}</p></blockquote>")
-                i = j - 1
-            }
-            trimmed.startsWith("> ") -> {
-                out.append("<blockquote><p>${trimmed.removePrefix("> ")}</p></blockquote>")
-            }
-            trimmed.startsWith("- ") || trimmed.startsWith("* ") -> {
-                val items = mutableListOf<String>()
-                var j = i
-                while (j < lines.size && (lines[j].trim().startsWith("- ") || lines[j].trim().startsWith("* "))) {
-                    items.add("<li>${lines[j].trim().drop(2)}</li>")
-                    j++
-                }
-                out.append("<ul>${items.joinToString("")}</ul>")
-                i = j - 1
-            }
-            trimmed.isNotBlank() -> {
-                out.append("<p>$trimmed</p>")
-            }
-        }
-        i++
-    }
-    return out.toString()
-}
-
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WorkbenchInteractiveSubPanel(
     subPanel: WorkbenchSubPanel,
@@ -10330,7 +9703,7 @@ private fun WorkbenchInteractiveSubPanel(
     ) {
         when (subPanel) {
             WorkbenchSubPanel.HEADINGS -> {
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
@@ -11001,72 +10374,20 @@ private fun WorkbenchCompactInputBox(
 }
 
 @Composable
-private fun WorkbenchToolChip(
-    label: String,
-    active: Boolean = false,
-    highlighted: Boolean = false,
-    onClick: () -> Unit
-) {
+private fun WorkbenchToolChip(label: String, active: Boolean = false, highlighted: Boolean = false, onClick: () -> Unit) {
     val palette = LocalPalette.current
-    val bg = when {
-        highlighted -> palette.publishBtnBg
-        active -> palette.activeChipBg
-        else -> palette.cardSurface
-    }
-    val fg = when {
-        highlighted -> palette.publishBtnContent
-        active -> palette.activeChipText
-        else -> palette.inkSecondary
-    }
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(bg)
-            .border(
-                width = 0.5.dp,
-                color = if (active || highlighted) palette.brandGold else palette.hairline,
-                shape = RoundedCornerShape(8.dp)
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 5.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = label,
-            fontSize = 11.5.sp,
-            fontWeight = if (active || highlighted) FontWeight.Bold else FontWeight.Medium,
-            color = fg,
-            maxLines = 1,
-            softWrap = false
-        )
+    TextButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)) {
+        Text(label, color = if (active || highlighted) palette.inkPrimary else palette.inkSecondary,
+            fontSize = 13.sp, fontWeight = if (active || highlighted) FontWeight.Bold else FontWeight.Normal)
     }
 }
 
 @Composable
-private fun WorkbenchMiniActionChip(
-    label: String,
-    enabled: Boolean = true,
-    highlighted: Boolean = false,
-    onClick: () -> Unit
-) {
+private fun WorkbenchMiniActionChip(label: String, enabled: Boolean = true, highlighted: Boolean = false, onClick: () -> Unit) {
     val palette = LocalPalette.current
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(if (highlighted) palette.tonalPill else palette.cardSurface)
-            .border(0.5.dp, palette.hairline, RoundedCornerShape(6.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 6.5.dp, vertical = 3.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = label,
-            fontSize = 10.5.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = if (!enabled) palette.inkTertiary.copy(alpha = 0.45f)
-            else if (highlighted) palette.brandGold
-            else palette.inkSecondary
-        )
+    TextButton(enabled = enabled, onClick = onClick, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
+        Text(label, color = if (!enabled) palette.inkTertiary else if (highlighted) palette.inkPrimary else palette.inkSecondary,
+            fontSize = 12.sp, fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal)
     }
 }
 
@@ -11543,6 +10864,9 @@ private fun UserNotificationsSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    var showMarkAllConfirm by remember { mutableStateOf(false) }
+    var markingAll by remember { mutableStateOf(false) }
+    var markAllError by remember { mutableStateOf<String?>(null) }
     var notifications by remember { mutableStateOf<List<UserNotificationItem>>(emptyList()) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
@@ -11597,12 +10921,7 @@ private fun UserNotificationsSheet(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .clickable {
-                            scope.launch {
-                                val ok = LinuxDoRepository.markNotificationsRead()
-                                if (ok) {
-                                    notifications = notifications.map { it.copy(read = true) }
-                                }
-                            }
+                            showMarkAllConfirm = true
                         }
                         .padding(horizontal = 8.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -11732,6 +11051,27 @@ private fun UserNotificationsSheet(
             }
         }
     }
+    if (showMarkAllConfirm) LinDoConfirmDialog("全部标为已读？", "当前账号的所有未读通知将标记为已读。", "确认标记", busy = markingAll, error = markAllError, destructive = false,
+        onDismiss = { showMarkAllConfirm = false; markAllError = null }, onConfirm = {
+            if (!markingAll) {
+                markingAll = true
+                markAllError = null
+                scope.launch {
+                    try {
+                        val ok = LinuxDoRepository.markNotificationsRead()
+                        if (ok) {
+                            showMarkAllConfirm = false
+                            notifications = notifications.map { it.copy(read = true) }
+                        } else {
+                            markAllError = "操作失败，请重试"
+                        }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (error: Exception) { markAllError = error.message ?: "操作失败，请重试" }
+                    finally { markingAll = false }
+                }
+            }
+        })
+
 }
 
 /**
@@ -12000,7 +11340,7 @@ private fun UserBookmarksSheet(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun UserPrivateMessagesSheet(
+internal fun UserPrivateMessagesSheet(
     username: String,
     initialRecipient: String?,
     onDismiss: () -> Unit,
@@ -12008,6 +11348,9 @@ private fun UserPrivateMessagesSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    var pendingArchive by remember { mutableStateOf<TopicSummary?>(null) }
+    var archiving by remember { mutableStateOf(false) }
+    var archiveError by remember { mutableStateOf<String?>(null) }
     var tab by remember(initialRecipient) { mutableStateOf(if (!initialRecipient.isNullOrBlank()) 2 else 0) } // 0=收件箱, 1=已发送, 2=写私信
     var messages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -12046,6 +11389,7 @@ private fun UserPrivateMessagesSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 380.dp, max = 620.dp)
+                .windowInsetsPadding(WindowInsets.ime)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
             Text(
@@ -12072,31 +11416,10 @@ private fun UserPrivateMessagesSheet(
             Spacer(modifier = Modifier.height(10.dp))
 
             if (tab == 2) {
-                OutlinedTextField(
-                    value = recipient,
-                    onValueChange = { recipient = it },
-                    singleLine = true,
-                    placeholder = { Text("接收人用户名（如 neo，多人用逗号分隔）", fontSize = 13.sp) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = pmTitle,
-                    onValueChange = { pmTitle = it },
-                    singleLine = true,
-                    placeholder = { Text("私信主题...", fontSize = 13.sp) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = pmBody,
-                    onValueChange = { pmBody = it },
-                    placeholder = { Text("私信内容（支持 Markdown）...", fontSize = 13.sp) },
-                    modifier = Modifier.fillMaxWidth().height(120.dp),
-                    shape = RoundedCornerShape(12.dp)
-                )
+                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                ComposerTextInput(recipient, { recipient = it }, "接收人用户名，多人用逗号分隔", enabled = !isSending)
+                ComposerTextInput(pmTitle, { pmTitle = it }, "输入私信主题", enabled = !isSending, title = true)
+                LinDoMarkdownWorkbench(pmBody, { pmBody = it }, "写下私信内容", enabled = !isSending, defaultEditorHeight = 180.dp)
                 if (statusMsg != null) {
                     Spacer(modifier = Modifier.height(6.dp))
                     LinDoFeedbackRow(message = statusMsg!!, state = if (statusMsg!!.contains("失败")) LinDoMascotState.NetworkError else LinDoMascotState.Success)
@@ -12105,25 +11428,28 @@ private fun UserPrivateMessagesSheet(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(42.dp)
+                        .heightIn(min = 48.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(palette.tonalPill)
+                        .background(Color.Transparent)
                         .clickable(enabled = !isSending && recipient.isNotBlank() && pmTitle.isNotBlank() && pmBody.isNotBlank()) {
-                            scope.launch {
+                            if (!isSending) {
                                 isSending = true
-                                val tid = LinuxDoRepository.sendPrivateMessage(recipient, pmTitle, pmBody)
-                                isSending = false
-                                if (tid != null) {
-                                    statusMsg = "私信已发送！"
-                                    tab = 1
-                                } else {
-                                    statusMsg = "发送失败，请确认对方允许接收私信"
+                                scope.launch {
+                                    try {
+                                        val tid = LinuxDoRepository.sendPrivateMessage(recipient, pmTitle, pmBody)
+                                        if (tid != null) { statusMsg = "私信已发送"; pmTitle = ""; pmBody = ""; tab = 1 }
+                                        else statusMsg = "发送失败，内容已保留"
+                                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                                    catch (error: Exception) { statusMsg = error.message ?: "发送失败，内容已保留" }
+                                    finally { isSending = false }
                                 }
                             }
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     LinDoBusyButtonLabel(busy = isSending, busyLabel = "正在发送", label = "发送私信", color = palette.brandGold)
+                }
+
                 }
             } else {
                 if (isLoading) {
@@ -12159,6 +11485,9 @@ private fun UserPrivateMessagesSheet(
                                     enableAnimations = false,
                                     onClick = { onSelectMessageTopic(msg) }
                                 )
+                                if (tab == 0) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                    TextButton(onClick = { pendingArchive = msg; archiveError = null }) { Text("归档", color = palette.inkSecondary, fontSize = 12.sp) }
+                                }
                             }
                         }
                     }
@@ -12166,6 +11495,18 @@ private fun UserPrivateMessagesSheet(
             }
         }
     }
+    pendingArchive?.let { message -> LinDoConfirmDialog("归档这段会话？", "「${message.title}」将移出收件箱，可在归档中找回。", "确认归档", busy = archiving, error = archiveError,
+        destructive = false, onDismiss = { pendingArchive = null }, onConfirm = {
+            if (!archiving) {
+                archiving = true
+                scope.launch { try {
+                    if (LinuxDoRepository.archivePrivateMessage(message.id)) { messages = messages.filterNot { it.id == message.id }; pendingArchive = null }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (error: Exception) { archiveError = error.message ?: "归档失败，请重试" }
+                finally { archiving = false } }
+            }
+        }) }
+
 }
 
 /**
@@ -12462,6 +11803,8 @@ private fun EditProfileModalSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.ime)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
             Row(
@@ -12650,147 +11993,8 @@ private fun UserReadHistorySheet(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun UserCloudDraftsSheet(
-    onDismiss: () -> Unit,
-    onOpenDraftTopic: (CloudDraftItem) -> Unit
-) {
-    val palette = LocalPalette.current
-    val scope = rememberCoroutineScope()
-    var drafts by remember { mutableStateOf<List<CloudDraftItem>>(emptyList()) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var reloadToken by remember { mutableIntStateOf(0) }
-    var isLoading by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit, reloadToken) {
-        isLoading = true
-        loadError = null
-        try {
-            drafts = LinuxDoRepository.fetchCloudDrafts()
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            loadError = error.message ?: "加载失败，请重试"
-        } finally {
-            isLoading = false
-        }
-    }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = palette.cardSurface
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 340.dp, max = 580.dp)
-                .padding(horizontal = 18.dp, vertical = 8.dp)
-        ) {
-            Text(
-                text = "云端草稿箱",
-                fontSize = 17.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            if (isLoading) {
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LinDoLoadingIndicator(label = "加载中")
-                }
-            } else {
-                if (loadError != null) {
-                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-                }
-
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 8.dp)
-                ) {
-                    if (drafts.isEmpty() && loadError == null) {
-                        item {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                LinDoEmptyState(message = "云端草稿箱为空，未发送的话题与回复会自动保存在此")
-                            }
-                        }
-                    } else {
-                        itemsIndexed(drafts, key = { idx, d -> "${d.draftKey}_$idx" }) { _, draft ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(palette.canvas)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                    .clickable {
-                                        onOpenDraftTopic(draft)
-                                    }
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = draft.title,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.inkPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (draft.excerpt.isNotBlank()) {
-                                        Spacer(modifier = Modifier.height(3.dp))
-                                        Text(
-                                            text = draft.excerpt,
-                                            fontSize = 12.5.sp,
-                                            color = palette.inkSecondary,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = draft.createdAtText,
-                                        fontSize = 11.sp,
-                                        color = palette.inkTertiary
-                                    )
-                                }
-
-                                Spacer(modifier = Modifier.width(8.dp))
-
-                                Box(
-                                    modifier = Modifier
-                                        .size(32.dp)
-                                        .clip(CircleShape)
-                                        .clickable {
-                                            scope.launch {
-                                                val ok = LinuxDoRepository.deleteCloudDraft(draft.draftKey, draft.sequence)
-                                                if (ok) {
-                                                    drafts = drafts.filterNot { it.draftKey == draft.draftKey }
-                                                }
-                                            }
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = LinDoIcons.Trash,
-                                        contentDescription = "删除草稿",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = palette.inkSecondary
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+private fun UserCloudDraftsSheet(onDismiss: () -> Unit, onOpenDraftTopic: (CloudDraftItem) -> Unit) =
+    UserDraftsSheet(onDismiss, onOpenDraftTopic)
 
 /** Debug host uses production sheets and renderer without logging out the current account. */
 @Composable

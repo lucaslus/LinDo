@@ -1,0 +1,64 @@
+diff --git a/composeApp/src/androidMain/kotlin/do_/linux/lindo/MainActivity.kt b/composeApp/src/androidMain/kotlin/do_/linux/lindo/MainActivity.kt
+index bcbffa6..af1e3b6 100644
+--- a/composeApp/src/androidMain/kotlin/do_/linux/lindo/MainActivity.kt
++++ b/composeApp/src/androidMain/kotlin/do_/linux/lindo/MainActivity.kt
+@@ -376,7 +376,9 @@ class MainActivity : ComponentActivity() {
+                 intent.removeExtra("lindo.brand_preview")
+                 debugPreviewGeneration++
+             }
+-            if (debugPreview == "icon") {
++            if (debugPreview?.startsWith("audit-") == true) {
++                do_.linux.lindo.ui.LinDoAuditPreview(debugPreview)
++            } else if (debugPreview == "icon") {
+                 InstalledIconPreview()
+             } else if (debugPreview == "welcome") {
+                 var dark by remember { mutableStateOf(false) }
+diff --git a/composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LinDoApp.kt b/composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LinDoApp.kt
+index 669f212..3ed5d46 100644
+--- a/composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LinDoApp.kt
++++ b/composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LinDoApp.kt
+@@ -12815,3 +12815,44 @@ fun LinDoReadRegressionPreview(scene: String, cooked: String = "", onClose: () -
+         }
+     }
+ }
++
++/** Isolated audit fixture; every repository request uses a local fake transport. */
++@Composable
++fun LinDoAuditPreview(scene: String) {
++    val dark = scene.endsWith("-dark")
++    val palette = remember(dark) { buildLinDoPalette(dark) }
++    DisposableEffect(Unit) {
++        val oldTransport = UserApiKeyAuthManager.webViewHttpExecutor
++        UserApiKeyAuthManager.webViewHttpExecutor = { url, method, _, _ ->
++            when {
++                url.contains("/posts/900001.json") && method == "GET" -> {
++                    delay(6000)
++                    200 to """{"id":900001,"raw":"**original markdown from server**"}"""
++                }
++                url.contains("/tags/filter/") -> 200 to """{"results":[{"name":"人工智能"},{"name":"快问快答"}]}"""
++                url.contains("/site.json") -> 200 to """{"categories":[]}"""
++                url.contains("/drafts") -> 200 to """{"draft_sequence":2}"""
++                else -> 503 to """{"errors":["isolated audit transport"]}"""
++            }
++        }
++        UserApiKeyAuthManager.restorePersistedSession(
++            do_.linux.lindo.core.network.AuthenticatedUserProfile(userId = 900001, username = "audit_fixture", displayName = "审查示例"), null, null
++        )
++        onDispose { UserApiKeyAuthManager.webViewHttpExecutor = oldTransport }
++    }
++    CompositionLocalProvider(LocalPalette provides palette, LocalLinDoAnimations provides false, LocalLinDoDarkTheme provides dark) {
++        MaterialTheme(colorScheme = if (dark) DarkMaterialScheme else LightMaterialScheme) {
++            Surface(Modifier.fillMaxSize(), color = palette.cardSurface) {
++                when {
++                    scene.startsWith("audit-create") -> CreateTopicModalSheet(4, onDismiss = {}, onTopicCreated = { _, _ -> })
++                    scene.startsWith("audit-reply") -> TopicReplyComposerSheet(900001, "检查回复编辑体验与长标题的排版一致性", 12, "audit_fixture", onDismiss = {}, onPostCreated = {})
++                    else -> {
++                        val summary = remember { TopicSummary(id = 900001, title = "编辑原帖与回复体验审查示例", originalPoster = TopicUser(id = 900001, username = "audit_fixture")) }
++                        var detail by remember { mutableStateOf(TopicDetailModel(id = 900001, title = summary.title, categoryName = "技术交流", posts = listOf(PostItemModel(id = 900001, postNumber = 1, userId = 900001, username = "audit_fixture", cookedHtml = "<p><strong>original markdown from server</strong></p>", canEdit = true)))) }
++                        CommunityTopicReaderPane(summary, detail, isLoading = false, enableAnimations = false, showBackButton = true, onBack = {}, onRefresh = {}, onDetailUpdated = { detail = it }, onInspectBadge = {}, onInspectUser = {}, onRequestLogin = {})
++                    }
++                }
++            }
++        }
++    }
++}

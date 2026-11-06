@@ -20,6 +20,9 @@ sealed interface PostBlockNode {
     data class QuoteBlock(val username: String?, val postNumber: Int?, val topicId: Int?, val quotedText: String,
         val children: List<PostBlockNode> = emptyList()) : PostBlockNode
     data class DetailsSpoilerBlock(val title: String, val innerText: String, val children: List<PostBlockNode> = emptyList()) : PostBlockNode
+    data class Spoiler(val children: List<PostBlockNode>) : PostBlockNode
+    data class PollOption(val id: String, val text: String)
+    data class Poll(val name: String, val title: String, val options: List<PollOption>, val multiple: Boolean, val min: Int, val max: Int, val closed: Boolean) : PostBlockNode
     data class BulletList(val items: List<String>, val ordered: Boolean = false,
         val itemBlocks: List<List<PostBlockNode>> = emptyList(), val start: Int = 1) : PostBlockNode
     data class ImageGallery(val urls: List<String>, val captions: List<String> = emptyList()) : PostBlockNode
@@ -74,7 +77,10 @@ object DiscourseAstParser {
     }
 
     fun safeUrl(raw: String, allowMailto: Boolean = true): String? = runCatching {
-        val value = raw.trim()
+        val value = raw.trim().let {
+            if (it.startsWith("upload://") && it.removePrefix("upload://").matches(Regex("[A-Za-z0-9_.-]+")))
+                "https://linux.do/uploads/short-url/${it.removePrefix("upload://")}" else it
+        }
         if (value.isEmpty()) return null
         val uri = URI("https://linux.do/").resolve(value)
         if (uri.scheme?.lowercase() !in if (allowMailto) setOf("https", "http", "mailto") else setOf("https", "http")) return null
@@ -108,13 +114,24 @@ object DiscourseAstParser {
             val tag = node.normalName()
             when {
                 tag in setOf("script", "style", "noscript", "template") || node.hasAttr("hidden") || node.hasClass("meta") -> Unit
+                node.hasClass("spoiler") || node.hasClass("spoilered") -> {
+                    flush()
+                    result += PostBlockNode.Spoiler(blocks(node.childNodes(), nesting + 1))
+                }
                 node.hasClass("poll") -> {
                     flush()
                     val title = node.attr("data-poll-title")
                         .ifBlank { node.selectFirst(".poll-title, p, h3, h4")?.text().orEmpty() }
                         .ifBlank { "社区投票" }
                     val liOptions = node.select("li").map { it.text().trim() }.filter { it.isNotBlank() }
-                    result += PostBlockNode.Unsupported(
+                    val options = node.select("[data-poll-option-id]").map { PostBlockNode.PollOption(it.attr("data-poll-option-id"), it.text().trim()) }.filter { it.id.isNotBlank() }
+                    if (options.isNotEmpty() && node.attr("data-poll-name").isNotBlank()) {
+                        val multiple = node.attr("data-poll-type") == "multiple"
+                        result += PostBlockNode.Poll(node.attr("data-poll-name"), title, options, multiple,
+                            node.attr("data-poll-min").toIntOrNull() ?: 1,
+                            node.attr("data-poll-max").toIntOrNull() ?: if (multiple) options.size else 1,
+                            node.attr("data-poll-status") == "closed")
+                    } else result += PostBlockNode.Unsupported(
                         label = title,
                         text = node.wholeText().trim(),
                         options = liOptions,
@@ -246,19 +263,14 @@ object DiscourseAstParser {
                         }
                     } else {
                         val svgText = node.text().trim()
-                        val isDecorativeIcon = svgText.isEmpty() ||
-                            node.hasClass("d-icon") ||
+                        val isDecorativeIcon = node.hasClass("d-icon") ||
                             node.hasClass("svg-icon") ||
                             node.hasClass("fa") ||
                             node.hasClass("octicon") ||
                             node.parents().any { it.hasClass("anchor") || it.hasClass("chckbx-box") }
                         if (!isDecorativeIcon) {
                             flush()
-                            result += PostBlockNode.CalloutBlock(
-                                kind = "svg",
-                                title = "图表内容",
-                                children = listOf(PostBlockNode.Paragraph(svgText))
-                            )
+                            result += PostBlockNode.Unsupported("图形内容", svgText.ifBlank { "此图形可在原帖中查看" }, kind = "svg")
                         }
                     }
                 }

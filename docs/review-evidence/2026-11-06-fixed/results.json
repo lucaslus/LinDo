@@ -1,0 +1,14 @@
+[
+  {
+    "case": "editor-recovery-and-keyboard",
+    "passed": true
+  },
+  {
+    "case": "delete-confirmation",
+    "passed": true
+  },
+  {
+    "case": "archive-confirmation",
+    "passed": true
+  }
+]

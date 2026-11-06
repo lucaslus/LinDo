@@ -4,6 +4,7 @@
 import argparse
 import fcntl
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -19,6 +20,24 @@ APK = ROOT / "composeApp/build/outputs/apk/debug/composeApp-debug.apk"
 
 def log(message):
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
+def select_jdk(env):
+    """Prefer an explicit compatible JDK, then a local JDK 21 installation."""
+    candidates = [Path(env["JAVA_HOME"])] if env.get("JAVA_HOME") else []
+    if sys.platform == "darwin":
+        probe = subprocess.run(["/usr/libexec/java_home", "-v", "21"], capture_output=True, text=True)
+        if probe.returncode == 0:
+            candidates.append(Path(probe.stdout.strip()))
+    candidates.append(Path("/Applications/Android Studio.app/Contents/jbr/Contents/Home"))
+    for candidate in candidates:
+        release = candidate / "release"
+        if not (candidate / "bin/java").is_file() or not release.is_file():
+            continue
+        version = re.search(r'JAVA_VERSION="(\d+)', release.read_text())
+        if version and 17 <= int(version.group(1)) <= 23:
+            return candidate
+    return None
 
 
 def snapshot():
@@ -83,10 +102,9 @@ def main():
     if args.once and args.skip_initial:
         parser.error("--once and --skip-initial cannot be combined")
     env = os.environ.copy()
-    studio_jdk = Path("/Applications/Android Studio.app/Contents/jbr/Contents/Home")
-    jdk = studio_jdk if studio_jdk.is_dir() else Path(env.get("JAVA_HOME", "/nonexistent"))
-    if not (jdk / "bin/java").is_file():
-        parser.error("Set JAVA_HOME to a working JDK (JDK 21 recommended).")
+    jdk = select_jdk(env)
+    if jdk is None:
+        parser.error("Gradle 8.13 needs JDK 17–23. Install JDK 21 or set JAVA_HOME to a compatible installation.")
     env["JAVA_HOME"] = str(jdk)
     env["PATH"] = str(jdk / "bin") + os.pathsep + env.get("PATH", "")
     sdk = env.get("ANDROID_HOME") or env.get("ANDROID_SDK_ROOT") or str(Path.home() / "Library/Android/sdk")

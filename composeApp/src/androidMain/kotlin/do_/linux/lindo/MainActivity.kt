@@ -101,7 +101,7 @@ class MainActivity : ComponentActivity() {
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private val prefs by lazy {
-        getSharedPreferences("lindo_auth_session", Context.MODE_PRIVATE)
+        KeystorePreferences(this)
     }
 
     // 常驻同源 Chromium WebView 引擎：共享 BoringSSL JA3/JA4 指纹、cf_clearance、_t 与 CSRF Token
@@ -233,11 +233,14 @@ class MainActivity : ComponentActivity() {
                 prefs.edit()
                     .putString("pending_rsa_priv_b64", pkB64)
                     .putString("pending_rsa_nonce", nonce)
+                    .putLong("pending_rsa_created_at", UserApiKeyAuthManager.pendingAuthorizationCreatedAt())
                     .putString("client_id", UserApiKeyAuthManager.getClientId())
                     .commit()
             }
         }
         restoreSessionFromDisk()
+        do_.linux.lindo.core.compose.LocalComposerDrafts.restore(prefs.getString("composer_drafts", null))
+        do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist = { encoded -> prefs.edit().putString("composer_drafts", encoded).apply() }
 
         // 2. 初始化常驻同源 WebView API 桥接引擎
         initPersistentApiWebView()
@@ -284,14 +287,18 @@ class MainActivity : ComponentActivity() {
             runCatching {
                 // 仅清除 Discourse 账号会话 Cookie (_t / _forum_session)，保留 Cloudflare 信任通行证 (cf_clearance / __cf_bm / _cfuvid)
                 val cm = CookieManager.getInstance()
-                cm.setCookie("https://linux.do", "_t=; Max-Age=0; Path=/; Secure; HttpOnly")
-                cm.setCookie("https://linux.do", "_forum_session=; Max-Age=0; Path=/; Secure; HttpOnly")
+                listOf("_t", "_forum_session").forEach { name ->
+                    cm.setCookie("https://linux.do", "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
+                    cm.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly")
+                    cm.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
+                }
                 cm.flush()
                 prefs.edit()
                     .remove("api_key")
                     .remove("username")
                     .remove("display_name")
                     .remove("avatar_template")
+                    .remove("animated_avatar")
                     .remove("user_id")
                     .remove("user_title")
                     .remove("trust_level")
@@ -523,7 +530,7 @@ class MainActivity : ComponentActivity() {
         pendingHttpCallbacks[reqId] = deferred
 
         val formBodyEncoded = if (!formParams.isNullOrEmpty()) {
-            formParams.entries.joinToString("&") { (k, v) ->
+            do_.linux.lindo.core.network.formEntries(formParams).joinToString("&") { (k, v) ->
                 "${Uri.encode(k)}=${Uri.encode(v)}"
             }
         } else {
@@ -834,7 +841,7 @@ class MainActivity : ComponentActivity() {
             // 恢复跳转到系统浏览器前生成的 RSA 私钥与 nonce
             val savedPendingPrivKey = prefs.getString("pending_rsa_priv_b64", null)
             val savedPendingNonce = prefs.getString("pending_rsa_nonce", null)
-            UserApiKeyAuthManager.restorePendingPrivateKeyBase64(savedPendingPrivKey, savedPendingNonce)
+            UserApiKeyAuthManager.restorePendingPrivateKeyBase64(savedPendingPrivKey, savedPendingNonce, prefs.getLong("pending_rsa_created_at", 0L))
 
             // 恢复用户的阅读密度/字号、深色模式、动效与主题色偏好（默认官方黑白黄）
             UserApiKeyAuthManager.uiFontScale = prefs.getFloat("ui_font_scale", 1.0f)
@@ -932,13 +939,9 @@ class MainActivity : ComponentActivity() {
                 editor.putString("raw_cookies", mergedCookieHeader)
             }
             val apiKey = UserApiKeyAuthManager.getApiKey()
-            if (!apiKey.isNullOrBlank()) {
-                editor.putString("api_key", apiKey)
-            }
+            editor.putString("api_key", apiKey)
             val pendingPrivKey = UserApiKeyAuthManager.exportPendingPrivateKeyBase64()
-            if (!pendingPrivKey.isNullOrBlank()) {
-                editor.putString("pending_rsa_priv_b64", pendingPrivKey)
-            }
+            editor.putString("pending_rsa_priv_b64", pendingPrivKey)
             editor.putString("client_id", UserApiKeyAuthManager.getClientId())
             editor.putString("user_agent", UserApiKeyAuthManager.customUserAgent)
             val user = UserApiKeyAuthManager.currentUser
@@ -1002,6 +1005,7 @@ class MainActivity : ComponentActivity() {
         pendingWebFileChooserCallback = null
         pendingHttpCallbacks.values.forEach { it.cancel() }
         pendingHttpCallbacks.clear()
+        do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist = null
         UserApiKeyAuthManager.onPersistPendingKey = null
         UserApiKeyAuthManager.openExternalUrlLauncher = null
         UserApiKeyAuthManager.onPersistSession = null

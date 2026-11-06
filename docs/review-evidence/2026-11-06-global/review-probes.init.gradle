@@ -1,0 +1,11 @@
+// Review-only source injection. Does not modify the app or normal test source sets.
+gradle.projectsEvaluated {
+    def app = gradle.rootProject.project(':composeApp')
+    app.kotlin.sourceSets.getByName('desktopTest').kotlin.srcDir(
+        gradle.rootProject.file('docs/review-evidence/2026-11-06-global')
+    )
+    app.tasks.named('desktopTest').configure {
+        reports.junitXml.outputLocation.set(app.layout.buildDirectory.dir('global-review-probe-results'))
+        reports.html.outputLocation.set(app.layout.buildDirectory.dir('global-review-probe-report'))
+    }
+}

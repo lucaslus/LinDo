@@ -228,7 +228,8 @@ data class PostItemModel(
     val actionCode: String? = null,
     val canEdit: Boolean = true,
     val canDelete: Boolean = false,
-    val raw: String? = null
+    val raw: String? = null,
+    val topicId: Int = 0
 )
 
 /**
@@ -249,7 +250,8 @@ data class TopicDetailModel(
     val minWordCountRule: Int? = null,
     val posts: List<PostItemModel> = emptyList(),
     val streamIds: List<Int> = emptyList(),
-    val loadError: String? = null
+    val loadError: String? = null,
+    val originalPosterUsername: String? = null
 )
 
 /**

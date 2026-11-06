@@ -48,7 +48,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.*
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -255,10 +255,14 @@ data class AuthenticatedUserProfile(
  * 2. 支持系统浏览器一键授权回跳 (`discourse://auth_redirect` + `scopes=one_time_password` + RSA PKCS1 解密与 OTP 兑换)
  */
 object UserApiKeyAuthManager {
+    @Volatile var sessionGeneration: Long = 0L
+        private set
     private var activeUserApiKey: String? = null
     private var clientId: String = "lindo-kmp-${UUID.randomUUID()}"
     private var pendingPrivateKey: java.security.PrivateKey? = null
     private var pendingNonce: String? = null
+    private var pendingAuthCreatedAt: Long = 0L
+    fun pendingAuthorizationCreatedAt(): Long = pendingAuthCreatedAt
 
     @Volatile
     var currentUser: AuthenticatedUserProfile? = null
@@ -331,8 +335,9 @@ object UserApiKeyAuthManager {
         return Base64.getEncoder().encodeToString(pk)
     }
 
-    fun restorePendingPrivateKeyBase64(pkcs8B64: String?, nonce: String?) {
-        if (pkcs8B64.isNullOrBlank()) return
+    fun restorePendingPrivateKeyBase64(pkcs8B64: String?, nonce: String?, createdAt: Long = System.currentTimeMillis()) {
+        if (pkcs8B64.isNullOrBlank() || nonce.isNullOrBlank() || System.currentTimeMillis() - createdAt !in 0..900_000L) return
+        pendingAuthCreatedAt = createdAt
         runCatching {
             val bytes = Base64.getMimeDecoder().decode(pkcs8B64.trim())
             val spec = java.security.spec.PKCS8EncodedKeySpec(bytes)
@@ -418,13 +423,19 @@ object UserApiKeyAuthManager {
     }
 
     fun logout() {
+        sessionGeneration++
         activeUserApiKey = null
         currentUser = null
         fullProfileCache = null
         pendingOtpToken = null
+        pendingPrivateKey = null
+        pendingNonce = null
+        pendingAuthCreatedAt = 0L
+        LinuxDoRepository.clearPollVoteState()
+        onPersistPendingKey?.invoke(null, null)
         CookieSentinel.clearAuthCookiesOnly()
-        onLogoutPlatformClear?.invoke()
-        onPersistSession?.invoke(null, null)
+        val platformClear = onLogoutPlatformClear
+        if (platformClear != null) platformClear.invoke() else onPersistSession?.invoke(null, null)
         onAuthStateChanged?.invoke()
     }
 
@@ -449,6 +460,7 @@ object UserApiKeyAuthManager {
         }
         val nonce = UUID.randomUUID().toString().replace("-", "")
         pendingNonce = nonce
+        pendingAuthCreatedAt = System.currentTimeMillis()
         // 立即持久化待回调 RSA 私钥与 nonce，防止切换到 Chrome 期间进程或 Activity 被系统回收
         onPersistPendingKey?.invoke(exportPendingPrivateKeyBase64(), nonce)
         val encodedPub = java.net.URLEncoder.encode(publicPem, "UTF-8")
@@ -495,77 +507,40 @@ object UserApiKeyAuthManager {
      * 处理 `discourse://auth_redirect?payload=...&oneTimePassword=...` 深链回调，RSA/ECB/PKCS1Padding 解密
      */
     fun handleAuthRedirectUri(uriString: String): Boolean {
-        val privKey = pendingPrivateKey
-        if (privKey == null) {
-            println("LinDoAuth: handleAuthRedirectUri aborted because pendingPrivateKey is null")
-            return false
-        }
-        return try {
-            val query = uriString.substringAfter('?', "")
-            if (query.isEmpty()) return false
-            val params = query.split("&").associate { part ->
-                val idx = part.indexOf('=')
-                if (idx > 0) {
-                    val k = part.substring(0, idx)
-                    val v = java.net.URLDecoder.decode(part.substring(idx + 1), "UTF-8")
-                    k to v
-                } else {
-                    part to ""
-                }
-            }
-            println("LinDoAuth: handleAuthRedirectUri query keys=${params.keys}")
-
-            var key: String? = null
-            var otpInPayload: String? = null
-
-            val payloadB64 = params["payload"]
-            if (!payloadB64.isNullOrBlank()) {
-                val decryptedJson = decryptRsaBase64(payloadB64, privKey)
-                if (!decryptedJson.isNullOrBlank()) {
-                    runCatching {
-                        val jsonObj = Json { ignoreUnknownKeys = true }.parseToJsonElement(decryptedJson).jsonObject
-                        key = jsonObj["key"]?.jsonPrimitive?.contentOrNull
-                        otpInPayload = jsonObj["one_time_password"]?.jsonPrimitive?.contentOrNull
-                            ?: jsonObj["oneTimePassword"]?.jsonPrimitive?.contentOrNull
-                    }
-                }
-            }
-
-            // Discourse UserApiKeysController 在 query 参数中以 `oneTimePassword` (camelCase) 或 `one_time_password` 携带 RSA 加密的一次性令牌
-            val otpParamB64 = params["oneTimePassword"]
-                ?: params["one_time_password"]
-                ?: params["otp"]
-                ?: params.entries.firstOrNull {
-                    it.key.equals("oneTimePassword", ignoreCase = true) ||
-                        it.key.equals("one_time_password", ignoreCase = true)
-                }?.value
-
-            val decryptedOtp = if (!otpParamB64.isNullOrBlank()) {
-                decryptRsaBase64(otpParamB64, privKey)?.trim()?.takeIf { it.isNotEmpty() } ?: otpInPayload
-            } else {
-                otpInPayload
-            }
-
-            println("LinDoAuth: Decrypted keyPresent=${!key.isNullOrBlank()}, otpPresent=${!decryptedOtp.isNullOrBlank()}")
-
-            if (key.isNullOrBlank() && decryptedOtp.isNullOrBlank()) {
-                return false
-            }
-
-            if (!key.isNullOrBlank()) {
-                activeUserApiKey = key
-            }
-            if (!decryptedOtp.isNullOrBlank()) {
-                pendingOtpToken = decryptedOtp
-            }
+        val privateKey = pendingPrivateKey ?: return false
+        val expectedNonce = pendingNonce ?: return false
+        if (System.currentTimeMillis() - pendingAuthCreatedAt !in 0..900_000L) return false
+        return runCatching {
+            val uri = java.net.URI(uriString)
+            if (uri.scheme !in setOf("discourse", "lindo") || uri.rawAuthority != "auth_redirect" ||
+                uri.rawPath.orEmpty() !in setOf("", "/") || uri.userInfo != null) return false
+            val entries = uri.rawQuery.orEmpty().split('&').filter { it.contains('=') }
+                .map { it.substringBefore('=') to java.net.URLDecoder.decode(it.substringAfter('='), "UTF-8") }
+            if (entries.map { it.first }.distinct().size != entries.size) return false
+            val params = entries.toMap()
+            val payload = params["payload"]?.let { decryptRsaBase64(it, privateKey) } ?: return false
+            val obj = Json.parseToJsonElement(payload).jsonObject
+            val nonce = obj["nonce"]?.jsonPrimitive?.contentOrNull ?: return false
+            if (!java.security.MessageDigest.isEqual(nonce.toByteArray(), expectedNonce.toByteArray())) return false
+            val key = obj["key"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            val encryptedOtp = params["oneTimePassword"] ?: params["one_time_password"]
+            val otp = if (encryptedOtp != null) {
+                decryptRsaBase64(encryptedOtp, privateKey)?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+            } else obj["one_time_password"]?.jsonPrimitive?.contentOrNull
+            if (key == null && otp.isNullOrBlank()) return false
+            // Consume before notifying observers so a duplicate deep link cannot replay the grant.
+            pendingPrivateKey = null
+            pendingNonce = null
+            pendingAuthCreatedAt = 0L
+            onPersistPendingKey?.invoke(null, null)
+            if (key != null) activeUserApiKey = key
+            if (!otp.isNullOrBlank()) pendingOtpToken = otp
             onPersistSession?.invoke(currentUser, activeUserApiKey)
             onAuthStateChanged?.invoke()
             true
-        } catch (t: Throwable) {
-            println("LinDoAuth: handleAuthRedirectUri exception: ${t.message}")
-            false
-        }
+        }.getOrDefault(false)
     }
+
 }
 
 data class EdgeCandidateResult(
@@ -1183,6 +1158,7 @@ object LinuxDoRepository {
      * 3. `/u/{username}/summary.json`（获取 days_visited、time_read、posts_read_count、likes_received、likes_given、topic_count、post_count、badges）
      */
     suspend fun fetchCurrentUserProfile(): UserFullProfileSummary? = withContext(Dispatchers.IO) {
+        val generation = UserApiKeyAuthManager.sessionGeneration
         var currentUsername = UserApiKeyAuthManager.currentUser?.username?.takeIf {
             it.isNotBlank() && it != "linuxdo_user"
         }
@@ -1328,6 +1304,7 @@ object LinuxDoRepository {
         }
 
         // 同步更新全局登录用户状态（修正 Lv.3 等真实等级与真实头像）
+        if (generation != UserApiKeyAuthManager.sessionGeneration) return@withContext null
         UserApiKeyAuthManager.recordWebSessionLogin(
             username = uname,
             displayName = displayName.ifBlank { uname },
@@ -1364,6 +1341,7 @@ object LinuxDoRepository {
             unreadNotifications = unreadNotifs,
             badges = topBadges
         )
+        if (generation != UserApiKeyAuthManager.sessionGeneration) return@withContext null
         UserApiKeyAuthManager.fullProfileCache = fullProfile
         fullProfile
     }
@@ -1378,7 +1356,7 @@ object LinuxDoRepository {
     ): PostItemModel? = withContext(Dispatchers.IO) {
         val params = buildMap {
             put("topic_id", topicId.toString())
-            put("raw", raw.trim())
+            put("raw", raw)
             if (replyToPostNumber != null && replyToPostNumber > 0) {
                 put("reply_to_post_number", replyToPostNumber.toString())
             }
@@ -1386,8 +1364,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/posts.json",
             method = "POST",
-            formParams = params
-        ) ?: return@withContext null
+            formParams = params,
+            preserveFailure = true
+        ) ?: throw ApiReadException(ApiFailureKind.Connection)
+        requireMutationObject(res)
 
         if (res.first in 200..299 && res.second.trimStart().startsWith("{")) {
             return@withContext try {
@@ -1409,7 +1389,7 @@ object LinuxDoRepository {
         editReason: String = ""
     ): PostItemModel? = withContext(Dispatchers.IO) {
         val params = buildMap {
-            put("post[raw]", newRaw.trim())
+            put("post[raw]", newRaw)
             if (editReason.isNotBlank()) {
                 put("post[edit_reason]", editReason.trim())
             }
@@ -1417,8 +1397,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/posts/$postId.json",
             method = "PUT",
-            formParams = params
-        ) ?: return@withContext null
+            formParams = params,
+            preserveFailure = true
+        ) ?: throw ApiReadException(ApiFailureKind.Connection)
+        requireMutationObject(res)
 
         if (res.first in 200..299 && res.second.trimStart().startsWith("{")) {
             return@withContext try {
@@ -1435,6 +1417,14 @@ object LinuxDoRepository {
     /**
      * 拉取帖子原始 Markdown 源文（用于无损二次编辑，优先请求 `/posts/{id}.json`，兜底 `/raw/{topicId}/{postNumber}`）
      */
+    suspend fun fetchPostForEditing(postId: Int): PostItemModel = withContext(Dispatchers.IO) {
+        val root = readApiObject(executeHttp("https://linux.do/posts/$postId.json", preserveFailure = true))
+        val post = (root["post"] as? JsonObject) ?: root
+        val parsed = parseSinglePostObject(post, 0) ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
+        if (parsed.id <= 0 || parsed.raw == null) throw ApiMutationException("未能读取原始正文，请重试")
+        parsed
+    }
+
     suspend fun fetchPostRawMarkdown(
         postId: Int,
         topicId: Int? = null,
@@ -1500,17 +1490,15 @@ object LinuxDoRepository {
     /**
      * 收藏指定帖子/话题到个人书签 (`POST /bookmarks.json`)
      */
-    suspend fun toggleTopicBookmark(postId: Int, name: String = ""): Boolean = withContext(Dispatchers.IO) {
-        val res = executeHttp(
-            url = "https://linux.do/bookmarks.json",
-            method = "POST",
-            formParams = mapOf(
-                "bookmarkable_id" to postId.toString(),
-                "bookmarkable_type" to "Post",
-                "name" to name
-            )
-        )
-        res != null && res.first in 200..299
+    suspend fun setTopicBookmark(topicId: Int, bookmarked: Boolean): Boolean = withContext(Dispatchers.IO) {
+        val route = if (bookmarked) "bookmark" else "remove_bookmarks"
+        requireMutationSuccess(executeHttp("https://linux.do/t/$topicId/$route.json", "PUT", emptyMap(), preserveFailure = true))
+        true
+    }
+
+    suspend fun archivePrivateMessage(topicId: Int): Boolean = withContext(Dispatchers.IO) {
+        requireMutationSuccess(executeHttp("https://linux.do/t/$topicId/archive-message.json", "PUT", emptyMap(), preserveFailure = true))
+        true
     }
 
     /**
@@ -1745,29 +1733,13 @@ object LinuxDoRepository {
      * 调用 Discourse 官方发帖标签过滤接口 (`/tags/filter/search.json?filterForInput=true&categoryId=...`)
      * 获取当前版块允许使用的真实社区标签（Linux.do 普通用户不允许创建不存在的自定义标签）
      */
-    suspend fun fetchCategoryAllowedTags(
-        categoryId: Int,
-        query: String = ""
-    ): List<String> = withContext(Dispatchers.IO) {
-        val encodedQ = java.net.URLEncoder.encode(query.trim(), "UTF-8")
-        val url = "https://linux.do/tags/filter/search.json?q=$encodedQ&filterForInput=true&categoryId=$categoryId&limit=12"
-        val res = executeHttp(url, method = "GET")
-        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
-            try {
-                val root = json.parseToJsonElement(res.second).jsonObject
-                val list = (root["results"] as? JsonArray)?.mapNotNull { item ->
-                    val obj = item as? JsonObject ?: return@mapNotNull null
-                    obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                        ?: obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                        ?: obj["text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                }.orEmpty()
-                if (list.isNotEmpty()) {
-                    return@withContext list
-                }
-            } catch (_: Throwable) {
-            }
-        }
-        listOf("人工智能", "快问快答", "纯水", "病友", "抽奖")
+    suspend fun fetchCategoryAllowedTags(categoryId: Int, query: String = ""): List<String> = withContext(Dispatchers.IO) {
+        val q = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+        val root = readApiObject(executeHttp("https://linux.do/tags/filter/search.json?q=$q&filterForInput=true&categoryId=$categoryId&limit=50", preserveFailure = true))
+        root.requireArray("results").mapNotNull { element ->
+            val tag = element as? JsonObject ?: return@mapNotNull null
+            (tag["name"] ?: tag["id"] ?: tag["text"])?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        }.distinct()
     }
 
     /**
@@ -1781,7 +1753,7 @@ object LinuxDoRepository {
     ): Int? = withContext(Dispatchers.IO) {
         val params = buildMap {
             put("title", title.trim())
-            put("raw", raw.trim())
+            put("raw", raw)
             put("category", categoryId.toString())
             tags.filter { it.isNotBlank() }.forEachIndexed { idx, tag ->
                 put("tags[$idx]", tag.trim())
@@ -1790,8 +1762,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/posts.json",
             method = "POST",
-            formParams = params
-        ) ?: return@withContext null
+            formParams = params,
+            preserveFailure = true
+        ) ?: throw ApiReadException(ApiFailureKind.Connection)
+        requireMutationObject(res)
         if (res.first in 200..299 && res.second.trimStart().startsWith("{")) {
             return@withContext try {
                 val obj = json.parseToJsonElement(res.second).jsonObject
@@ -2087,15 +2061,16 @@ object LinuxDoRepository {
     ): Int? = withContext(Dispatchers.IO) {
         val params = mapOf(
             "title" to title.trim(),
-            "raw" to raw.trim(),
+            "raw" to raw,
             "archetype" to "private_message",
             "target_recipients" to targetUsernames.trim()
         )
         val res = executeHttp(
             url = "https://linux.do/posts.json",
             method = "POST",
-            formParams = params
-        ) ?: return@withContext null
+            formParams = params, preserveFailure = true
+        ) ?: throw ApiReadException(ApiFailureKind.Connection)
+        requireMutationObject(res)
         if (res.first in 200..299 && res.second.trimStart().startsWith("{")) {
             return@withContext try {
                 val obj = json.parseToJsonElement(res.second).jsonObject
@@ -2600,6 +2575,7 @@ object LinuxDoRepository {
             postNumber = postNumber,
             userId = userId,
             username = username,
+            topicId = resolvedTopicId,
             displayName = displayName,
             avatarTemplate = avatarTemplate,
             animatedAvatar = animatedAvatar,
@@ -2674,6 +2650,7 @@ object LinuxDoRepository {
         return TopicDetailModel(
             id = id,
             title = title,
+            originalPosterUsername = (root["details"] as? JsonObject)?.get("created_by")?.let { (it as? JsonObject)?.get("username")?.jsonPrimitive?.contentOrNull },
             categoryName = catName,
             categoryColorHex = catColor,
             tags = tags,
@@ -2932,6 +2909,9 @@ object LinuxDoRepository {
                 var draftCategoryId: Int? = obj["category_id"]?.jsonPrimitive?.intOrNull
                 var draftTags: List<String> = emptyList()
                 var replyToPostNumber: Int? = null
+                var action = if (draftKey == "new_topic") "createTopic" else if (draftKey.startsWith("edit_post_")) "edit" else "reply"
+                var targetTopicId: Int? = null
+                var targetPostId: Int? = draftKey.removePrefix("edit_post_").takeIf { draftKey.startsWith("edit_post_") }?.toIntOrNull()
                 if (dataStr.trimStart().startsWith("{")) {
                     runCatching {
                         val dObj = json.parseToJsonElement(dataStr).jsonObject
@@ -2944,11 +2924,15 @@ object LinuxDoRepository {
                                 ?: dObj["category_id"]?.jsonPrimitive?.intOrNull
                         }
                         draftTags = parseTagsArray(dObj["tags"] as? JsonArray)
-                        replyToPostNumber = dObj["postId"]?.jsonPrimitive?.intOrNull
-                            ?: dObj["replyToPostNumber"]?.jsonPrimitive?.intOrNull
+                        action = dObj["action"]?.jsonPrimitive?.contentOrNull?.takeUnless { draftKey.startsWith("edit_post_") } ?: action
+                        targetTopicId = dObj["topicId"]?.jsonPrimitive?.intOrNull
+                        if (action.startsWith("edit")) targetPostId = targetPostId ?: dObj["postId"]?.jsonPrimitive?.intOrNull
+                        replyToPostNumber = dObj["replyToPostNumber"]?.jsonPrimitive?.intOrNull
+                            ?: if (action == "reply") dObj["postId"]?.jsonPrimitive?.intOrNull else null
                     }
                 }
                 val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull
+                    ?: targetTopicId
                     ?: draftKey.removePrefix("topic_").toIntOrNull()
                     ?: 0
                 val createdAt = formatRelativeTime(obj["created_at"]?.jsonPrimitive?.contentOrNull)
@@ -2962,7 +2946,9 @@ object LinuxDoRepository {
                     raw = rawReply,
                     categoryId = draftCategoryId,
                     tags = draftTags,
-                    replyToPostNumber = replyToPostNumber
+                    replyToPostNumber = replyToPostNumber,
+                    action = action,
+                    postId = targetPostId
                 )
             }
         } catch (cancelled: CancellationException) {
@@ -2979,11 +2965,10 @@ object LinuxDoRepository {
      */
     suspend fun deleteCloudDraft(draftKey: String, sequence: Int): Boolean = withContext(Dispatchers.IO) {
         val encoded = java.net.URLEncoder.encode(draftKey, "UTF-8")
-        val res = executeHttp(
-            url = "https://linux.do/drafts/$encoded.json?sequence=$sequence",
-            method = "DELETE"
-        )
-        res != null && res.first in 200..299
+        requireMutationObject(executeHttp("https://linux.do/drafts/$encoded.json?sequence=$sequence", "DELETE", preserveFailure = true))
+        // Discourse deliberately returns success for sequence conflicts; verify the actual outcome.
+        val root = readApiObject(executeHttp("https://linux.do/drafts/$encoded.json", preserveFailure = true))
+        root["draft"] == null || root["draft"] is JsonNull
     }
 
     /**
@@ -2999,6 +2984,16 @@ object LinuxDoRepository {
         res != null && res.first in 200..299
     }
 
+    data class PollVoteSnapshot(
+        val selectedIds: Set<String>,
+        val optionVotes: Map<String, Int> = emptyMap(),
+        val voters: Int? = null
+    )
+
+    private val pollVoteSnapshots = java.util.concurrent.ConcurrentHashMap<String, PollVoteSnapshot>()
+    fun getPollVoteSnapshot(postId: Int, pollName: String): PollVoteSnapshot? = pollVoteSnapshots["$postId:$pollName"]
+    fun clearPollVoteState() { pollVoteSnapshots.clear() }
+
     /**
      * 帖内原生投票 (`PUT /polls/vote.json`)
      */
@@ -3013,9 +3008,24 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/polls/vote.json",
             method = "PUT",
-            formParams = params
+            formParams = params, preserveFailure = true
         )
-        res != null && res.first in 200..299
+        val root = requireMutationObject(res)
+        val pollObj = root["poll"] as? JsonObject
+        val voteArr = root["vote"] as? JsonArray
+        val ok = pollObj != null && voteArr != null
+        if (ok) {
+            val confirmedIds = voteArr!!.mapNotNull { it.jsonPrimitive.contentOrNull?.takeIf(String::isNotBlank) }.toSet().ifEmpty { options.toSet() }
+            val votesByOption = (pollObj!!["options"] as? JsonArray)?.mapNotNull { item ->
+                val obj = item as? JsonObject ?: return@mapNotNull null
+                val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                val count = obj["votes"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+                id to count
+            }?.toMap().orEmpty()
+            val votersCount = pollObj["voters"]?.jsonPrimitive?.intOrNull
+            pollVoteSnapshots["$postId:$pollName"] = PollVoteSnapshot(confirmedIds, votesByOption, votersCount)
+        }
+        ok
     }
 
     /**
@@ -3113,6 +3123,12 @@ object LinuxDoRepository {
      * - 话题回复：`draftKey = "topic_$topicId"`
      * 返回更新后的 `draft_sequence`
      */
+    suspend fun fetchDraftSequence(draftKey: String): Int = withContext(Dispatchers.IO) {
+        val key = java.net.URLEncoder.encode(draftKey, "UTF-8")
+        val root = readApiObject(executeHttp("https://linux.do/drafts/$key.json", preserveFailure = true))
+        root["draft_sequence"]?.jsonPrimitive?.intOrNull ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
+    }
+
     suspend fun saveCloudDraft(
         draftKey: String,
         sequence: Int,
@@ -3121,45 +3137,25 @@ object LinuxDoRepository {
         categoryId: Int? = null,
         tags: List<String> = emptyList(),
         replyToPostNumber: Int? = null,
-        action: String = if (draftKey == "new_topic") "createTopic" else "reply"
+        action: String = if (draftKey == "new_topic") "createTopic" else "reply",
+        topicId: Int? = null,
+        postId: Int? = null
     ): Int? = withContext(Dispatchers.IO) {
-        if (replyRaw.isBlank() && title.isBlank()) return@withContext null
-        val escapedReply = replyRaw
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "")
-        val escapedTitle = title
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", " ")
-        val tagsJson = tags.joinToString(",") { "\"${it.replace("\"", "")}\"" }
-        val dataJson = buildString {
-            append("{")
-            append("\"reply\":\"$escapedReply\",")
-            append("\"action\":\"$action\"")
-            if (escapedTitle.isNotBlank()) append(",\"title\":\"$escapedTitle\"")
-            if (categoryId != null && categoryId > 0) append(",\"categoryId\":$categoryId")
-            if (tags.isNotEmpty()) append(",\"tags\":[$tagsJson]")
-            if (replyToPostNumber != null && replyToPostNumber > 0) append(",\"postId\":$replyToPostNumber")
-            append("}")
+        val data = buildJsonObject {
+            put("reply", replyRaw)
+            put("action", action)
+            if (title.isNotBlank()) put("title", title)
+            categoryId?.let { put("categoryId", it) }
+            put("tags", buildJsonArray { tags.forEach { add(JsonPrimitive(it)) } })
+            topicId?.let { put("topicId", it) }
+            postId?.let { put("postId", it) }
+            replyToPostNumber?.let { put("replyToPostNumber", it) }
         }
-        val res = executeHttp(
-            url = "https://linux.do/drafts.json",
-            method = "POST",
-            formParams = mapOf(
-                "draft_key" to draftKey,
-                "sequence" to sequence.toString(),
-                "data" to dataJson
-            )
-        ) ?: return@withContext null
-        if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withContext null
-        try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            root["draft_sequence"]?.jsonPrimitive?.intOrNull ?: sequence
-        } catch (_: Throwable) {
-            sequence
-        }
+        val root = requireMutationObject(executeHttp(
+            "https://linux.do/drafts.json", "POST", mapOf("draft_key" to draftKey,
+                "sequence" to sequence.toString(), "data" to data.toString()), preserveFailure = true
+        ))
+        root["draft_sequence"]?.jsonPrimitive?.intOrNull ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
     }
 
     /**
@@ -3345,5 +3341,8 @@ data class CloudDraftItem(
     val raw: String = "",
     val categoryId: Int? = null,
     val tags: List<String> = emptyList(),
-    val replyToPostNumber: Int? = null
+    val replyToPostNumber: Int? = null,
+    val action: String = "reply",
+    val postId: Int? = null,
+    val sequenceKnown: Boolean = true
 )
