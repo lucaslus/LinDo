@@ -19,8 +19,44 @@ object LinuxDoSiteRules {
     const val LOTTERY_TAG = "抽奖"
     const val LOTTERY_TOPIC_COST_POINTS = 20
 
+    enum class UserTitleVisualStyle {
+        HOLOGRAPHIC,
+        GOLD_HONOR,
+        APPLE_SPECIAL,
+        SILVER_ACTIVE,
+        STANDARD
+    }
+
     private val squareAvatarUsernames = setOf("neo")
     private val holographicTitles = setOf("种子用户", "破界者", "premium")
+    private val goldHonorTitles = setOf(
+        "全年不落",
+        "devotee",
+        "不二之选",
+        "一元复始",
+        "骐骥驰骋",
+        "岂曰无衣?",
+        "岂曰无衣？",
+        "岂曰无衣",
+        "非我莫属",
+        "社区领袖",
+        "领袖",
+        "万人迷",
+        "点赞狂魔"
+    )
+    private val silverActiveTitles = setOf(
+        "狂热",
+        "aficionado",
+        "活跃用户",
+        "活跃会员",
+        "一周年",
+        "博学",
+        "领航员",
+        "深得人心",
+        "迷恋",
+        "enthusiast",
+        "维基编辑"
+    )
     private val avatarUsernameRegex = Regex("""/user_avatar/[^/]+/([^/]+)/""")
 
     /**
@@ -57,6 +93,21 @@ object LinuxDoSiteRules {
      */
     fun isHolographicTitle(userTitle: String?): Boolean {
         return userTitle != null && holographicTitles.contains(userTitle.trim().lowercase())
+    }
+
+    /**
+     * 解析用户头衔的视觉展示层级（全息流光 / 黄金荣誉 / Apple 专属 / 银质活跃 / 普通头衔）
+     */
+    fun resolveTitleVisualStyle(userTitle: String?): UserTitleVisualStyle {
+        val normalized = userTitle?.trim()?.lowercase() ?: return UserTitleVisualStyle.STANDARD
+        if (normalized.isEmpty()) return UserTitleVisualStyle.STANDARD
+        return when {
+            holographicTitles.contains(normalized) -> UserTitleVisualStyle.HOLOGRAPHIC
+            normalized.contains("only apple can do") -> UserTitleVisualStyle.APPLE_SPECIAL
+            goldHonorTitles.contains(normalized) -> UserTitleVisualStyle.GOLD_HONOR
+            silverActiveTitles.contains(normalized) -> UserTitleVisualStyle.SILVER_ACTIVE
+            else -> UserTitleVisualStyle.STANDARD
+        }
     }
 
     /**

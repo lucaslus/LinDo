@@ -239,4 +239,61 @@ class LinDoCoreTest {
             LinuxDoEmojiCatalog.resolveReactionImageUrl("bili_057")
         )
     }
+
+    @Test
+    fun testOfficialBadgeCatalogAndSpecialTitlesAlignment() {
+        // 1. 验证官方核心荣誉与纪念徽章（种子用户、全年不落、不二之选、一元复始、骐骥驰骋、岂曰无衣?、Only Apple Can Do、活跃用户、狂热、迷恋等）
+        val requiredTitles = listOf(
+            "种子用户",
+            "全年不落",
+            "不二之选",
+            "一元复始",
+            "骐骥驰骋",
+            "岂曰无衣?",
+            "破界者",
+            "非我莫属",
+            "社区领袖",
+            "万人迷",
+            "点赞狂魔",
+            "Only Apple Can Do",
+            "狂热",
+            "活跃用户",
+            "一周年",
+            "博学",
+            "领航员",
+            "深得人心",
+            "迷恋",
+            "维基编辑"
+        )
+        for (title in requiredTitles) {
+            val resolved = UniversalBadgeEngine.resolveBadgeForUserTitle(title)
+            assertNotNull(resolved, "Expected badge resolution for title: $title")
+            assertTrue(resolved.allowTitle, "Expected allowTitle=true for title badge: $title")
+        }
+
+        // 2. 验证头衔视觉层级分类（全息流光 / 黄金荣誉 / Apple 专属 / 银质活跃）
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.HOLOGRAPHIC, LinuxDoSiteRules.resolveTitleVisualStyle("种子用户"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.HOLOGRAPHIC, LinuxDoSiteRules.resolveTitleVisualStyle("破界者"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("全年不落"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("不二之选"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("一元复始"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("骐骥驰骋"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("岂曰无衣?"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.APPLE_SPECIAL, LinuxDoSiteRules.resolveTitleVisualStyle("Only Apple Can Do"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.SILVER_ACTIVE, LinuxDoSiteRules.resolveTitleVisualStyle("活跃用户"))
+        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.SILVER_ACTIVE, LinuxDoSiteRules.resolveTitleVisualStyle("狂热"))
+
+        // 3. 验证帖子楼层自动根据头衔补齐对应徽章并去重保真
+        val seedPost = PostItemModel(
+            id = 2001,
+            postNumber = 1,
+            userId = 777,
+            username = "seed_member",
+            displayName = "元老姥友",
+            userTitle = "全年不落"
+        )
+        val rootJson = Json.parseToJsonElement("""{"user_badges": {}}""").jsonObject
+        val enriched = BadgeInjector.injectTopLevelUserBadges(listOf(seedPost), rootJson).single()
+        assertTrue(enriched.badgesGranted.any { it.name == "全年不落" && it.badgeTypeId == 1 })
+    }
 }

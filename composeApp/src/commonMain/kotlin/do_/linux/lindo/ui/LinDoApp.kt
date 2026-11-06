@@ -124,6 +124,9 @@ import coil3.compose.AsyncImage
 import do_.linux.lindo.core.connect.ConnectTrustLevelReport
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
+import do_.linux.lindo.core.model.BadgeGranteeItem
+import do_.linux.lindo.core.model.BadgeInjector
+import do_.linux.lindo.core.model.BadgeType
 import do_.linux.lindo.core.model.CommunitySearchResult
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.model.PostItemModel
@@ -705,6 +708,8 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
     // 全局官方功能抽屉状态
     var inspectedBadge by remember { mutableStateOf<GrantedBadge?>(null) }
     var inspectedUsername by remember { mutableStateOf<String?>(null) }
+    var showBadgesCenterSheet by remember { mutableStateOf(false) }
+    var badgesCenterUsername by remember { mutableStateOf<String?>(null) }
     var showNetworkSheet by remember { mutableStateOf(false) }
     var showAuthSheet by remember { mutableStateOf(false) }
     var showConnectSheet by remember { mutableStateOf(false) }
@@ -991,6 +996,36 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                 return
             }
         }
+        val badgeMatch = Regex(
+            """^https?://(?:www\.)?linux\.do/badges(?:/(\d+)(?:/([^/?#]+))?)?(?:[/?#].*)?$""",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)
+        if (badgeMatch != null) {
+            val bid = badgeMatch.groupValues.getOrNull(1)?.toIntOrNull()
+            val bSlug = badgeMatch.groupValues.getOrNull(2)
+            if (bid != null && bid > 0) {
+                val resolved = BadgeInjector.lookupBadgeById(bid)
+                    ?: UniversalBadgeEngine.lookupOfficialBadge(id = bid, slug = bSlug)
+                    ?: GrantedBadge(id = bid, name = bSlug?.replace("-", " ") ?: "徽章 #$bid", slug = bSlug.orEmpty())
+                inspectedBadge = resolved
+            } else {
+                badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
+                showBadgesCenterSheet = true
+            }
+            return
+        }
+        val userBadgesMatch = Regex(
+            """^https?://(?:www\.)?linux\.do/u/([^/?#]+)/badges(?:[/?#].*)?$""",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)
+        if (userBadgesMatch != null) {
+            val uname = userBadgesMatch.groupValues[1]
+            if (uname.isNotBlank()) {
+                badgesCenterUsername = uname
+                showBadgesCenterSheet = true
+                return
+            }
+        }
         val userMatch = Regex(
             """^https?://(?:www\.)?linux\.do/u/([^/?#]+)/?$""",
             RegexOption.IGNORE_CASE
@@ -1066,6 +1101,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
         val canIntercept = activeWebLoginUrl != null ||
             inspectedBadge != null ||
             inspectedUsername != null ||
+            showBadgesCenterSheet ||
             showGlobalSearchSheet ||
             showCreateTopicSheet ||
             showNotificationsSheet ||
@@ -1093,6 +1129,10 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                 }
                 inspectedUsername != null -> {
                     inspectedUsername = null
+                    true
+                }
+                showBadgesCenterSheet -> {
+                    showBadgesCenterSheet = false
                     true
                 }
                 showGlobalSearchSheet -> {
@@ -1395,6 +1435,10 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                         },
                                         onOpenEditProfile = { showEditProfileSheet = true },
                                         onInspectBadge = { inspectedBadge = it },
+                                        onOpenBadgesCenter = {
+                                            badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
+                                            showBadgesCenterSheet = true
+                                        },
                                         onOpenConnectSheet = { showConnectSheet = true },
                                         onOpenNetworkSheet = { showNetworkSheet = true },
                                         onOpenAuthSheet = { showAuthSheet = true },
@@ -1577,6 +1621,10 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                                 },
                                                 onOpenEditProfile = { showEditProfileSheet = true },
                                                 onInspectBadge = { inspectedBadge = it },
+                                                onOpenBadgesCenter = {
+                                                    badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
+                                                    showBadgesCenterSheet = true
+                                                },
                                                 onOpenConnectSheet = { showConnectSheet = true },
                                                 onOpenNetworkSheet = { showNetworkSheet = true },
                                                 onOpenAuthSheet = { showAuthSheet = true },
@@ -1631,7 +1679,33 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                 inspectedBadge?.let { badge ->
                     BadgeDetailBottomSheet(
                         badge = badge,
-                        onDismiss = { inspectedBadge = null }
+                        currentUsername = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
+                        currentUserTitle = fullUserProfile?.title ?: currentUser?.userTitle.orEmpty(),
+                        isAuthorized = isAuthorized,
+                        onDismiss = { inspectedBadge = null },
+                        onTitleUpdated = {
+                            syncUserProfile()
+                        },
+                        onInspectUser = { uname ->
+                            inspectedBadge = null
+                            inspectedUsername = uname
+                        },
+                        onSelectTopicId = { tid, title, postNum ->
+                            inspectedBadge = null
+                            openTopicById(tid, title, postNum)
+                        }
+                    )
+                }
+
+                if (showBadgesCenterSheet) {
+                    CommunityBadgesSheet(
+                        targetUsername = badgesCenterUsername ?: fullUserProfile?.username ?: currentUser?.username.orEmpty(),
+                        currentUserTitle = fullUserProfile?.title ?: currentUser?.userTitle.orEmpty(),
+                        initialEarnedBadges = fullUserProfile?.badges.orEmpty(),
+                        onDismiss = { showBadgesCenterSheet = false },
+                        onInspectBadge = { badge ->
+                            inspectedBadge = badge
+                        }
                     )
                 }
 
@@ -1647,6 +1721,14 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                         onSelectTopicId = { tid, title ->
                             inspectedUsername = null
                             openTopicById(tid, title)
+                        },
+                        onInspectBadge = { badge ->
+                            inspectedBadge = badge
+                        },
+                        onOpenUserBadges = { targetUser ->
+                            inspectedUsername = null
+                            badgesCenterUsername = targetUser
+                            showBadgesCenterSheet = true
                         }
                     )
                 }
@@ -4707,6 +4789,10 @@ private fun CommunityPostFloor(
     val primaryName = post.displayName?.takeIf { it.isNotBlank() } ?: post.username
     val hasDistinctHandle = !post.displayName.isNullOrBlank() && !post.displayName.equals(post.username, ignoreCase = true)
     val hasUserTitle = !post.userTitle.isNullOrBlank()
+    val hasIosDevice = !post.iosDeviceName.isNullOrBlank()
+    val statusEmojiRaw = post.userStatus?.emoji?.trim()?.takeIf { it.isNotEmpty() }
+    val statusDescText = post.userStatus?.description?.trim()?.takeIf { it.isNotEmpty() }
+    var showStatusDescription by remember(post.id) { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -4714,7 +4800,7 @@ private fun CommunityPostFloor(
             .background(palette.cardSurface)
             .padding(horizontal = 16.dp, vertical = 14.dp)
     ) {
-        // 1. 楼层头部（对齐官方 Linux.do 移动 Web：40dp 头像 + 智能单/双行昵称头衔（绝不重复打印相同 @username） + 右上角回复头像跳转/时间/#楼号）
+        // 1. 楼层头部（对齐官方 Linux.do 移动 Web & CFluxDo：40dp 头像 + 昵称/管理盾牌/个人状态Emoji/楼主/徽章列 + 第二行用户名/iOS机型/特种头衔/生日纪念日）
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -4740,18 +4826,50 @@ private fun CommunityPostFloor(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.5.dp)
                 ) {
                     Text(
                         text = primaryName,
                         fontSize = 14.6.sp,
                         fontWeight = FontWeight.Bold,
-                        color = palette.inkPrimary,
+                        color = if (post.admin || post.moderator) palette.brandGold else palette.inkPrimary,
                         maxLines = 1,
                         softWrap = false,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
+
+                    if (post.admin || post.moderator || post.groupModerator) {
+                        Icon(
+                            imageVector = LinDoIcons.ShieldCheck,
+                            contentDescription = if (post.admin) "管理员" else "版主",
+                            modifier = Modifier.size(13.5.dp),
+                            tint = if (post.admin || post.moderator) palette.brandGold else palette.inkSecondary
+                        )
+                    }
+
+                    if (statusEmojiRaw != null) {
+                        val cleanShortcode = statusEmojiRaw.removeSurrounding(":")
+                        val unicodeEmoji = remember(cleanShortcode) {
+                            LinuxDoEmojiCatalog.shortcodeToUnicode(cleanShortcode)
+                                ?: if (!statusEmojiRaw.startsWith(":") && statusEmojiRaw.any { it.code > 127 }) statusEmojiRaw else null
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable(enabled = statusDescText != null) {
+                                    showStatusDescription = !showStatusDescription
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            PostReactionGlyph(
+                                reactionId = cleanShortcode,
+                                emojiFallback = unicodeEmoji ?: "💬",
+                                isSelected = false,
+                                size = 15.dp
+                            )
+                        }
+                    }
 
                     if (isOp) {
                         Text(
@@ -4767,9 +4885,9 @@ private fun CommunityPostFloor(
                     if (post.badgesGranted.isNotEmpty()) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            horizontalArrangement = Arrangement.spacedBy(2.5.dp)
                         ) {
-                            post.badgesGranted.take(4).forEach { badge ->
+                            post.badgesGranted.take(5).forEach { badge ->
                                 PostGrantedBadgeIcon(
                                     badge = badge,
                                     onClick = { onInspectBadge(badge) }
@@ -4779,7 +4897,14 @@ private fun CommunityPostFloor(
                     }
                 }
 
-                if (hasDistinctHandle || hasUserTitle) {
+                val hasRow2 = hasDistinctHandle ||
+                    hasIosDevice ||
+                    hasUserTitle ||
+                    post.isTodayBirthday ||
+                    post.isTodayCakeday ||
+                    (showStatusDescription && statusDescText != null)
+
+                if (hasRow2) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -4795,7 +4920,33 @@ private fun CommunityPostFloor(
                             )
                         }
 
-                        if (hasDistinctHandle && hasUserTitle) {
+                        if (hasIosDevice) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(palette.subtleSurface)
+                                    .padding(horizontal = 4.5.dp, vertical = 1.dp)
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.AppleLogo,
+                                    contentDescription = "Apple Device",
+                                    modifier = Modifier.size(9.5.dp),
+                                    tint = palette.inkSecondary
+                                )
+                                Text(
+                                    text = post.iosDeviceName.orEmpty(),
+                                    fontSize = 10.2.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+
+                        if ((hasDistinctHandle || hasIosDevice) && hasUserTitle) {
                             Text(
                                 text = "·",
                                 fontSize = 11.5.sp,
@@ -4804,9 +4955,41 @@ private fun CommunityPostFloor(
                         }
 
                         if (hasUserTitle) {
+                            val resolvedTitleBadge = remember(post.userTitle) {
+                                UniversalBadgeEngine.resolveBadgeForUserTitle(post.userTitle)
+                            }
                             UserTitleTag(
-                                title = post.userTitle,
-                                enableAnimations = enableAnimations
+                                title = post.userTitle.orEmpty(),
+                                enableAnimations = enableAnimations,
+                                onClick = resolvedTitleBadge?.let { b -> { onInspectBadge(b) } }
+                            )
+                        }
+
+                        if (post.isTodayBirthday) {
+                            Text(
+                                text = "🎂",
+                                fontSize = 11.2.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+
+                        if (post.isTodayCakeday) {
+                            Text(
+                                text = "🍰",
+                                fontSize = 11.2.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+
+                        if (showStatusDescription && statusDescText != null) {
+                            Text(
+                                text = "· $statusDescText",
+                                fontSize = 11.sp,
+                                color = palette.inkSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -6798,6 +6981,7 @@ private fun CommunityProfileScreen(
     onOpenPrivateMessages: () -> Unit,
     onOpenEditProfile: () -> Unit,
     onInspectBadge: (GrantedBadge) -> Unit,
+    onOpenBadgesCenter: () -> Unit = {},
     onOpenConnectSheet: () -> Unit,
     onOpenNetworkSheet: () -> Unit,
     onOpenAuthSheet: () -> Unit,
@@ -6956,7 +7140,14 @@ private fun CommunityProfileScreen(
                                     maxLines = 1
                                 )
                                 if (!userTitle.isNullOrBlank()) {
-                                    UserTitleTag(title = userTitle, enableAnimations = enableAnimations)
+                                    val resolvedTitleBadge = remember(userTitle) {
+                                        UniversalBadgeEngine.resolveBadgeForUserTitle(userTitle)
+                                    }
+                                    UserTitleTag(
+                                        title = userTitle,
+                                        enableAnimations = enableAnimations,
+                                        onClick = resolvedTitleBadge?.let { b -> { onInspectBadge(b) } }
+                                    )
                                 }
                             }
                         }
@@ -6977,6 +7168,48 @@ private fun CommunityProfileScreen(
                                 modifier = Modifier.size(18.dp),
                                 tint = palette.inkSecondary
                             )
+                        }
+                    }
+
+                    if (isAuthorized && fullProfile != null && fullProfile.badges.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            fullProfile.badges.take(8).forEach { badge ->
+                                UniversalBadgeChip(
+                                    badge = badge,
+                                    compact = true,
+                                    onClick = { onInspectBadge(badge) }
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(palette.subtleSurface)
+                                    .clickable { onOpenBadgesCenter() }
+                                    .padding(horizontal = 8.dp, vertical = 3.5.dp)
+                            ) {
+                                Text(
+                                    text = "全部 ${fullProfile.badgeCount.coerceAtLeast(fullProfile.badges.size)} 枚",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Icon(
+                                    imageVector = LinDoIcons.ChevronRight,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(12.dp),
+                                    tint = palette.inkTertiary
+                                )
+                            }
                         }
                     }
 
@@ -7045,9 +7278,19 @@ private fun CommunityProfileScreen(
                 } else {
                     "查看信任等级周期要求与活跃度指标"
                 }
+                val badgeSub = if (isAuthorized && fullProfile != null) {
+                    val count = fullProfile.badgeCount.coerceAtLeast(fullProfile.badges.size)
+                    val titleText = userTitle?.let { " · 当前头衔「$it」" }.orEmpty()
+                    "已解锁 $count 枚荣誉徽章$titleText · 全站徽章墙"
+                } else {
+                    "查看种子用户、全年不落、Only Apple Can Do 等全站徽章与佩戴规则"
+                }
                 val menuRows = listOf(
                     Triple("Connect 看板", connectSub, LinDoIcons.AwardBadge) to {
                         onOpenConnectSheet()
+                    },
+                    Triple("我的徽章与头衔", badgeSub, LinDoIcons.Trophy) to {
+                        onOpenBadgesCenter()
                     },
                     Triple("我的社区", "话题、回复、投票与互动记录", LinDoIcons.MessageCircle) to {
                         if (isAuthorized) onOpenActivities() else onPrimaryWebLogin()
@@ -7586,57 +7829,897 @@ private fun GoogleSegmentedActionTile(
 }
 
 /**
- * 徽章详情抽屉
+ * 徽章详情抽屉（对齐 Linux.do Web `/badges/{id}/{slug}` 与 CFluxDo `BadgeDetailSheet`）：
+ * 1. 金/银/铜等级勋章视觉头、解锁条件 (`description` + `longDescription`)、全站授予次数与获授时间
+ * 2. 若 `allowTitle == true`，提供一键「佩戴为我的头衔」按钮（直调 `PUT /u/{username}.json`）
+ * 3. 实时拉取并展示该徽章的最近获得者列表 (`GET /user_badges.json?badge_id={id}`)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BadgeDetailBottomSheet(
     badge: GrantedBadge,
-    onDismiss: () -> Unit
+    currentUsername: String = "",
+    currentUserTitle: String = "",
+    isAuthorized: Boolean = false,
+    onDismiss: () -> Unit,
+    onTitleUpdated: () -> Unit = {},
+    onInspectUser: (String) -> Unit = {},
+    onSelectTopicId: (Int, String, Int?) -> Unit = { _, _, _ -> }
 ) {
     val palette = LocalPalette.current
-    val isApple = remember(badge) { UniversalBadgeEngine.isAppleBadge(badge) }
+    val scope = rememberCoroutineScope()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    val catalogBadge = remember(badge) {
+        UniversalBadgeEngine.lookupOfficialBadge(id = badge.id, name = badge.name, slug = badge.slug)
+    }
+    val effectiveBadge = remember(badge, catalogBadge) {
+        if (catalogBadge != null) {
+            badge.copy(
+                id = if (badge.id > 0 && badge.id < 9000) badge.id else catalogBadge.id,
+                description = badge.description.ifBlank { catalogBadge.description },
+                longDescription = badge.longDescription.ifBlank { catalogBadge.longDescription },
+                badgeTypeId = if (badge.description.isBlank() && badge.badgeTypeId == 3) catalogBadge.badgeTypeId else badge.badgeTypeId,
+                icon = badge.icon ?: catalogBadge.icon,
+                imageUrl = badge.imageUrl ?: catalogBadge.imageUrl,
+                slug = badge.slug.ifBlank { catalogBadge.slug },
+                grantCount = maxOf(badge.grantCount, catalogBadge.grantCount),
+                allowTitle = badge.allowTitle || catalogBadge.allowTitle
+            )
+        } else {
+            badge
+        }
+    }
+
+    val isApple = remember(effectiveBadge) { UniversalBadgeEngine.isAppleBadge(effectiveBadge) }
+    val tierColor = remember(effectiveBadge, palette.isDark) {
+        UniversalBadgeEngine.badgeTierColor(effectiveBadge.badgeType, isDark = palette.isDark)
+    }
+
+    var grantees by remember(effectiveBadge.id) { mutableStateOf<List<BadgeGranteeItem>>(emptyList()) }
+    var isLoadingGrantees by remember(effectiveBadge.id) { mutableStateOf(false) }
+    var isEquippingTitle by remember(effectiveBadge.id) { mutableStateOf(false) }
+    var titleEquipStatus by remember(effectiveBadge.id) { mutableStateOf<String?>(null) }
+    var equippedNow by remember(effectiveBadge.name, currentUserTitle) {
+        mutableStateOf(currentUserTitle.trim().equals(effectiveBadge.name.trim(), ignoreCase = true))
+    }
+
+    LaunchedEffect(effectiveBadge.id) {
+        if (effectiveBadge.id in 1..8999) {
+            isLoadingGrantees = true
+            try {
+                grantees = LinuxDoRepository.fetchBadgeGrantees(effectiveBadge.id)
+            } finally {
+                isLoadingGrantees = false
+            }
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         containerColor = palette.cardSurface
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 16.dp)
+                .heightIn(min = 320.dp, max = 640.dp)
+                .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
+            // 1. 顶部勋章英雄区：大尺寸等级圆章 + 名称 + 等级胶囊 + 重复次数 + 关闭键
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                UniversalBadgeChip(badge = badge, compact = false)
-                if (badge.isFirstTimeGrant || isApple) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(palette.subtleSurface)
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                Box(
+                    modifier = Modifier
+                        .size(50.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(tierColor.copy(alpha = 0.14f))
+                        .border(0.8.dp, tierColor.copy(alpha = 0.38f), RoundedCornerShape(14.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val fallbackIcon = remember(effectiveBadge) {
+                        UniversalBadgeEngine.resolveFallbackIcon(effectiveBadge)
+                    }
+                    Icon(
+                        imageVector = fallbackIcon,
+                        contentDescription = effectiveBadge.name,
+                        tint = tierColor,
+                        modifier = Modifier.size(25.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = if (badge.isFirstTimeGrant) "🎉 首次获取解锁" else "Apple 专属徽章",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.brandGold
+                            text = effectiveBadge.name,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.inkPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (effectiveBadge.count > 1) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(tierColor.copy(alpha = 0.15f))
+                                    .padding(horizontal = 6.dp, vertical = 1.5.dp)
+                            ) {
+                                Text(
+                                    text = "×${effectiveBadge.count}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = tierColor
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        // 金/银/铜徽章等级胶囊
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.5.dp),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(tierColor.copy(alpha = 0.14f))
+                                .padding(horizontal = 6.5.dp, vertical = 2.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(tierColor)
+                            )
+                            Text(
+                                text = effectiveBadge.badgeType.labelZh,
+                                fontSize = 10.8.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = tierColor
+                            )
+                        }
+
+                        if (effectiveBadge.isFirstTimeGrant || isApple) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(palette.subtleSurface)
+                                    .padding(horizontal = 6.5.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (effectiveBadge.isFirstTimeGrant) "🎉 本楼首次解锁" else " Apple 生态徽章",
+                                    fontSize = 10.8.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.brandGold
+                                )
+                            }
+                        } else if (effectiveBadge.isEarned) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(palette.subtleSurface)
+                                    .padding(horizontal = 6.5.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "✓ 已获得",
+                                    fontSize = 10.8.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.brandGold
+                                )
+                            }
+                        }
+
+                        if (effectiveBadge.allowTitle) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(palette.subtleSurface)
+                                    .padding(horizontal = 6.5.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "可设头衔",
+                                    fontSize = 10.8.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .clickable { onDismiss() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "关闭",
+                        modifier = Modifier.size(17.dp),
+                        tint = palette.inkSecondary
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 2. 徽章简介与详细获取规则卡片
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(palette.subtleSurface.copy(alpha = 0.65f))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = effectiveBadge.plainDescription.ifBlank {
+                        if (isApple) "Linux.do 官方「Only Apple Can Do」Apple 生态专属徽章"
+                        else "Linux.do 社区荣誉徽章"
+                    },
+                    fontSize = 13.8.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 20.sp,
+                    color = palette.inkPrimary
+                )
+
+                val longDesc = effectiveBadge.plainLongDescription
+                if (longDesc.isNotBlank() && !longDesc.equals(effectiveBadge.plainDescription, ignoreCase = true)) {
+                    Text(
+                        text = longDesc,
+                        fontSize = 12.4.sp,
+                        lineHeight = 18.5.sp,
+                        color = palette.inkSecondary
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = buildString {
+                            if (effectiveBadge.grantCount > 0) {
+                                append("全站共授予 ")
+                                append(formatCompactNumber(effectiveBadge.grantCount))
+                                append(" 次")
+                            } else {
+                                append("LINUX DO 官方荣誉徽章")
+                            }
+                            effectiveBadge.grantedAtText?.takeIf { it.isNotBlank() }?.let {
+                                append(" · 获授于 ")
+                                append(it)
+                            }
+                        },
+                        fontSize = 11.5.sp,
+                        color = palette.inkTertiary
+                    )
+
+                    if (effectiveBadge.allowTitle && isAuthorized && currentUsername.isNotBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (equippedNow) palette.tonalPill else palette.brandGold.copy(alpha = 0.16f)
+                                )
+                                .clickable(enabled = !isEquippingTitle && !equippedNow) {
+                                    scope.launch {
+                                        isEquippingTitle = true
+                                        titleEquipStatus = null
+                                        val ok = LinuxDoRepository.updateUserTitle(
+                                            username = currentUsername,
+                                            title = effectiveBadge.name
+                                        )
+                                        isEquippingTitle = false
+                                        if (ok) {
+                                            equippedNow = true
+                                            titleEquipStatus = "已佩戴「${effectiveBadge.name}」为个人头衔"
+                                            onTitleUpdated()
+                                        } else {
+                                            titleEquipStatus = "需要先解锁该徽章才可设为头衔"
+                                        }
+                                    }
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.5.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = when {
+                                    isEquippingTitle -> "设置中..."
+                                    equippedNow -> "✓ 当前佩戴头衔"
+                                    else -> "佩戴为我的头衔"
+                                },
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (equippedNow) palette.inkSecondary else palette.brandGold
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (titleEquipStatus != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = titleEquipStatus!!,
+                    fontSize = 11.8.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (equippedNow) palette.brandGold else palette.inkSecondary
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 3. 最近获得者列表 (`GET /user_badges.json?badge_id={id}`)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "最近获得该徽章的姥友",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkSecondary,
+                    modifier = Modifier.weight(1f)
+                )
+                if (grantees.isNotEmpty()) {
+                    Text(
+                        text = "最新 ${grantees.size} 位",
+                        fontSize = 11.5.sp,
+                        color = palette.inkTertiary
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (isLoadingGrantees) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    LinDoLoadingIndicator(label = "正在查询最近获得者")
+                }
+            } else if (grantees.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 18.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "满足对应社区贡献或活动条件即可自动获授该徽章",
+                        fontSize = 12.2.sp,
+                        color = palette.inkTertiary
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .fillMaxWidth()
+                        .heightIn(max = 280.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(bottom = 16.dp)
+                ) {
+                    itemsIndexed(grantees.take(15), key = { idx, g -> "${g.id}_${g.userId}_$idx" }) { _, grantee ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(palette.canvas)
+                                .clickable {
+                                    if (grantee.topicId > 0) {
+                                        onSelectTopicId(
+                                            grantee.topicId,
+                                            grantee.topicTitle.ifBlank { "话题 #${grantee.topicId}" },
+                                            grantee.postNumber.takeIf { it > 0 }
+                                        )
+                                    } else {
+                                        onInspectUser(grantee.username)
+                                    }
+                                }
+                                .padding(horizontal = 11.dp, vertical = 8.5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(modifier = Modifier.clickable { onInspectUser(grantee.username) }) {
+                                SmartAvatar(
+                                    username = grantee.username,
+                                    avatarTemplate = grantee.avatarTemplate,
+                                    animatedAvatar = grantee.animatedAvatar,
+                                    size = 30.dp,
+                                    enableAnimations = false
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(9.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Text(
+                                        text = grantee.displayName,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (grantee.admin || grantee.moderator) palette.brandGold else palette.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "@${grantee.username}",
+                                        fontSize = 11.2.sp,
+                                        color = palette.inkTertiary,
+                                        maxLines = 1
+                                    )
+                                    if (grantee.count > 1) {
+                                        Text(
+                                            text = "×${grantee.count}",
+                                            fontSize = 10.8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = tierColor
+                                        )
+                                    }
+                                }
+                                if (!grantee.topicTitle.isNullOrBlank()) {
+                                    Text(
+                                        text = "获授于：${grantee.topicTitle}",
+                                        fontSize = 11.2.sp,
+                                        color = palette.inkSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = grantee.grantedAtText,
+                                fontSize = 11.sp,
+                                color = palette.inkTertiary,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+    }
+}
+
+/**
+ * 原生全站徽章墙与个人已获徽章中心抽屉 (`CommunityBadgesSheet`)
+ * 完整对齐 Linux.do Web `/badges` 与 `/u/{username}/badges`：
+ * 1. 双模式切换：「已获徽章」与「全站徽章墙（金/银/铜分级）」
+ * 2. 支持按「全部 / 金徽章 / 银徽章 / 铜徽章 / 可设头衔」筛选，以及按名称/描述实时搜索（如：种子用户、全年不落、不二之选、Only Apple Can Do）
+ * 3. 点击任意徽章即弹出 `BadgeDetailBottomSheet`，查看详细获取规则、最近获得者并支持一键设为个人头衔
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CommunityBadgesSheet(
+    targetUsername: String,
+    currentUserTitle: String = "",
+    initialEarnedBadges: List<GrantedBadge> = emptyList(),
+    onDismiss: () -> Unit,
+    onInspectBadge: (GrantedBadge) -> Unit
+) {
+    val palette = LocalPalette.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    var selectedTab by remember { mutableIntStateOf(0) } // 0 = 已获徽章, 1 = 全站徽章墙
+    var tierFilter by remember { mutableIntStateOf(0) } // 0=全部, 1=金徽章, 2=银徽章, 3=铜徽章, 4=可设头衔
+    var searchQuery by remember { mutableStateOf("") }
+
+    var earnedBadges by remember(targetUsername) {
+        mutableStateOf(
+            UniversalBadgeEngine.mergeBadgesPreservingRichness(
+                initialEarnedBadges + listOfNotNull(
+                    UniversalBadgeEngine.resolveBadgeForUserTitle(currentUserTitle)?.copy(isEarned = true)
+                )
+            )
+        )
+    }
+    var allSiteBadges by remember {
+        mutableStateOf(UniversalBadgeEngine.officialBadgeCatalog)
+    }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(targetUsername) {
+        isLoading = true
+        try {
+            val cleanUser = targetUsername.trim().removePrefix("@")
+            val fetchedUserBadges = if (cleanUser.isNotBlank()) {
+                LinuxDoRepository.fetchUserBadges(cleanUser)
+            } else {
+                emptyList()
+            }
+            val titleBadge = UniversalBadgeEngine.resolveBadgeForUserTitle(currentUserTitle)?.copy(isEarned = true)
+            val mergedEarned = UniversalBadgeEngine.mergeBadgesPreservingRichness(
+                fetchedUserBadges + initialEarnedBadges + listOfNotNull(titleBadge)
+            ).map { it.copy(isEarned = true) }
+            if (mergedEarned.isNotEmpty()) {
+                earnedBadges = mergedEarned
+            }
+
+            val earnedByKey = mergedEarned.associateBy { UniversalBadgeEngine.badgeDedupeKey(it) }
+            val siteCatalog = LinuxDoRepository.fetchAllSiteBadges().map { siteBadge ->
+                val earnedMatch = earnedByKey[UniversalBadgeEngine.badgeDedupeKey(siteBadge)]
+                if (earnedMatch != null) {
+                    siteBadge.copy(
+                        isEarned = true,
+                        count = maxOf(siteBadge.count, earnedMatch.count),
+                        grantedAtText = earnedMatch.grantedAtText
+                    )
+                } else {
+                    siteBadge
+                }
+            }
+            if (siteCatalog.isNotEmpty()) {
+                allSiteBadges = siteCatalog
+            }
+        } finally {
+            isLoading = false
+        }
+    }
+
+    val sourceList = if (selectedTab == 0) earnedBadges else allSiteBadges
+    val filteredBadges = remember(sourceList, tierFilter, searchQuery) {
+        val q = searchQuery.trim()
+        sourceList.filter { badge ->
+            val matchesTier = when (tierFilter) {
+                1 -> badge.badgeTypeId == 1
+                2 -> badge.badgeTypeId == 2
+                3 -> badge.badgeTypeId == 3
+                4 -> badge.allowTitle
+                else -> true
+            }
+            val matchesQuery = q.isEmpty() ||
+                badge.name.contains(q, ignoreCase = true) ||
+                badge.plainDescription.contains(q, ignoreCase = true) ||
+                badge.plainLongDescription.contains(q, ignoreCase = true) ||
+                badge.slug.contains(q, ignoreCase = true)
+            matchesTier && matchesQuery
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = palette.cardSurface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 480.dp, max = 690.dp)
+                .padding(horizontal = 18.dp, vertical = 10.dp)
+        ) {
+            // 1. 顶栏：标题 + 已获/全站切换 + 关闭
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.Trophy,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = palette.brandGold
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (targetUsername.isNotBlank()) "社区徽章与头衔 (@$targetUsername)" else "LINUX DO 全站徽章墙",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .clickable { onDismiss() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "关闭",
+                        modifier = Modifier.size(17.dp),
+                        tint = palette.inkSecondary
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 2. 主模式切换：已获徽章 vs 全站徽章墙
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(palette.subtleSurface)
+                    .padding(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                val tabs = listOf(
+                    "已获徽章 (${earnedBadges.size})" to 0,
+                    "全站徽章墙 (${allSiteBadges.size})" to 1
+                )
+                tabs.forEach { (label, idx) ->
+                    val active = selectedTab == idx
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (active) palette.cardSurface else Color.Transparent)
+                            .clickable { selectedTab = idx },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            fontSize = 12.8.sp,
+                            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                            color = if (active) palette.inkPrimary else palette.inkSecondary
                         )
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = badge.plainDescription.ifBlank {
-                    if (isApple) "Linux.do 官方「Only Apple Can Do」Apple 生态专属徽章"
-                    else "Linux.do 社区荣誉徽章"
-                },
-                fontSize = 14.sp,
-                lineHeight = 21.sp,
-                color = palette.inkSecondary
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 3. 搜索框（支持搜索种子用户、全年不落、不二之选、Only Apple Can Do 等）
+            WorkbenchCompactInputBox(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = "搜索徽章名称或解锁条件（如：种子用户、全年不落、Apple...）",
+                leadingIcon = LinDoIcons.Search,
+                modifier = Modifier.fillMaxWidth()
             )
-            Spacer(modifier = Modifier.height(24.dp))
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 4. 金/银/铜等级与头衔快筛胶囊
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val filters = listOf(
+                    Triple(0, "全部", null),
+                    Triple(1, "金徽章", Color(0xFFEAB308)),
+                    Triple(2, "银徽章", Color(0xFF94A3B8)),
+                    Triple(3, "铜徽章", Color(0xFFD97706)),
+                    Triple(4, "可设头衔", palette.brandGold)
+                )
+                filters.forEach { (code, label, dotCol) ->
+                    GoogleM3FilterPill(
+                        label = label,
+                        dotColor = dotCol,
+                        selected = tierFilter == code,
+                        onClick = { tierFilter = code }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 5. 徽章列表
+            if (isLoading && filteredBadges.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    LinDoLoadingIndicator(label = "正在同步社区徽章目录")
+                }
+            } else if (filteredBadges.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        LinDoEmptyState(
+                            message = if (selectedTab == 0 && searchQuery.isBlank()) {
+                                "暂未在该分类下找到已获徽章，点击「全站徽章墙」可浏览所有官方徽章"
+                            } else {
+                                "没有找到匹配的徽章"
+                            }
+                        )
+                        if (selectedTab == 0) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(palette.tonalPill)
+                                    .clickable { selectedTab = 1 }
+                                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    text = "浏览全站徽章墙",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.brandGold
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(top = 2.dp, bottom = 24.dp)
+                ) {
+                    itemsIndexed(
+                        filteredBadges,
+                        key = { idx, b -> "${selectedTab}_${b.id}_${b.name}_$idx" }
+                    ) { _, badge ->
+                        val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = palette.isDark)
+                        val fallbackIcon = remember(badge) {
+                            UniversalBadgeEngine.resolveFallbackIcon(badge)
+                        }
+                        val isCurrentTitle = currentUserTitle.isNotBlank() &&
+                            currentUserTitle.trim().equals(badge.name.trim(), ignoreCase = true)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(13.dp))
+                                .background(palette.canvas)
+                                .border(
+                                    width = 0.6.dp,
+                                    color = if (badge.isEarned) tierColor.copy(alpha = 0.35f) else palette.hairline,
+                                    shape = RoundedCornerShape(13.dp)
+                                )
+                                .clickable { onInspectBadge(badge) }
+                                .padding(horizontal = 13.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(11.dp))
+                                    .background(tierColor.copy(alpha = 0.13f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = fallbackIcon,
+                                    contentDescription = badge.name,
+                                    tint = tierColor,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Text(
+                                        text = badge.name,
+                                        fontSize = 14.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (badge.count > 1) {
+                                        Text(
+                                            text = "×${badge.count}",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = tierColor
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(5.dp))
+                                            .background(tierColor.copy(alpha = 0.14f))
+                                            .padding(horizontal = 5.5.dp, vertical = 1.5.dp)
+                                    ) {
+                                        Text(
+                                            text = badge.badgeType.labelZh,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = tierColor
+                                        )
+                                    }
+                                    if (badge.allowTitle) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(5.dp))
+                                                .background(palette.subtleSurface)
+                                                .padding(horizontal = 5.5.dp, vertical = 1.5.dp)
+                                        ) {
+                                            Text(
+                                                text = if (isCurrentTitle) "当前头衔" else "可设头衔",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if (isCurrentTitle) palette.brandGold else palette.inkSecondary
+                                            )
+                                        }
+                                    }
+                                    if (badge.isEarned) {
+                                        Text(
+                                            text = "✓ 已获",
+                                            fontSize = 10.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.brandGold
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(3.dp))
+
+                                Text(
+                                    text = badge.plainDescription.ifBlank { badge.plainLongDescription },
+                                    fontSize = 12.2.sp,
+                                    lineHeight = 17.5.sp,
+                                    color = palette.inkSecondary,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+
+                                if (badge.grantCount > 0 || !badge.grantedAtText.isNullOrBlank()) {
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        text = buildString {
+                                            if (badge.grantCount > 0) {
+                                                append("全站共授予 ")
+                                                append(formatCompactNumber(badge.grantCount))
+                                                append(" 次")
+                                            }
+                                            badge.grantedAtText?.takeIf { it.isNotBlank() }?.let {
+                                                if (isNotEmpty()) append(" · ")
+                                                append("获授于 ")
+                                                append(it)
+                                            }
+                                        },
+                                        fontSize = 10.8.sp,
+                                        color = palette.inkTertiary
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(6.dp))
+
+                            Icon(
+                                imageVector = LinDoIcons.ChevronRight,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                                tint = palette.inkTertiary
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -11094,7 +12177,9 @@ private fun PublicUserCardSheet(
     username: String,
     onDismiss: () -> Unit,
     onSendPrivateMessage: (String) -> Unit,
-    onSelectTopicId: (Int, String) -> Unit
+    onSelectTopicId: (Int, String) -> Unit,
+    onInspectBadge: (GrantedBadge) -> Unit = {},
+    onOpenUserBadges: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
     var cardProfile by remember { mutableStateOf<UserFullProfileSummary?>(null) }
@@ -11150,16 +12235,27 @@ private fun PublicUserCardSheet(
                             text = p?.displayName ?: username,
                             fontSize = 17.sp,
                             fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary,
+                            color = if (p?.admin == true || p?.moderator == true) palette.brandGold else palette.inkPrimary,
                             maxLines = 1
                         )
+                        if (p?.admin == true || p?.moderator == true) {
+                            Icon(
+                                imageVector = LinDoIcons.ShieldCheck,
+                                contentDescription = "管理员/版主",
+                                modifier = Modifier.size(14.dp),
+                                tint = palette.brandGold
+                            )
+                        }
                         if (p != null && p.badges.isNotEmpty()) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
-                                p.badges.take(3).forEach { b ->
-                                    PostGrantedBadgeIcon(badge = b)
+                                p.badges.take(4).forEach { b ->
+                                    PostGrantedBadgeIcon(
+                                        badge = b,
+                                        onClick = { onInspectBadge(b) }
+                                    )
                                 }
                             }
                         }
@@ -11174,11 +12270,34 @@ private fun PublicUserCardSheet(
                             )
                         }
                     }
-                    Text(
-                        text = "@$username" + (p?.title?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
-                        fontSize = 12.5.sp,
-                        color = palette.inkSecondary
-                    )
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text(
+                            text = "@$username",
+                            fontSize = 12.5.sp,
+                            color = palette.inkSecondary
+                        )
+                        if (!p?.title.isNullOrBlank()) {
+                            Text(
+                                text = "·",
+                                fontSize = 12.sp,
+                                color = palette.inkTertiary
+                            )
+                            val titleBadge = remember(p?.title) {
+                                UniversalBadgeEngine.resolveBadgeForUserTitle(p?.title)
+                            }
+                            UserTitleTag(
+                                title = p?.title.orEmpty(),
+                                enableAnimations = true,
+                                onClick = titleBadge?.let { b -> { onInspectBadge(b) } }
+                            )
+                        }
+                    }
                 }
 
                 Box(
@@ -11217,6 +12336,47 @@ private fun PublicUserCardSheet(
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+
+            if (p != null && p.badges.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    p.badges.take(6).forEach { badge ->
+                        UniversalBadgeChip(
+                            badge = badge,
+                            compact = true,
+                            onClick = { onInspectBadge(badge) }
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(palette.subtleSurface)
+                            .clickable { onOpenUserBadges(username) }
+                            .padding(horizontal = 8.dp, vertical = 3.5.dp)
+                    ) {
+                        Text(
+                            text = "全部 ${p.badgeCount.coerceAtLeast(p.badges.size)} 枚",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.inkSecondary
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Icon(
+                            imageVector = LinDoIcons.ChevronRight,
+                            contentDescription = null,
+                            modifier = Modifier.size(12.dp),
+                            tint = palette.inkTertiary
+                        )
+                    }
+                }
             }
 
             if (p != null) {

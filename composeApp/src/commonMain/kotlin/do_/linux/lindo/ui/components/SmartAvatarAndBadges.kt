@@ -246,66 +246,161 @@ fun FlairBadgeOverlay(
 }
 
 /**
- * Linux.do 帖子头部用户头衔（对齐 FluxDO 的 `HolographicText` 11sp 行内头衔样式）
+ * Linux.do 帖子头部用户头衔（对齐 Web / CFluxDo / FluxDO 全息流光、黄金荣誉、Apple 专属与银质活跃头衔样式）
  */
 @Composable
 fun UserTitleTag(
     title: String,
     enableAnimations: Boolean = true,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val isHolo = LinuxDoSiteRules.isHolographicTitle(title)
-    if (!isHolo) {
-        Text(
-            text = title,
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = modifier
-        )
-        return
-    }
-
-    val shift = if (enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused) {
-        val transition = rememberInfiniteTransition(label = "holoTitle")
-        val value by transition.animateFloat(
-            initialValue = 0f,
-            targetValue = 200f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 15000, easing = LinearEasing),
-                repeatMode = RepeatMode.Restart
-            ),
-            label = "holoShift"
-        )
-        value
+    val isDark = LocalLinDoDarkTheme.current
+    val visualStyle = remember(title) { LinuxDoSiteRules.resolveTitleVisualStyle(title) }
+    val clickableModifier = if (onClick != null) {
+        modifier
+            .clip(RoundedCornerShape(4.dp))
+            .clickable(onClick = onClick)
     } else {
-        40f
+        modifier
     }
 
-    val holoBrush = Brush.linearGradient(
-        colors = listOf(
-            Color(0xFFFF00FF),
-            Color(0xFF00FFFF),
-            Color(0xFFFFFF00),
-            Color(0xFFFF00FF),
-            Color(0xFF00FFFF)
-        ),
-        start = Offset(shift, 0f),
-        end = Offset(shift + 140f, 30f)
-    )
+    when (visualStyle) {
+        LinuxDoSiteRules.UserTitleVisualStyle.HOLOGRAPHIC -> {
+            val shift = if (enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused) {
+                val transition = rememberInfiniteTransition(label = "holoTitle")
+                val value by transition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 200f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 12000, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
+                    ),
+                    label = "holoShift"
+                )
+                value
+            } else {
+                40f
+            }
 
-    Text(
-        text = title,
-        style = TextStyle(
-            brush = holoBrush,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold
-        ),
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = modifier
-    )
+            val holoColors = if (isDark) {
+                listOf(
+                    Color(0xFFFF00FF),
+                    Color(0xFF00FFFF),
+                    Color(0xFFFFFF00),
+                    Color(0xFFFF00FF),
+                    Color(0xFF00FFFF)
+                )
+            } else {
+                listOf(
+                    Color(0xFFCC00CC),
+                    Color(0xFF0099AA),
+                    Color(0xFFCC8800),
+                    Color(0xFFCC00CC),
+                    Color(0xFF0099AA)
+                )
+            }
+
+            val holoBrush = Brush.linearGradient(
+                colors = holoColors,
+                start = Offset(shift, 0f),
+                end = Offset(shift + 140f, 30f)
+            )
+
+            Text(
+                text = title,
+                style = TextStyle(
+                    brush = holoBrush,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = clickableModifier
+            )
+        }
+
+        LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR -> {
+            val goldColors = if (isDark) {
+                listOf(
+                    Color(0xFFFBBF24),
+                    Color(0xFFF59E0B),
+                    Color(0xFFFDE68A),
+                    Color(0xFFF59E0B)
+                )
+            } else {
+                listOf(
+                    Color(0xFFB45309),
+                    Color(0xFFD97706),
+                    Color(0xFF92400E)
+                )
+            }
+            val goldBrush = Brush.linearGradient(
+                colors = goldColors,
+                start = Offset(0f, 0f),
+                end = Offset(120f, 20f)
+            )
+            Text(
+                text = title,
+                style = TextStyle(
+                    brush = goldBrush,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = clickableModifier
+            )
+        }
+
+        LinuxDoSiteRules.UserTitleVisualStyle.APPLE_SPECIAL -> {
+            val appleTint = if (isDark) Color(0xFFE2E8F0) else Color(0xFF1E293B)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.5.dp),
+                modifier = clickableModifier
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.AppleLogo,
+                    contentDescription = "Apple",
+                    tint = appleTint,
+                    modifier = Modifier.size(10.5.dp)
+                )
+                Text(
+                    text = title,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = appleTint,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        LinuxDoSiteRules.UserTitleVisualStyle.SILVER_ACTIVE -> {
+            val silverTint = if (isDark) Color(0xFFCBD5E1) else Color(0xFF475569)
+            Text(
+                text = title,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = silverTint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = clickableModifier
+            )
+        }
+
+        LinuxDoSiteRules.UserTitleVisualStyle.STANDARD -> {
+            Text(
+                text = title,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = clickableModifier
+            )
+        }
+    }
 }
 
 /**
@@ -404,29 +499,44 @@ fun PostGrantedBadgeIcon(
 
 /**
  * 徽章墙与用户资料卡使用的 Web 风格徽章组件 (`UniversalBadgeChip`)
- * 对齐 Linux.do Web `.user-badge`：清爽细边框 + 金/银/铜勋章图标 + 徽章名称
+ * 对齐 Linux.do Web `.user-badge`：清爽细边框 + 金/银/铜勋章图标 + 徽章名称 + 重复获授次数 `×N`
  */
 @Composable
 fun UniversalBadgeChip(
     badge: GrantedBadge,
     compact: Boolean = true,
+    onClick: ((GrantedBadge) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val tierColor = remember(badge) {
-        UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = false)
+    val isDark = LocalLinDoDarkTheme.current
+    val tierColor = remember(badge, isDark) {
+        UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = isDark)
     }
+    val shape = RoundedCornerShape(if (compact) 6.dp else 8.dp)
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
+            .clip(shape)
+            .let { mod ->
+                if (onClick != null) mod.clickable { onClick(badge) } else mod
+            }
+            .background(
+                color = tierColor.copy(alpha = if (badge.isEarned) 0.08f else 0.03f),
+                shape = shape
+            )
             .border(
-                width = 0.5.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-                shape = RoundedCornerShape(if (compact) 5.dp else 7.dp)
+                width = 0.6.dp,
+                color = if (badge.isEarned) {
+                    tierColor.copy(alpha = 0.34f)
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                },
+                shape = shape
             )
             .padding(
-                horizontal = if (compact) 6.dp else 8.dp,
-                vertical = if (compact) 2.5.dp else 4.dp
+                horizontal = if (compact) 6.5.dp else 8.5.dp,
+                vertical = if (compact) 3.dp else 4.5.dp
             )
     ) {
         PostGrantedBadgeIcon(badge = badge)
@@ -439,6 +549,16 @@ fun UniversalBadgeChip(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        if (badge.count > 1) {
+            Spacer(modifier = Modifier.width(3.dp))
+            Text(
+                text = "×${badge.count}",
+                color = tierColor,
+                fontSize = if (compact) 10.2.sp else 11.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+        }
     }
 }
 

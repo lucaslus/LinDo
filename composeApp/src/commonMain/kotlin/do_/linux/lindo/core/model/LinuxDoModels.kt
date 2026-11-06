@@ -1,5 +1,6 @@
 package do_.linux.lindo.core.model
 
+import do_.linux.lindo.core.badge.UniversalBadgeEngine
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -34,13 +35,20 @@ data class GrantedBadge(
     val id: Int,
     val name: String,
     val description: String = "",
+    @SerialName("long_description") val longDescription: String = "",
     @SerialName("badge_type_id") val badgeTypeId: Int = 3,
     val icon: String? = null,
     @SerialName("image_url") val imageUrl: String? = null,
     val slug: String = "",
     @SerialName("grant_count") val grantCount: Int = 0,
     val allowTitle: Boolean = false,
-    val isFirstTimeGrant: Boolean = false
+    val isFirstTimeGrant: Boolean = false,
+    val count: Int = 1,
+    val grantedAtText: String = "",
+    val isEarned: Boolean = false,
+    val topicId: Int = 0,
+    val topicTitle: String = "",
+    val postNumber: Int = 0
 ) {
     val badgeType: BadgeType get() = BadgeType.fromId(badgeTypeId)
 
@@ -54,7 +62,38 @@ data class GrantedBadge(
             .replace("&amp;", "&")
             .trim()
             .ifEmpty { name }
+
+    val plainLongDescription: String
+        get() = longDescription
+            .replace(Regex("<[^>]+>"), "")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .trim()
 }
+
+/**
+ * 徽章获得者明细项（来自 `/user_badges.json?badge_id={id}`）
+ */
+@Serializable
+data class BadgeGranteeItem(
+    val id: Int,
+    val userId: Int,
+    val username: String,
+    val displayName: String = "",
+    val avatarTemplate: String = "",
+    val animatedAvatar: String? = null,
+    val trustLevel: Int = 1,
+    val admin: Boolean = false,
+    val moderator: Boolean = false,
+    val grantedAtText: String = "",
+    val topicId: Int = 0,
+    val topicTitle: String = "",
+    val postNumber: Int = 1,
+    val count: Int = 1
+)
 
 /**
  * 用户身份角标 (Flair)
@@ -169,6 +208,7 @@ data class PostItemModel(
     val isTopicOwner: Boolean = false,
     val flair: FlairInfo = FlairInfo(),
     val userStatus: UserStatus? = null,
+    val iosDeviceName: String? = null,
     val isTodayBirthday: Boolean = false,
     val isTodayCakeday: Boolean = false,
     val badgesGranted: List<GrantedBadge> = emptyList(),
@@ -376,7 +416,14 @@ object BadgeInjector {
     private val userBadgesMemoryCache = mutableMapOf<Int, List<GrantedBadge>>()
     private val knownBadgesById = mutableMapOf<Int, GrantedBadge>()
 
-    fun lookupBadgeById(badgeId: Int): GrantedBadge? = knownBadgesById[badgeId]
+    init {
+        UniversalBadgeEngine.officialBadgeCatalog.forEach { badge ->
+            knownBadgesById[badge.id] = badge
+        }
+    }
+
+    fun lookupBadgeById(badgeId: Int): GrantedBadge? =
+        knownBadgesById[badgeId] ?: UniversalBadgeEngine.lookupOfficialBadge(id = badgeId)
 
     private fun ingestBadgesCollection(badgesRaw: JsonElement?, targetMap: MutableMap<Int, GrantedBadge>) {
         when (badgesRaw) {
@@ -498,41 +545,11 @@ object BadgeInjector {
         return posts.map { post ->
             val cachedUserBadges = getBadgesForUser(post.userId)
             val floorGrants = postLevelGrants[post.postNumber].orEmpty()
-            val appleTitleBadge = if (
-                post.userTitle?.contains("only apple can do", ignoreCase = true) == true
-            ) {
-                listOf(
-                    GrantedBadge(
-                        id = 9991,
-                        name = "Only Apple Can Do",
-                        description = "Linux.do 官方「Only Apple Can Do」Apple 生态专属徽章",
-                        badgeTypeId = 2,
-                        icon = "fab-apple",
-                        slug = "only-apple-can-do",
-                        allowTitle = true
-                    )
-                )
-            } else {
-                emptyList()
-            }
+            val titleBadge = UniversalBadgeEngine.resolveBadgeForUserTitle(post.userTitle)
 
-            val merged = (floorGrants + post.badgesGranted + cachedUserBadges + appleTitleBadge)
-                .distinctBy { badge ->
-                    if (badge.name.contains("only apple can do", ignoreCase = true) || badge.slug.contains("only-apple-can-do", ignoreCase = true)) {
-                        "only-apple-can-do"
-                    } else {
-                        "${badge.id}_${badge.name.trim().lowercase()}"
-                    }
-                }
-                .sortedByDescending { badge ->
-                    when {
-                        badge.isFirstTimeGrant -> 2
-                        badge.name.contains("only apple can do", ignoreCase = true) ||
-                            badge.slug.contains("only-apple-can-do", ignoreCase = true) ||
-                            badge.icon?.contains("apple", ignoreCase = true) == true -> 1
-                        else -> 0
-                    }
-                }
+            val merged = UniversalBadgeEngine.mergeBadgesPreservingRichness(
+                floorGrants + post.badgesGranted + cachedUserBadges + listOfNotNull(titleBadge)
+            )
 
             if (merged != post.badgesGranted) {
                 post.copy(badgesGranted = merged)
@@ -548,22 +565,30 @@ object BadgeInjector {
             ?: obj["badge_id"]?.jsonPrimitive?.intOrNull
             ?: obj["id"]?.jsonPrimitive?.intOrNull
             ?: fallbackId
-        val known = knownBadgesById[resolvedId]
-        val rawName = target["name"]?.jsonPrimitive?.contentOrNull
+        val rawNameCandidate = target["name"]?.jsonPrimitive?.contentOrNull
             ?: obj["badge_name"]?.jsonPrimitive?.contentOrNull
+        val rawSlugCandidate = target["slug"]?.jsonPrimitive?.contentOrNull
+            ?: obj["badge_slug"]?.jsonPrimitive?.contentOrNull
+        val known = knownBadgesById[resolvedId]
+            ?: UniversalBadgeEngine.lookupOfficialBadge(
+                id = resolvedId,
+                name = rawNameCandidate,
+                slug = rawSlugCandidate
+            )
+        val rawName = rawNameCandidate
             ?: known?.name
             ?: "徽章 #$resolvedId"
-        val rawSlug = target["slug"]?.jsonPrimitive?.contentOrNull
-            ?: obj["badge_slug"]?.jsonPrimitive?.contentOrNull
+        val rawSlug = rawSlugCandidate
             ?: known?.slug
             ?: ""
         val rawIcon = target["icon"]?.jsonPrimitive?.contentOrNull
             ?: known?.icon
             ?: if (rawName.contains("only apple can do", ignoreCase = true) || rawSlug.contains("only-apple-can-do", ignoreCase = true)) "fab-apple" else null
         return GrantedBadge(
-            id = resolvedId,
+            id = if (resolvedId != 0) resolvedId else (known?.id ?: 0),
             name = rawName,
             description = target["description"]?.jsonPrimitive?.contentOrNull ?: known?.description ?: "",
+            longDescription = target["long_description"]?.jsonPrimitive?.contentOrNull ?: known?.longDescription ?: "",
             badgeTypeId = target["badge_type_id"]?.jsonPrimitive?.intOrNull ?: known?.badgeTypeId ?: 3,
             icon = rawIcon,
             imageUrl = target["image_url"]?.jsonPrimitive?.contentOrNull
@@ -572,7 +597,17 @@ object BadgeInjector {
             slug = rawSlug,
             grantCount = target["grant_count"]?.jsonPrimitive?.intOrNull ?: known?.grantCount ?: 0,
             allowTitle = target["allow_title"]?.jsonPrimitive?.booleanOrNull ?: known?.allowTitle ?: false,
-            isFirstTimeGrant = isFirstGrant
+            isFirstTimeGrant = isFirstGrant,
+            count = obj["count"]?.jsonPrimitive?.intOrNull
+                ?: target["count"]?.jsonPrimitive?.intOrNull
+                ?: 1,
+            grantedAtText = obj["granted_at"]?.jsonPrimitive?.contentOrNull
+                ?: target["granted_at"]?.jsonPrimitive?.contentOrNull
+                ?: "",
+            isEarned = true,
+            topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: 0,
+            topicTitle = obj["topic_title"]?.jsonPrimitive?.contentOrNull ?: "",
+            postNumber = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 0
         )
     }
 }

@@ -6,6 +6,7 @@ import do_.linux.lindo.core.connect.ConnectTrustLevelReport
 import do_.linux.lindo.core.connect.ConsolidatedTimingBatch
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
+import do_.linux.lindo.core.model.BadgeGranteeItem
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.CommunitySearchResult
 import do_.linux.lindo.core.model.FlairInfo
@@ -18,6 +19,7 @@ import do_.linux.lindo.core.model.TopicUser
 import do_.linux.lindo.core.model.UserActivityItem
 import do_.linux.lindo.core.model.UserFullProfileSummary
 import do_.linux.lindo.core.model.UserNotificationItem
+import do_.linux.lindo.core.model.UserStatus
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import io.ktor.client.HttpClient
@@ -1292,21 +1294,34 @@ object LinuxDoRepository {
                     topicCount = us["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
                     postCount = us["post_count"]?.jsonPrimitive?.intOrNull ?: 0
                 }
+                val badgeCountById = mutableMapOf<Int, Int>()
+                val badgeGrantedAtById = mutableMapOf<Int, String>()
+                (root["user_badges"] as? JsonArray)?.forEach { ubElem ->
+                    val ubObj = ubElem as? JsonObject ?: return@forEach
+                    val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                    val cnt = ubObj["count"]?.jsonPrimitive?.intOrNull ?: 1
+                    badgeCountById[bid] = (badgeCountById[bid] ?: 0).coerceAtLeast(cnt)
+                    ubObj["granted_at"]?.jsonPrimitive?.contentOrNull?.let { grantedAt ->
+                        if (grantedAt.length >= 10) {
+                            badgeGrantedAtById[bid] = grantedAt.substring(0, 10)
+                        }
+                    }
+                }
                 (root["badges"] as? JsonArray)?.forEach { bElem ->
                     val bObj = bElem as? JsonObject ?: return@forEach
-                    val bid = bObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    val bname = bObj["name"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                    val parsed = BadgeInjector.parseGrantedBadge(bObj)
                     topBadges.add(
-                        GrantedBadge(
-                            id = bid,
-                            name = bname,
-                            description = bObj["description"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "") ?: "",
-                            badgeTypeId = bObj["badge_type_id"]?.jsonPrimitive?.intOrNull ?: 3,
-                            icon = bObj["icon"]?.jsonPrimitive?.contentOrNull,
-                            imageUrl = bObj["image_url"]?.jsonPrimitive?.contentOrNull,
-                            slug = bObj["slug"]?.jsonPrimitive?.contentOrNull ?: ""
+                        parsed.copy(
+                            count = badgeCountById[parsed.id] ?: parsed.count,
+                            grantedAtText = badgeGrantedAtById[parsed.id] ?: parsed.grantedAtText,
+                            isEarned = true
                         )
                     )
+                }
+                UniversalBadgeEngine.resolveBadgeForUserTitle(title)?.let { titleBadge ->
+                    if (topBadges.none { UniversalBadgeEngine.badgeDedupeKey(it) == UniversalBadgeEngine.badgeDedupeKey(titleBadge) }) {
+                        topBadges.add(0, titleBadge.copy(isEarned = true))
+                    }
                 }
             } catch (_: Throwable) {
             }
@@ -2166,21 +2181,34 @@ object LinuxDoRepository {
                     topicCount = us["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
                     postCount = us["post_count"]?.jsonPrimitive?.intOrNull ?: 0
                 }
+                val badgeCountById = mutableMapOf<Int, Int>()
+                val badgeGrantedAtById = mutableMapOf<Int, String>()
+                (root["user_badges"] as? JsonArray)?.forEach { ubElem ->
+                    val ubObj = ubElem as? JsonObject ?: return@forEach
+                    val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                    val cnt = ubObj["count"]?.jsonPrimitive?.intOrNull ?: 1
+                    badgeCountById[bid] = (badgeCountById[bid] ?: 0).coerceAtLeast(cnt)
+                    ubObj["granted_at"]?.jsonPrimitive?.contentOrNull?.let { grantedAt ->
+                        if (grantedAt.length >= 10) {
+                            badgeGrantedAtById[bid] = grantedAt.substring(0, 10)
+                        }
+                    }
+                }
                 (root["badges"] as? JsonArray)?.forEach { bElem ->
                     val bObj = bElem as? JsonObject ?: return@forEach
-                    val bid = bObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    val bname = bObj["name"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                    val parsed = BadgeInjector.parseGrantedBadge(bObj)
                     topBadges.add(
-                        GrantedBadge(
-                            id = bid,
-                            name = bname,
-                            description = bObj["description"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "") ?: "",
-                            badgeTypeId = bObj["badge_type_id"]?.jsonPrimitive?.intOrNull ?: 3,
-                            icon = bObj["icon"]?.jsonPrimitive?.contentOrNull,
-                            imageUrl = bObj["image_url"]?.jsonPrimitive?.contentOrNull,
-                            slug = bObj["slug"]?.jsonPrimitive?.contentOrNull ?: ""
+                        parsed.copy(
+                            count = badgeCountById[parsed.id] ?: parsed.count,
+                            grantedAtText = badgeGrantedAtById[parsed.id] ?: parsed.grantedAtText,
+                            isEarned = true
                         )
                     )
+                }
+                UniversalBadgeEngine.resolveBadgeForUserTitle(title)?.let { titleBadge ->
+                    if (topBadges.none { UniversalBadgeEngine.badgeDedupeKey(it) == UniversalBadgeEngine.badgeDedupeKey(titleBadge) }) {
+                        topBadges.add(0, titleBadge.copy(isEarned = true))
+                    }
                 }
             } catch (_: Throwable) {
             }
@@ -2241,6 +2269,228 @@ object LinuxDoRepository {
         false
     }
 
+    /**
+     * 仅更新当前用户的佩戴头衔 (`PUT /u/{username}.json`)
+     */
+    suspend fun updateUserTitle(
+        username: String,
+        title: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext false
+        val res = executeHttp(
+            url = "https://linux.do/u/$targetUsername.json",
+            method = "PUT",
+            formParams = mapOf("title" to title.trim())
+        )
+        if (res != null && res.first in 200..299) {
+            fetchCurrentUserProfile()
+            return@withContext true
+        }
+        false
+    }
+
+    /**
+     * 获取指定用户的完整已获徽章列表 (`GET /user-badges/{username}.json?grouped=true`)
+     */
+    suspend fun fetchUserBadges(username: String): List<GrantedBadge> = withContext(Dispatchers.IO) {
+        val clean = username.trim().removePrefix("@")
+        if (clean.isBlank()) return@withContext emptyList()
+        val res = executeHttp("https://linux.do/user-badges/$clean.json?grouped=true", method = "GET")
+        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
+            try {
+                val root = json.parseToJsonElement(res.second).jsonObject
+                val badgesMap = mutableMapOf<Int, GrantedBadge>()
+                (root["badges"] as? JsonArray)?.forEach { bElem ->
+                    val bObj = bElem as? JsonObject ?: return@forEach
+                    val parsed = BadgeInjector.parseGrantedBadge(bObj)
+                    badgesMap[parsed.id] = parsed
+                }
+                val topicsMap = mutableMapOf<Int, String>()
+                (root["topics"] as? JsonArray)?.forEach { tElem ->
+                    val tObj = tElem as? JsonObject ?: return@forEach
+                    val tid = tObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                    val tTitle = tObj["title"]?.jsonPrimitive?.contentOrNull ?: ""
+                    topicsMap[tid] = tTitle
+                }
+                val result = mutableListOf<GrantedBadge>()
+                (root["user_badges"] as? JsonArray)?.forEach { ubElem ->
+                    val ubObj = ubElem as? JsonObject ?: return@forEach
+                    val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                    val base = badgesMap[bid]
+                        ?: BadgeInjector.lookupBadgeById(bid)
+                        ?: BadgeInjector.parseGrantedBadge(ubObj, fallbackId = bid)
+                    val count = ubObj["count"]?.jsonPrimitive?.intOrNull ?: 1
+                    val grantedIso = ubObj["granted_at"]?.jsonPrimitive?.contentOrNull
+                    val grantedText = if (!grantedIso.isNullOrBlank() && grantedIso.length >= 10) {
+                        grantedIso.substring(0, 10)
+                    } else ""
+                    val tid = ubObj["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
+                    val pNum = ubObj["post_number"]?.jsonPrimitive?.intOrNull ?: 0
+                    result.add(
+                        base.copy(
+                            count = count,
+                            grantedAtText = grantedText,
+                            isEarned = true,
+                            topicId = tid,
+                            topicTitle = topicsMap[tid].orEmpty(),
+                            postNumber = pNum
+                        )
+                    )
+                }
+                if (result.isNotEmpty()) {
+                    return@withContext result.sortedWith(
+                        compareBy<GrantedBadge> { it.badgeTypeId }
+                            .thenByDescending { it.allowTitle }
+                            .thenByDescending { it.count }
+                    )
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        fetchPublicUserCard(clean)?.badges.orEmpty()
+    }
+
+    /**
+     * 获取全站所有徽章目录 (`GET /badges.json`) 并与本地官方目录深度合并
+     */
+    suspend fun fetchAllSiteBadges(): List<GrantedBadge> = withContext(Dispatchers.IO) {
+        val remoteBadges = mutableListOf<GrantedBadge>()
+        val res = executeHttp("https://linux.do/badges.json", method = "GET")
+        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
+            try {
+                val root = json.parseToJsonElement(res.second).jsonObject
+                (root["badges"] as? JsonArray)?.forEach { bElem ->
+                    val bObj = bElem as? JsonObject ?: return@forEach
+                    val parsed = BadgeInjector.parseGrantedBadge(bObj).copy(isEarned = false)
+                    remoteBadges.add(parsed)
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        val catalogDefaults = UniversalBadgeEngine.officialBadgeCatalog.map { it.copy(isEarned = false) }
+        val mergedByKey = linkedMapOf<String, GrantedBadge>()
+        for (badge in (remoteBadges + catalogDefaults)) {
+            val key = UniversalBadgeEngine.badgeDedupeKey(badge)
+            val existing = mergedByKey[key]
+            if (existing == null) {
+                mergedByKey[key] = badge
+            } else {
+                mergedByKey[key] = existing.copy(
+                    description = existing.description.ifBlank { badge.description },
+                    longDescription = existing.longDescription.ifBlank { badge.longDescription },
+                    icon = existing.icon ?: badge.icon,
+                    imageUrl = existing.imageUrl ?: badge.imageUrl,
+                    slug = existing.slug.ifBlank { badge.slug },
+                    grantCount = maxOf(existing.grantCount, badge.grantCount),
+                    allowTitle = existing.allowTitle || badge.allowTitle
+                )
+            }
+        }
+        mergedByKey.values.sortedWith(
+            compareBy<GrantedBadge> { it.badgeTypeId }
+                .thenByDescending { it.allowTitle }
+                .thenBy { it.id }
+        )
+    }
+
+    /**
+     * 获取某枚徽章的最近获得者记录 (`GET /user_badges.json?badge_id={id}`)
+     */
+    suspend fun fetchBadgeGrantees(
+        badgeId: Int,
+        username: String? = null
+    ): List<BadgeGranteeItem> = withContext(Dispatchers.IO) {
+        if (badgeId <= 0) return@withContext emptyList()
+        val queryUser = username?.trim()?.removePrefix("@")?.takeIf { it.isNotBlank() }
+        val url = buildString {
+            append("https://linux.do/user_badges.json?badge_id=$badgeId")
+            if (queryUser != null) {
+                append("&username=$queryUser")
+            }
+        }
+        val res = executeHttp(url, method = "GET") ?: return@withContext emptyList()
+        if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        try {
+            val root = json.parseToJsonElement(res.second).jsonObject
+            data class GranteeUserMeta(
+                val id: Int,
+                val username: String,
+                val displayName: String,
+                val avatarTemplate: String,
+                val admin: Boolean,
+                val moderator: Boolean,
+                val trustLevel: Int
+            )
+            val usersMap = mutableMapOf<Int, GranteeUserMeta>()
+            (root["users"] as? JsonArray)?.forEach { uElem ->
+                val uObj = uElem as? JsonObject ?: return@forEach
+                val uid = uObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                val uname = uObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$uid"
+                usersMap[uid] = GranteeUserMeta(
+                    id = uid,
+                    username = uname,
+                    displayName = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: uname,
+                    avatarTemplate = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: "",
+                    admin = uObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    moderator = uObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1
+                )
+            }
+            val topicsMap = mutableMapOf<Int, String>()
+            (root["topics"] as? JsonArray)?.forEach { tElem ->
+                val tObj = tElem as? JsonObject ?: return@forEach
+                val tid = tObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                val tTitle = tObj["title"]?.jsonPrimitive?.contentOrNull ?: ""
+                topicsMap[tid] = tTitle
+            }
+            val grantees = mutableListOf<BadgeGranteeItem>()
+            (root["user_badges"] as? JsonArray)?.forEach { ubElem ->
+                val ubObj = ubElem as? JsonObject ?: return@forEach
+                val ubId = ubObj["id"]?.jsonPrimitive?.intOrNull ?: 0
+                val uid = ubObj["user_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                val uMeta = usersMap[uid] ?: return@forEach
+                val grantedIso = ubObj["granted_at"]?.jsonPrimitive?.contentOrNull
+                val tid = ubObj["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
+                grantees.add(
+                    BadgeGranteeItem(
+                        id = ubId,
+                        userId = uid,
+                        username = uMeta.username,
+                        displayName = uMeta.displayName,
+                        avatarTemplate = uMeta.avatarTemplate,
+                        admin = uMeta.admin,
+                        moderator = uMeta.moderator,
+                        trustLevel = uMeta.trustLevel,
+                        grantedAtText = formatRelativeTime(grantedIso),
+                        count = ubObj["count"]?.jsonPrimitive?.intOrNull ?: 1,
+                        topicId = tid,
+                        topicTitle = topicsMap[tid].orEmpty(),
+                        postNumber = ubObj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
+                    )
+                )
+            }
+            grantees
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    private fun isTodayDateMonthDay(dateStr: String?, requirePreviousYear: Boolean): Boolean {
+        if (dateStr.isNullOrBlank() || dateStr.length < 10) return false
+        return try {
+            val datePart = dateStr.substring(0, 10)
+            val parsed = java.time.LocalDate.parse(datePart)
+            val today = java.time.LocalDate.now()
+            val sameMonthDay = parsed.monthValue == today.monthValue && parsed.dayOfMonth == today.dayOfMonth
+            if (!sameMonthDay) false
+            else if (requirePreviousYear) parsed.year < today.year
+            else true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     private fun parseSinglePostObject(
         pObj: JsonObject,
         fallbackIdx: Int,
@@ -2261,6 +2511,20 @@ object LinuxDoRepository {
         val trustLevel = pObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1
         val admin = pObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false
         val moderator = pObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false
+        val groupModerator = pObj["group_moderator"]?.jsonPrimitive?.booleanOrNull
+            ?: pObj["category_group_moderator"]?.jsonPrimitive?.booleanOrNull
+            ?: false
+        val iosDeviceName = pObj["ios_device_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val userStatusObj = pObj["user_status"] as? JsonObject
+        val userStatus = userStatusObj?.let { sObj ->
+            val desc = sObj["description"]?.jsonPrimitive?.contentOrNull
+            val emoji = sObj["emoji"]?.jsonPrimitive?.contentOrNull
+            if (!desc.isNullOrBlank() || !emoji.isNullOrBlank()) {
+                UserStatus(description = desc, emoji = emoji)
+            } else {
+                null
+            }
+        }
         val cooked = pObj["cooked"]?.jsonPrimitive?.contentOrNull ?: "<p></p>"
         val createdAtIso = pObj["created_at"]?.jsonPrimitive?.contentOrNull
         val replyCount = pObj["reply_count"]?.jsonPrimitive?.intOrNull ?: 0
@@ -2319,20 +2583,17 @@ object LinuxDoRepository {
         val rawMarkdown = pObj["raw"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
 
         // 同时解析本楼首次获授徽章 (`badges_granted`) 与行内用户徽章 (`user_badges` / `post_badges`)，
-        // 以及佩戴 `Only Apple Can Do` 头衔时的苹果 Logo 徽章注入
+        // 以及根据用户佩戴头衔自动解析对应徽章（如 `种子用户`、`全年不落`、`Only Apple Can Do`、`岂曰无衣?` 等）
         val firstGrantedBadges = parseInlinePostBadges(pObj["badges_granted"], isFirstGrant = true)
         val inlineUserBadges = parseInlinePostBadges(pObj["user_badges"], isFirstGrant = false)
         val inlinePostBadges = parseInlinePostBadges(pObj["post_badges"], isFirstGrant = false)
-        val appleTitleBadge = if (userTitle?.contains("only apple can do", ignoreCase = true) == true) {
-            listOf(UniversalBadgeEngine.createOnlyAppleCanDoBadge(isFirstGrant = false))
-        } else {
-            emptyList()
-        }
-        val inlineBadges = (firstGrantedBadges + inlineUserBadges + inlinePostBadges + appleTitleBadge)
-            .distinctBy { badge ->
-                if (UniversalBadgeEngine.isAppleBadge(badge)) "only-apple-can-do"
-                else "${badge.id}_${badge.name.trim().lowercase()}"
-            }
+        val titleBadge = UniversalBadgeEngine.resolveBadgeForUserTitle(userTitle)
+        val inlineBadges = UniversalBadgeEngine.mergeBadgesPreservingRichness(
+            firstGrantedBadges + inlineUserBadges + inlinePostBadges + listOfNotNull(titleBadge)
+        )
+
+        val cakedateRaw = pObj["user_cakedate"]?.jsonPrimitive?.contentOrNull
+        val birthdateRaw = pObj["user_birthdate"]?.jsonPrimitive?.contentOrNull
 
         return PostItemModel(
             id = pid,
@@ -2347,8 +2608,12 @@ object LinuxDoRepository {
             trustLevel = trustLevel,
             admin = admin,
             moderator = moderator,
+            groupModerator = groupModerator,
             isTopicOwner = postNumber == 1 || pObj["topic_owner"]?.jsonPrimitive?.booleanOrNull == true,
-            isTodayCakeday = pObj["user_cakedate"] != null && postNumber == 1,
+            isTodayCakeday = isTodayDateMonthDay(cakedateRaw, requirePreviousYear = true),
+            isTodayBirthday = isTodayDateMonthDay(birthdateRaw, requirePreviousYear = false),
+            iosDeviceName = iosDeviceName,
+            userStatus = userStatus,
             flair = FlairInfo(
                 url = pObj["flair_url"]?.jsonPrimitive?.contentOrNull,
                 name = pObj["flair_name"]?.jsonPrimitive?.contentOrNull,
