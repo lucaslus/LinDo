@@ -2430,19 +2430,27 @@ object LinuxDoRepository {
             val tObj = elem as? JsonObject ?: return@mapNotNull null
             val id = tObj["id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
             val title = tObj["title"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val posters = (tObj["posters"] as? JsonArray)?.mapNotNull { pElem ->
-                val uid = (pElem as? JsonObject)?.get("user_id")?.jsonPrimitive?.intOrNull
-                uid?.let { usersMap[it] }
+            val posterEntries = (tObj["posters"] as? JsonArray)?.mapNotNull { pElem ->
+                val pObj = pElem as? JsonObject ?: return@mapNotNull null
+                val uid = pObj["user_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+                val user = usersMap[uid] ?: return@mapNotNull null
+                val desc = pObj["description"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                desc to user
             }.orEmpty()
-            val op = posters.firstOrNull() ?: TopicUser(
+            val posters = posterEntries.map { it.second }
+            val op = posterEntries.firstOrNull { (desc, _) ->
+                desc.contains("Original Poster", ignoreCase = true) ||
+                    desc.contains("原始") ||
+                    desc.contains("Creator", ignoreCase = true)
+            }?.second ?: posters.firstOrNull() ?: TopicUser(
                 id = 0,
                 username = tObj["last_poster_username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo"
             )
             val categoryId = tObj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
             val (catName, catColor) = resolveCategoryMeta(categoryId)
             val tags = parseTagsArray(tObj["tags"] as? JsonArray)
-            val lastPostedIso = tObj["last_posted_at"]?.jsonPrimitive?.contentOrNull
-                ?: tObj["bumped_at"]?.jsonPrimitive?.contentOrNull
+            val lastPostedIso = tObj["bumped_at"]?.jsonPrimitive?.contentOrNull
+                ?: tObj["last_posted_at"]?.jsonPrimitive?.contentOrNull
                 ?: tObj["created_at"]?.jsonPrimitive?.contentOrNull
 
             TopicSummary(
@@ -2480,19 +2488,32 @@ object LinuxDoRepository {
     }
 
     private fun formatRelativeTime(isoString: String?): String {
-        if (isoString.isNullOrBlank()) return "刚刚"
+        val raw = isoString?.trim().orEmpty()
+        if (raw.isEmpty()) return ""
         return try {
-            val instant = Instant.parse(isoString)
-            val diffSec = Duration.between(instant, Instant.now()).seconds.coerceAtLeast(0L)
+            val instant = runCatching { Instant.parse(raw) }.getOrElse {
+                java.time.OffsetDateTime.parse(raw).toInstant()
+            }
+            val now = Instant.now()
+            val diffSec = Duration.between(instant, now).seconds.coerceAtLeast(0L)
             when {
-                diffSec < 60 -> "刚刚"
-                diffSec < 3600 -> "${diffSec / 60}m"
-                diffSec < 86400 -> "${diffSec / 3600}h"
-                diffSec < 86400 * 30 -> "${diffSec / 86400}d"
-                else -> "${diffSec / (86400 * 30)}mo"
+                diffSec < 60 -> "1m"
+                diffSec < 3600 -> "${(diffSec / 60).coerceAtLeast(1)}m"
+                diffSec < 86400 -> "${(diffSec / 3600).coerceAtLeast(1)}h"
+                diffSec < 86400 * 30 -> "${(diffSec / 86400).coerceAtLeast(1)}d"
+                else -> {
+                    val zone = java.time.ZoneId.systemDefault()
+                    val targetDate = instant.atZone(zone)
+                    val currentYear = now.atZone(zone).year
+                    if (targetDate.year == currentYear) {
+                        "${targetDate.monthValue}月${targetDate.dayOfMonth}日"
+                    } else {
+                        "${targetDate.year % 100}年${targetDate.monthValue}月"
+                    }
+                }
             }
         } catch (_: Throwable) {
-            "刚刚"
+            ""
         }
     }
 

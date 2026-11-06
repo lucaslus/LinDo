@@ -130,7 +130,7 @@ data class TopicSummary(
     val unseen: Boolean = false,
     val unreadPosts: Int = 0,
     val hasAcceptedAnswer: Boolean = false,
-    val lastPostedAt: String = "刚刚",
+    val lastPostedAt: String = "1m",
     val createdAtIso: String = "",
     val lastPostedAtIso: String = "",
     val originalPoster: TopicUser,

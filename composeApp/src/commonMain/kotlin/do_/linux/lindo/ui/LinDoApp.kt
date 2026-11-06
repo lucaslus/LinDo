@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -1019,7 +1021,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
             categoryName = "技术讨论",
             categoryColorHex = "0E76BD",
             tags = emptyList(),
-            lastPostedAt = "刚刚",
+            lastPostedAt = "",
             originalPoster = TopicUser(id = 0, username = "linuxdo")
         )
         openTopic(existing, targetPostNumber)
@@ -2856,14 +2858,16 @@ private fun CommunityHomeFeedPane(
                         }
 
                         // 底部波浪呼吸脉冲分页加载栏（触底无更多时展示零度娘“没有更多了”）
-                        item(key = "load_more_footer") {
-                            LinearPulseLoadingFooter(
-                                isLoadingMore = isLoadingMore,
-                                hasMore = hasMoreTopics,
-                                loadedCount = regularTopics.size,
-                                isError = loadMoreError,
-                                onLoadMore = onLoadMore
-                            )
+                        if (regularTopics.isNotEmpty()) {
+                            item(key = "load_more_footer") {
+                                LinearPulseLoadingFooter(
+                                    isLoadingMore = isLoadingMore,
+                                    hasMore = hasMoreTopics,
+                                    loadedCount = regularTopics.size,
+                                    isError = loadMoreError,
+                                    onLoadMore = onLoadMore
+                                )
+                            }
                         }
                     }
                 }
@@ -3134,6 +3138,15 @@ private fun CommunityTopicItem(
                     if (topic.views > 0) {
                         Text(
                             text = formatCompactNumber(topic.views),
+                            fontSize = 11.sp,
+                            color = palette.inkTertiary,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                    if (topic.lastPostedAt.isNotBlank()) {
+                        Text(
+                            text = topic.lastPostedAt,
                             fontSize = 11.sp,
                             color = palette.inkTertiary,
                             maxLines = 1,
@@ -3440,13 +3453,14 @@ private fun CommunityTopicReaderPane(
     var editPostRawText by remember(summary.id) { mutableStateOf("") }
     var isSavingPostEdit by remember(summary.id) { mutableStateOf(false) }
 
-    val catColor = remember(summary.categoryColorHex) {
-        LinuxDoSiteRules.parseHexColor(summary.categoryColorHex)
+    val catColor = remember(detail?.categoryColorHex ?: summary.categoryColorHex) {
+        LinuxDoSiteRules.parseHexColor(detail?.categoryColorHex ?: summary.categoryColorHex)
     }
     val op = summary.originalPoster
-    val opName = op.name?.takeIf { it.isNotBlank() } ?: op.username
-
     val posts = detail?.posts.orEmpty()
+    val effectiveOpUsername = remember(posts, op.username) {
+        posts.firstOrNull { it.postNumber == 1 }?.username?.takeIf { it.isNotBlank() } ?: op.username
+    }
     val streamIds = detail?.streamIds.orEmpty()
     val loadedIds = remember(posts) { posts.map { it.id }.toSet() }
     val remainingPostIds = remember(streamIds, loadedIds) {
@@ -3468,7 +3482,7 @@ private fun CommunityTopicReaderPane(
         }
     }
 
-    // 若从通知、搜索、书签或动态指定了目标楼层，加载完成后自动精准滚动到对应楼层
+    // 若从通知、搜索、书签或动态指定了目标楼层，加载完成后自动精准滚动到对应楼层（若目标楼层即当前返回窗口第 0 项，保留 index=0 话题标题头可见）
     var jumpedToTargetFloor by remember(summary.id, targetPostNumber) { mutableStateOf(false) }
     LaunchedEffect(summary.id, targetPostNumber, posts.size) {
         val targetFloor = targetPostNumber
@@ -3476,7 +3490,11 @@ private fun CommunityTopicReaderPane(
             val targetIdx = posts.indexOfFirst { it.postNumber == targetFloor }
             if (targetIdx >= 0) {
                 jumpedToTargetFloor = true
-                readerListState.scrollToItem(targetIdx + 1)
+                if (targetIdx == 0) {
+                    readerListState.scrollToItem(0)
+                } else {
+                    readerListState.scrollToItem(targetIdx + 1)
+                }
             }
         }
     }
@@ -3542,9 +3560,29 @@ private fun CommunityTopicReaderPane(
     }
 
     var showTopMoreMenu by remember(summary.id) { mutableStateOf(false) }
+    var expandTopBarTitle by remember(summary.id) { mutableStateOf(false) }
     val showCollapsedTitleInTopBar by remember {
         derivedStateOf {
-            readerListState.firstVisibleItemIndex > 0 || readerListState.firstVisibleItemScrollOffset > 110
+            readerListState.firstVisibleItemIndex > 0 || readerListState.firstVisibleItemScrollOffset > 220
+        }
+    }
+    val allTopicTags = remember(detail?.tags, summary.tags) {
+        detail?.tags?.ifEmpty { summary.tags } ?: summary.tags
+    }
+    val resolvedTitle = detail?.title ?: summary.title
+    val resolvedCategoryName = detail?.categoryName ?: summary.categoryName
+
+    fun toggleOnlyOpMode() {
+        val nextState = !onlyOpFilter
+        onlyOpFilter = nextState
+        scope.launch {
+            val filtered = LinuxDoRepository.fetchTopicDetail(
+                topicId = summary.id,
+                summaryFallback = summary,
+                trackVisit = false,
+                filterUsername = if (nextState) effectiveOpUsername else null
+            )
+            onDetailUpdated(filtered)
         }
     }
 
@@ -3554,13 +3592,15 @@ private fun CommunityTopicReaderPane(
             .background(palette.cardSurface)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        // 1. 极简移动端顶栏（绝不堆砌按钮：仅保留 返回 + 滚动标题 + 只看楼主切换 + 书签 + 更多菜单 `⋯`）
+        // 1. 融合官方 Discourse Sticky Header 的自适应顶栏：
+        // - 首屏未滚出标题区时：展示版块徽标与操作图标，不与下方完整大标题重复堆砌；
+        // - 向下滚动滚出标题区后：自动切换为最多 2 行（点击可展开完整多行）标题 + 版块/标签微缩栏，彻底解决长标题截断看不全的问题！
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp)
+                .heightIn(min = 50.dp)
                 .background(palette.cardSurface)
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (showBackButton) {
@@ -3570,52 +3610,90 @@ private fun CommunityTopicReaderPane(
                     tint = palette.inkPrimary,
                     onClick = onBack
                 )
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(8.dp))
             }
 
-            Text(
-                text = if (showCollapsedTitleInTopBar) {
-                    detail?.title ?: summary.title
-                } else {
-                    "话题正文"
-                },
-                fontSize = 15.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // 只看楼主 纯文字/轻量切换
-            Text(
-                text = if (onlyOpFilter) "全部楼层" else "只看楼主",
-                fontSize = 12.2.sp,
-                fontWeight = if (onlyOpFilter) FontWeight.Bold else FontWeight.Medium,
-                color = if (onlyOpFilter) palette.brandGold else palette.inkSecondary,
-                maxLines = 1,
-                softWrap = false,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable {
-                        val nextState = !onlyOpFilter
-                        onlyOpFilter = nextState
-                        scope.launch {
-                            val filtered = LinuxDoRepository.fetchTopicDetail(
-                                topicId = summary.id,
-                                summaryFallback = summary,
-                                trackVisit = false,
-                                filterUsername = if (nextState) op.username else null
+            if (showCollapsedTitleInTopBar) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { expandTopBarTitle = !expandTopBarTitle }
+                        .padding(vertical = 2.dp)
+                ) {
+                    Text(
+                        text = resolvedTitle,
+                        fontSize = 13.8.sp,
+                        lineHeight = 18.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.inkPrimary,
+                        maxLines = if (expandTopBarTitle) 6 else 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.5.dp)
+                                .clip(RoundedCornerShape(1.5.dp))
+                                .background(catColor)
+                        )
+                        Text(
+                            text = resolvedCategoryName,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = catColor,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        allTopicTags.take(2).forEach { tag ->
+                            Text(
+                                text = "#$tag",
+                                fontSize = 10.8.sp,
+                                color = palette.inkTertiary,
+                                maxLines = 1,
+                                softWrap = false
                             )
-                            onDetailUpdated(filtered)
                         }
                     }
-                    .padding(horizontal = 6.dp, vertical = 4.dp)
-            )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(catColor)
+                    )
+                    Text(
+                        text = resolvedCategoryName,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.inkPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (onlyOpFilter) {
+                        Text(
+                            text = "· 只看楼主",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.brandGold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
 
-            Spacer(modifier = Modifier.width(4.dp))
+            Spacer(modifier = Modifier.width(6.dp))
 
             // 收藏书签图标
             TonalCircleIconButton(
@@ -3641,7 +3719,7 @@ private fun CommunityTopicReaderPane(
 
             Spacer(modifier = Modifier.width(4.dp))
 
-            // 更多操作图标 (`⋯`)：收纳订阅、复制链接、打开原帖、刷新
+            // 更多操作图标 (`⋯`)：收纳只看楼主、订阅、复制链接、打开原帖、刷新
             TonalCircleIconButton(
                 icon = LinDoIcons.MoreHoriz,
                 contentDescription = "更多操作",
@@ -3656,10 +3734,33 @@ private fun CommunityTopicReaderPane(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(palette.subtleSurface)
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp, vertical = 9.dp),
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Row(
+                    modifier = Modifier.clickable {
+                        showTopMoreMenu = false
+                        toggleOnlyOpMode()
+                    },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.User,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = if (onlyOpFilter) palette.brandGold else palette.inkSecondary
+                    )
+                    Text(
+                        text = if (onlyOpFilter) "查看全部楼层" else "只看楼主",
+                        fontSize = 12.2.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (onlyOpFilter) palette.brandGold else palette.inkPrimary
+                    )
+                }
+
                 Row(
                     modifier = Modifier.clickable {
                         val prevLevel = notificationLevel
@@ -3781,7 +3882,7 @@ private fun CommunityTopicReaderPane(
                 .background(palette.cardSurface),
             contentPadding = PaddingValues(bottom = 24.dp)
         ) {
-            // 话题标题与版块/全量 Tag 头部区域（1:1 对齐 Linux.do Web `#topic-title`）
+            // 话题标题与版块/全量 Tag 头部区域（融合官方 Linux.do Web `#topic-title` 折行排版与话题筛选栏）
             item(key = "header_${summary.id}") {
                 Column(
                     modifier = Modifier
@@ -3789,38 +3890,42 @@ private fun CommunityTopicReaderPane(
                         .background(palette.cardSurface)
                         .padding(horizontal = 16.dp, vertical = 14.dp)
                 ) {
-                    // 完整多行大标题
+                    // 完整多行话题大标题（不截断，字号与行高贴合官方 Discourse 移动端阅读比例）
                     Text(
-                        text = detail?.title ?: summary.title,
-                        fontSize = 19.5f.sp,
+                        text = resolvedTitle,
+                        fontSize = 18.8f.sp,
                         fontWeight = FontWeight.Bold,
-                        lineHeight = 27.5f.sp,
-                        letterSpacing = (-0.3).sp,
+                        lineHeight = 26.2f.sp,
+                        letterSpacing = (-0.25).sp,
                         color = palette.inkPrimary
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Linux.do Web 风格：`■ 版块名` + 完整可横滑 `#Tag` 列表（绝不漏显或截断任何一个 Tag）
-                    val allTags = (detail?.tags?.ifEmpty { summary.tags } ?: summary.tags)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    // Linux.do 官方折行风格：`■ 版块名` + 自动折行 `#Tag` 标签组（无需横滑即可一眼看全所有板块与标签）
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(catColor.copy(alpha = if (palette.isDark) 0.16f else 0.10f))
+                                .padding(horizontal = 7.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Box(
                                 modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(RoundedCornerShape(2.dp))
+                                    .size(7.dp)
+                                    .clip(RoundedCornerShape(1.8.dp))
                                     .background(catColor)
                             )
                             Spacer(modifier = Modifier.width(5.dp))
                             Text(
-                                text = detail?.categoryName ?: summary.categoryName,
-                                fontSize = 12.8.sp,
+                                text = resolvedCategoryName,
+                                fontSize = 12.2.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = catColor,
                                 maxLines = 1,
@@ -3828,22 +3933,29 @@ private fun CommunityTopicReaderPane(
                             )
                         }
 
-                        allTags.forEach { tag ->
-                            Text(
-                                text = "#$tag",
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = palette.inkSecondary,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier.clickable { onSelectTag(tag) }
-                            )
+                        allTopicTags.forEach { tag ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(palette.subtleSurface)
+                                    .clickable { onSelectTag(tag) }
+                                    .padding(horizontal = 7.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "#$tag",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(11.dp))
 
-                    // 话题统计概览栏（楼层数 · 阅读数 · 点赞数 + 直达末楼）
+                    // 话题统计概览与筛选栏（楼层数 · 浏览 · 点赞 | 只看楼主 · 直达末楼）
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -3856,17 +3968,32 @@ private fun CommunityTopicReaderPane(
                             modifier = Modifier.weight(1f)
                         )
 
+                        Text(
+                            text = if (onlyOpFilter) "全部楼层" else "只看楼主",
+                            fontSize = 12.sp,
+                            fontWeight = if (onlyOpFilter) FontWeight.Bold else FontWeight.Medium,
+                            color = if (onlyOpFilter) palette.brandGold else palette.inkSecondary,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { toggleOnlyOpMode() }
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+
                         if (posts.size > 3) {
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = "↓ 直达末楼",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = palette.inkSecondary,
-                                modifier = Modifier.clickable {
-                                    scope.launch {
-                                        readerListState.animateScrollToItem(posts.size)
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        scope.launch {
+                                            readerListState.animateScrollToItem(posts.size)
+                                        }
                                     }
-                                }
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
                             )
                         }
                     }
@@ -3892,7 +4019,7 @@ private fun CommunityTopicReaderPane(
                     post = post,
                     onOpenWebUrl = onOpenWebUrl,
                     originalUrl = "https://linux.do/t/topic/${summary.id}/${post.postNumber}",
-                    opUsername = op.username,
+                    opUsername = effectiveOpUsername,
                     fontScale = fontScale,
                     enableAnimations = enableAnimations,
                     onInspectBadge = onInspectBadge,
@@ -5368,6 +5495,8 @@ private fun CommunityMessagesScreen(
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
+    val notifListState = rememberLazyListState()
+    val pmListState = rememberLazyListState()
 
     LaunchedEffect(isAuthorized, subTab, username, reloadToken) {
         if (!isAuthorized) return@LaunchedEffect
@@ -5378,12 +5507,14 @@ private fun CommunityMessagesScreen(
                 val loaded = LinuxDoRepository.fetchUserNotifications()
                 notifications = loaded
                 onUnreadCountSynced(loaded.count { !it.read })
+                notifListState.scrollToItem(0)
             } else if (subTab == 1) {
                 val effectiveUsername = username.ifBlank {
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
                 }
                 if (effectiveUsername.isNotBlank()) {
                     privateMessages = LinuxDoRepository.fetchPrivateMessages(effectiveUsername, sent = false)
+                    pmListState.scrollToItem(0)
                 }
             }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -5392,6 +5523,12 @@ private fun CommunityMessagesScreen(
             loadError = error.message ?: "加载失败，请重试"
         } finally {
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(categoryFilter, subTab) {
+        if (subTab == 0) {
+            notifListState.scrollToItem(0)
         }
     }
 
@@ -5557,270 +5694,354 @@ private fun CommunityMessagesScreen(
 
         if (subTab == 1) {
             // 私信列表与写私信入口
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 128.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "近期私信会话",
-                            fontSize = 14.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.activeChipBg)
-                                .clickable { onOpenNewPrivateMessage() }
-                                .padding(horizontal = 11.dp, vertical = 5.dp)
+            if (isLoading && privateMessages.isEmpty()) {
+                LinearShimmerTopicSkeletonList(isCompact = true)
+            } else {
+                LazyColumn(
+                    state = pmListState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 128.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    item(key = "pm_header") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "+ 写私信 / 全部",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.activeChipText
+                                text = "近期私信会话",
+                                fontSize = 14.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.inkPrimary,
+                                modifier = Modifier.weight(1f)
                             )
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(palette.activeChipBg)
+                                    .clickable { onOpenNewPrivateMessage() }
+                                    .padding(horizontal = 11.dp, vertical = 5.dp)
+                            ) {
+                                Text(
+                                    text = "+ 写私信 / 全部",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.activeChipText
+                                )
+                            }
                         }
                     }
-                }
 
-                if (loadError != null && privateMessages.isEmpty()) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 24.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoStatePanel(
-                                state = LinDoMascotState.NetworkError,
-                                title = "私信列表暂时无法加载",
-                                detail = loadError!!,
-                                onRetry = { reloadToken++ },
-                                actionLabel = "重新加载"
+                    if (loadError != null && privateMessages.isEmpty()) {
+                        item(key = "pm_error") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoStatePanel(
+                                    state = LinDoMascotState.NetworkError,
+                                    title = "私信列表暂时无法加载",
+                                    detail = loadError!!,
+                                    onRetry = { reloadToken++ },
+                                    actionLabel = "重新加载"
+                                )
+                            }
+                        }
+                    } else if (privateMessages.isEmpty() && !isLoading) {
+                        item(key = "pm_empty") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 48.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoEmptyState(message = "暂无私信记录，点击右上角可发起私信")
+                            }
+                        }
+                    } else if (privateMessages.isNotEmpty()) {
+                        itemsIndexed(privateMessages, key = { _, m -> m.id }) { _, msg ->
+                            CommunityTopicItem(
+                                topic = msg,
+                                isSelected = false,
+                                isCompact = true,
+                                enableAnimations = false,
+                                onClick = { onSelectMessageTopic(msg) }
                             )
                         }
-                    }
-                } else if (privateMessages.isEmpty() && !isLoading) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 48.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState(message = "暂无私信记录，点击右上角可发起私信")
+                        item(key = "pm_end_footer") {
+                            LinearPulseLoadingFooter(
+                                isLoadingMore = false,
+                                hasMore = false,
+                                loadedCount = privateMessages.size,
+                                doneText = "没有更多私信了 · 零度娘已经翻到底啦",
+                                onLoadMore = {}
+                            )
                         }
-                    }
-                } else {
-                    itemsIndexed(privateMessages, key = { _, m -> m.id }) { _, msg ->
-                        CommunityTopicItem(
-                            topic = msg,
-                            isSelected = false,
-                            isCompact = true,
-                            enableAnimations = false,
-                            onClick = { onSelectMessageTopic(msg) }
-                        )
-                    }
-                    item(key = "pm_end_footer") {
-                        LinearPulseLoadingFooter(
-                            isLoadingMore = false,
-                            hasMore = false,
-                            loadedCount = privateMessages.size,
-                            doneText = "没有更多私信了 · 零度娘已经翻到底啦",
-                            onLoadMore = {}
-                        )
                     }
                 }
             }
         } else {
-            // 通知流列表（左莫兰迪圆头像 + 动作标题 + 右未读点 + #F4F5F7 引用框 + 时间）
+            // 通知流列表（左侧头像 + 语义类型角标 + 顶行右侧时间/未读点 + 清晰区分回复正文与目标话题）
             if (isLoading && notifications.isEmpty()) {
-                LinDoLoadingIndicator(
-                    modifier = Modifier.fillMaxWidth().height(44.dp)
-                )
-            }
-
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(palette.cardSurface),
-                contentPadding = PaddingValues(top = 4.dp, bottom = 128.dp)
-            ) {
-                if (loadError != null && notifications.isEmpty()) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 32.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoStatePanel(
-                                state = LinDoMascotState.NetworkError,
-                                title = "通知消息暂时无法加载",
-                                detail = loadError!!,
-                                onRetry = { reloadToken++ },
-                                actionLabel = "重新同步"
-                            )
-                        }
-                    }
-                } else if (filteredNotifications.isEmpty() && !isLoading) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 56.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState(message = "暂无相关通知消息")
-                        }
-                    }
-                } else {
-                    itemsIndexed(filteredNotifications, key = { _, item -> item.id }) { _, item ->
-                        val primaryActor = item.actingUsername.substringBefore("、").trim()
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    if (!item.read) {
-                                        val updated = notifications.map {
-                                            if (it.id == item.id) it.copy(read = true) else it
-                                        }
-                                        notifications = updated
-                                        onUnreadCountSynced(updated.count { !it.read })
-                                    }
-                                    when {
-                                        item.topicId > 0 -> {
-                                            onSelectTopicId(item.topicId, item.title, item.postNumber)
-                                        }
-                                        item.badgeId > 0 -> {
-                                            onInspectBadge(
-                                                GrantedBadge(
-                                                    id = item.badgeId,
-                                                    name = item.badgeName.ifBlank { item.title },
-                                                    description = "LINUX DO 社区授予徽章"
-                                                )
-                                            )
-                                        }
-                                        item.notificationType in 29..33 -> {
-                                            val chatUrl = if (item.chatChannelId > 0) {
-                                                "https://linux.do/chat/c/-/${item.chatChannelId}"
-                                            } else {
-                                                "https://linux.do/chat"
-                                            }
-                                            onOpenWebUrl(chatUrl)
-                                        }
-                                        primaryActor.isNotBlank() && primaryActor != "系统" -> {
-                                            onInspectUser(primaryActor)
-                                        }
-                                    }
-                                }
-                                .padding(horizontal = 16.dp, vertical = 12.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.Top
+                LinearShimmerTopicSkeletonList(isCompact = true)
+            } else {
+                LazyColumn(
+                    state = notifListState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(palette.cardSurface),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 128.dp)
+                ) {
+                    if (loadError != null && notifications.isEmpty()) {
+                        item(key = "notif_error") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 32.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Box(
-                                    modifier = Modifier.clickable(
-                                        enabled = primaryActor.isNotBlank() && primaryActor != "系统"
-                                    ) {
-                                        onInspectUser(primaryActor)
-                                    }
-                                ) {
-                                    SmartAvatar(
-                                        username = item.actingUsername.ifBlank { "L" },
-                                        avatarTemplate = item.actingAvatarTemplate,
-                                        animatedAvatar = null,
-                                        primaryGroupName = null,
-                                        flair = null,
-                                        size = 38.dp,
-                                        enableAnimations = false
-                                    )
-                                }
-
-                                Spacer(modifier = Modifier.width(12.dp))
-
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = item.actingUsername,
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = palette.inkPrimary
-                                        )
-                                        Spacer(modifier = Modifier.width(5.dp))
-                                        Text(
-                                            text = item.typeLabel,
-                                            fontSize = 13.5.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = palette.inkPrimary,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        if (!item.read) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(7.dp)
-                                                    .clip(CircleShape)
-                                                    .background(palette.tabIndicatorColor)
-                                            )
-                                        }
-                                    }
-
-                                    Spacer(modifier = Modifier.height(6.dp))
-
-                                    // #F4F5F7 浅灰圆角引用内容框
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(palette.subtleSurface)
-                                            .padding(horizontal = 11.dp, vertical = 8.dp)
-                                    ) {
-                                        Text(
-                                            text = item.title,
-                                            fontSize = 12.8.sp,
-                                            color = palette.inkSecondary,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-
-                                    Spacer(modifier = Modifier.height(5.dp))
-
-                                    Text(
-                                        text = item.createdAtText,
-                                        fontSize = 11.2.sp,
-                                        color = palette.inkTertiary
-                                    )
-                                }
+                                LinDoStatePanel(
+                                    state = LinDoMascotState.NetworkError,
+                                    title = "通知消息暂时无法加载",
+                                    detail = loadError!!,
+                                    onRetry = { reloadToken++ },
+                                    actionLabel = "重新同步"
+                                )
                             }
                         }
+                    } else if (filteredNotifications.isEmpty() && !isLoading) {
+                        item(key = "notif_empty") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 56.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoEmptyState(message = "暂无相关通知消息")
+                            }
+                        }
+                    } else if (filteredNotifications.isNotEmpty()) {
+                        itemsIndexed(filteredNotifications, key = { _, item -> item.id }) { _, item ->
+                            val primaryActor = item.actingUsername.substringBefore("、").trim()
+                            val (badgeIcon, badgeColor) = when (item.notificationType) {
+                                5, 19, 25 -> LinDoIcons.HeartFilled to Color(0xFFE11D48)
+                                2, 3, 6, 7, 9, 11, 38, 802 -> LinDoIcons.MessageCircle to Color(0xFF0E76BD)
+                                1, 15, 29, 30, 31, 32, 33 -> LinDoIcons.AtSign to Color(0xFFD97706)
+                                12 -> LinDoIcons.Sparkles to Color(0xFF059669)
+                                else -> LinDoIcons.Bell to Color(0xFF059669)
+                            }
+                            val hasDistinctExcerpt = item.excerpt.isNotBlank() &&
+                                !item.excerpt.equals(item.title, ignoreCase = true)
 
-                        HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = 16.dp),
-                            thickness = 0.5.dp,
-                            color = palette.hairline
-                        )
-                    }
-                    item(key = "notifications_end_footer") {
-                        LinearPulseLoadingFooter(
-                            isLoadingMore = false,
-                            hasMore = false,
-                            loadedCount = filteredNotifications.size,
-                            doneText = "没有更多通知了 · 零度娘已经翻到底啦",
-                            onLoadMore = {}
-                        )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        if (!item.read) {
+                                            palette.brandGold.copy(alpha = if (palette.isDark) 0.06f else 0.04f)
+                                        } else {
+                                            Color.Transparent
+                                        }
+                                    )
+                                    .clickable {
+                                        if (!item.read) {
+                                            val updated = notifications.map {
+                                                if (it.id == item.id) it.copy(read = true) else it
+                                            }
+                                            notifications = updated
+                                            onUnreadCountSynced(updated.count { !it.read })
+                                        }
+                                        when {
+                                            item.topicId > 0 -> {
+                                                onSelectTopicId(item.topicId, item.title, item.postNumber)
+                                            }
+                                            item.badgeId > 0 -> {
+                                                onInspectBadge(
+                                                    GrantedBadge(
+                                                        id = item.badgeId,
+                                                        name = item.badgeName.ifBlank { item.title },
+                                                        description = "LINUX DO 社区授予徽章"
+                                                    )
+                                                )
+                                            }
+                                            item.notificationType in 29..33 -> {
+                                                val chatUrl = if (item.chatChannelId > 0) {
+                                                    "https://linux.do/chat/c/-/${item.chatChannelId}"
+                                                } else {
+                                                    "https://linux.do/chat"
+                                                }
+                                                onOpenWebUrl(chatUrl)
+                                            }
+                                            primaryActor.isNotBlank() && primaryActor != "系统" -> {
+                                                onInspectUser(primaryActor)
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    // 头像 + 右下角语义动作类型小角标（点赞红心 / 回复气泡 / @ 提及 / 徽章星标）
+                                    Box(
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clickable(
+                                                enabled = primaryActor.isNotBlank() && primaryActor != "系统"
+                                            ) {
+                                                onInspectUser(primaryActor)
+                                            }
+                                    ) {
+                                        SmartAvatar(
+                                            username = item.actingUsername.ifBlank { "L" },
+                                            avatarTemplate = item.actingAvatarTemplate,
+                                            animatedAvatar = null,
+                                            primaryGroupName = null,
+                                            flair = null,
+                                            size = 38.dp,
+                                            enableAnimations = false
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.BottomEnd)
+                                                .size(16.dp)
+                                                .clip(CircleShape)
+                                                .background(badgeColor)
+                                                .border(1.2.dp, palette.cardSurface, CircleShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = badgeIcon,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(9.5.dp),
+                                                tint = Color.White
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.width(12.dp))
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        // 第一行：触发用户 + 动作标签 | 右侧相对时间 + 未读圆点
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.weight(1f),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = item.actingUsername,
+                                                    fontSize = 13.8.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = palette.inkPrimary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = item.typeLabel,
+                                                    fontSize = 12.8.sp,
+                                                    fontWeight = if (!item.read) FontWeight.SemiBold else FontWeight.Normal,
+                                                    color = if (!item.read) badgeColor else palette.inkSecondary,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                            }
+
+                                            Spacer(modifier = Modifier.width(8.dp))
+
+                                            if (item.createdAtText.isNotBlank()) {
+                                                Text(
+                                                    text = item.createdAtText,
+                                                    fontSize = 11.5.sp,
+                                                    color = palette.inkTertiary,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                            }
+                                            if (!item.read) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(7.dp)
+                                                        .clip(CircleShape)
+                                                        .background(palette.tabIndicatorColor)
+                                                )
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.height(6.dp))
+
+                                        if (hasDistinctExcerpt) {
+                                            // 有具体回复/提及正文：先直观展示正文，再以精简话题条关联来源话题与楼层
+                                            Text(
+                                                text = item.excerpt,
+                                                fontSize = 13.8.sp,
+                                                lineHeight = 19.5.sp,
+                                                fontWeight = if (!item.read) FontWeight.Medium else FontWeight.Normal,
+                                                color = if (!item.read) palette.inkPrimary else palette.inkSecondary,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                        }
+
+                                        // 目标话题 / 详情行（带楼层号胶囊提示）
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(palette.subtleSurface)
+                                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = item.title,
+                                                fontSize = 12.8.sp,
+                                                lineHeight = 18.sp,
+                                                fontWeight = if (!item.read && !hasDistinctExcerpt) FontWeight.SemiBold else FontWeight.Normal,
+                                                color = if (!item.read) palette.inkPrimary else palette.inkSecondary,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            if (item.topicId > 0 && item.postNumber > 1) {
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = "#${item.postNumber}",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = palette.inkTertiary,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                                thickness = 0.5.dp,
+                                color = palette.hairline
+                            )
+                        }
+                        item(key = "notifications_end_footer") {
+                            LinearPulseLoadingFooter(
+                                isLoadingMore = false,
+                                hasMore = false,
+                                loadedCount = filteredNotifications.size,
+                                doneText = "没有更多通知了 · 零度娘已经翻到底啦",
+                                onLoadMore = {}
+                            )
+                        }
                     }
                 }
             }
@@ -9156,14 +9377,16 @@ private fun GlobalSearchModalSheet(
                         }
                     }
 
-                    item(key = "search_results_end_footer") {
-                        LinearPulseLoadingFooter(
-                            isLoadingMore = false,
-                            hasMore = false,
-                            loadedCount = results.size,
-                            doneText = "没有更多了 · 共找到 ${results.size} 条相关结果",
-                            onLoadMore = {}
-                        )
+                    if (results.isNotEmpty()) {
+                        item(key = "search_results_end_footer") {
+                            LinearPulseLoadingFooter(
+                                isLoadingMore = false,
+                                hasMore = false,
+                                loadedCount = results.size,
+                                doneText = "没有更多了 · 共找到 ${results.size} 条相关结果",
+                                onLoadMore = {}
+                            )
+                        }
                     }
                 }
             }

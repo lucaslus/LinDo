@@ -33,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -95,70 +96,79 @@ fun SmartAvatar(
             label = "glow_alpha")
     } else rememberUpdatedState(0.25f)
 
-    var animatedReady by remember(animatedUrl) { mutableStateOf(false) }
-    var staticLoaded by remember(staticUrl) { mutableStateOf(false) }
+    androidx.compose.runtime.key(username, staticUrl, animatedUrl) {
+        var animatedReady by remember { mutableStateOf(false) }
+        var staticLoaded by remember { mutableStateOf(false) }
 
-    Box(
-        modifier = modifier.size(size).drawBehind {
-            glowColor?.let { glow ->
-                drawCircle(brush = Brush.radialGradient(
-                    listOf(glow.copy(alpha = glowAlpha.value), glow.copy(alpha = 0f)),
-                    radius = this.size.minDimension * 0.8f), radius = this.size.minDimension * 0.8f)
-            }
-        },
-        contentAlignment = Alignment.Center
-    ) {
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clip(shape)
-                .background(avatarFallbackColor(username))
-                .border(
-                    width = 0.5.dp,
-                    color = Color(0x14000000),
-                    shape = shape
-                ),
+            modifier = modifier.size(size).drawBehind {
+                glowColor?.let { glow ->
+                    drawCircle(brush = Brush.radialGradient(
+                        listOf(glow.copy(alpha = glowAlpha.value), glow.copy(alpha = 0f)),
+                        radius = this.size.minDimension * 0.8f), radius = this.size.minDimension * 0.8f)
+                }
+            },
             contentAlignment = Alignment.Center
         ) {
-            if (!staticLoaded && !animatedReady) {
-                Text(
-                    text = username.firstOrNull()?.uppercase() ?: "L",
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = (size.value * 0.40f).sp
-                )
-            }
-
-            if (!animatedReady && staticUrl.isNotEmpty()) {
-                AsyncImage(
-                    model = staticUrl,
-                    contentDescription = username,
-                    contentScale = ContentScale.Crop,
-                    onSuccess = { staticLoaded = true },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-
-            if (!animatedUrl.isNullOrBlank()) {
-                AsyncImage(
-                    model = animatedUrl,
-                    contentDescription = "$username animated avatar",
-                    contentScale = ContentScale.Crop,
-                    onSuccess = { animatedReady = true },
-                    onError = { animatedReady = false },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        }
-
-        if (flair != null && flair.hasFlair && size >= 28.dp) {
-            FlairBadgeOverlay(
-                flair = flair,
-                badgeSize = (size.value * 0.36f).coerceIn(13f, 16f).dp,
+            Box(
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .offset(x = 1.dp, y = 1.dp)
-            )
+                    .fillMaxSize()
+                    .clip(shape)
+                    .background(avatarFallbackColor(username))
+                    .border(
+                        width = 0.5.dp,
+                        color = Color(0x14000000),
+                        shape = shape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                if (!staticLoaded && !animatedReady) {
+                    Text(
+                        text = username.firstOrNull()?.uppercase() ?: "L",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = (size.value * 0.40f).sp
+                    )
+                }
+
+                if (!animatedReady && staticUrl.isNotEmpty()) {
+                    AsyncImage(
+                        model = staticUrl,
+                        contentDescription = username,
+                        contentScale = ContentScale.Crop,
+                        onLoading = { staticLoaded = false },
+                        onSuccess = { staticLoaded = true },
+                        onError = { staticLoaded = false },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .alpha(if (staticLoaded) 1f else 0f)
+                    )
+                }
+
+                if (!animatedUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = animatedUrl,
+                        contentDescription = "$username animated avatar",
+                        contentScale = ContentScale.Crop,
+                        onLoading = { animatedReady = false },
+                        onSuccess = { animatedReady = true },
+                        onError = { animatedReady = false },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .alpha(if (animatedReady) 1f else 0f)
+                    )
+                }
+            }
+
+            if (flair != null && flair.hasFlair && size >= 28.dp) {
+                FlairBadgeOverlay(
+                    flair = flair,
+                    badgeSize = (size.value * 0.36f).coerceIn(13f, 16f).dp,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .offset(x = 1.dp, y = 1.dp)
+                )
+            }
         }
     }
 }
