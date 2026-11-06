@@ -99,10 +99,13 @@ fun LinDoBrandWordmark(
             )
         }
         Row(
-            verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            LindoColorWordmarkText(isDark = isDark, fontSizeSp = fontSizeSp)
+            LindoColorWordmarkText(
+                isDark = isDark,
+                fontSizeSp = fontSizeSp,
+                modifier = Modifier.alignByBaseline()
+            )
             if (showMotto) {
                 Text(
                     text = "真诚 · 友善 · 团结 · 专业",
@@ -111,7 +114,7 @@ fun LinDoBrandWordmark(
                     letterSpacing = 0.15.sp,
                     color = brandSecondary(isDark),
                     maxLines = 1,
-                    modifier = Modifier.padding(bottom = 2.5.dp)
+                    modifier = Modifier.alignByBaseline()
                 )
             }
         }

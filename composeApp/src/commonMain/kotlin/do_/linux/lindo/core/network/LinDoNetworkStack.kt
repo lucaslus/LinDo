@@ -1542,6 +1542,11 @@ object LinuxDoRepository {
                 val chatChannelTitle = dataObj?.get("chat_channel_title")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 val groupName = dataObj?.get("group_name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 val customMessage = dataObj?.get("message")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val rawExcerpt = dataObj?.get("excerpt")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: obj["excerpt"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("chat_message")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("original_post_excerpt")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: customMessage
                 val slugTitle = slug.takeIf { it.isNotBlank() && it != "topic" }?.replace('-', ' ')
                 val title = when {
                     rawTopicTitle != null -> rawTopicTitle
@@ -1557,12 +1562,12 @@ object LinuxDoRepository {
                     nType in 29..33 -> "收到一条实时聊天消息 · 点击打开聊天"
                     slugTitle != null -> slugTitle
                     topicId > 0 -> "话题 #$topicId"
-                    primaryActor != "系统" -> "来自 @$primaryActor 的互动 · 点击查看主页"
+                    primaryActor != "系统" -> "来自 @$primaryActor 的社区动态 · 点击查看 @$primaryActor 的主页"
                     else -> "系统消息通知"
                 }
                 val actingAvatarTemplate = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull
                     ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull
-                val excerpt = customMessage.orEmpty()
+                val excerpt = cleanSearchSnippet(rawExcerpt)
                 UserNotificationItem(
                     id = id,
                     notificationType = nType,
