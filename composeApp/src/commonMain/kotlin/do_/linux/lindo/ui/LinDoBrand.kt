@@ -77,15 +77,15 @@ fun LindoColorWordmarkText(
 @Composable
 fun LinDoBrandWordmark(
     isDark: Boolean = false,
-    fontSizeSp: Float = 22f,
-    iconSize: Dp = 34.dp,
+    fontSizeSp: Float = 24.5f,
+    iconSize: Dp = 36.dp,
     showMotto: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(9.dp)
     ) {
         Box(
             modifier = Modifier.size(iconSize),
@@ -99,7 +99,7 @@ fun LinDoBrandWordmark(
             )
         }
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
         ) {
             LindoColorWordmarkText(
                 isDark = isDark,
@@ -109,9 +109,9 @@ fun LinDoBrandWordmark(
             if (showMotto) {
                 Text(
                     text = "真诚 · 友善 · 团结 · 专业",
-                    fontSize = 10.2.sp,
+                    fontSize = 10.8.sp,
                     fontWeight = FontWeight.Medium,
-                    letterSpacing = 0.15.sp,
+                    letterSpacing = 0.2.sp,
                     color = brandSecondary(isDark),
                     maxLines = 1,
                     modifier = Modifier.alignByBaseline()

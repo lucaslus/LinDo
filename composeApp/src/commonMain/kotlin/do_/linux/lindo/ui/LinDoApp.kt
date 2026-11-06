@@ -2362,12 +2362,12 @@ private fun CommunityHomeFeedPane(
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // 1. 理想型社区品牌顶栏：LINUX DO + 新的理想型社区 + 右侧搜索/通知/头像
+            // 1. 理想型社区品牌顶栏：Lindo + 真诚 · 友善 · 团结 · 专业 + 右侧刷新/通知/头像（整体高度与字号呼吸感升级）
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(palette.cardSurface)
-                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 6.dp)
+                    .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 9.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -2384,8 +2384,8 @@ private fun CommunityHomeFeedPane(
                     ) {
                         LinDoBrandWordmark(
                             isDark = palette.isDark,
-                            fontSizeSp = 22f,
-                            iconSize = 34.dp,
+                            fontSizeSp = 24.5f,
+                            iconSize = 36.dp,
                             showMotto = true
                         )
                     }
@@ -2393,7 +2393,7 @@ private fun CommunityHomeFeedPane(
                     // 顶部快捷刷新
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
                             .clickable { onRefresh() },
                         contentAlignment = Alignment.Center
@@ -2401,17 +2401,17 @@ private fun CommunityHomeFeedPane(
                         Icon(
                             imageVector = LinDoIcons.Refresh,
                             contentDescription = "刷新最新话题",
-                            modifier = Modifier.size(17.dp),
+                            modifier = Modifier.size(18.dp),
                             tint = palette.inkPrimary
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(2.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
 
                     // 顶部通知铃铛（带主题色未读小红点/琥珀点）
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
                             .clickable { onOpenNotifications() },
                         contentAlignment = Alignment.Center
@@ -2419,7 +2419,7 @@ private fun CommunityHomeFeedPane(
                         Icon(
                             imageVector = LinDoIcons.Bell,
                             contentDescription = "消息通知",
-                            modifier = Modifier.size(19.dp),
+                            modifier = Modifier.size(19.5.dp),
                             tint = palette.inkPrimary
                         )
                         if (unreadNotificationCount > 0) {
@@ -2436,35 +2436,35 @@ private fun CommunityHomeFeedPane(
 
                     Spacer(modifier = Modifier.width(6.dp))
 
-                    // 纯净圆形个人头像（不套 Linux.do 外圈，略微放大提升触控与视觉亲和力）
+                    // 纯净圆形个人头像（与左侧零度娘 icon 严格同尺寸 36.dp）
                     GoogleAccountRingAvatar(
                         letter = currentUser?.displayName?.takeIf { it.isNotBlank() }
                             ?: currentUser?.username
                             ?: "L",
                         avatarUrl = currentUser?.avatarTemplate,
                         animatedAvatar = currentUser?.animatedAvatar,
-                        avatarSize = 34.dp,
+                        avatarSize = 36.dp,
                         onClick = onAvatarClick
                     )
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(11.dp))
 
                 // 2. 全圆角胶囊搜索入口（图标、占位符与胶囊框严格居中对齐，点击直接唤起全站实时搜索抽屉）
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(36.dp)
+                        .height(38.dp)
                         .clip(RoundedCornerShape(99.dp))
                         .background(palette.subtleSurface)
                         .clickable { onOpenGlobalSearch() }
-                        .padding(horizontal = 14.dp),
+                        .padding(horizontal = 15.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Search,
                         contentDescription = "全站搜索",
-                        modifier = Modifier.size(15.dp),
+                        modifier = Modifier.size(15.5.dp),
                         tint = palette.inkTertiary
                     )
 
@@ -2479,7 +2479,7 @@ private fun CommunityHomeFeedPane(
                         Text(
                             text = if (searchQuery.isEmpty()) "搜索话题、用户和你感兴趣的事" else searchQuery,
                             style = TextStyle(
-                                fontSize = 13.sp,
+                                fontSize = 13.2.sp,
                                 lineHeight = 16.sp,
                                 color = if (searchQuery.isEmpty()) palette.inkTertiary else palette.inkPrimary
                             ),
@@ -2503,9 +2503,9 @@ private fun CommunityHomeFeedPane(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // 3. QQ音乐级大小字阶频道 Tab（选中 18sp ExtraBold，未选中 14.5sp Medium，底部 11x3dp 胶囊横条）
+                // 3. 大小字阶频道 Tab（选中 18.5sp ExtraBold，未选中 14.8sp Medium，底部 12x3dp 胶囊横条）
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -2514,7 +2514,7 @@ private fun CommunityHomeFeedPane(
                         modifier = Modifier
                             .weight(1f)
                             .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        horizontalArrangement = Arrangement.spacedBy(22.dp),
                         verticalAlignment = Alignment.Bottom
                     ) {
                         FeedSortFilter.entries.forEach { sort ->
@@ -2530,14 +2530,14 @@ private fun CommunityHomeFeedPane(
                             ) {
                                 Text(
                                     text = sort.label,
-                                    fontSize = if (selected) 18.sp else 14.5.sp,
+                                    fontSize = if (selected) 18.5.sp else 14.8.sp,
                                     fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
                                     letterSpacing = if (selected) (-0.3).sp else 0.sp,
                                     color = if (selected) palette.inkPrimary else palette.inkSecondary,
                                     maxLines = 1,
                                     softWrap = false
                                 )
-                                Spacer(modifier = Modifier.height(4.dp))
+                                Spacer(modifier = Modifier.height(5.dp))
                                 Box(
                                     modifier = Modifier
                                         .width(12.dp)
@@ -2551,10 +2551,10 @@ private fun CommunityHomeFeedPane(
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // 右侧「卡片 / 紧凑」展示形式切换（仅保留形象直观的视图切换 Icon，去除多余文字）
+                    // 右侧「卡片 / 紧凑」展示形式切换
                     Box(
                         modifier = Modifier
-                            .size(30.dp)
+                            .size(32.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .clickable { onToggleCompactMode() },
                         contentAlignment = Alignment.Center
@@ -2562,13 +2562,13 @@ private fun CommunityHomeFeedPane(
                         Icon(
                             imageVector = if (isCompact) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
                             contentDescription = "切换列表展示形式",
-                            modifier = Modifier.size(17.5.dp),
+                            modifier = Modifier.size(18.dp),
                             tint = if (isCompact) palette.activeChipText else palette.inkSecondary
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // 4. 纯文字分类筛选条（无底色块，直接通过字重与主题文字色区分）
                 Row(
@@ -2875,12 +2875,12 @@ private fun GoogleM3FilterPill(
                 indication = null,
                 onClick = onClick
             )
-            .padding(vertical = 4.dp),
+            .padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = label,
-            fontSize = if (selected) 13.2.sp else 12.8.sp,
+            fontSize = if (selected) 13.5.sp else 13.sp,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
             color = if (selected) selectedColor else palette.inkSecondary,
             maxLines = 1,
