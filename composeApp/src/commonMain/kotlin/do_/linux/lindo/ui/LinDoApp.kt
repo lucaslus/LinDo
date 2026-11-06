@@ -3789,18 +3789,15 @@ private fun CommunityTopicReaderPane(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Linux.do 官方折行风格：`■ 版块名` + 自动折行 `#Tag` 标签组（无需横滑即可一眼看全所有板块与标签）
+                    // Linux.do 官方折行风格：`■ 版块名` + 自动折行 `#Tag` 标签组（纯色块圆点与纯文字标签，无底色块）
                     @OptIn(ExperimentalLayoutApi::class)
                     FlowRow(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(catColor.copy(alpha = if (palette.isDark) 0.16f else 0.10f))
-                                .padding(horizontal = 7.dp, vertical = 3.dp),
+                            modifier = Modifier.padding(vertical = 2.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(
@@ -3821,22 +3818,17 @@ private fun CommunityTopicReaderPane(
                         }
 
                         allTopicTags.forEach { tag ->
-                            Box(
+                            Text(
+                                text = "#$tag",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Normal,
+                                color = palette.inkSecondary,
+                                maxLines = 1,
+                                softWrap = false,
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(palette.subtleSurface)
                                     .clickable { onSelectTag(tag) }
-                                    .padding(horizontal = 7.dp, vertical = 3.dp)
-                            ) {
-                                Text(
-                                    text = "#$tag",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkSecondary,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                            }
+                                    .padding(vertical = 2.dp)
+                            )
                         }
                     }
 
@@ -5720,7 +5712,6 @@ private fun CommunityMessagesScreen(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(if (active) bgTint else Color.Transparent)
                         .clickable {
                             subTab = 0
                             categoryFilter = if (categoryFilter == code) 0 else code
@@ -5769,6 +5760,14 @@ private fun CommunityMessagesScreen(
                         maxLines = 1,
                         softWrap = false
                     )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(12.dp)
+                            .height(2.5.dp)
+                            .clip(RoundedCornerShape(99.dp))
+                            .background(if (active) fg else Color.Transparent)
+                    )
                 }
             }
         }
@@ -5803,18 +5802,25 @@ private fun CommunityMessagesScreen(
                                 color = palette.inkPrimary,
                                 modifier = Modifier.weight(1f)
                             )
-                            Box(
+                            Row(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(palette.activeChipBg)
                                     .clickable { onOpenNewPrivateMessage() }
-                                    .padding(horizontal = 11.dp, vertical = 5.dp)
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
+                                Icon(
+                                    imageVector = LinDoIcons.Edit,
+                                    contentDescription = "写私信",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = palette.brandGold
+                                )
                                 Text(
-                                    text = "+ 写私信 / 全部",
-                                    fontSize = 12.sp,
+                                    text = "写私信 / 全部",
+                                    fontSize = 12.2.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = palette.activeChipText
+                                    color = palette.brandGold
                                 )
                             }
                         }
@@ -6184,22 +6190,15 @@ private fun CommunityMessagesScreen(
                                                 .padding(horizontal = 10.dp, vertical = 7.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(4.dp))
-                                                    .background(palette.cardSurface)
-                                                    .padding(horizontal = 5.dp, vertical = 1.5.dp)
-                                            ) {
-                                                Text(
-                                                    text = contextTypeTag,
-                                                    fontSize = 10.5.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = palette.inkTertiary,
-                                                    maxLines = 1,
-                                                    softWrap = false
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.width(7.dp))
+                                            Text(
+                                                text = "$contextTypeTag ·",
+                                                fontSize = 11.2.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = palette.inkTertiary,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
                                             Text(
                                                 text = item.title,
                                                 fontSize = 12.8.sp,
@@ -7301,19 +7300,12 @@ private fun NetworkDiagnosticsSheet(
                             color = palette.inkTertiary
                         )
                     }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (index == 0) palette.tonalPill else palette.subtleSurface)
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    ) {
-                        Text(
-                            text = if (node.rttMs < 0) "未测试" else if (!node.traceVerified) "不可用" else "${node.rttMs} ms",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (index == 0) palette.onTonalPill else palette.inkSecondary
-                        )
-                    }
+                    Text(
+                        text = if (node.rttMs < 0) "未测试" else if (!node.traceVerified) "不可用" else "${node.rttMs} ms",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (index == 0) palette.brandGold else palette.inkSecondary
+                    )
                 }
             }
 
@@ -8079,11 +8071,14 @@ private fun LinDoMarkdownWorkbench(
     var uploadStatusText by remember { mutableStateOf<String?>(null) }
     var lastUploadedImage by remember { mutableStateOf<UploadedMediaResult?>(null) }
 
-    // 云端草稿静默防抖保存 (`POST /drafts.json`)
+    // 云端草稿防抖保存 (`POST /drafts.json`)：固定槽位长度与高度，绝不撑高或顶乱编辑栏
     var draftSeq by remember { mutableStateOf(0) }
+    var isSyncingDraft by remember { mutableStateOf(false) }
+    var draftSynced by remember { mutableStateOf(false) }
     LaunchedEffect(tfv.text, draftTitle, draftCategoryId) {
         if (tfv.text.trim().length < 4 && draftTitle.trim().length < 4) return@LaunchedEffect
         delay(2200L)
+        isSyncingDraft = true
         val nextSeq = LinuxDoRepository.saveCloudDraft(
             draftKey = draftKey,
             sequence = draftSeq,
@@ -8093,8 +8088,10 @@ private fun LinDoMarkdownWorkbench(
             tags = draftTags,
             replyToPostNumber = replyToPostNumber
         )
+        isSyncingDraft = false
         if (nextSeq != null) {
             draftSeq = nextSeq
+            draftSynced = true
         }
     }
 
@@ -8160,6 +8157,43 @@ private fun LinDoMarkdownWorkbench(
                 }
             }
 
+            // 固定宽度（88dp）、固定单行高度（20dp）的云端草稿同步槽位，超出自动省略号 `...`，绝不撑高或挤压左右按钮
+            Row(
+                modifier = Modifier
+                    .width(88.dp)
+                    .height(20.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (isSyncingDraft) {
+                    LinDoMascot(
+                        state = LinDoMascotState.Loading,
+                        compact = true,
+                        size = 15.dp,
+                        animate = true
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "同步草稿...",
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp,
+                        color = palette.inkTertiary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (draftSynced) {
+                    Text(
+                        text = "已存草稿",
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp,
+                        color = palette.inkTertiary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.weight(1f))
 
             if (tfv.text.isNotEmpty()) {
@@ -8167,7 +8201,8 @@ private fun LinDoMarkdownWorkbench(
                     text = "${tfv.text.length} 字",
                     fontSize = 11.5.sp,
                     color = palette.inkTertiary,
-                    maxLines = 1
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
@@ -9602,30 +9637,27 @@ private fun GlobalSearchModalSheet(
                             "Claude", "DeepSeek", "MCP", "人工智能",
                             "Cursor", "开源", "Docker", "快问快答"
                         )
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            hotKeywords.chunked(4).forEach { rowWords ->
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    rowWords.forEach { kw ->
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(99.dp))
-                                                .background(palette.subtleSurface)
-                                                .border(0.5.dp, palette.hairline, RoundedCornerShape(99.dp))
-                                                .clickable {
-                                                    query = kw
-                                                    performSearch(kw)
-                                                }
-                                                .padding(horizontal = 12.dp, vertical = 6.dp)
-                                        ) {
-                                            Text(
-                                                text = kw,
-                                                fontSize = 12.2.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = palette.inkPrimary
-                                            )
+                        @OptIn(ExperimentalLayoutApi::class)
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            hotKeywords.forEach { kw ->
+                                Text(
+                                    text = "#$kw",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier
+                                        .clickable {
+                                            query = kw
+                                            performSearch(kw)
                                         }
-                                    }
-                                }
+                                        .padding(vertical = 2.dp)
+                                )
                             }
                         }
                     }
@@ -9676,7 +9708,10 @@ private fun GlobalSearchModalSheet(
                     }
                 } else {
                     itemsIndexed(results, key = { idx, item -> "${item.topicId}_${item.postNumber}_$idx" }) { _, item ->
-                        val (catBg, catFg) = remember(item.categoryName, palette.isDark) {
+                        val catDotColor = remember(item.categoryColorHex) {
+                            LinuxDoSiteRules.parseHexColor(item.categoryColorHex)
+                        }
+                        val (_, catFg) = remember(item.categoryName, palette.isDark) {
                             resolveMorandiCategoryColors(item.categoryName, palette.isDark)
                         }
                         Column(
@@ -9716,18 +9751,21 @@ private fun GlobalSearchModalSheet(
                                     maxLines = 1,
                                     modifier = Modifier.weight(1f)
                                 )
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(catBg)
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.5.dp)
+                                            .clip(RoundedCornerShape(1.5.dp))
+                                            .background(catDotColor)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.5.dp))
                                     Text(
                                         text = item.categoryName,
-                                        fontSize = 10.5.sp,
+                                        fontSize = 11.2.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = catFg,
-                                        maxLines = 1
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -9875,10 +9913,9 @@ private fun UserNotificationsSheet(
                     color = palette.inkPrimary,
                     modifier = Modifier.weight(1f)
                 )
-                Box(
+                Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
-                        .background(palette.subtleSurface)
                         .clickable {
                             scope.launch {
                                 val ok = LinuxDoRepository.markNotificationsRead()
@@ -9887,13 +9924,21 @@ private fun UserNotificationsSheet(
                                 }
                             }
                         }
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    Icon(
+                        imageVector = LinDoIcons.Check,
+                        contentDescription = "全部已读",
+                        modifier = Modifier.size(14.dp),
+                        tint = palette.inkSecondary
+                    )
                     Text(
-                        text = "全部标为已读",
-                        fontSize = 11.5.sp,
+                        text = "全部已读",
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = palette.inkPrimary
+                        color = palette.inkSecondary
                     )
                 }
             }
@@ -10111,19 +10156,12 @@ private fun UserActivitiesSheet(
                                     .padding(12.dp)
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(5.dp))
-                                            .background(palette.subtleSurface)
-                                            .padding(horizontal = 6.dp, vertical = 1.5.dp)
-                                    ) {
-                                        Text(
-                                            text = item.actionLabel,
-                                            fontSize = 10.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = palette.inkPrimary
-                                        )
-                                    }
+                                    Text(
+                                        text = item.actionLabel,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.brandGold
+                                    )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
                                         text = "${item.categoryName} · #${item.postNumber}楼 · ${item.createdAtText}",
@@ -10959,8 +10997,8 @@ private fun UserCloudDraftsSheet(
 
                                 Box(
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(palette.subtleSurface)
+                                        .size(32.dp)
+                                        .clip(CircleShape)
                                         .clickable {
                                             scope.launch {
                                                 val ok = LinuxDoRepository.deleteCloudDraft(draft.draftKey, draft.sequence)
@@ -10968,14 +11006,14 @@ private fun UserCloudDraftsSheet(
                                                     drafts = drafts.filterNot { it.draftKey == draft.draftKey }
                                                 }
                                             }
-                                        }
-                                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                                        },
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Text(
-                                        text = "删除",
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = palette.inkSecondary
+                                    Icon(
+                                        imageVector = LinDoIcons.Trash,
+                                        contentDescription = "删除草稿",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = palette.inkSecondary
                                     )
                                 }
                             }

@@ -28,6 +28,7 @@ import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -381,20 +382,40 @@ fun LinDoEmptyState(message: String, modifier: Modifier = Modifier) {
 
 @Composable
 fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifier = Modifier) {
-    Row(modifier.heightIn(min = 36.dp).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
-        verticalAlignment = Alignment.CenterVertically) {
-        LinDoMascot(state = state, compact = true, size = 20.dp)
-        Spacer(Modifier.width(6.dp))
-        Text(message, modifier = Modifier.weight(1f), fontSize = 11.sp, lineHeight = 17.sp,
-            color = if (LocalLinDoDarkTheme.current) Color(0xFFB8AFA2) else Color(0xFF746C61))
+    Row(
+        modifier = modifier
+            .heightIn(min = 22.dp)
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LinDoMascot(state = state, compact = true, size = 18.dp)
+        Spacer(Modifier.width(5.dp))
+        Text(
+            text = message,
+            modifier = Modifier.weight(1f, fill = false),
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            color = if (LocalLinDoDarkTheme.current) Color(0xFFB8AFA2) else Color(0xFF746C61)
+        )
     }
 }
 
 @Composable
 fun LinDoBusyButtonLabel(busy: Boolean, busyLabel: String, label: String, color: Color) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (busy) LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 20.dp)
-        Text(if (busy) busyLabel else label, color = color, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        if (busy) LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 18.dp)
+        Text(
+            text = if (busy) busyLabel else label,
+            color = color,
+            fontSize = 12.5.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
