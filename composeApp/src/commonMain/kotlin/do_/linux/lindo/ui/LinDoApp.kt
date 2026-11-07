@@ -11,9 +11,11 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -4817,6 +4819,7 @@ private fun TonalCircleIconButton(
  *   - 左侧：**仅展示该楼层真实收到的表情回应 (`post.reactions`)**，绝不默认塞入未发生的假表情按钮！
  *   - 右侧：Web 风格清爽线性图标操作（`♡` 点赞、`😊+` 展开表情选择器、复制楼层链接、引用 `❝`、回复 `↩`）
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CommunityPostFloor(
     post: PostItemModel,
@@ -4894,6 +4897,7 @@ private fun CommunityPostFloor(
     var floorActionError by remember(post.id) { mutableStateOf<String?>(null) }
 
     var showReactionPopover by remember(post.id) { mutableStateOf(false) }
+    var showBoostComposer by remember(post.id) { mutableStateOf(false) }
     var showFloorMoreMenu by remember(post.id) { mutableStateOf(false) }
     var showInlineReplies by remember(post.id) { mutableStateOf(false) }
     var copiedFloorLink by remember(post.id) { mutableStateOf(false) }
@@ -4905,8 +4909,8 @@ private fun CommunityPostFloor(
         }
     }
 
-    LaunchedEffect(showReactionPopover, showBoostEmojiPicker) {
-        if ((showReactionPopover || showBoostEmojiPicker) && !LinuxDoEmojiCatalog.hasSyncedServerEmojis()) {
+    LaunchedEffect(showReactionPopover, showBoostComposer, showBoostEmojiPicker) {
+        if ((showReactionPopover || showBoostComposer || showBoostEmojiPicker) && !LinuxDoEmojiCatalog.hasSyncedServerEmojis()) {
             if (LinuxDoRepository.syncSiteEmojis()) {
                 syncedEmojiGroupsVersion++
             }
@@ -5017,6 +5021,7 @@ private fun CommunityPostFloor(
                     canBoostLocal = false
                     boostInputText = ""
                     showBoostEmojiPicker = false
+                    showBoostComposer = false
                     showReactionPopover = false
                 } else {
                     floorActionError = res.errorMessage ?: "发送小火箭 Boost 失败，请稍后重试"
@@ -5551,7 +5556,7 @@ private fun CommunityPostFloor(
 
         PostRichContent(astNodes, palette, onOpenWebUrl, originalUrl, post.id)
 
-        // 2.2 官方小火箭 Boost 气泡列表 (`discourse-boosts`：展示头像 + 16 字内短评与自定义表情，点击自己的气泡可一键删除)
+        // 2.2 官方小火箭 Boost 气泡列表 (`discourse-boosts`：气泡与 `+🚀` 统一 28dp 同高且严格垂直居中对齐)
         if (localBoosts.isNotEmpty()) {
             Spacer(modifier = Modifier.height(10.dp))
             @OptIn(ExperimentalLayoutApi::class)
@@ -5566,7 +5571,9 @@ private fun CommunityPostFloor(
                     val isExpanded = expandedBoostId == boost.id
                     Row(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
+                            .align(Alignment.CenterVertically)
+                            .height(28.dp)
+                            .clip(RoundedCornerShape(14.dp))
                             .background(
                                 if (isMyBoost) palette.activeChipBg.copy(alpha = 0.55f)
                                 else palette.subtleSurface
@@ -5574,12 +5581,12 @@ private fun CommunityPostFloor(
                             .border(
                                 width = 0.6.dp,
                                 color = if (isMyBoost) palette.brandGold.copy(alpha = 0.45f) else palette.hairline,
-                                shape = RoundedCornerShape(16.dp)
+                                shape = RoundedCornerShape(14.dp)
                             )
                             .clickable {
                                 expandedBoostId = if (isExpanded) null else boost.id
                             }
-                            .padding(horizontal = 8.5.dp, vertical = 4.5.dp),
+                            .padding(horizontal = 8.5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
@@ -5587,13 +5594,13 @@ private fun CommunityPostFloor(
                             username = boost.username,
                             avatarTemplate = boost.avatarTemplate,
                             animatedAvatar = null,
-                            size = 17.dp,
+                            size = 16.5.dp,
                             enableAnimations = enableAnimations
                         )
                         BoostInlineContent(
                             plainText = boost.plainText,
-                            fontSize = 12.6.sp,
-                            emojiSize = 15.5.dp,
+                            fontSize = 12.4.sp,
+                            emojiSize = 15.dp,
                             textColor = palette.inkPrimary
                         )
                         if (isExpanded) {
@@ -5609,7 +5616,7 @@ private fun CommunityPostFloor(
                             if (isMyBoost) {
                                 Text(
                                     text = if (isDeletingBoostId == boost.id) "删除中…" else "删除",
-                                    fontSize = 11.2.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFFEF4444),
                                     modifier = Modifier
@@ -5618,7 +5625,7 @@ private fun CommunityPostFloor(
                                         .clickable(enabled = isDeletingBoostId == null) {
                                             deleteBoost(boost.id)
                                         }
-                                        .padding(horizontal = 5.dp, vertical = 1.5.dp)
+                                        .padding(horizontal = 5.dp, vertical = 1.dp)
                                 )
                             }
                         }
@@ -5628,25 +5635,33 @@ private fun CommunityPostFloor(
                 if (!isOwnPost && !isDeletedPost && canBoostLocal) {
                     Row(
                         modifier = Modifier
-                            .height(27.dp)
+                            .align(Alignment.CenterVertically)
+                            .height(28.dp)
                             .clip(RoundedCornerShape(14.dp))
-                            .background(palette.subtleSurface)
-                            .border(0.6.dp, palette.hairline, RoundedCornerShape(14.dp))
-                            .clickable { showReactionPopover = true }
-                            .padding(horizontal = 8.dp),
+                            .background(if (showBoostComposer) palette.activeChipBg else palette.subtleSurface)
+                            .border(
+                                width = 0.6.dp,
+                                color = if (showBoostComposer) palette.brandGold.copy(alpha = 0.45f) else palette.hairline,
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .clickable {
+                                showBoostComposer = !showBoostComposer
+                                if (showBoostComposer) showReactionPopover = false
+                            }
+                            .padding(horizontal = 8.5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
-                        Text(
-                            text = "+",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkSecondary
+                        Icon(
+                            imageVector = LinDoIcons.Plus,
+                            contentDescription = null,
+                            modifier = Modifier.size(11.dp),
+                            tint = if (showBoostComposer) palette.brandGold else palette.inkSecondary
                         )
                         Icon(
                             imageVector = LinDoIcons.Rocket,
                             contentDescription = "添加小火箭 Boost",
-                            modifier = Modifier.size(13.dp),
+                            modifier = Modifier.size(12.5.dp),
                             tint = palette.brandGold
                         )
                     }
@@ -5687,56 +5702,22 @@ private fun CommunityPostFloor(
             }
         }
 
-        // 2.8 按需展开的「快捷表情表态 + 小火箭 Boost 短评发送器」组合面板
+        // 2.7 独立单行「表情点赞」选择条 (`discourse-reactions`：与小火箭彻底分离，纯粹单行胶囊)
         AnimatedVisibility(visible = showReactionPopover) {
-            val boostStats = remember(boostInputText) { BoostInputStats.compute(boostInputText) }
-            val pickerGroups = remember(syncedEmojiGroupsVersion) { LinuxDoEmojiCatalog.getPickerGroups() }
-            val safeGroupIdx = selectedBoostEmojiGroupIdx.coerceIn(0, (pickerGroups.size - 1).coerceAtLeast(0))
-
-            Column(
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 10.dp)
-                    .clip(RoundedCornerShape(16.dp))
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(21.dp))
                     .background(palette.subtleSurface)
-                    .border(0.6.dp, palette.hairline, RoundedCornerShape(16.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(9.dp)
+                    .border(0.6.dp, palette.hairline, RoundedCornerShape(21.dp))
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // 第一部分：1-Tap 官方表情表态 (`discourse-reactions`)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "快捷表态",
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.inkSecondary
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .clickable {
-                                showBoostEmojiPicker = false
-                                showReactionPopover = false
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.Close,
-                            contentDescription = "收起面板",
-                            modifier = Modifier.size(13.5.dp),
-                            tint = palette.inkTertiary
-                        )
-                    }
-                }
-
                 Row(
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .weight(1f)
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -5747,13 +5728,12 @@ private fun CommunityPostFloor(
                         val isMine = myReactionId == rId
                         Box(
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(32.dp)
                                 .clip(CircleShape)
-                                .background(if (isMine) palette.activeChipBg else palette.cardSurface)
-                                .border(
-                                    width = 0.5.dp,
-                                    color = if (isMine) palette.brandGold else palette.hairline,
-                                    shape = CircleShape
+                                .background(if (isMine) palette.activeChipBg else Color.Transparent)
+                                .then(
+                                    if (isMine) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), CircleShape)
+                                    else Modifier
                                 )
                                 .clickable { toggleReaction(rId, emo) },
                             contentAlignment = Alignment.Center
@@ -5762,156 +5742,133 @@ private fun CommunityPostFloor(
                                 reactionId = rId,
                                 emojiFallback = emo,
                                 isSelected = isMine,
-                                size = 20.dp
+                                size = 19.5.dp
                             )
                         }
                     }
                 }
-
-                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-
-                // 第二部分：🚀 小火箭 Boost 发送器 (`discourse-boosts`：支持表情 + 16 字内有限字数短评)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .clickable { showReactionPopover = false },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.Rocket,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                            tint = palette.brandGold
-                        )
-                        Text(
-                            text = "小火箭 Boost",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary
-                        )
-                        Text(
-                            text = "· 可发表情与短评",
-                            fontSize = 11.2.sp,
-                            color = palette.inkTertiary
-                        )
-                    }
-
-                    val counterOverLimit = boostStats.exceedsLength || boostStats.exceedsEmojiLimit
-                    Text(
-                        text = "${boostStats.visibleLength}/${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH} 字 · 表情 ${boostStats.emojiCount}/${BoostInputStats.MAX_BOOST_EMOJI_COUNT}",
-                        fontSize = 11.sp,
-                        fontWeight = if (counterOverLimit) FontWeight.Bold else FontWeight.Medium,
-                        color = if (counterOverLimit) Color(0xFFEF4444) else palette.inkTertiary
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "收起表情表态",
+                        modifier = Modifier.size(14.dp),
+                        tint = palette.inkTertiary
                     )
                 }
+            }
+        }
 
+        // 2.8 独立极简「小火箭 Boost」单行输入条 (`discourse-boosts`：与表情点赞彻底解耦，仅保留单行清爽输入 + 按需展开表情网格)
+        AnimatedVisibility(visible = showBoostComposer) {
+            val boostStats = remember(boostInputText) { BoostInputStats.compute(boostInputText) }
+            val pickerGroups = remember(syncedEmojiGroupsVersion) { LinuxDoEmojiCatalog.getPickerGroups() }
+            val safeGroupIdx = selectedBoostEmojiGroupIdx.coerceIn(0, (pickerGroups.size - 1).coerceAtLeast(0))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 when {
-                    isOwnPost -> {
-                        Text(
-                            text = "不能给自己的帖子发送小火箭 Boost",
-                            fontSize = 12.sp,
-                            color = palette.inkTertiary
-                        )
-                    }
-                    isDeletedPost -> {
-                        Text(
-                            text = "该楼层已被删除，无法发送小火箭 Boost",
-                            fontSize = 12.sp,
-                            color = palette.inkTertiary
-                        )
-                    }
-                    !canBoostLocal -> {
-                        Text(
-                            text = "你已为本楼发送过小火箭 Boost（点击上方你的小火箭气泡可删除后重发）",
-                            fontSize = 12.sp,
-                            color = palette.inkSecondary
-                        )
-                    }
-                    else -> {
-                        // 一键快捷助力短语
+                    isOwnPost || isDeletedPost || !canBoostLocal -> {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            LinuxDoEmojiCatalog.quickBoostPresets.forEach { (label, rawPreset) ->
-                                val isPresetSelected = boostInputText.trim() == rawPreset
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(
-                                            if (isPresetSelected) palette.activeChipBg else palette.cardSurface
-                                        )
-                                        .border(
-                                            width = 0.5.dp,
-                                            color = if (isPresetSelected) palette.brandGold else palette.hairline,
-                                            shape = RoundedCornerShape(12.dp)
-                                        )
-                                        .clickable {
-                                            boostInputText = rawPreset
-                                            floorActionError = null
-                                        }
-                                        .padding(horizontal = 9.dp, vertical = 4.5.dp)
-                                ) {
-                                    Text(
-                                        text = label,
-                                        fontSize = 11.8.sp,
-                                        color = if (isPresetSelected) palette.brandGold else palette.inkPrimary
-                                    )
-                                }
-                            }
-                        }
-
-                        // 输入框 + 表情包选择器按钮 + 发送按钮
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
+                                .height(38.dp)
+                                .clip(RoundedCornerShape(11.dp))
+                                .background(palette.subtleSurface)
+                                .border(0.6.dp, palette.hairline, RoundedCornerShape(11.dp))
+                                .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            // 展开/收起全量表情面板按钮
+                            Text(
+                                text = when {
+                                    isOwnPost -> "不能给自己的帖子发送小火箭"
+                                    isDeletedPost -> "该楼层已被删除，无法发送小火箭"
+                                    else -> "已发送过小火箭（点击上方你的气泡可删除重发）"
+                                },
+                                fontSize = 12.sp,
+                                color = palette.inkSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
                             Box(
                                 modifier = Modifier
-                                    .size(34.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (showBoostEmojiPicker) palette.activeChipBg else palette.cardSurface)
-                                    .border(
-                                        width = 0.6.dp,
-                                        color = if (showBoostEmojiPicker) palette.brandGold else palette.hairline,
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        showBoostEmojiPicker = false
+                                        showBoostComposer = false
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.Close,
+                                    contentDescription = "关闭",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = palette.inkTertiary
+                                )
+                            }
+                        }
+                    }
+                    else -> {
+                        val counterOverLimit = boostStats.exceedsLength || boostStats.exceedsEmojiLimit
+                        val canSendNow = boostStats.isValid && !isSubmittingBoost
+
+                        // 一体化单行小火箭输入条（左侧纯矢量表情按钮 + 中部无框输入 + 右侧字数与发送/关闭图标）
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(40.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(palette.subtleSurface)
+                                .border(
+                                    width = 0.6.dp,
+                                    color = if (counterOverLimit) Color(0xFFEF4444) else palette.hairline,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            // 左侧：纯矢量表情图标按钮
+                            Box(
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (showBoostEmojiPicker) palette.activeChipBg else Color.Transparent)
                                     .clickable { showBoostEmojiPicker = !showBoostEmojiPicker },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "😊",
-                                    fontSize = 16.sp
+                                Icon(
+                                    imageVector = LinDoIcons.Smile,
+                                    contentDescription = "选择表情",
+                                    modifier = Modifier.size(17.5.dp),
+                                    tint = if (showBoostEmojiPicker) palette.brandGold else palette.inkSecondary
                                 )
                             }
 
-                            // 紧凑单行输入框
+                            // 中间：无边框单行输入框
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(36.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(palette.cardSurface)
-                                    .border(
-                                        width = 0.6.dp,
-                                        color = if (boostStats.exceedsLength || boostStats.exceedsEmojiLimit) Color(0xFFEF4444) else palette.hairline,
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    .padding(horizontal = 10.dp),
+                                    .padding(horizontal = 4.dp),
                                 contentAlignment = Alignment.CenterStart
                             ) {
                                 if (boostInputText.isEmpty()) {
                                     Text(
                                         text = "发个小火箭助力 @${post.username}（限 16 字）…",
-                                        fontSize = 12.2.sp,
+                                        fontSize = 12.5.sp,
                                         color = palette.inkTertiary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
@@ -5924,13 +5881,13 @@ private fun CommunityPostFloor(
                                     },
                                     singleLine = true,
                                     textStyle = TextStyle(
-                                        fontSize = 12.8.sp,
+                                        fontSize = 13.sp,
                                         color = palette.inkPrimary
                                     ),
                                     cursorBrush = SolidColor(palette.brandGold),
                                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                                     keyboardActions = KeyboardActions(onSend = {
-                                        if (boostStats.isValid && !isSubmittingBoost) {
+                                        if (canSendNow) {
                                             submitBoost(boostInputText)
                                         }
                                     }),
@@ -5938,26 +5895,48 @@ private fun CommunityPostFloor(
                                 )
                             }
 
-                            val canSendNow = boostStats.isValid && !isSubmittingBoost
+                            // 右侧：精简字数提示 + 纯图标发送按钮 + 关闭按钮
+                            Text(
+                                text = "${boostStats.visibleLength}/${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH}",
+                                fontSize = 11.sp,
+                                fontWeight = if (counterOverLimit) FontWeight.Bold else FontWeight.Medium,
+                                color = if (counterOverLimit) Color(0xFFEF4444) else palette.inkTertiary,
+                                maxLines = 1
+                            )
+
                             Box(
                                 modifier = Modifier
-                                    .height(34.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(
-                                        if (canSendNow) palette.brandGold
-                                        else palette.hairline
-                                    )
+                                    .size(30.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (canSendNow) palette.activeChipBg else Color.Transparent)
                                     .clickable(enabled = canSendNow) {
                                         submitBoost(boostInputText)
-                                    }
-                                    .padding(horizontal = 12.dp),
+                                    },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = if (isSubmittingBoost) "发送中…" else "发送",
-                                    fontSize = 12.2.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (canSendNow) Color(0xFF111827) else palette.inkTertiary
+                                Icon(
+                                    imageVector = LinDoIcons.Send,
+                                    contentDescription = "发送小火箭",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = if (canSendNow) palette.brandGold else palette.inkTertiary.copy(alpha = 0.38f)
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        showBoostEmojiPicker = false
+                                        showBoostComposer = false
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.Close,
+                                    contentDescription = "收起小火箭",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = palette.inkTertiary
                                 )
                             }
                         }
@@ -5967,7 +5946,7 @@ private fun CommunityPostFloor(
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                modifier = Modifier.padding(top = 2.dp)
+                                modifier = Modifier.padding(horizontal = 6.dp)
                             ) {
                                 Text(
                                     text = "预览：",
@@ -5983,15 +5962,14 @@ private fun CommunityPostFloor(
                             }
                         }
 
-                        // 可展开的全量表情包选择面板（含飞书/B站/贴吧等站点自定义表情包 + 标准表情）
+                        // 按需展开的全量表情包选择面板
                         AnimatedVisibility(visible = showBoostEmojiPicker && pickerGroups.isNotEmpty()) {
                             val activeGroup = pickerGroups[safeGroupIdx]
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(top = 4.dp)
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(palette.cardSurface)
+                                    .background(palette.subtleSurface)
                                     .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
                                     .padding(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -6025,7 +6003,7 @@ private fun CommunityPostFloor(
                                 FlowRow(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .heightIn(max = 136.dp)
+                                        .heightIn(max = 132.dp)
                                         .verticalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -6036,7 +6014,7 @@ private fun CommunityPostFloor(
                                             modifier = Modifier
                                                 .size(32.dp)
                                                 .clip(RoundedCornerShape(8.dp))
-                                                .background(palette.subtleSurface)
+                                                .background(palette.cardSurface)
                                                 .clickable { appendEmojiToBoostInput(token) },
                                             contentAlignment = Alignment.Center
                                         ) {
@@ -6056,7 +6034,7 @@ private fun CommunityPostFloor(
             }
         }
 
-        // 3. 楼层底部控制栏（对齐官方移动 Web：左侧无框表态计数 + `N ⌄` 子回复展开；右侧纯矢量图标组 `♡` `🔗` `🚀` `⋯` `↩`）
+        // 3. 楼层底部控制栏（对齐官方移动 Web：左侧无框表态计数 + `N ⌄` 子回复展开；右侧纯矢量图标组 `♡` `🚀` `⋯` `↩`）
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -6128,44 +6106,63 @@ private fun CommunityPostFloor(
                 }
             }
 
-            // 右侧：4 项黄金高频动作（♡ 点赞 · 🚀 小火箭/表态 · ⋯ 更多(含引用/复制链接/编辑/删除) · ↩ 回复），拉大触控热区防单手误触
+            // 右侧：4 项高频动作（♡ 点赞/长按表情表态 · 🚀 小火箭 Boost · ⋯ 更多 · ↩ 回复）
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // 1. 点赞/取消点赞 (Heart)
+                // 1. 点赞 / 表情表态（单击红心点赞，长按展开单行表情表态栏）
                 Box(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .clickable { toggleReaction("heart", "❤️") },
+                        .combinedClickable(
+                            onClick = {
+                                if (showReactionPopover) {
+                                    showReactionPopover = false
+                                } else {
+                                    toggleReaction("heart", "❤️")
+                                }
+                            },
+                            onLongClick = {
+                                showReactionPopover = !showReactionPopover
+                                if (showReactionPopover) showBoostComposer = false
+                            }
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = if (myReactionId != null) LinDoIcons.HeartFilled else LinDoIcons.Heart,
-                        contentDescription = "点赞",
+                        contentDescription = "点赞（长按选择表情表态）",
                         modifier = Modifier.size(19.dp),
-                        tint = if (myReactionId != null) Color(0xFFE11D48) else palette.inkSecondary
+                        tint = when {
+                            myReactionId != null -> Color(0xFFE11D48)
+                            showReactionPopover -> palette.brandGold
+                            else -> palette.inkSecondary
+                        }
                     )
                 }
 
-                // 2. 小火箭 / 多表情回应选择器 (Rocket / Boost)
+                // 2. 小火箭 Boost（独立控制单行小火箭输入条，不再混入表情表态）
                 Box(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .clickable { showReactionPopover = !showReactionPopover },
+                        .clickable {
+                            showBoostComposer = !showBoostComposer
+                            if (showBoostComposer) showReactionPopover = false
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Rocket,
-                        contentDescription = "选择回应表情",
+                        contentDescription = "小火箭 Boost",
                         modifier = Modifier.size(18.5.dp),
-                        tint = if (showReactionPopover) palette.brandGold else palette.inkSecondary
+                        tint = if (showBoostComposer) palette.brandGold else palette.inkSecondary
                     )
                 }
 
-                // 3. 更多操作按钮 (`⋯`)：收纳引用、复制链接、编辑、删除等操作
+                // 3. 更多操作按钮 (`⋯`)：收纳表情表态、引用、复制链接、编辑、删除等操作
                 Box {
                     Box(
                         modifier = Modifier
@@ -6187,6 +6184,31 @@ private fun CommunityPostFloor(
                         onDismissRequest = { showFloorMoreMenu = false },
                         modifier = Modifier.background(palette.cardSurface)
                     ) {
+                        if (!isOwnPost && !isDeletedPost) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = "表情表态",
+                                        fontSize = 13.5.sp,
+                                        color = palette.inkPrimary
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = LinDoIcons.Smile,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = palette.inkSecondary
+                                    )
+                                },
+                                onClick = {
+                                    showFloorMoreMenu = false
+                                    showReactionPopover = true
+                                    showBoostComposer = false
+                                }
+                            )
+                        }
+
                         DropdownMenuItem(
                             text = {
                                 Text(
