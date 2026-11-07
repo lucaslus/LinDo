@@ -73,6 +73,10 @@ internal fun ComposerSheet(
     topicTitle: String = "",
     replyToPostNumber: Int? = null,
     replyToUsername: String? = null,
+    replyToDisplayName: String? = null,
+    replyToAvatarUrl: String? = null,
+    replyToAnimatedAvatar: String? = null,
+    replyToContentSnippet: String? = null,
     post: PostItemModel? = null,
     accountUsername: String? = null,
     initialRaw: String = "",
@@ -273,19 +277,19 @@ internal fun ComposerSheet(
                 .windowInsetsPadding(WindowInsets.ime)
                 .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
-            // ==================== 1. 一体化极简对齐顶栏 (48dp · 纯图标化操作) ====================
+            // ==================== 1. 一体化极简对齐顶栏 (48dp · 统一无底色框纯图标设计) ====================
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
-                    .padding(horizontal = 12.dp),
+                    .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 左侧：关闭图标按钮
+                // 左侧：关闭图标按钮（无底色无边框，与详情页顶栏及下方工具栏严格统一）
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(9.dp))
                         .clickable(enabled = !busy, onClick = ::requestClose),
                     contentAlignment = Alignment.Center
                 ) {
@@ -297,9 +301,9 @@ internal fun ComposerSheet(
                     )
                 }
 
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(4.dp))
 
-                // 中左：单行清爽标题与上下文胶囊 + 云端同步指示点
+                // 中左：清爽单行标题 + 云端同步指示点（去除突兀的灰底胶囊框）
                 Row(
                     modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
@@ -315,37 +319,10 @@ internal fun ComposerSheet(
                     Text(
                         text = headerTitle,
                         color = palette.inkPrimary,
-                        fontSize = 15.2.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.5.sp,
+                        fontWeight = FontWeight.SemiBold,
                         maxLines = 1
                     )
-
-                    val contextBadgeText = when (action) {
-                        ComposerAction.REPLY -> draft.replyToUsername?.takeIf { it.isNotBlank() }?.let { "@$it" }
-                            ?: topicTitle.takeIf { it.isNotBlank() }
-                        ComposerAction.EDIT -> topicTitle.takeIf { it.isNotBlank() }
-                        ComposerAction.NEW_TOPIC -> null
-                    }
-                    if (!contextBadgeText.isNullOrBlank()) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f, fill = false)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(palette.subtleSurface)
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(6.dp))
-                                .padding(horizontal = 7.dp, vertical = 2.dp),
-                            contentAlignment = Alignment.CenterStart
-                        ) {
-                            Text(
-                                text = contextBadgeText,
-                                color = palette.inkSecondary,
-                                fontSize = 11.2.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
 
                     if (draftStatusLabel != null) {
                         Box(
@@ -366,7 +343,7 @@ internal fun ComposerSheet(
                     }
                 }
 
-                // 右侧：纯图标「预览/编辑切换」+ 图标「发送/保存」按钮（含富文本微金点预览提示）
+                // 右侧：统一风格纯图标「预览/编辑切换」+ 图标「发送/保存」按钮（无多余灰底圆圈）
                 if (prepared && prepareError == null) {
                     val isPreview = viewMode == WorkbenchViewMode.PREVIEW
                     val hasRichMarkdown = remember(draft.raw) {
@@ -376,13 +353,12 @@ internal fun ComposerSheet(
                     }
                     Box(
                         modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(if (isPreview) palette.activeChipBg else palette.subtleSurface)
-                            .border(
-                                width = 0.6.dp,
-                                color = if (isPreview) palette.brandGold else palette.hairline,
-                                shape = CircleShape
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (isPreview) palette.activeChipBg else Color.Transparent)
+                            .then(
+                                if (isPreview) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
+                                else Modifier
                             )
                             .clickable(enabled = !busy) {
                                 val nextMode = if (isPreview) WorkbenchViewMode.SOURCE else WorkbenchViewMode.PREVIEW
@@ -397,7 +373,7 @@ internal fun ComposerSheet(
                             imageVector = if (isPreview) LinDoIcons.Edit else LinDoIcons.Eye,
                             contentDescription = if (isPreview) "切换编辑" else "实时预览",
                             tint = if (isPreview) palette.brandGold else palette.inkSecondary,
-                            modifier = Modifier.size(16.5.dp)
+                            modifier = Modifier.size(18.5.dp)
                         )
                         if (!isPreview && hasRichMarkdown) {
                             Box(
@@ -411,23 +387,18 @@ internal fun ComposerSheet(
                         }
                     }
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                 }
 
-                // 主操作图标按钮：发送 / 保存
+                // 主操作图标按钮：发送 / 保存（与全站图标按钮视觉语言严格统一）
                 Box(
                     modifier = Modifier
-                        .height(34.dp)
-                        .widthIn(min = 42.dp)
-                        .clip(RoundedCornerShape(17.dp))
-                        .background(
-                            if (canSubmit || submitting) palette.brandGold
-                            else palette.subtleSurface
-                        )
-                        .border(
-                            width = 0.5.dp,
-                            color = if (canSubmit || submitting) Color.Transparent else palette.hairline,
-                            shape = RoundedCornerShape(17.dp)
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(if (canSubmit || submitting) palette.activeChipBg else Color.Transparent)
+                        .then(
+                            if (canSubmit || submitting) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
+                            else Modifier
                         )
                         .clickable(enabled = canSubmit) {
                             if (action == ComposerAction.NEW_TOPIC && LinuxDoSiteRules.requiresTopicCostConfirmation(draft.tags)) {
@@ -435,8 +406,7 @@ internal fun ComposerSheet(
                             } else {
                                 submit()
                             }
-                        }
-                        .padding(horizontal = 12.dp),
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     if (submitting) {
@@ -445,8 +415,8 @@ internal fun ComposerSheet(
                         Icon(
                             imageVector = if (action == ComposerAction.EDIT) LinDoIcons.Check else LinDoIcons.Send,
                             contentDescription = if (action == ComposerAction.EDIT) "保存" else "发布",
-                            tint = if (canSubmit) Color(0xFF111827) else palette.inkTertiary,
-                            modifier = Modifier.size(16.5.dp)
+                            tint = if (canSubmit) palette.brandGold else palette.inkTertiary.copy(alpha = 0.38f),
+                            modifier = Modifier.size(18.5.dp)
                         )
                     }
                 }
@@ -466,7 +436,81 @@ internal fun ComposerSheet(
                     }
                 }
                 else -> {
-                    // ==================== 2. 新建话题专属：版块 + 标签胶囊条 + 标题输入（位于文本框上方） ====================
+                    // ==================== 2A. 回复专属：被回复对象头像 + 昵称楼层 + 2~3行内容预览（超出...截断） ====================
+                    if (action == ComposerAction.REPLY) {
+                        val targetUsername = draft.replyToUsername?.takeIf { it.isNotBlank() } ?: replyToUsername.orEmpty()
+                        val targetDisplayName = replyToDisplayName?.takeIf { it.isNotBlank() } ?: targetUsername.ifBlank { "楼主" }
+                        val targetFloorNum = draft.replyToPostNumber ?: replyToPostNumber
+                        val previewSnippet = replyToContentSnippet?.takeIf { it.isNotBlank() } ?: topicTitle
+                        if (previewSnippet.isNotBlank() || targetDisplayName.isNotBlank()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(palette.cardSurface)
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                GoogleAccountRingAvatar(
+                                    letter = targetDisplayName.ifBlank { "L" },
+                                    avatarUrl = replyToAvatarUrl,
+                                    animatedAvatar = replyToAnimatedAvatar,
+                                    avatarSize = 32.dp,
+                                    strokeWidth = 0.dp
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Text(
+                                            text = targetDisplayName,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = palette.inkPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (targetUsername.isNotBlank() && !targetUsername.equals(targetDisplayName, ignoreCase = true)) {
+                                            Text(
+                                                text = "@$targetUsername",
+                                                fontSize = 11.8.sp,
+                                                color = palette.inkTertiary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.weight(1f))
+                                        Text(
+                                            text = if (targetFloorNum != null && targetFloorNum > 0) "#$targetFloorNum" else "#1",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = palette.inkTertiary,
+                                            maxLines = 1
+                                        )
+                                    }
+                                    if (previewSnippet.isNotBlank()) {
+                                        Text(
+                                            text = previewSnippet,
+                                            fontSize = 13.sp,
+                                            lineHeight = 18.8.sp,
+                                            color = palette.inkSecondary,
+                                            maxLines = 3,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                            HorizontalDivider(color = palette.hairline, thickness = 0.5.dp)
+                        }
+                    }
+
+                    // ==================== 2B. 新建话题专属：版块 + 标签胶囊条 + 标题输入（位于文本框上方） ====================
                     if (action == ComposerAction.NEW_TOPIC) {
                         val activeCat = LinuxDoRepository.categories.firstOrNull { it.id == draft.categoryId }
                             ?: LinuxDoRepository.categories.firstOrNull()

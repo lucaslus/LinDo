@@ -615,7 +615,7 @@ private fun GeminiSparkleIcon(
  * 纯净圆角用户头像（移除外围 Linux.do 双色圆环，保持清爽现代全尺寸圆形裁切与 0.5dp 微描边）
  */
 @Composable
-private fun GoogleAccountRingAvatar(
+internal fun GoogleAccountRingAvatar(
     letter: String = "L",
     avatarUrl: String? = null,
     avatarSize: Dp = 76.dp,
@@ -4695,11 +4695,72 @@ internal fun CommunityTopicReaderPane(
     }
 
     if (showReplySheet) {
+        val targetFloorNum = replyTargetPostNumber
+        val targetPost = remember(targetFloorNum, posts) {
+            if (targetFloorNum != null && targetFloorNum > 1) {
+                posts.firstOrNull { it.postNumber == targetFloorNum }
+            } else {
+                posts.firstOrNull { it.postNumber == 1 } ?: posts.firstOrNull()
+            }
+        }
+        val effectiveTopicTitle = detail?.title ?: summary.title
+        val replyPreviewSnippet = remember(targetPost, targetFloorNum, effectiveTopicTitle, summary.excerpt) {
+            val postBodyText = targetPost?.let { p ->
+                val doc = org.jsoup.Jsoup.parseBodyFragment(p.cookedHtml)
+                doc.select(".spoiler, .spoilered").forEach { it.text("[剧透内容]") }
+                val withoutQuotes = doc.clone().apply { select("aside.quote, blockquote").remove() }
+                val cleaned = withoutQuotes.body().text().trim().ifBlank { doc.body().text().trim() }
+                val hasImages = doc.select("img:not(.emoji):not(.avatar)").isNotEmpty()
+                when {
+                    cleaned.isNotBlank() -> cleaned.replace(Regex("\\s+"), " ")
+                    hasImages -> "[图片]"
+                    else -> p.raw?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
+                }
+            }.orEmpty()
+            val isMainTopic = targetFloorNum == null || targetFloorNum <= 1
+            if (isMainTopic) {
+                val baseBody = postBodyText.ifBlank { summary.excerpt?.trim().orEmpty() }
+                when {
+                    baseBody.isBlank() -> effectiveTopicTitle
+                    effectiveTopicTitle.isNotBlank() && !baseBody.startsWith(effectiveTopicTitle) -> "$effectiveTopicTitle · $baseBody"
+                    else -> baseBody
+                }
+            } else {
+                postBodyText.ifBlank { effectiveTopicTitle }
+            }
+        }
+        val replyAvatarUrl = if (targetFloorNum != null && targetFloorNum > 1) {
+            targetPost?.avatarTemplate
+        } else {
+            targetPost?.avatarTemplate ?: op.avatarTemplate
+        }
+        val replyAnimatedAvatar = if (targetFloorNum != null && targetFloorNum > 1) {
+            targetPost?.animatedAvatar
+        } else {
+            targetPost?.animatedAvatar ?: op.animatedAvatar
+        }
+        val replyDisplayName = if (targetFloorNum != null && targetFloorNum > 1) {
+            targetPost?.displayName?.ifBlank { targetPost.username } ?: replyTargetUsername
+        } else {
+            targetPost?.displayName?.ifBlank { targetPost.username }
+                ?: op.name?.takeIf { it.isNotBlank() }
+                ?: op.username
+        }
+        val resolvedReplyUsername = if (targetFloorNum != null && targetFloorNum > 1) {
+            replyTargetUsername ?: targetPost?.username
+        } else {
+            targetPost?.username?.ifBlank { op.username } ?: op.username
+        }
+
         TopicReplyComposerSheet(
             topicId = summary.id,
-            topicTitle = detail?.title ?: summary.title,
+            topicTitle = effectiveTopicTitle,
             replyToPostNumber = replyTargetPostNumber,
-            replyToUsername = replyTargetUsername,
+            replyToUsername = resolvedReplyUsername,
+            replyToDisplayName = replyDisplayName,
+            replyToAvatarUrl = replyAvatarUrl,
+            replyToAnimatedAvatar = replyAnimatedAvatar,
+            replyToContentSnippet = replyPreviewSnippet,
             initialRaw = replyInitialQuote,
             initialDraft = replyCloudDraft,
             onDismiss = { showReplySheet = false },
@@ -10190,13 +10251,33 @@ private fun GoogleWelcomeLoginScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TopicReplyComposerSheet(
-    topicId: Int, topicTitle: String, replyToPostNumber: Int?, replyToUsername: String?,
-    initialRaw: String = "", initialDraft: CloudDraftItem? = null,
-    onDismiss: () -> Unit, onPostCreated: (PostItemModel) -> Unit
-) = ComposerSheet(ComposerAction.REPLY, topicId = topicId, topicTitle = topicTitle,
-    replyToPostNumber = replyToPostNumber, replyToUsername = replyToUsername,
-    initialRaw = initialRaw, initialDraft = initialDraft, onDismiss = onDismiss,
-    onPublished = { it.post?.let(onPostCreated) })
+    topicId: Int,
+    topicTitle: String,
+    replyToPostNumber: Int?,
+    replyToUsername: String?,
+    replyToDisplayName: String? = null,
+    replyToAvatarUrl: String? = null,
+    replyToAnimatedAvatar: String? = null,
+    replyToContentSnippet: String? = null,
+    initialRaw: String = "",
+    initialDraft: CloudDraftItem? = null,
+    onDismiss: () -> Unit,
+    onPostCreated: (PostItemModel) -> Unit
+) = ComposerSheet(
+    ComposerAction.REPLY,
+    topicId = topicId,
+    topicTitle = topicTitle,
+    replyToPostNumber = replyToPostNumber,
+    replyToUsername = replyToUsername,
+    replyToDisplayName = replyToDisplayName,
+    replyToAvatarUrl = replyToAvatarUrl,
+    replyToAnimatedAvatar = replyToAnimatedAvatar,
+    replyToContentSnippet = replyToContentSnippet,
+    initialRaw = initialRaw,
+    initialDraft = initialDraft,
+    onDismiss = onDismiss,
+    onPublished = { it.post?.let(onPostCreated) }
+)
 
 /**
  * 官方功能 2：发布全新话题全屏级工作台抽屉 (`POST /posts.json`)
