@@ -39,6 +39,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -226,7 +227,7 @@ fun FlairBadgeOverlay(
     val visual = remember(tempBadge) {
         UniversalBadgeEngine.resolveBadgeVisual(tempBadge, isDark = true)
     }
-    if (visual is ResolvedBadgeVisual.VectorGlyph) {
+    if (visual is ResolvedBadgeVisual.VectorGlyph || visual is ResolvedBadgeVisual.DynamicSpriteSvg) {
         Surface(
             modifier = modifier.size(badgeSize),
             shape = CircleShape,
@@ -234,12 +235,18 @@ fun FlairBadgeOverlay(
             shadowElevation = 0.5.dp
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                Icon(
-                    imageVector = visual.icon,
-                    contentDescription = flair.name,
-                    tint = fgColor,
-                    modifier = Modifier.size(badgeSize * 0.64f)
-                )
+                when (visual) {
+                    is ResolvedBadgeVisual.VectorGlyph -> Icon(
+                        visual.icon, flair.name, Modifier.size(badgeSize * 0.64f), tint = fgColor
+                    )
+                    is ResolvedBadgeVisual.DynamicSpriteSvg -> AsyncImage(
+                        model = remember(visual.svgXml) { visual.svgXml.encodeToByteArray() },
+                        contentDescription = flair.name,
+                        colorFilter = ColorFilter.tint(fgColor),
+                        modifier = Modifier.size(badgeSize * 0.64f)
+                    )
+                    else -> Unit
+                }
             }
         }
     }
@@ -465,6 +472,26 @@ fun PostGrantedBadgeIcon(
                         .size(14.dp)
                         .alpha(if (svgLoaded) 1f else 0f)
                 )
+            }
+            is ResolvedBadgeVisual.DynamicSpriteSvg -> {
+                val bytes = remember(visual.svgXml) { visual.svgXml.encodeToByteArray() }
+                val hasOwnPaint = remember(visual.svgXml) {
+                    Regex("""(?:fill|stroke)\s*=\s*['"](?!none|currentColor)[^'"]+""", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(visual.svgXml)
+                }
+                var failed by remember(visual.svgXml) { mutableStateOf(false) }
+                if (failed) {
+                    Icon(fallbackVector, badge.name, Modifier.size(13.5.dp), tint = tierColor)
+                } else {
+                    AsyncImage(
+                        model = bytes,
+                        contentDescription = badge.name,
+                        contentScale = ContentScale.Fit,
+                        colorFilter = if (hasOwnPaint) null else ColorFilter.tint(visual.tintColor),
+                        onError = { failed = true },
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
             }
             is ResolvedBadgeVisual.VectorGlyph -> {
                 Icon(

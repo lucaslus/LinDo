@@ -18,10 +18,22 @@ import kotlin.test.*
 
 class ComposerAndSafetyTest {
     private fun owner() = "test-${UUID.randomUUID()}"
-    private suspend fun withTransport(handler: suspend (String, String, Map<String, String>?) -> Pair<Int, String>, block: suspend () -> Unit) {
+    private suspend fun withTransport(handler: suspend (String, String, Map<String, String>?) -> Pair<Int, String>?, block: suspend () -> Unit) {
         val previous = UserApiKeyAuthManager.webViewHttpExecutor
         try { UserApiKeyAuthManager.webViewHttpExecutor = { url, method, form, _ -> handler(url, method, form) }; block() }
         finally { UserApiKeyAuthManager.webViewHttpExecutor = previous }
+    }
+
+    @Test fun searchDistinguishesOfflineFromAValidEmptyResult() = runTest {
+        withTransport({ _, _, _ -> null }) {
+            val error = assertFailsWith<ApiReadException> { LinuxDoRepository.searchCommunity("lindo") }
+            assertEquals(ApiFailureKind.Connection, error.kind)
+        }
+        withTransport({ url, _, _ ->
+            if (url.contains("/search/query.json")) 200 to """{"posts":[],"topics":[]}""" else null
+        }) {
+            assertTrue(LinuxDoRepository.searchCommunity("lindo").isEmpty())
+        }
     }
 
     @Test fun rawEditingRequiresTheActualSourceAndKeepsItsTopic() = runTest {
@@ -230,6 +242,22 @@ class ComposerAndSafetyTest {
         val overEmojis = BoostInputStats.compute("🚀🔥🎉❤️👍😆")
         assertTrue(overEmojis.exceedsEmojiLimit)
         assertFalse(overEmojis.isValid)
+    }
+
+    @Test fun boostAuthorIsIndependentOfModerationPermission() {
+        val boost = PostBoostItem(id = 42L, cookedHtml = "助力", userId = 7, username = "writer", canDelete = true)
+        assertFalse(boost.isBy(8, "writer"))
+        assertTrue(boost.isBy(7, "renamed_writer"))
+        assertTrue(boost.copy(userId = 0).isBy(7, "Writer"))
+        assertFalse(boost.isBy(null, null))
+    }
+
+    @Test fun notificationReplyLabelDoesNotAttributeTheDestinationFloorToTheRecipient() {
+        val reply = UserNotificationItem(id = 1, notificationType = 2, read = false,
+            createdAtText = "", topicId = 42, postNumber = 12, title = "话题")
+        assertEquals("回复了你", reply.typeLabel)
+        assertEquals("提及了你", reply.copy(notificationType = 1).typeLabel)
+        assertEquals(12, reply.postNumber)
     }
 
     @Test fun reactionToggleParsesServerSnapshotAndSurfacesErrors() = runTest {

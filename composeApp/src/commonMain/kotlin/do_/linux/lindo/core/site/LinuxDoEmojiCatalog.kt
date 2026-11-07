@@ -92,6 +92,16 @@ object LinuxDoEmojiCatalog {
         if (rawGroups.isEmpty()) return
         val groupLabelMap = mapOf(
             "default" to "社区精选",
+            "smileys_&_emotion" to "笑脸",
+            "smileys_&_people" to "笑脸",
+            "people_&_body" to "人物与手势",
+            "animals_&_nature" to "动物与自然",
+            "food_&_drink" to "食物与饮品",
+            "travel_&_places" to "旅行与地点",
+            "activities" to "活动",
+            "objects" to "物品",
+            "symbols" to "符号",
+            "flags" to "旗帜",
             "feishu" to "飞书表情",
             "lark" to "飞书表情",
             "bilibili" to "B站小电视",
@@ -111,7 +121,9 @@ object LinuxDoEmojiCatalog {
         for ((groupKey, entries) in rawGroups) {
             if (entries.isEmpty()) continue
             val cleanGroupKey = groupKey.trim()
-            val labelZh = groupLabelMap[cleanGroupKey.lowercase()] ?: cleanGroupKey
+            val labelKey = cleanGroupKey.removePrefix("✨").trim().lowercase()
+                .replace('-', '_').replace(' ', '_')
+            val labelZh = groupLabelMap[labelKey] ?: cleanGroupKey
             val items = entries.mapNotNull { (rawName, rawUrl) ->
                 val cleanName = rawName.trim().removeSurrounding(":")
                 val cleanUrl = rawUrl.trim()

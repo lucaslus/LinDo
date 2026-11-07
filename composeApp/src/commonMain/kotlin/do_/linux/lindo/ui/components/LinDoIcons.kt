@@ -1455,6 +1455,35 @@ object LinDoIcons {
         }
     }
 
+    val BoostRocket: ImageVector by lazy {
+        lucideIcon("BoostRocket") {
+            path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+                moveTo(20.6f, 2.5f)
+                curveTo(14.9f, 2.1f, 10.7f, 4.5f, 7.8f, 8.4f)
+                lineTo(5.4f, 8.5f)
+                curveTo(4.6f, 8.6f, 4.0f, 9.0f, 3.6f, 9.7f)
+                lineTo(1.9f, 12.9f)
+                curveTo(1.6f, 13.5f, 2.0f, 14.1f, 2.7f, 14.1f)
+                lineTo(6.1f, 14.0f)
+                lineTo(10.0f, 17.9f)
+                lineTo(9.9f, 21.3f)
+                curveTo(9.9f, 22.0f, 10.5f, 22.4f, 11.1f, 22.1f)
+                lineTo(14.3f, 20.4f)
+                curveTo(15.0f, 20.0f, 15.4f, 19.4f, 15.5f, 18.6f)
+                lineTo(15.6f, 16.2f)
+                curveTo(19.5f, 13.3f, 21.9f, 9.1f, 21.5f, 3.4f)
+                curveTo(21.5f, 2.9f, 21.1f, 2.5f, 20.6f, 2.5f)
+                close()
+                moveTo(15.4f, 6.9f)
+                curveTo(16.4f, 6.9f, 17.2f, 7.7f, 17.2f, 8.7f)
+                curveTo(17.2f, 9.7f, 16.4f, 10.5f, 15.4f, 10.5f)
+                curveTo(14.4f, 10.5f, 13.6f, 9.7f, 13.6f, 8.7f)
+                curveTo(13.6f, 7.7f, 14.4f, 6.9f, 15.4f, 6.9f)
+                close()
+            }
+        }
+    }
+
     val Rocket: ImageVector by lazy {
         lucideIcon("Rocket") {
             strokePath(1.8f) {

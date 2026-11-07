@@ -109,13 +109,14 @@ internal fun ComposerSheet(
     var showDiscard by remember(key) { mutableStateOf(false) }
     var showCost by remember(key) { mutableStateOf(false) }
     var syncRetry by remember(key) { mutableIntStateOf(0) }
-    var availableTags by remember { mutableStateOf(emptyList<String>()) }
+    var availableTags by remember(draft.categoryId) { mutableStateOf(emptyList<String>()) }
     var tagQuery by remember { mutableStateOf("") }
     var tagsLoading by remember { mutableStateOf(false) }
     var tagsError by remember { mutableStateOf<String?>(null) }
     var tagRetry by remember { mutableIntStateOf(0) }
     var appliedTemplate by remember(key) { mutableStateOf<String?>(null) }
 
+    var replyContextExpanded by remember(key) { mutableStateOf(false) }
     var viewMode by remember(key) { mutableStateOf(WorkbenchViewMode.SOURCE) }
     var showCategoryPicker by remember(key) { mutableStateOf(false) }
     var showTagPicker by remember(key) { mutableStateOf(false) }
@@ -160,7 +161,7 @@ internal fun ComposerSheet(
                 title = if (action == ComposerAction.NEW_TOPIC) initialDraft?.title?.takeUnless { it.startsWith("未命名") }.orEmpty() else topicTitle,
                 categoryId = initialDraft?.categoryId ?: initialCategoryId,
                 tags = initialDraft?.tags.orEmpty(), topicId = topicId?.takeIf { it > 0 } ?: sourcePost?.topicId?.takeIf { it > 0 } ?: initialDraft?.topicId?.takeIf { it > 0 },
-                postId = editingId, postNumber = sourcePost?.postNumber ?: post?.postNumber,
+                postId = editingId, postNumber = post?.postNumber ?: sourcePost?.postNumber,
                 replyToPostNumber = initialDraft?.replyToPostNumber ?: replyToPostNumber,
                 replyToUsername = replyToUsername, sequence = initialDraft?.sequence?.takeIf { initialDraft.sequenceKnown })
             val local = LocalComposerDrafts.get(owner, key)
@@ -172,6 +173,8 @@ internal fun ComposerSheet(
                     val targetNum = if (initialDraft != null) base.replyToPostNumber else replyToPostNumber
                     val targetUser = if (initialDraft != null) base.replyToUsername else replyToUsername
                     base.copy(raw = mergedRaw, replyToPostNumber = targetNum, replyToUsername = targetUser)
+                } else if (action == ComposerAction.EDIT) {
+                    base.copy(postNumber = seed.postNumber ?: base.postNumber)
                 } else base
             }
             session = ComposerDraftSession(draft)
@@ -192,8 +195,8 @@ internal fun ComposerSheet(
         finally { syncing = false }
     }
 
-    LaunchedEffect(draft.categoryId, tagQuery, tagRetry, prepared) {
-        if (!prepared || action != ComposerAction.NEW_TOPIC) return@LaunchedEffect
+    LaunchedEffect(draft.categoryId, tagQuery, tagRetry, prepared, showTagPicker) {
+        if (!prepared || !showTagPicker || action != ComposerAction.NEW_TOPIC) return@LaunchedEffect
         tagsLoading = true
         tagsError = null
         try {
@@ -216,15 +219,17 @@ internal fun ComposerSheet(
         }
     }
 
-    val validation = when {
+    val titleValidation = if (prepared && action == ComposerAction.NEW_TOPIC &&
+        draft.title.trim().length < LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH
+    ) "标题至少 ${LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH} 个字" else null
+    val bodyValidation = when {
         !prepared -> null
-        action == ComposerAction.NEW_TOPIC && draft.title.trim().length < LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH -> "标题至少 ${LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH} 个字"
         draft.raw.trim().length < LinuxDoSiteRules.MIN_POST_RAW_LENGTH -> "正文至少 ${LinuxDoSiteRules.MIN_POST_RAW_LENGTH} 个字"
         action == ComposerAction.EDIT && !hasChanges -> "内容尚未修改"
         else -> null
     }
     val focusBodyInitially = remember(prepared) { action != ComposerAction.NEW_TOPIC || draft.title.isNotBlank() }
-    val canSubmit = prepared && !busy && validation == null
+    val canSubmit = prepared && !busy && titleValidation == null && bodyValidation == null
 
     fun submit() {
         if (!canSubmit || submitting) return
@@ -266,146 +271,69 @@ internal fun ComposerSheet(
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // ==================== 1. 一体化极简对齐顶栏 (48dp · 统一无底色框纯图标设计) ====================
+            val headerTitle = when (action) {
+                ComposerAction.NEW_TOPIC -> "新话题"
+                ComposerAction.EDIT -> if ((draft.postNumber ?: 1) > 1) "编辑回复" else "编辑帖子"
+                ComposerAction.REPLY -> if (draft.replyToPostNumber == null) "回复话题" else "回复"
+            }
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .padding(horizontal = 10.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 左侧：返回图标按钮（无底色无边框，与详情页顶栏及下方工具栏严格统一）
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(9.dp))
-                        .clickable(enabled = !busy, onClick = ::requestClose),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.ArrowLeft,
-                        contentDescription = "返回",
-                        tint = palette.inkPrimary,
-                        modifier = Modifier.size(18.5.dp)
-                    )
+                IconButton(enabled = !busy, onClick = ::requestClose) {
+                    Icon(LinDoIcons.ArrowLeft, "返回", tint = palette.inkPrimary, modifier = Modifier.size(20.dp))
                 }
-
-                Spacer(modifier = Modifier.width(4.dp))
-
-                // 中左：清爽单行标题 + 云端同步指示点（去除突兀的灰底胶囊框）
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    val replyPostNum = draft.replyToPostNumber
-                    val editPostNum = draft.postNumber
-                    val headerTitle = when (action) {
-                        ComposerAction.NEW_TOPIC -> "新话题"
-                        ComposerAction.EDIT -> if (editPostNum != null && editPostNum > 0) "编辑 #$editPostNum" else "编辑"
-                        ComposerAction.REPLY -> if (replyPostNum != null && replyPostNum > 0) "回复 #$replyPostNum" else "回复"
-                    }
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = headerTitle,
-                        color = palette.inkPrimary,
-                        fontSize = 15.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1
+                        headerTitle, color = palette.inkPrimary, fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis
                     )
-
-                    if (draftStatusLabel != null) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    when {
-                                        syncError != null -> Color(0xFFF59E0B)
-                                        synced -> Color(0xFF10B981)
-                                        else -> palette.brandGold
-                                    }
-                                )
-                                .let { mod ->
-                                    if (syncError != null && !busy) mod.clickable { syncRetry++ } else mod
-                                }
+                    val floorLabel = draft.postNumber
+                        ?.takeIf { action == ComposerAction.EDIT && it > 1 }
+                        ?.let { "${it} 楼" }
+                    val status = listOfNotNull(floorLabel, draftStatusLabel).joinToString(" · ")
+                    if (status.isNotBlank()) {
+                        Text(
+                            status,
+                            modifier = if (syncError != null && !busy) Modifier.clickable { syncRetry++ } else Modifier,
+                            color = if (syncError != null) MaterialTheme.colorScheme.error else palette.inkSecondary,
+                            fontSize = 10.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
-
-                // 右侧：统一风格纯图标「预览/编辑切换」+ 图标「发送/保存」按钮（无多余灰底圆圈）
                 if (prepared && prepareError == null) {
                     val isPreview = viewMode == WorkbenchViewMode.PREVIEW
-                    val hasRichMarkdown = remember(draft.raw) {
-                        val txt = draft.raw
-                        txt.contains("![") || txt.contains("```") || txt.contains("[quote") ||
-                            txt.contains("[details") || txt.contains("[poll") || txt.contains("](")
-                    }
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(if (isPreview) palette.activeChipBg else Color.Transparent)
-                            .then(
-                                if (isPreview) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
-                                else Modifier
-                            )
-                            .clickable(enabled = !busy) {
-                                val nextMode = if (isPreview) WorkbenchViewMode.SOURCE else WorkbenchViewMode.PREVIEW
-                                viewMode = nextMode
-                                if (nextMode == WorkbenchViewMode.PREVIEW) {
-                                    keyboard?.hide()
-                                }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (isPreview) LinDoIcons.Edit else LinDoIcons.Eye,
-                            contentDescription = if (isPreview) "切换编辑" else "实时预览",
-                            tint = if (isPreview) palette.brandGold else palette.inkSecondary,
-                            modifier = Modifier.size(18.5.dp)
-                        )
-                        if (!isPreview && hasRichMarkdown) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(top = 6.dp, end = 6.dp)
-                                    .size(5.dp)
-                                    .clip(CircleShape)
-                                    .background(palette.brandGold)
-                            )
+                    TextButton(
+                        enabled = !busy,
+                        contentPadding = PaddingValues(horizontal = 10.dp),
+                        onClick = {
+                            viewMode = if (isPreview) WorkbenchViewMode.SOURCE else WorkbenchViewMode.PREVIEW
+                            if (!isPreview) keyboard?.hide()
                         }
+                    ) {
+                        Text(if (isPreview) "继续编辑" else "预览", color = palette.inkSecondary, maxLines = 1)
                     }
-
-                    Spacer(modifier = Modifier.width(4.dp))
                 }
-
-                // 主操作图标按钮：发送 / 保存（与全站图标按钮视觉语言严格统一）
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(9.dp))
-                        .background(if (canSubmit || submitting) palette.activeChipBg else Color.Transparent)
-                        .then(
-                            if (canSubmit || submitting) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
-                            else Modifier
-                        )
-                        .clickable(enabled = canSubmit) {
-                            if (action == ComposerAction.NEW_TOPIC && LinuxDoSiteRules.requiresTopicCostConfirmation(draft.tags)) {
-                                showCost = true
-                            } else {
-                                submit()
-                            }
-                        },
-                    contentAlignment = Alignment.Center
+                val actionLabel = when (action) {
+                    ComposerAction.NEW_TOPIC -> "发布"
+                    ComposerAction.REPLY -> "发送"
+                    ComposerAction.EDIT -> "保存"
+                }
+                TextButton(
+                    enabled = canSubmit,
+                    contentPadding = PaddingValues(horizontal = 10.dp),
+                    onClick = {
+                        if (action == ComposerAction.NEW_TOPIC && LinuxDoSiteRules.requiresTopicCostConfirmation(draft.tags)) {
+                            showCost = true
+                        } else submit()
+                    }
                 ) {
                     if (submitting) {
-                        LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 16.dp)
+                        LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 18.dp)
                     } else {
-                        Icon(
-                            imageVector = if (action == ComposerAction.EDIT) LinDoIcons.Check else LinDoIcons.Send,
-                            contentDescription = if (action == ComposerAction.EDIT) "保存" else "发布",
-                            tint = if (canSubmit) palette.brandGold else palette.inkTertiary.copy(alpha = 0.38f),
-                            modifier = Modifier.size(18.5.dp)
+                        Text(
+                            actionLabel, fontWeight = FontWeight.Bold, maxLines = 1,
+                            color = if (canSubmit) palette.accent else palette.inkTertiary.copy(alpha = 0.6f)
                         )
                     }
                 }
@@ -425,81 +353,52 @@ internal fun ComposerSheet(
                     }
                 }
                 else -> {
-                    // ==================== 2A. 回复专属：被回复对象头像 + 昵称楼层 + 2~3行内容预览（超出...截断） ====================
                     if (action == ComposerAction.REPLY) {
-                        val targetUsername = draft.replyToUsername?.takeIf { it.isNotBlank() } ?: replyToUsername.orEmpty()
-                        val targetDisplayName = replyToDisplayName?.takeIf { it.isNotBlank() } ?: targetUsername.ifBlank { "楼主" }
-                        val targetFloorNum = draft.replyToPostNumber ?: replyToPostNumber
-                        val previewSnippet = replyToContentSnippet?.takeIf { it.isNotBlank() } ?: topicTitle
-                        if (previewSnippet.isNotBlank() || targetDisplayName.isNotBlank()) {
+                        val floor = draft.replyToPostNumber
+                        val name = replyToDisplayName?.takeIf { it.isNotBlank() }
+                            ?: draft.replyToUsername?.takeIf { it.isNotBlank() } ?: "楼主"
+                        val snippet = if (floor == null) topicTitle else replyToContentSnippet.orEmpty()
+                        if (floor != null || snippet.isNotBlank()) {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(palette.cardSurface)
-                                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.Top
+                                Modifier.fillMaxWidth()
+                                    .then(if (snippet.isNotBlank()) Modifier.clickable { replyContextExpanded = !replyContextExpanded } else Modifier)
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.Top,
+                                horizontalArrangement = Arrangement.spacedBy(9.dp)
                             ) {
-                                GoogleAccountRingAvatar(
-                                    letter = targetDisplayName.ifBlank { "L" },
-                                    avatarUrl = replyToAvatarUrl,
-                                    animatedAvatar = replyToAnimatedAvatar,
-                                    avatarSize = 32.dp,
-                                    strokeWidth = 0.dp
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
+                                if (floor != null) {
+                                    GoogleAccountRingAvatar(
+                                        letter = name, avatarUrl = replyToAvatarUrl,
+                                        animatedAvatar = replyToAnimatedAvatar, avatarSize = 25.dp, strokeWidth = 0.dp
+                                    )
+                                }
+                                Column(Modifier.weight(1f)) {
+                                    if (floor != null) {
                                         Text(
-                                            text = targetDisplayName,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = palette.inkPrimary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        if (targetUsername.isNotBlank() && !targetUsername.equals(targetDisplayName, ignoreCase = true)) {
-                                            Text(
-                                                text = "@$targetUsername",
-                                                fontSize = 11.8.sp,
-                                                color = palette.inkTertiary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f, fill = false)
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.weight(1f))
-                                        Text(
-                                            text = if (targetFloorNum != null && targetFloorNum > 0) "#$targetFloorNum" else "#1",
-                                            fontSize = 11.5.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = palette.inkTertiary,
-                                            maxLines = 1
+                                            "回复给 $name · ${floor} 楼",
+                                            color = palette.inkPrimary, fontWeight = FontWeight.Medium,
+                                            fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                                         )
                                     }
-                                    if (previewSnippet.isNotBlank()) {
+                                    if (snippet.isNotBlank()) {
                                         Text(
-                                            text = previewSnippet,
-                                            fontSize = 13.sp,
-                                            lineHeight = 18.8.sp,
-                                            color = palette.inkSecondary,
-                                            maxLines = 3,
-                                            overflow = TextOverflow.Ellipsis
+                                            snippet, color = palette.inkSecondary, fontSize = 12.sp, lineHeight = 18.sp,
+                                            maxLines = if (replyContextExpanded) 5 else 1, overflow = TextOverflow.Ellipsis
                                         )
                                     }
+                                }
+                                if (snippet.isNotBlank()) {
+                                    Icon(
+                                        if (replyContextExpanded) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
+                                        if (replyContextExpanded) "收起原文" else "展开原文",
+                                        tint = palette.inkSecondary, modifier = Modifier.size(15.dp)
+                                    )
                                 }
                             }
                             HorizontalDivider(color = palette.hairline, thickness = 0.5.dp)
                         }
                     }
 
-                    // ==================== 2B. 新建话题专属：版块 + 标签胶囊条 + 标题输入（位于文本框上方） ====================
                     if (action == ComposerAction.NEW_TOPIC) {
                         val activeCat = LinuxDoRepository.categories.firstOrNull { it.id == draft.categoryId }
                             ?: LinuxDoRepository.categories.firstOrNull()
@@ -508,26 +407,18 @@ internal fun ComposerSheet(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                                .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(7.dp)
                         ) {
-                            // 版块选择胶囊
                             Row(
                                 modifier = Modifier
-                                    .height(28.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(if (showCategoryPicker) palette.activeChipBg else palette.subtleSurface)
-                                    .border(
-                                        width = 0.6.dp,
-                                        color = if (showCategoryPicker) palette.brandGold else palette.hairline,
-                                        shape = RoundedCornerShape(14.dp)
-                                    )
+                                    .heightIn(min = 48.dp)
                                     .clickable(enabled = !busy) {
                                         showCategoryPicker = !showCategoryPicker
                                         if (showCategoryPicker) showTagPicker = false
                                     }
-                                    .padding(horizontal = 10.dp),
+                                    .padding(horizontal = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
@@ -553,18 +444,14 @@ internal fun ComposerSheet(
                                 )
                             }
 
-                            // 已选标签胶囊
                             draft.tags.forEach { tag ->
                                 Row(
                                     modifier = Modifier
-                                        .height(28.dp)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(palette.activeChipBg.copy(alpha = 0.65f))
-                                        .border(0.5.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                                        .heightIn(min = 48.dp)
                                         .clickable(enabled = !busy) {
                                             update(draft.copy(tags = draft.tags - tag))
                                         }
-                                        .padding(horizontal = 9.dp),
+                                        .padding(horizontal = 5.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
@@ -583,34 +470,26 @@ internal fun ComposerSheet(
                                 }
                             }
 
-                            // 图标化添加标签胶囊按钮 (`+#`)
                             if (draft.tags.size < 5) {
                                 Row(
                                     modifier = Modifier
-                                        .height(28.dp)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(if (showTagPicker) palette.activeChipBg else palette.subtleSurface)
-                                        .border(
-                                            width = 0.6.dp,
-                                            color = if (showTagPicker) palette.brandGold else palette.hairline,
-                                            shape = RoundedCornerShape(14.dp)
-                                        )
+                                        .heightIn(min = 48.dp)
                                         .clickable(enabled = !busy) {
                                             showTagPicker = !showTagPicker
                                             if (showTagPicker) showCategoryPicker = false
                                         }
-                                        .padding(horizontal = 9.dp),
+                                        .padding(horizontal = 5.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(3.dp)
                                 ) {
                                     Icon(
                                         imageVector = LinDoIcons.Plus,
-                                        contentDescription = "添加标签",
+                                        contentDescription = null,
                                         modifier = Modifier.size(12.dp),
                                         tint = if (showTagPicker) palette.brandGold else palette.inkSecondary
                                     )
                                     Text(
-                                        text = if (draft.tags.isEmpty()) "#" else "# ${draft.tags.size}/5",
+                                        text = "添加标签",
                                         fontSize = 11.8.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = if (showTagPicker) palette.brandGold else palette.inkSecondary
@@ -709,109 +588,24 @@ internal fun ComposerSheet(
                             }
                         }
 
-                        // 按需展开：本版块标签搜索与快选面板
-                        AnimatedVisibility(visible = showTagPicker) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 4.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.6.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                    .padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "标签 (${draft.tags.size}/5)",
-                                        fontSize = 11.8.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.inkSecondary
-                                    )
-                                    Box(
-                                        modifier = Modifier
-                                            .size(22.dp)
-                                            .clip(CircleShape)
-                                            .clickable { showTagPicker = false },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = LinDoIcons.Close,
-                                            contentDescription = "关闭",
-                                            modifier = Modifier.size(13.dp),
-                                            tint = palette.inkTertiary
-                                        )
-                                    }
-                                }
-                                ComposerTextInput(
-                                    value = tagQuery,
-                                    onChange = { tagQuery = it },
-                                    placeholder = "搜索标签…",
-                                    enabled = !busy
-                                )
-                                when {
-                                    tagsError != null -> LinDoLoadFailure(tagsError!!, { tagRetry++ })
-                                    tagsLoading -> LinDoFeedbackRow("加载中", LinDoMascotState.Loading)
-                                    else -> {
-                                        val unselectedTags = availableTags.filterNot { it in draft.tags }
-                                        if (unselectedTags.isEmpty()) {
-                                            Text(
-                                                text = "暂无更多标签",
-                                                fontSize = 11.5.sp,
-                                                color = palette.inkTertiary
-                                            )
-                                        } else {
-                                            FlowRow(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .heightIn(max = 110.dp)
-                                                    .verticalScroll(rememberScrollState()),
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                unselectedTags.forEach { tag ->
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .clip(RoundedCornerShape(8.dp))
-                                                            .background(palette.cardSurface)
-                                                            .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
-                                                            .clickable(enabled = !busy && draft.tags.size < 5) {
-                                                                update(draft.copy(tags = draft.tags + tag))
-                                                            }
-                                                            .padding(horizontal = 9.dp, vertical = 4.5.dp)
-                                                    ) {
-                                                        Text(
-                                                            text = "#$tag",
-                                                            fontSize = 12.sp,
-                                                            color = palette.inkPrimary
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
                         // 无边框大字号话题标题输入栏
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp)
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
                         ) {
                             ComposerTextInput(
                                 value = draft.title,
                                 onChange = { update(draft.copy(title = it)) },
-                                placeholder = "话题标题（至少 ${LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH} 字）…",
+                                placeholder = "话题标题",
                                 enabled = !busy,
                                 title = true,
                                 autofocus = !focusBodyInitially
                             )
+                            if (titleValidation != null && (draft.title.isNotBlank() || draft.raw.isNotBlank())) {
+                                Text(
+                                    titleValidation, fontSize = 11.5.sp, color = palette.inkSecondary,
+                                    modifier = Modifier.padding(bottom = 6.dp)
+                                )
+                            }
                         }
                         HorizontalDivider(
                             color = palette.hairline,
@@ -831,15 +625,15 @@ internal fun ComposerSheet(
                         rawValue = draft.raw,
                         onRawValueChange = { update(draft.copy(raw = it)) },
                         placeholder = when (action) {
-                            ComposerAction.NEW_TOPIC -> "写下话题正文（支持 Markdown、代码块、投票与自定义表情）…"
-                            ComposerAction.EDIT -> "修改帖子内容…"
-                            ComposerAction.REPLY -> "写下你的回复，真诚友善地参与交流…"
+                            ComposerAction.NEW_TOPIC -> "写下正文"
+                            ComposerAction.EDIT -> "修改正文"
+                            ComposerAction.REPLY -> "写下回复"
                         },
                         enabled = !submitting,
                         autofocus = focusBodyInitially,
                         onUploadingChange = { uploading = it },
                         externalViewMode = viewMode,
-                        validationHint = validation,
+                        validationHint = bodyValidation,
                         fillAvailableHeight = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -847,6 +641,47 @@ internal fun ComposerSheet(
             }
         }
     }
+
+    if (showTagPicker) AlertDialog(
+        onDismissRequest = { showTagPicker = false },
+        containerColor = palette.cardSurface,
+        title = { Text("选择标签", fontSize = 18.sp, fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ComposerTextInput(tagQuery, { tagQuery = it }, "搜索标签", enabled = !busy, autofocus = true)
+                Text("已选 ${draft.tags.size} / 5", fontSize = 12.sp, color = palette.inkSecondary)
+                val tagError = tagsError
+                when {
+                    tagsLoading -> LinDoLoadingIndicator(label = "加载标签", compactInline = true)
+                    tagError != null -> LinDoLoadFailure("标签暂时加载失败", { tagRetry++ })
+                    availableTags.isEmpty() -> Text(
+                        if (tagQuery.isBlank()) "这个版块暂无可用标签" else "没有匹配的标签",
+                        fontSize = 13.sp, color = palette.inkSecondary
+                    )
+                    else -> Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
+                        (draft.tags + availableTags).distinct().forEach { tag ->
+                            val selected = tag in draft.tags
+                            val toggle = {
+                                val next = if (selected) draft.tags - tag else draft.tags + tag
+                                update(draft.copy(tags = next))
+                            }
+                            Row(
+                                Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                    .clickable(enabled = !busy && (selected || draft.tags.size < 5), onClick = toggle),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("#$tag", color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                                if (selected) Icon(
+                                    LinDoIcons.Check, "已选", tint = palette.accent, modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { showTagPicker = false }) { Text("完成") } }
+    )
 
     if (showExit) AlertDialog(
         onDismissRequest = { showExit = false },
@@ -925,9 +760,10 @@ internal fun ComposerTextInput(
     )
     BasicTextField(
         value = value,
-        onValueChange = onChange,
+        onValueChange = { next -> onChange(if (title) next.replace(Regex("[\\r\\n]+"), " ") else next) },
         enabled = enabled,
-        singleLine = true,
+        singleLine = !title,
+        maxLines = if (title) 3 else 1,
         textStyle = style,
         cursorBrush = SolidColor(palette.brandGold),
         modifier = Modifier

@@ -153,7 +153,11 @@ class ComposerDraftSession(initial: ComposerDraft) {
 
 fun ComposerDraft.toCloudItem() = do_.linux.lindo.core.network.CloudDraftItem(
     draftKey = key, sequence = sequence ?: 0, title = title.ifBlank {
-        when (action) { ComposerAction.NEW_TOPIC -> "未命名话题草稿"; ComposerAction.REPLY -> "回复话题 #$topicId"; ComposerAction.EDIT -> "编辑第 #${postNumber ?: ""} 楼" }
+        when (action) {
+            ComposerAction.NEW_TOPIC -> "未命名话题草稿"
+            ComposerAction.REPLY -> "话题回复草稿"
+            ComposerAction.EDIT -> postNumber?.takeIf { it > 1 }?.let { "${it} 楼 · 编辑草稿" } ?: "帖子编辑草稿"
+        }
     }, excerpt = raw, topicId = topicId ?: 0, createdAtText = "本机草稿", raw = raw, categoryId = categoryId,
     tags = tags, replyToPostNumber = replyToPostNumber, action = when (action) {
         ComposerAction.NEW_TOPIC -> "createTopic"; ComposerAction.REPLY -> "reply"; ComposerAction.EDIT -> "edit"

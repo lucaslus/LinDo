@@ -202,7 +202,12 @@ data class PostBoostItem(
     val avatarTemplate: String = "",
     val canDelete: Boolean = false,
     val canFlag: Boolean = false
-)
+) {
+    internal fun isBy(accountId: Int?, accountUsername: String?): Boolean {
+        if (accountId != null && accountId > 0 && userId > 0) return userId == accountId
+        return !accountUsername.isNullOrBlank() && username.equals(accountUsername, ignoreCase = true)
+    }
+}
 
 /**
  * 对齐官方 `DiscourseBoosts::Boost` (`MAX_VISIBLE_LENGTH = 16`, `MAX_EMOJI = 5`) 字数与表情统计：
@@ -359,7 +364,8 @@ data class TopicDetailModel(
     val posts: List<PostItemModel> = emptyList(),
     val streamIds: List<Int> = emptyList(),
     val loadError: String? = null,
-    val originalPosterUsername: String? = null
+    val originalPosterUsername: String? = null,
+    val highestPostNumber: Int? = null
 )
 
 /**
@@ -431,17 +437,17 @@ data class UserNotificationItem(
 ) {
     val typeLabel: String
         get() = when (notificationType) {
-            1 -> if (postNumber > 1) "在 #${postNumber} 楼 @提及了你" else "在主帖 @提及了你"
-            2 -> if (postNumber > 1) "回复了你的 #${postNumber} 楼" else "回复了你的话题"
-            3 -> if (postNumber > 1) "在 #${postNumber} 楼引用了你" else "引用了你的发言"
-            4 -> "编辑了 #${postNumber} 楼帖子"
-            5 -> if (postNumber > 1) "赞了你的 #${postNumber} 楼评论" else "赞了你的主帖"
+            1 -> "提及了你"
+            2 -> "回复了你"
+            3 -> "引用了你的发言"
+            4 -> "编辑了帖子"
+            5 -> if (postNumber > 1) "赞了你的回复" else "赞了你的主帖"
             6 -> "发来私信"
             7 -> "邀请你参与私信"
             8 -> "接受了你的邀请"
-            9 -> if (postNumber > 1) "在话题发表了 #${postNumber} 楼回复" else "回复了话题"
+            9 -> "回复了话题"
             10 -> "移动了帖子"
-            11 -> if (postNumber > 1) "链接了你的 #${postNumber} 楼" else "链接了你的帖子"
+            11 -> "链接了你的帖子"
             12 -> "授予你社区徽章"
             13 -> "邀请你参与话题"
             14 -> "系统通知"
@@ -457,8 +463,7 @@ data class UserNotificationItem(
             24 -> "书签定时提醒"
             25 -> when {
                 count > 1 -> "回应了你的 $count 条发言"
-                postNumber > 1 -> "表态了你的 #${postNumber} 楼"
-                else -> "赞了你的主帖"
+                else -> "回应了你的发言"
             }
             26 -> "投票额度已归还"
             27 -> "活动即将开始"
@@ -471,7 +476,7 @@ data class UserNotificationItem(
             34 -> "指派了话题给你"
             36, 800 -> "关注了你"
             37, 801 -> "发布了新话题"
-            38, 802 -> if (postNumber > 1) "发表了 #${postNumber} 楼新回复" else "发表了新回复"
+            38, 802 -> "发表了新回复"
             else -> if (topicId > 0) "参与了话题互动" else "与你产生了社区互动"
         }
 }
@@ -701,45 +706,29 @@ object BadgeInjector {
     fun injectTopLevelUserBadges(posts: List<PostItemModel>, rootJson: JsonObject): List<PostItemModel> {
         parseAndCacheUserBadges(rootJson)
 
-        val topicTitle = rootJson["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
-        val isAppleTopic = topicTitle.contains("only apple can do", ignoreCase = true)
-
         // 同时收集顶层 user_badges 中指定了 post_number 的本楼首次获授徽章（兼容 JsonArray 与 JsonObject）
         val postLevelGrants = mutableMapOf<Int, MutableList<GrantedBadge>>()
         val rawUbSource = rootJson["user_badges"]
             ?: (rootJson["post_stream"] as? JsonObject)?.get("user_badges")
         for (ubObj in extractUserBadgeObjects(rawUbSource)) {
             val pNum = ubObj["post_number"]?.jsonPrimitive?.intOrNull ?: continue
+            val userId = ubObj["user_id"]?.jsonPrimitive?.intOrNull
+            if (userId != null && posts.none { it.postNumber == pNum && it.userId == userId }) continue
             val nested = (ubObj["badge"] as? JsonObject)?.let { parseGrantedBadge(it, isFirstGrant = true) }
             val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull
                 ?: (ubObj["badge"] as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull
             val resolved = nested
                 ?: bid?.let { lookupBadgeById(it)?.copy(isFirstTimeGrant = true) }
-                ?: if (isAppleTopic) UniversalBadgeEngine.createOnlyAppleCanDoBadge(isFirstGrant = true) else null
             if (resolved != null && isMeaningfulBadge(resolved)) {
                 postLevelGrants.getOrPut(pNum) { mutableListOf() }.add(resolved)
             }
         }
 
         return posts.map { post ->
-            val cachedUserBadges = getBadgesForUser(post.userId)
             val floorGrants = postLevelGrants[post.postNumber].orEmpty()
-
-            // 修复：在 Only Apple can do 专帖内，若本楼带有未解析出的楼层徽章引用或苹果设备回复获章，归一化为 Only Apple Can Do 徽章
-            val normalizedPostBadges = post.badgesGranted.mapNotNull { b ->
-                when {
-                    isMeaningfulBadge(b) -> b
-                    isAppleTopic || !post.iosDeviceName.isNullOrBlank() ->
-                        UniversalBadgeEngine.createOnlyAppleCanDoBadge(isFirstGrant = b.isFirstTimeGrant)
-                    else -> null
-                }
-            }
-
-            // 严格对齐 Linux.do 官方佩戴逻辑与位置：
-            // 第一行（昵称右侧）仅展示实际佩戴/获授的徽章图标（floorGrants + normalizedPostBadges + cachedUserBadges），
-            // 绝不把第二行的文字头衔 (`user_title`) 重复塞进第一行冒充徽章图标。
+            // The profile cache records ownership. Only explicit post data belongs on a floor.
             val merged = UniversalBadgeEngine.mergeBadgesPreservingRichness(
-                floorGrants + normalizedPostBadges + cachedUserBadges
+                post.badgesGranted + floorGrants
             ).filter { isMeaningfulBadge(it) }
 
             if (merged != post.badgesGranted) {

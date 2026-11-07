@@ -197,7 +197,7 @@ class LinDoCoreTest {
 
     @Test
     fun testOnlyAppleCanDoBadgeAndEmojiCatalogAlignment() {
-        // 1. Only Apple Can Do 徽章（无论来自 name、slug、fab-apple icon 还是 .svg URL）均识别为 AppleLogo 矢量图标
+        // Use the supplied artwork and retain the Apple glyph as a fallback.
         val appleBadge = GrantedBadge(
             id = 205,
             name = "Only Apple Can Do",
@@ -207,11 +207,14 @@ class LinDoCoreTest {
             isFirstTimeGrant = true
         )
         assertTrue(UniversalBadgeEngine.isAppleBadge(appleBadge))
-        val visual = UniversalBadgeEngine.resolveBadgeVisual(appleBadge, isDark = true)
+        val artwork = assertIs<ResolvedBadgeVisual.SvgImage>(UniversalBadgeEngine.resolveBadgeVisual(appleBadge))
+        assertEquals("https://linux.do/uploads/default/original/3X/only-apple-can-do.svg", artwork.url)
+        assertEquals(null, artwork.tintColor)
+        val visual = UniversalBadgeEngine.resolveBadgeVisual(appleBadge.copy(imageUrl = null), isDark = true)
         assertIs<ResolvedBadgeVisual.VectorGlyph>(visual)
         assertEquals(LinDoIcons.AppleLogo, visual.icon)
 
-        // 2. 首次获取徽章在楼层注入时优先置于首位（紧跟用户名展示苹果 Logo）
+        // The first grant remains attached to the floor that earned it.
         val rawPost = PostItemModel(
             id = 1001,
             postNumber = 5,
@@ -327,5 +330,10 @@ class LinDoCoreTest {
         assertEquals("Only Apple Can Do", enriched.badgesGranted.single().name)
         assertEquals(146, enriched.badgesGranted.single().id)
         assertTrue(enriched.badgesGranted.none { it.name == "全年不落" })
+
+        val otherFloor = seedPost.copy(id = 2002, postNumber = 2, iosDeviceName = "iPhone 13 Pro")
+        val anotherUser = seedPost.copy(id = 2003, userId = 778, username = "other_member")
+        assertTrue(BadgeInjector.injectTopLevelUserBadges(listOf(otherFloor), rootJson).single().badgesGranted.isEmpty())
+        assertTrue(BadgeInjector.injectTopLevelUserBadges(listOf(anotherUser), rootJson).single().badgesGranted.isEmpty())
     }
 }

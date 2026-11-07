@@ -799,12 +799,6 @@ object UniversalBadgeEngine {
     fun resolveBadgeVisual(badge: GrantedBadge, isDark: Boolean = true): ResolvedBadgeVisual {
         val tierColor = badgeTierColor(badge.badgeType, isDark)
 
-        // 0. 优先识别官方 `Only Apple Can Do` 徽章，直接渲染高精度苹果 Logo 矢量图标（彻底避免 .svg 位图解码失败）
-        if (isAppleBadge(badge)) {
-            val appleTint = if (isDark) Color(0xFFF5F5F7) else Color(0xFF1D1D1F)
-            return ResolvedBadgeVisual.VectorGlyph(icon = LinDoIcons.AppleLogo, tintColor = appleTint)
-        }
-
         // 1. 优先处理 image_url（自动区分 SVG 与位图）
         if (!badge.imageUrl.isNullOrBlank()) {
             val fullUrl = LinuxDoSiteRules.resolveUrl(badge.imageUrl)
@@ -839,9 +833,14 @@ object UniversalBadgeEngine {
 
             // 2b. 再查内置高频及新上线徽章图标表（同时结合徽章名称语义，避免通用 fa-certificate 冲掉专属图标）
             val nameHint = badge.name.trim().lowercase()
-            val semanticIcon = matchBadgeNameIcon(nameHint) ?: matchVectorIcon(key)
+            val semanticIcon = if (key in setOf("certificate", "award", "medal")) {
+                matchBadgeNameIcon(nameHint) ?: matchVectorIcon(key)
+            } else matchVectorIcon(key) ?: matchBadgeNameIcon(nameHint)
             if (semanticIcon != null) {
-                return ResolvedBadgeVisual.VectorGlyph(icon = semanticIcon, tintColor = tierColor)
+                val tint = if (semanticIcon == LinDoIcons.AppleLogo) {
+                    if (isDark) Color(0xFFF5F5F7) else Color(0xFF1D1D1F)
+                } else tierColor
+                return ResolvedBadgeVisual.VectorGlyph(icon = semanticIcon, tintColor = tint)
             }
         }
 

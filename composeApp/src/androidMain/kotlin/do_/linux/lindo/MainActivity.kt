@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -1824,8 +1825,13 @@ private fun AndroidWebLoginModal(
     var completed by remember { mutableStateOf(false) }
     var pageLoadError by remember(initialUrl) { mutableStateOf<String?>(null) }
     var rendererGone by remember { mutableStateOf(false) }
+    fun retryPage() {
+        pageLoadError = null
+        rendererGone = false
+        webViewRef?.reload()
+    }
     BackHandler {
-        if (webViewRef?.canGoBack() == true) webViewRef?.goBack() else onDismiss()
+        if (pageLoadError == null && webViewRef?.canGoBack() == true) webViewRef?.goBack() else onDismiss()
     }
     val isDark = remember { UserApiKeyAuthManager.uiDarkTheme }
 
@@ -1963,15 +1969,13 @@ private fun AndroidWebLoginModal(
     val barFg = if (isDark) androidx.compose.ui.graphics.Color(0xFFF3F4F6) else androidx.compose.ui.graphics.Color(0xFF111827)
     val barSubFg = if (isDark) androidx.compose.ui.graphics.Color(0xFFA1A8B5) else androidx.compose.ui.graphics.Color(0xFF525866)
     val barBorder = if (isDark) androidx.compose.ui.graphics.Color(0xFF232833) else androidx.compose.ui.graphics.Color(0xFFEDEFF3)
-    var currentPageTitle by remember(initialUrl) {
+    val currentPageTitle = remember(initialUrl) {
         val host = runCatching { Uri.parse(initialUrl).host }.getOrNull().orEmpty()
-        mutableStateOf(
-            when {
-                host.contains("connect.linux.do", ignoreCase = true) -> "LINUX DO Connect"
-                host.contains("credit.linux.do", ignoreCase = true) -> "LINUX DO 社区积分"
-                else -> host.ifBlank { "LINUX DO" }
-            }
-        )
+        when (host.lowercase()) {
+            "connect.linux.do" -> "LINUX DO Connect"
+            "credit.linux.do" -> "LINUX DO 社区积分"
+            else -> host.ifBlank { "LINUX DO" }
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -1986,18 +1990,12 @@ private fun AndroidWebLoginModal(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(44.dp)
+                        .heightIn(min = 48.dp)
                         .background(barBg)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .clickable { onDismiss() },
-                        contentAlignment = Alignment.Center
-                    ) {
+                    androidx.compose.material3.IconButton(onClick = onDismiss) {
                         androidx.compose.material3.Icon(
                             imageVector = do_.linux.lindo.ui.components.LinDoIcons.Close,
                             contentDescription = "关闭网页",
@@ -2005,26 +2003,16 @@ private fun AndroidWebLoginModal(
                             tint = barFg
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = currentPageTitle,
                         fontSize = 14.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = barFg,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .clickable {
-                                pageLoadError = null
-                                rendererGone = false
-                                webViewRef?.reload()
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
+                    androidx.compose.material3.IconButton(onClick = ::retryPage) {
                         androidx.compose.material3.Icon(
                             imageVector = do_.linux.lindo.ui.components.LinDoIcons.Refresh,
                             contentDescription = "刷新网页",
@@ -2176,11 +2164,7 @@ private fun AndroidWebLoginModal(
                 statusTitle = if (rendererGone) "网页已停止运行" else "暂时连接不上 LINUX DO",
                 statusSubtitle = pageLoadError.orEmpty(),
                 onCancel = onDismiss,
-                onRetry = {
-                    pageLoadError = null
-                    rendererGone = false
-                    webViewRef?.reload()
-                }
+                onRetry = ::retryPage
             )
         }
     }

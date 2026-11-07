@@ -205,7 +205,7 @@ fun LinDoMascotLoginTransitionView(
                 LinDoBrandWordmark(isDark = isDark)
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onCancel, modifier = Modifier.size(48.dp)) {
-                    Icon(LinDoIcons.Close, "取消登录", tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
+                    Icon(LinDoIcons.Close, "关闭网页", tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
                 }
             }
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -213,19 +213,15 @@ fun LinDoMascotLoginTransitionView(
                     horizontalAlignment = Alignment.CenterHorizontally) {
                     LinDoMascot(state = if (onRetry != null) LinDoMascotState.NetworkError else LinDoMascotState.Loading, size = 64.dp)
                     Spacer(Modifier.height(12.dp))
-                    val textToShow = if (onRetry != null) {
-                        statusSubtitle.ifBlank { statusTitle.removeSuffix("...") }
-                    } else {
-                        "加载中"
-                    }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
                         Text(
-                            text = textToShow,
+                            text = statusTitle,
                             color = brandSecondary(isDark),
-                            fontSize = 12.2.sp,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
                             textAlign = TextAlign.Center,
                             lineHeight = 19.sp
                         )
@@ -233,6 +229,11 @@ fun LinDoMascotLoginTransitionView(
                             Spacer(Modifier.width(5.dp))
                             LinDoWaveDots(color = brandSecondary(isDark), dotSize = 4.dp)
                         }
+                    }
+                    if (statusSubtitle.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(statusSubtitle, color = brandSecondary(isDark), fontSize = 13.sp,
+                            lineHeight = 20.sp, textAlign = TextAlign.Center)
                     }
                     if (onRetry != null) {
                         Spacer(Modifier.height(14.dp))
@@ -242,12 +243,12 @@ fun LinDoMascotLoginTransitionView(
                         ) {
                             Icon(
                                 imageVector = LinDoIcons.Refresh,
-                                contentDescription = "刷新",
+                                contentDescription = null,
                                 modifier = Modifier.size(14.dp),
                                 tint = brandSecondary(isDark)
                             )
                             Spacer(Modifier.width(5.dp))
-                            Text("刷新", fontSize = 12.sp, color = brandSecondary(isDark))
+                            Text("重新连接", fontSize = 13.sp, color = brandSecondary(isDark))
                         }
                     } else if (progress.isFinite()) {
                         Spacer(Modifier.height(22.dp))
@@ -258,8 +259,10 @@ fun LinDoMascotLoginTransitionView(
                     }
                 }
             }
-            Text("连接过程中可随时返回", color = brandSecondary(isDark), modifier = Modifier.fillMaxWidth(),
-                fontSize = 11.sp, textAlign = TextAlign.Center)
+            if (onRetry == null) {
+                Text("连接过程中可随时返回", color = brandSecondary(isDark), modifier = Modifier.fillMaxWidth(),
+                    fontSize = 11.sp, textAlign = TextAlign.Center)
+            }
         }
     }
 }

@@ -2315,8 +2315,9 @@ kZC8lQg1
         true
     }
 
-    suspend fun archivePrivateMessage(topicId: Int): Boolean = withContext(Dispatchers.IO) {
-        requireMutationSuccess(executeHttp("https://linux.do/t/$topicId/archive-message.json", "PUT", emptyMap(), preserveFailure = true))
+    suspend fun archivePrivateMessage(topicId: Int, archived: Boolean = true): Boolean = withContext(Dispatchers.IO) {
+        val route = if (archived) "archive-message" else "move-to-inbox"
+        requireMutationSuccess(executeHttp("https://linux.do/t/$topicId/$route.json", "PUT", emptyMap(), preserveFailure = true))
         true
     }
 
@@ -2729,28 +2730,27 @@ kZC8lQg1
         }
 
         var lastApiError: ApiReadException? = null
+        var receivedValidResults = false
         for (endpoint in endpoints) {
-            val res = executeHttp(endpoint, method = "GET", preserveFailure = true)
-            if (res != null) {
-                try {
-                    val root = readApiObject(res)
-                    val parsed = parseSearchResponseRoot(root)
-                    if (parsed.isNotEmpty()) {
-                        return@withContext parsed
-                    }
-                    lastApiError = null
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (apiErr: ApiReadException) {
+            try {
+                val root = readApiObject(executeHttp(endpoint, method = "GET", preserveFailure = true))
+                val parsed = parseSearchResponseRoot(root)
+                if (parsed.isNotEmpty()) return@withContext parsed
+                receivedValidResults = true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (apiErr: ApiReadException) {
+                if (lastApiError == null || apiErr.kind != ApiFailureKind.Connection) {
                     lastApiError = apiErr
-                } catch (err: Exception) {
-                    lastApiError = ApiReadException(ApiFailureKind.InvalidPayload, err)
                 }
+            } catch (err: Exception) {
+                lastApiError = ApiReadException(ApiFailureKind.InvalidPayload, err)
             }
         }
+        if (receivedValidResults) return@withContext emptyList()
 
         // 若因未登录 / Cloudflare 搜索接口 403 / 429 限流导致主搜索接口被拦截，自动通过公开话题流 (latest + top + tag) 进行兜底检索
-        if (lastApiError != null) {
+        if (lastApiError?.kind in setOf(ApiFailureKind.Authentication, ApiFailureKind.Verification, ApiFailureKind.RateLimited)) {
             val fallbackPool = LinkedHashMap<Int, TopicSummary>()
             runCatching {
                 fetchTopics("latest.json").forEach { fallbackPool[it.id] = it }
@@ -2804,10 +2804,9 @@ kZC8lQg1
                     )
                 }
             }
-            throw lastApiError
         }
 
-        emptyList()
+        throw lastApiError ?: ApiReadException(ApiFailureKind.Connection)
     }
 
     /**
@@ -2982,8 +2981,9 @@ kZC8lQg1
         val rawAvatar = uObj?.get("avatar_template")?.jsonPrimitive?.contentOrNull
             ?: bObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
         val avatarUrl = if (rawAvatar.isNotBlank()) LinuxDoSiteRules.resolveUrl(rawAvatar) else ""
-        val myUsername = UserApiKeyAuthManager.currentUser?.username
-        val isMine = !myUsername.isNullOrBlank() && uname.equals(myUsername, ignoreCase = true)
+        val account = UserApiKeyAuthManager.currentUser
+        val isMine = if (uid > 0 && account != null && account.userId > 0) uid == account.userId
+            else account?.username?.let { uname.equals(it, ignoreCase = true) } == true
         val canDelete = bObj["can_delete"]?.jsonPrimitive?.booleanOrNull ?: isMine
         val canFlag = bObj["can_flag"]?.jsonPrimitive?.booleanOrNull ?: false
         return PostBoostItem(
@@ -3164,11 +3164,9 @@ kZC8lQg1
             preserveFailure = true
         )
         if (res != null && res.first in 200..299) {
-            postBoostSnapshots[postId]?.let { snap ->
-                postBoostSnapshots[postId] = snap.copy(
-                    boosts = snap.boosts.filterNot { it.id == boostId },
-                    canBoost = true
-                )
+            postBoostSnapshots.computeIfPresent(postId) { _, snap ->
+                val remaining = snap.boosts.filterNot { it.id == boostId }
+                if (remaining.size == snap.boosts.size) snap else snap.copy(boosts = remaining, canBoost = true)
             }
             return@withContext BoostMutationResult(ok = true)
         }
@@ -3181,14 +3179,14 @@ kZC8lQg1
     /**
      * 拉取用户私信箱 (`/topics/private-messages/{username}.json` 或 `private-messages-sent`)
      */
-    suspend fun fetchPrivateMessages(username: String, sent: Boolean = false): List<TopicSummary> = withContext(Dispatchers.IO) {
+    suspend fun fetchPrivateMessages(username: String, sent: Boolean = false, archived: Boolean = false): List<TopicSummary> = withContext(Dispatchers.IO) {
         if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
-        val path = if (sent) {
-            "topics/private-messages-sent/$username.json"
-        } else {
-            "topics/private-messages/$username.json"
+        val mailbox = when {
+            archived -> "private-messages-archive"
+            sent -> "private-messages-sent"
+            else -> "private-messages"
         }
-        val res = executeHttp("https://linux.do/$path", method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
+        val res = executeHttp("https://linux.do/topics/$mailbox/$username.json", method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
             (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
@@ -3704,12 +3702,13 @@ kZC8lQg1
 
         val rawRead = pObj["read"]?.jsonPrimitive?.booleanOrNull
         val alreadyReadInSession = resolvedTopicId > 0 && ScreenTrackEngine.isPostRead(resolvedTopicId, postNumber)
-        val myUsername = UserApiKeyAuthManager.currentUser?.username
-        val isOwnPost = !myUsername.isNullOrBlank() && username.equals(myUsername, ignoreCase = true)
+        val account = UserApiKeyAuthManager.currentUser
+        val isOwnPost = if (userId > 0 && account != null && account.userId > 0) userId == account.userId
+            else account?.username?.let { username.equals(it, ignoreCase = true) } == true
         val rawBoosts = parsePostBoostsArray(pObj["boosts"])
         val boostSnap = postBoostSnapshots[pid]
         val finalBoosts = boostSnap?.boosts ?: rawBoosts
-        val alreadyBoostedByMe = !myUsername.isNullOrBlank() && finalBoosts.any { it.username.equals(myUsername, ignoreCase = true) }
+        val alreadyBoostedByMe = finalBoosts.any { it.isBy(account?.userId, account?.username) }
         val canBoost = boostSnap?.canBoost
             ?: (pObj["can_boost"]?.jsonPrimitive?.booleanOrNull ?: (!isOwnPost && !alreadyBoostedByMe))
         val isRead = when {
@@ -3827,6 +3826,7 @@ kZC8lQg1
             views = views,
             likeCount = likeCount,
             postsCount = postsCount,
+            highestPostNumber = root["highest_post_number"]?.jsonPrimitive?.intOrNull,
             posts = enrichedPosts,
             streamIds = streamIds,
             bookmarked = bookmarked

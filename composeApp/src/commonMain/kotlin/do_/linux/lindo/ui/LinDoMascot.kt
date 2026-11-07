@@ -290,7 +290,7 @@ fun LinDoStatePanel(
     if (state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing) && onRetry == null) {
         LinDoLoadingIndicator(
             modifier = modifier,
-            label = "加载中",
+            label = title,
             state = state,
             useIconArtwork = useIconArtwork
         )
@@ -298,7 +298,6 @@ fun LinDoStatePanel(
     }
     val dark = LocalLinDoDarkTheme.current
     val secondaryText = if (dark) Color(0xFFB8AFA2) else Color(0xFF746C61)
-    val displayText = detail?.takeIf { it.isNotBlank() } ?: title
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -309,13 +308,17 @@ fun LinDoStatePanel(
         LinDoMascot(state = state, size = 60.dp, useIconArtwork = useIconArtwork)
         Spacer(Modifier.height(8.dp))
         Text(
-            text = displayText,
+            text = title,
             color = secondaryText,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Normal,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
             lineHeight = 18.sp
         )
+        if (!detail.isNullOrBlank() && detail != title) {
+            Spacer(Modifier.height(5.dp))
+            Text(detail, color = secondaryText, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 18.sp)
+        }
         if (onRetry != null) {
             Spacer(Modifier.height(8.dp))
             TextButton(
@@ -324,13 +327,13 @@ fun LinDoStatePanel(
             ) {
                 Icon(
                     imageVector = LinDoIcons.Refresh,
-                    contentDescription = "刷新",
+                    contentDescription = null,
                     modifier = Modifier.size(13.5.dp),
                     tint = secondaryText
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
-                    text = "刷新",
+                    text = actionLabel,
                     color = secondaryText,
                     fontSize = 11.8.sp,
                     fontWeight = FontWeight.Medium
@@ -454,12 +457,12 @@ fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
         ) {
             Icon(
                 imageVector = LinDoIcons.Refresh,
-                contentDescription = "刷新",
+                contentDescription = null,
                 modifier = Modifier.size(13.dp),
                 tint = secondaryText
             )
             Spacer(Modifier.width(4.dp))
-            Text("刷新", fontSize = 11.8.sp, color = secondaryText)
+            Text("重试", fontSize = 11.8.sp, color = secondaryText)
         }
     }
 }
