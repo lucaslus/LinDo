@@ -631,6 +631,168 @@ object CloudflareEdgeRacer {
 }
 
 /**
+ * 进程内本地回环 (`127.0.0.1`) 免梯直连隧道 (`LocalDirectConnectTunnel`)：
+ * - 供 Android Chromium `WebView` 通过 `ProxyController` 挂载；
+ * - 拦截 `CONNECT host:443`，使用无污染 Cloudflare Anycast DoH 解析真实边缘 IP（彻底绕过运营商 UDP 53 DNS 污染）；
+ * - 仅对首个 TLS `ClientHello` Record (`0x16`) 执行 RFC 8446 Record 层 SNI 分片，后续字节流 100% 原生透传，完整保留 WebView BoringSSL JA3/JA4 指纹与 `cf_clearance`。
+ */
+object LocalDirectConnectTunnel {
+    @Volatile
+    private var serverSocket: java.net.ServerSocket? = null
+
+    @Volatile
+    var listeningPort: Int = 0
+        private set
+
+    private val tunnelExecutor by lazy {
+        java.util.concurrent.Executors.newCachedThreadPool { r ->
+            Thread(r, "lindo-direct-tunnel").apply { isDaemon = true }
+        }
+    }
+
+    @Synchronized
+    fun ensureStarted(): Int {
+        if (listeningPort > 0 && serverSocket?.isClosed == false) {
+            return listeningPort
+        }
+        return try {
+            val srv = java.net.ServerSocket(0, 64, InetAddress.getByName("127.0.0.1"))
+            serverSocket = srv
+            val port = srv.localPort
+            listeningPort = port
+            Thread({
+                while (!srv.isClosed) {
+                    try {
+                        val client = srv.accept()
+                        tunnelExecutor.execute { handleTunnelClient(client) }
+                    } catch (_: Throwable) {
+                        if (srv.isClosed) break
+                    }
+                }
+            }, "lindo-direct-acceptor").apply {
+                isDaemon = true
+                start()
+            }
+            port
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    private fun handleTunnelClient(client: java.net.Socket) {
+        var upstream: java.net.Socket? = null
+        try {
+            client.tcpNoDelay = true
+            client.soTimeout = 12_000
+            val clientIn = client.getInputStream()
+            val clientOut = client.getOutputStream()
+
+            val headerBuf = java.io.ByteArrayOutputStream(512)
+            var state = 0
+            while (headerBuf.size() < 8192) {
+                val b = clientIn.read()
+                if (b == -1) return
+                headerBuf.write(b)
+                state = when {
+                    state == 0 && b == '\r'.code -> 1
+                    state == 1 && b == '\n'.code -> 2
+                    state == 2 && b == '\r'.code -> 3
+                    state == 3 && b == '\n'.code -> 4
+                    b == '\r'.code -> 1
+                    else -> 0
+                }
+                if (state == 4) break
+            }
+            if (state != 4) return
+
+            val headerText = headerBuf.toString("ISO-8859-1")
+            val firstLine = headerText.lineSequence().firstOrNull()?.trim().orEmpty()
+            if (!firstLine.startsWith("CONNECT ", ignoreCase = true)) return
+            val hostPort = firstLine.substringAfter(' ').substringBefore(' ').trim()
+            val host = hostPort.substringBefore(':').trim()
+            val port = hostPort.substringAfter(':', "443").toIntOrNull() ?: 443
+            if (host.isEmpty()) return
+
+            val candidateAddresses = runCatching {
+                LinuxDoRepository.resolveHostForDirectConnect(host)
+            }.getOrDefault(emptyList())
+
+            var connectedSocket: java.net.Socket? = null
+            val targets = if (candidateAddresses.isNotEmpty()) {
+                candidateAddresses.take(4).map { java.net.InetSocketAddress(it, port) }
+            } else {
+                listOf(java.net.InetSocketAddress(host, port))
+            }
+            for (addr in targets) {
+                try {
+                    val s = java.net.Socket()
+                    s.tcpNoDelay = true
+                    s.connect(addr, 3500)
+                    connectedSocket = s
+                    break
+                } catch (_: Throwable) {
+                }
+            }
+            upstream = connectedSocket ?: return
+
+            clientOut.write("HTTP/1.1 200 Connection Established\r\n\r\n".encodeToByteArray())
+            clientOut.flush()
+
+            client.soTimeout = 60_000
+            upstream.soTimeout = 60_000
+            val upIn = upstream.getInputStream()
+            val upOut = upstream.getOutputStream()
+
+            val firstPacket = ByteArray(16384)
+            val firstRead = clientIn.read(firstPacket)
+            if (firstRead <= 0) return
+
+            val fragments = LinuxDoRepository.TlsRecordFragmenter.fragmentClientHello(firstPacket, 0, firstRead)
+            if (fragments != null) {
+                for (frag in fragments) {
+                    upOut.write(frag)
+                    upOut.flush()
+                }
+            } else {
+                upOut.write(firstPacket, 0, firstRead)
+                upOut.flush()
+            }
+
+            val finalUpstream = upstream
+            tunnelExecutor.execute {
+                pipeStream(upIn, clientOut, finalUpstream, client)
+            }
+            pipeStream(clientIn, upOut, client, finalUpstream)
+        } catch (_: Throwable) {
+        } finally {
+            runCatching { client.close() }
+            runCatching { upstream?.close() }
+        }
+    }
+
+    private fun pipeStream(
+        input: java.io.InputStream,
+        output: java.io.OutputStream,
+        s1: java.net.Socket,
+        s2: java.net.Socket
+    ) {
+        val buf = ByteArray(16384)
+        try {
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                output.write(buf, 0, n)
+                output.flush()
+            }
+        } catch (_: Throwable) {
+        } finally {
+            runCatching { s1.close() }
+            runCatching { s2.close() }
+        }
+    }
+}
+
+/**
  * Linux.do 板块元数据定义
  */
 data class LinuxDoCategoryMeta(
@@ -736,18 +898,164 @@ object LinuxDoRepository {
         }
     }
 
+    /**
+     * RFC 8446 / RFC 5246 兼容的 TLS ClientHello Record 层分片器：
+     * - 将首个 TLS Handshake Record (`0x16 0x03 ...`) 在 SNI 域名 (`linux.do` / `cloudflare.com` 等) 中点处切分为 3 个合法的短 TLS Record；
+     * - Cloudflare BoringSSL 边缘节点在 Record 层无感重组后计算出的 JA3/JA4 指纹与原包 100% 一致，同时规避运营商旁路 DPI 对明文 SNI 的特征匹配。
+     */
+    internal object TlsRecordFragmenter {
+        private val sniNeedles = listOf(
+            "linux.do".encodeToByteArray(),
+            "cloudflare.com".encodeToByteArray(),
+            "github.com".encodeToByteArray(),
+            ".do".encodeToByteArray(),
+            ".com".encodeToByteArray()
+        )
+
+        private fun indexOfBytes(haystack: ByteArray, needle: ByteArray): Int {
+            if (needle.isEmpty() || haystack.size < needle.size) return -1
+            val limit = haystack.size - needle.size
+            for (i in 0..limit) {
+                var match = true
+                for (j in needle.indices) {
+                    if (haystack[i + j] != needle[j]) {
+                        match = false
+                        break
+                    }
+                }
+                if (match) return i
+            }
+            return -1
+        }
+
+        fun fragmentClientHello(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset): List<ByteArray>? {
+            if (length <= 9) return null
+            val contentType = bytes[offset].toInt() and 0xFF
+            val verMajor = bytes[offset + 1].toInt() and 0xFF
+            if (contentType != 0x16 || verMajor != 0x03) return null
+            val recLen = ((bytes[offset + 3].toInt() and 0xFF) shl 8) or (bytes[offset + 4].toInt() and 0xFF)
+            if (recLen <= 4 || 5 + recLen > length) return null
+
+            val verMinor = bytes[offset + 2]
+            val payload = bytes.copyOfRange(offset + 5, offset + 5 + recLen)
+            val trailing = if (5 + recLen < length) {
+                bytes.copyOfRange(offset + 5 + recLen, offset + length)
+            } else {
+                ByteArray(0)
+            }
+
+            var splitMid = -1
+            for (needle in sniNeedles) {
+                val idx = indexOfBytes(payload, needle)
+                if (idx > 2) {
+                    splitMid = idx + (needle.size / 2).coerceAtLeast(1)
+                    break
+                }
+            }
+            if (splitMid !in 3 until payload.size) {
+                splitMid = (payload.size / 3).coerceIn(3, payload.size - 1)
+            }
+
+            fun wrapRecord(slice: ByteArray, suffix: ByteArray = ByteArray(0)): ByteArray {
+                val out = ByteArray(5 + slice.size + suffix.size)
+                out[0] = 0x16
+                out[1] = bytes[offset + 1]
+                out[2] = verMinor
+                out[3] = ((slice.size shr 8) and 0xFF).toByte()
+                out[4] = (slice.size and 0xFF).toByte()
+                System.arraycopy(slice, 0, out, 5, slice.size)
+                if (suffix.isNotEmpty()) {
+                    System.arraycopy(suffix, 0, out, 5 + slice.size, suffix.size)
+                }
+                return out
+            }
+
+            val p1 = payload.copyOfRange(0, 2)
+            val p2 = payload.copyOfRange(2, splitMid)
+            val p3 = payload.copyOfRange(splitMid, payload.size)
+            return listOf(
+                wrapRecord(p1),
+                wrapRecord(p2),
+                wrapRecord(p3, trailing)
+            )
+        }
+    }
+
+    internal class TlsRecordFragmentingSocketFactory : javax.net.SocketFactory() {
+        private class FragmentingSocket : java.net.Socket() {
+            @Volatile
+            private var firstWritePending = true
+
+            override fun connect(endpoint: java.net.SocketAddress?, timeout: Int) {
+                super.connect(endpoint, timeout)
+                runCatching { tcpNoDelay = true }
+            }
+
+            override fun getOutputStream(): java.io.OutputStream {
+                val rawOut = super.getOutputStream()
+                return object : java.io.FilterOutputStream(rawOut) {
+                    override fun write(b: ByteArray, off: Int, len: Int) {
+                        if (firstWritePending && len > 0) {
+                            firstWritePending = false
+                            val fragments = TlsRecordFragmenter.fragmentClientHello(b, off, len)
+                            if (fragments != null) {
+                                for (frag in fragments) {
+                                    rawOut.write(frag)
+                                    rawOut.flush()
+                                }
+                                return
+                            }
+                        }
+                        rawOut.write(b, off, len)
+                    }
+                }
+            }
+        }
+
+        override fun createSocket(): java.net.Socket = FragmentingSocket()
+        override fun createSocket(host: String?, port: Int): java.net.Socket =
+            FragmentingSocket().apply { connect(java.net.InetSocketAddress(host, port)) }
+        override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int): java.net.Socket =
+            FragmentingSocket().apply {
+                bind(java.net.InetSocketAddress(localHost, localPort))
+                connect(java.net.InetSocketAddress(host, port))
+            }
+        override fun createSocket(host: InetAddress?, port: Int): java.net.Socket =
+            FragmentingSocket().apply { connect(java.net.InetSocketAddress(host, port)) }
+        override fun createSocket(address: InetAddress?, port: Int, localAddress: InetAddress?, localPort: Int): java.net.Socket =
+            FragmentingSocket().apply {
+                bind(java.net.InetSocketAddress(localAddress, localPort))
+                connect(java.net.InetSocketAddress(address, port))
+            }
+    }
+
+    private val cleanDohAnycastIps = listOf(
+        "104.16.248.249",
+        "104.16.249.249",
+        "172.64.36.1",
+        "172.64.36.2"
+    )
+
     private val dohBootstrapClient: okhttp3.OkHttpClient by lazy {
         okhttp3.OkHttpClient.Builder()
             .connectTimeout(2500, TimeUnit.MILLISECONDS)
             .readTimeout(2500, TimeUnit.MILLISECONDS)
+            .socketFactory(TlsRecordFragmentingSocketFactory())
+            .dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> {
+                    if (hostname.equals("cloudflare-dns.com", ignoreCase = true)) {
+                        val list = cleanDohAnycastIps.mapNotNull { ip ->
+                            runCatching { InetAddress.getByName(ip) }.getOrNull()
+                        }
+                        if (list.isNotEmpty()) return list
+                    }
+                    return Dns.SYSTEM.lookup(hostname)
+                }
+            })
             .build()
     }
 
-    @Volatile
-    private var cachedDohAddresses: List<InetAddress> = emptyList()
-
-    @Volatile
-    private var cachedDohExpireEpochMs: Long = 0L
+    private val dohHostCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<InetAddress>>>()
 
     private val poisonedIpPrefixes = listOf(
         "127.", "0.", "199.59.", "108.160.", "31.13.", "69.63.", "69.171.",
@@ -761,17 +1069,20 @@ object LinuxDoRepository {
     }
 
     /**
-     * 内置免配置加密 DoH 解析器（优先直连无污染 Cloudflare `1.1.1.1` / `1.0.0.1` DoH JSON 接口，并过滤已知 DNS 污染黑洞 IP）
+     * 内置免配置加密 DoH 解析器：
+     * - 优先通过 Cloudflare Anycast IP (`104.16.248.249` / `104.16.249.249`) 直连 `cloudflare-dns.com` 获取 100% 无污染 A 记录；
+     * - 自动过滤全部已知 GFW 投毒黑洞 IP。
      */
     private fun resolveViaEncryptedDoh(hostname: String): List<InetAddress> {
+        val key = hostname.trim().lowercase()
         val now = System.currentTimeMillis()
-        if (cachedDohAddresses.isNotEmpty() && now < cachedDohExpireEpochMs) {
-            return cachedDohAddresses
+        dohHostCache[key]?.let { (expireAt, list) ->
+            if (list.isNotEmpty() && now < expireAt) return list
         }
         val dohEndpoints = listOf(
-            "https://1.1.1.1/dns-query?name=$hostname&type=A",
-            "https://1.0.0.1/dns-query?name=$hostname&type=A",
-            "https://223.5.5.5/resolve?name=$hostname&type=A"
+            "https://cloudflare-dns.com/dns-query?name=$key&type=A",
+            "https://1.1.1.1/dns-query?name=$key&type=A",
+            "https://1.0.0.1/dns-query?name=$key&type=A"
         )
         for (endpoint in dohEndpoints) {
             try {
@@ -793,8 +1104,7 @@ object LinuxDoRepository {
                             } else null
                         }.orEmpty()
                         if (ips.isNotEmpty()) {
-                            cachedDohAddresses = ips
-                            cachedDohExpireEpochMs = now + 300_000L // 缓存 5 分钟
+                            dohHostCache[key] = (now + 300_000L) to ips
                             return ips
                         }
                     }
@@ -805,37 +1115,85 @@ object LinuxDoRepository {
         return emptyList()
     }
 
+    fun resolveHostForDirectConnect(hostname: String): List<InetAddress> {
+        val normalized = hostname.trim().lowercase()
+        val sysIps = runCatching { Dns.SYSTEM.lookup(normalized) }
+            .getOrDefault(emptyList())
+            .filterNot { addr -> isPoisonedIp(addr.hostAddress.orEmpty()) }
+        // 若用户开启了 Clash/Sing-box/Surge 等 Fake-IP TUN 代理 (198.18.0.0/15)，优先走本地 TUN Fake-IP
+        val fakeIps = sysIps.filter { addr ->
+            val ip = addr.hostAddress.orEmpty()
+            ip.startsWith("198.18.") || ip.startsWith("198.19.")
+        }
+        if (fakeIps.isNotEmpty()) return fakeIps
+
+        if (normalized == "linux.do" || normalized.endsWith(".linux.do")) {
+            val pinned = CloudflareEdgeRacer.pinnedEdgeIp
+            if (!pinned.isNullOrBlank() && !isPoisonedIp(pinned)) {
+                runCatching { listOf(InetAddress.getByName(pinned)) }
+                    .getOrNull()?.let { return it }
+            }
+            val dohList = resolveViaEncryptedDoh(normalized)
+            val fallbackEdgeIps = CloudflareEdgeRacer.defaultCandidates.mapNotNull { (ip, _) ->
+                runCatching { InetAddress.getByName(ip) }.getOrNull()
+            }
+            val combined = (dohList + fallbackEdgeIps + sysIps).distinct()
+            if (combined.isNotEmpty()) return combined
+        }
+        if (sysIps.isNotEmpty()) return sysIps
+        val dohIps = resolveViaEncryptedDoh(normalized)
+        if (dohIps.isNotEmpty()) return dohIps
+        return Dns.SYSTEM.lookup(hostname)
+    }
+
     private val sharedClient: HttpClient by lazy {
         HttpClient(OkHttp) {
             engine {
                 config {
                     connectTimeout(6, TimeUnit.SECONDS)
                     readTimeout(8, TimeUnit.SECONDS)
+                    socketFactory(TlsRecordFragmentingSocketFactory())
                     dns(object : Dns {
                         override fun lookup(hostname: String): List<InetAddress> {
-                            if (hostname == "linux.do" || hostname.endsWith(".linux.do")) {
-                                // 1. 优先使用用户测速锁定的最优 Cloudflare 边缘节点 IP
-                                val pinned = CloudflareEdgeRacer.pinnedEdgeIp
-                                if (!pinned.isNullOrBlank()) {
-                                    runCatching { listOf(InetAddress.getByName(pinned)) }
-                                        .getOrNull()?.let { return it }
-                                }
-                                // 2. 自动走加密 DoH (223.5.5.5 / 1.12.12.12) 防运营商 DNS 污染
-                                val dohList = resolveViaEncryptedDoh(hostname)
-                                if (dohList.isNotEmpty()) {
-                                    return dohList
-                                }
-                                // 3. 兜底使用内置 Cloudflare 边缘节点 IP + 系统 DNS
-                                val fallbackEdgeIps = CloudflareEdgeRacer.defaultCandidates.mapNotNull { (ip, _) ->
-                                    runCatching { InetAddress.getByName(ip) }.getOrNull()
-                                }
-                                val sysIps = runCatching { Dns.SYSTEM.lookup(hostname) }.getOrDefault(emptyList())
-                                val combined = (sysIps + fallbackEdgeIps).distinct()
-                                if (combined.isNotEmpty()) return combined
-                            }
-                            return Dns.SYSTEM.lookup(hostname)
+                            return resolveHostForDirectConnect(hostname)
                         }
                     })
+                }
+            }
+        }
+    }
+
+    /**
+     * 供 Coil `AsyncImage` 全局复用的免梯直连图片客户端（自动走无污染 DoH + TLS Record 分片 + 携带 Cookie 与 User-Agent）
+     */
+    val imageHttpClient: HttpClient by lazy {
+        HttpClient(OkHttp) {
+            engine {
+                config {
+                    connectTimeout(8, TimeUnit.SECONDS)
+                    readTimeout(12, TimeUnit.SECONDS)
+                    socketFactory(TlsRecordFragmentingSocketFactory())
+                    dns(object : Dns {
+                        override fun lookup(hostname: String): List<InetAddress> {
+                            return resolveHostForDirectConnect(hostname)
+                        }
+                    })
+                    addInterceptor { chain ->
+                        val orig = chain.request()
+                        val host = orig.url.host.lowercase()
+                        val builder = orig.newBuilder()
+                        UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
+                            builder.header("User-Agent", it)
+                        }
+                        if (host == "linux.do" || host.endsWith(".linux.do")) {
+                            val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
+                            if (cookieHeader.isNotEmpty()) {
+                                builder.header("Cookie", cookieHeader)
+                            }
+                            builder.header("Referer", "https://linux.do/")
+                        }
+                        chain.proceed(builder.build())
+                    }
                 }
             }
         }

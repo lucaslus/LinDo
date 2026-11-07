@@ -61,6 +61,7 @@ kotlin {
 
         androidMain.dependencies {
             implementation(libs.androidx.activity.compose)
+            implementation(libs.androidx.webkit)
             implementation(libs.kotlinx.coroutines.android)
             implementation(libs.coil.gif)
         }

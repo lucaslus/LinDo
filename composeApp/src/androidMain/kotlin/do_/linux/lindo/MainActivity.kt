@@ -64,8 +64,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.LinuxDoRepository
+import do_.linux.lindo.core.network.LocalDirectConnectTunnel
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import androidx.webkit.ProxyConfig
+import androidx.webkit.ProxyController
+import androidx.webkit.WebViewFeature
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.LinDoReadRegressionPreview
@@ -252,7 +256,8 @@ class MainActivity : ComponentActivity() {
         do_.linux.lindo.core.compose.LocalComposerDrafts.restore(prefs.getString("composer_drafts", null))
         do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist = { encoded -> prefs.edit().putString("composer_drafts", encoded).apply() }
 
-        // 2. 初始化常驻同源 WebView API 桥接引擎
+        // 2. 启动进程内免梯直连回环隧道 (Clean Anycast DoH + RFC 8446 TLS Record SNI 分片) 并挂载至 WebView，再初始化常驻同源 WebView API 桥接引擎
+        installDirectConnectWebViewTunnel()
         initPersistentApiWebView()
 
         // 3. 注册系统浏览器跳转桥接器
@@ -448,6 +453,24 @@ class MainActivity : ComponentActivity() {
                     wv.visibility = View.VISIBLE
                     root.addView(wv, 0, lp)
                 }
+            }
+        }
+    }
+
+    private fun installDirectConnectWebViewTunnel() {
+        runCatching {
+            val port = LocalDirectConnectTunnel.ensureStarted()
+            if (port > 0 && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+                val proxyConfig = ProxyConfig.Builder()
+                    .addProxyRule("127.0.0.1:$port")
+                    .addDirect()
+                    .addBypassRule("<local>")
+                    .build()
+                ProxyController.getInstance().setProxyOverride(
+                    proxyConfig,
+                    { r -> r.run() },
+                    {}
+                )
             }
         }
     }

@@ -748,6 +748,14 @@ internal fun GoogleAccountRingAvatar(
 
 @Composable
 fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Boolean = true) {
+    coil3.compose.setSingletonImageLoaderFactory { context ->
+        coil3.ImageLoader.Builder(context)
+            .components {
+                add(coil3.network.ktor3.KtorNetworkFetcherFactory(httpClient = { LinuxDoRepository.imageHttpClient }))
+                add(coil3.svg.SvgDecoder.Factory())
+            }
+            .build()
+    }
     var isDarkTheme by remember { mutableStateOf(UserApiKeyAuthManager.uiDarkTheme) }
     LaunchedEffect(isDarkTheme) { onThemeChanged(isDarkTheme) }
     var fontScale by remember { mutableStateOf(UserApiKeyAuthManager.uiFontScale) }
