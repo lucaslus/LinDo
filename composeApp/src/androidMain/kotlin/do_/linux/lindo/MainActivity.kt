@@ -96,6 +96,7 @@ import org.json.JSONObject
 import org.json.JSONArray
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.sync.withLock
 
 private fun releaseNativeWebView(view: WebView, rendererGone: Boolean = false) {
     (view.parent as? ViewGroup)?.removeView(view)
@@ -238,6 +239,16 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+            intent?.getBooleanExtra("lindo.self_test", false) == true) {
+            runCatching {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                    setShowWhenLocked(true)
+                    setTurnScreenOn(true)
+                }
+                window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(
                 Color.TRANSPARENT,
@@ -444,6 +455,66 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+            intent.getBooleanExtra("lindo.self_test", false)) {
+            activityScope.launch {
+                val reportFile = java.io.File(filesDir, "ech/runtime/self_test.log").apply {
+                    parentFile?.mkdirs()
+                }
+                fun logLine(msg: String) {
+                    runCatching {
+                        reportFile.appendText("[${System.currentTimeMillis()}] $msg\n")
+                    }
+                }
+                runCatching { reportFile.writeText("") }
+                withContext(Dispatchers.Main) {
+                    apiWebView?.onResume()
+                    apiWebView?.resumeTimers()
+                }
+                val startCookies = withContext(Dispatchers.Main) {
+                    runCatching { CookieManager.getInstance().getCookie("https://linux.do").orEmpty() }.getOrDefault("")
+                }
+                logLine("START has_cf_clearance=${startCookies.contains("cf_clearance=")} cookie_len=${startCookies.length}")
+                val topics = runCatching {
+                    withContext(Dispatchers.IO) {
+                        LinuxDoRepository.fetchTopics(
+                            path = "/latest.json?no_definitions=true",
+                            categoryId = null,
+                            page = 0
+                        )
+                    }
+                }.getOrElse { e ->
+                    logLine("ERROR fetchTopics: ${e::class.simpleName}: ${e.message}")
+                    emptyList()
+                }
+                val endCookies = withContext(Dispatchers.Main) {
+                    runCatching { CookieManager.getInstance().getCookie("https://linux.do").orEmpty() }.getOrDefault("")
+                }
+                logLine("RESULT topics_count=${topics.size} has_cf_clearance=${endCookies.contains("cf_clearance=")}")
+                topics.take(3).forEachIndexed { idx, t ->
+                    logLine("TOPIC[$idx] id=${t.id} title=${t.title} posts=${t.postsCount}")
+                }
+                if (topics.isNotEmpty()) {
+                    val page1 = runCatching {
+                        withContext(Dispatchers.IO) {
+                            LinuxDoRepository.fetchTopics(
+                                path = "/latest.json?no_definitions=true",
+                                categoryId = null,
+                                page = 1
+                            )
+                        }
+                    }.getOrDefault(emptyList())
+                    logLine("PAGE1 topics_count=${page1.size}")
+                    val detail = runCatching {
+                        withContext(Dispatchers.IO) {
+                            LinuxDoRepository.fetchTopicDetail(topics.first().id, topics.first())
+                        }
+                    }.getOrNull()
+                    logLine("DETAIL id=${detail?.id} posts=${detail?.posts?.size ?: 0}")
+                }
+            }
+        }
+
         // Attach transparent apiWebView with realistic mobile viewport dimensions so Chromium keeps timers & fetch active
         // without ever exposing a 1x1 headless viewport dimension to scripts.
         window.decorView.post {
@@ -466,93 +537,123 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun ensureLocalRustEchDaemonStarted() {
+    private fun isLocalEchPortListening(): Boolean {
+        return runCatching {
+            java.net.Socket().use { s ->
+                s.connect(java.net.InetSocketAddress("127.0.0.1", LOCAL_ECH_HTTPS_PORT), 120)
+                true
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun ensureLocalRustEchDaemonStarted(localDohPort: Int) {
         runCatching {
             val binFile = java.io.File(applicationInfo.nativeLibraryDir, "liblinuxdo_ech.so")
             if (!binFile.isFile) return
             LocalDirectConnectTunnel.localEchHttpsPort = LOCAL_ECH_HTTPS_PORT
+            val effectiveDohPort = if (localDohPort > 0) localDohPort else 28081
+            val echRoot = java.io.File(filesDir, "ech").apply { mkdirs() }
+            val certDir = java.io.File(echRoot, "certs").apply { mkdirs() }
+            val runtimeDir = java.io.File(echRoot, "runtime").apply { mkdirs() }
+            val configFile = java.io.File(echRoot, "linuxdo-accelerator.toml")
+            val versionFile = java.io.File(echRoot, "linuxdo-accelerator.toml.version")
+            val lindoMarkerFile = java.io.File(echRoot, "lindo-ech-doh.marker")
+            val expectedMarker = "$ECH_CONFIG_VERSION_MARKER:$effectiveDohPort"
+            val currentMarker = runCatching { lindoMarkerFile.takeIf { it.isFile }?.readText()?.trim() }.getOrNull()
+
+            if (currentMarker == expectedMarker && isLocalEchPortListening()) {
+                echDaemonStarted = true
+                return
+            }
+
             synchronized(MainActivity::class.java) {
-                if (echDaemonStarted) return
+                if (echDaemonStarted && isLocalEchPortListening() && currentMarker == expectedMarker) return
                 echDaemonStarted = true
             }
-            val appFilesDir = filesDir
-            val rawRes = resources
-            Thread({
-                runCatching {
-                    val echRoot = java.io.File(appFilesDir, "ech").apply { mkdirs() }
-                    val certDir = java.io.File(echRoot, "certs").apply { mkdirs() }
-                    java.io.File(echRoot, "runtime").mkdirs()
 
-                    rawRes.openRawResource(R.raw.lindo_ech_root_ca).use { input ->
+            // Terminate any stale child daemon synchronously BEFORE writing new config and waiting for readiness
+            runCatching {
+                val pidFile = java.io.File(runtimeDir, "linuxdo-accelerator.pid")
+                if (pidFile.isFile) {
+                    val stalePid = pidFile.readText().trim().toIntOrNull()
+                    if (stalePid != null && stalePid > 0 && stalePid != android.os.Process.myPid()) {
+                        android.os.Process.killProcess(stalePid)
+                        Thread.sleep(100L)
+                    }
+                }
+            }
+
+            val configTomlContent = """
+                listen_host = "127.0.0.1"
+                hosts_ip = "127.0.0.1"
+                http_port = $LOCAL_ECH_HTTP_PORT
+                https_port = $LOCAL_ECH_HTTPS_PORT
+                upstream = "https://linux.do"
+                fake_sni = "www.cloudflare.com"
+
+                doh_endpoints = [
+                    "http://127.0.0.1:$effectiveDohPort/query-dns",
+                ]
+                managed_prefer_ipv6 = false
+                dns_hosts = {}
+                edge_node = ""
+
+                proxy_domains = [
+                    "linux.do",
+                    "*.linux.do",
+                    "idcflare.com",
+                    "*.idcflare.com",
+                ]
+
+                hosts_domains = [
+                    "linux.do",
+                    "connect.linux.do",
+                    "credit.linux.do",
+                    "www.linux.do",
+                    "idcflare.com",
+                    "www.idcflare.com",
+                ]
+
+                certificate_domains = [
+                    "linux.do",
+                    "www.linux.do",
+                    "*.linux.do",
+                    "connect.linux.do",
+                    "*.s3.linux.do",
+                    "idcflare.com",
+                    "www.idcflare.com",
+                    "*.idcflare.com",
+                ]
+
+                ca_common_name = "LinDo Local ECH Root CA"
+                server_common_name = "linux.do"
+            """.trimIndent() + "\n"
+
+            fun writeCertsAndConfig() {
+                runCatching {
+                    resources.openRawResource(R.raw.lindo_ech_root_ca).use { input ->
                         java.io.File(certDir, "linuxdo-accelerator-root-ca.crt").outputStream().use { input.copyTo(it) }
                     }
-                    rawRes.openRawResource(R.raw.lindo_ech_server_crt).use { input ->
+                    resources.openRawResource(R.raw.lindo_ech_server_crt).use { input ->
                         java.io.File(certDir, "linuxdo-accelerator-server.crt").outputStream().use { input.copyTo(it) }
                     }
-                    rawRes.openRawResource(R.raw.lindo_ech_server_key).use { input ->
+                    resources.openRawResource(R.raw.lindo_ech_server_key).use { input ->
                         java.io.File(certDir, "linuxdo-accelerator-server.key").outputStream().use { input.copyTo(it) }
                     }
-
-                    val configFile = java.io.File(echRoot, "linuxdo-accelerator.toml")
-                    val versionFile = java.io.File(echRoot, "linuxdo-accelerator.toml.version")
                     versionFile.writeText(ECH_CONFIG_VERSION_MARKER)
-                    configFile.writeText(
-                        """
-                        listen_host = "127.0.0.1"
-                        hosts_ip = "127.0.0.1"
-                        http_port = $LOCAL_ECH_HTTP_PORT
-                        https_port = $LOCAL_ECH_HTTPS_PORT
-                        upstream = "https://linux.do"
-                        fake_sni = "www.cloudflare.com"
-
-                        doh_endpoints = [
-                            "https://aaa.ddd.oaifree.com/query-dns",
-                        ]
-                        managed_prefer_ipv6 = false
-                        dns_hosts = {}
-                        edge_node = ""
-
-                        proxy_domains = [
-                            "linux.do",
-                            "*.linux.do",
-                            "idcflare.com",
-                            "*.idcflare.com",
-                        ]
-
-                        hosts_domains = [
-                            "linux.do",
-                            "connect.linux.do",
-                            "credit.linux.do",
-                            "www.linux.do",
-                            "idcflare.com",
-                            "www.idcflare.com",
-                        ]
-
-                        certificate_domains = [
-                            "linux.do",
-                            "www.linux.do",
-                            "*.linux.do",
-                            "connect.linux.do",
-                            "*.s3.linux.do",
-                            "idcflare.com",
-                            "www.idcflare.com",
-                            "*.idcflare.com",
-                        ]
-
-                        ca_common_name = "LinDo Local ECH Root CA"
-                        server_common_name = "linux.do"
-                        """.trimIndent() + "\n"
-                    )
+                    configFile.writeText(configTomlContent)
                     versionFile.writeText(ECH_CONFIG_VERSION_MARKER)
+                    lindoMarkerFile.writeText(expectedMarker)
+                }
+            }
 
+            writeCertsAndConfig()
+
+            Thread({
+                runCatching {
                     while (true) {
-                        val alreadyListening = runCatching {
-                            java.net.Socket().use { s ->
-                                s.connect(java.net.InetSocketAddress("127.0.0.1", LOCAL_ECH_HTTPS_PORT), 400)
-                                true
-                            }
-                        }.getOrDefault(false)
-                        if (!alreadyListening) {
+                        if (!isLocalEchPortListening()) {
+                            writeCertsAndConfig()
                             runCatching {
                                 val proc = ProcessBuilder(
                                     binFile.absolutePath,
@@ -569,30 +670,24 @@ class MainActivity : ComponentActivity() {
                                 proc.waitFor()
                             }
                         }
-                        Thread.sleep(1500L)
+                        Thread.sleep(1200L)
                     }
                 }
             }, "lindo-ech-daemon").apply {
                 isDaemon = true
                 start()
             }
-            for (i in 0 until 12) {
-                val ready = runCatching {
-                    java.net.Socket().use { s ->
-                        s.connect(java.net.InetSocketAddress("127.0.0.1", LOCAL_ECH_HTTPS_PORT), 80)
-                        true
-                    }
-                }.getOrDefault(false)
-                if (ready) break
-                runCatching { Thread.sleep(30L) }
+            for (i in 0 until 45) {
+                if (isLocalEchPortListening()) break
+                runCatching { Thread.sleep(45L) }
             }
         }
     }
 
     private fun installDirectConnectWebViewTunnel() {
         runCatching {
-            ensureLocalRustEchDaemonStarted()
             val port = LocalDirectConnectTunnel.ensureStarted()
+            ensureLocalRustEchDaemonStarted(port)
             if (port > 0 && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
                 val proxyConfig = ProxyConfig.Builder()
                     .addProxyRule("127.0.0.1:$port")
@@ -681,20 +776,151 @@ class MainActivity : ComponentActivity() {
                     if (cookies.isNotBlank()) {
                         CookieSentinel.ingestRawCookieString(cookies)
                     }
+                    view?.evaluateJavascript(
+                        "(function(){ return document.getElementById('data-preloaded') != null ? 'PRELOADED' : ((window._cf_chl_opt != null || document.title === 'Just a moment...') ? 'CHALLENGE' : 'BLANK'); })()"
+                    ) { stateStr ->
+                        val isChallenge = stateStr?.contains("CHALLENGE") == true
+                        val isPreloaded = stateStr?.contains("PRELOADED") == true
+                        val latestCookie = cm.getCookie("https://linux.do").orEmpty()
+                        if (latestCookie.isNotBlank()) {
+                            CookieSentinel.ingestRawCookieString(latestCookie)
+                        }
+                        if (isPreloaded || (!isChallenge && !apiWebViewAwaitingRealDom)) {
+                            apiWebViewAwaitingRealDom = false
+                            if (latestCookie.contains("cf_clearance=")) {
+                                persistSessionToDisk()
+                            }
+                            if (!apiWebViewReady.isCompleted) {
+                                apiWebViewReady.complete(true)
+                            }
+                        }
+                    }
+                }
+            }
+            apiWebView = wv
+            runCatching {
+                wv.onResume()
+                wv.resumeTimers()
+            }
+            val existingCookies = cm.getCookie("https://linux.do").orEmpty()
+            if (existingCookies.isNotBlank()) {
+                CookieSentinel.ingestRawCookieString(existingCookies)
+            }
+            if (existingCookies.contains("cf_clearance=")) {
+                apiWebViewAwaitingRealDom = false
+                // 已持有 cf_clearance：使用轻量级同源空文档极速初始化 https://linux.do 上下文；若后续遇到风控 403 则由 refreshApiWebViewCloudflareClearance 自动刷新
+                wv.loadDataWithBaseURL(
+                    "https://linux.do/",
+                    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
+                    "text/html",
+                    "UTF-8",
+                    "https://linux.do/"
+                )
+            } else {
+                apiWebViewAwaitingRealDom = true
+                // 首次启动尚未持有 cf_clearance：先挂载同源上下文，待附加至 Window 后立即导航至 https://linux.do/ 自动完成无感 Cloudflare JS 校验
+                wv.loadDataWithBaseURL(
+                    "https://linux.do/",
+                    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
+                    "text/html",
+                    "UTF-8",
+                    "https://linux.do/"
+                )
+                window.decorView.post {
+                    runCatching {
+                        wv.onResume()
+                        wv.resumeTimers()
+                        wv.loadUrl("https://linux.do/")
+                    }
+                }
+                activityScope.launch {
+                    for (i in 0 until 80) {
+                        if (apiWebViewReady.isCompleted) break
+                        delay(250L)
+                        val domReady = CompletableDeferred<Boolean>()
+                        wv.evaluateJavascript(
+                            "(function(){ return document.getElementById('data-preloaded') != null; })()"
+                        ) { res ->
+                            domReady.complete(res == "true")
+                        }
+                        if (withTimeoutOrNull(1000L) { domReady.await() } == true) {
+                            apiWebViewAwaitingRealDom = false
+                            val c = runCatching { cm.getCookie("https://linux.do").orEmpty() }.getOrDefault("")
+                            if (c.isNotBlank()) {
+                                CookieSentinel.ingestRawCookieString(c)
+                                persistSessionToDisk()
+                            }
+                            if (!apiWebViewReady.isCompleted) {
+                                apiWebViewReady.complete(true)
+                            }
+                            break
+                        }
+                    }
+                    apiWebViewAwaitingRealDom = false
                     if (!apiWebViewReady.isCompleted) {
                         apiWebViewReady.complete(true)
                     }
                 }
             }
-            apiWebView = wv
-            // 使用轻量级同源空文档初始化 https://linux.do 上下文（historyUrl 传 https://linux.do/ 确保 SiteForCookies 与 SameSite=Lax Cookie 100% 生效）
-            wv.loadDataWithBaseURL(
-                "https://linux.do/",
-                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
-                "text/html",
-                "UTF-8",
-                "https://linux.do/"
-            )
+        }
+    }
+
+    @Volatile
+    private var apiWebViewAwaitingRealDom = false
+    private val clearanceRefreshLock = kotlinx.coroutines.sync.Mutex()
+
+    private suspend fun refreshApiWebViewCloudflareClearance(): Boolean {
+        if (clearanceRefreshLock.isLocked) {
+            clearanceRefreshLock.withLock {
+                return apiWebViewReady.isCompleted
+            }
+        }
+        return clearanceRefreshLock.withLock {
+            val wv = apiWebView ?: return@withLock false
+            val cm = CookieManager.getInstance()
+            withContext(Dispatchers.Main) {
+                runCatching {
+                    wv.onResume()
+                    wv.resumeTimers()
+                }
+                apiWebViewAwaitingRealDom = true
+                if (apiWebViewReady.isCompleted) {
+                    apiWebViewReady = CompletableDeferred()
+                }
+                wv.loadUrl("https://linux.do/")
+            }
+            for (i in 0 until 80) {
+                if (apiWebViewReady.isCompleted && !apiWebViewAwaitingRealDom) return@withLock true
+                delay(250L)
+                val isDomReady = withContext(Dispatchers.Main) {
+                    val domDef = CompletableDeferred<Boolean>()
+                    wv.evaluateJavascript(
+                        "(function(){ return document.getElementById('data-preloaded') != null; })()"
+                    ) { res ->
+                        domDef.complete(res == "true")
+                    }
+                    withTimeoutOrNull(1000L) { domDef.await() } == true
+                }
+                if (isDomReady) {
+                    apiWebViewAwaitingRealDom = false
+                    withContext(Dispatchers.Main) {
+                        val c = runCatching { cm.getCookie("https://linux.do").orEmpty() }.getOrDefault("")
+                        if (c.isNotBlank()) {
+                            CookieSentinel.ingestRawCookieString(c)
+                            persistSessionToDisk()
+                        }
+                    }
+                    if (!apiWebViewReady.isCompleted) {
+                        apiWebViewReady.complete(true)
+                    }
+                    return@withLock true
+                }
+            }
+            apiWebViewAwaitingRealDom = false
+            if (!apiWebViewReady.isCompleted) {
+                apiWebViewReady.complete(true)
+            }
+            false
         }
     }
 
@@ -702,10 +928,11 @@ class MainActivity : ComponentActivity() {
         url: String,
         method: String,
         formParams: Map<String, String>?,
-        headers: Map<String, String>
+        headers: Map<String, String>,
+        allowChallengeRetry: Boolean = true
     ): Pair<Int, String>? {
         val wv = apiWebView ?: return null
-        withTimeoutOrNull(3500L) { apiWebViewReady.await() }
+        withTimeoutOrNull(14000L) { apiWebViewReady.await() }
 
         val reqId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Pair<Int, String>>()
@@ -738,6 +965,7 @@ class MainActivity : ComponentActivity() {
                 const controller = new AbortController();
                 const timer = setTimeout(() => controller.abort(), 10000);
                 try {
+                    const targetUrl = ${JSONObject.quote(url)};
                     const method = ${JSONObject.quote(method.uppercase())};
                     const hdrs = $headersJson;
                     hdrs['Accept'] = 'application/json, text/javascript, */*; q=0.01';
@@ -783,15 +1011,52 @@ class MainActivity : ComponentActivity() {
                         }
                         return o;
                     }
-                    let resp = await fetch(${JSONObject.quote(url)}, buildOpts());
+                    if (method === 'GET') {
+                        try {
+                            const preEl = document.getElementById('data-preloaded');
+                            if (preEl && preEl.dataset && preEl.dataset.preloaded) {
+                                const preObj = JSON.parse(preEl.dataset.preloaded);
+                                if (!window.__lindoConsumedInitialPreload && targetUrl.indexOf('/latest.json') >= 0 && targetUrl.indexOf('page=') < 0 && preObj.topic_list) {
+                                    window.__lindoConsumedInitialPreload = true;
+                                    clearTimeout(timer);
+                                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 200, preObj.topic_list);
+                                    return;
+                                }
+                                if (targetUrl.indexOf('/site.json') >= 0 && preObj.site) {
+                                    clearTimeout(timer);
+                                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 200, preObj.site);
+                                    return;
+                                }
+                            }
+                        } catch (_) {}
+                    }
+                    let resp = await fetch(targetUrl, buildOpts());
                     let text = await resp.text();
                     if (method !== 'GET' && method !== 'HEAD' && (resp.status === 403 || (resp.status === 422 && text.indexOf('CSRF') >= 0))) {
                         const freshToken = await refreshCsrfToken();
                         if (freshToken) {
                             hdrs['X-CSRF-Token'] = freshToken;
-                            resp = await fetch(${JSONObject.quote(url)}, buildOpts());
+                            resp = await fetch(targetUrl, buildOpts());
                             text = await resp.text();
                         }
+                    }
+                    if (method === 'GET' && resp.status === 403) {
+                        try {
+                            const preEl = document.getElementById('data-preloaded');
+                            if (preEl && preEl.dataset && preEl.dataset.preloaded) {
+                                const preObj = JSON.parse(preEl.dataset.preloaded);
+                                if (targetUrl.indexOf('/latest.json') >= 0 && targetUrl.indexOf('page=') < 0 && preObj.topic_list) {
+                                    clearTimeout(timer);
+                                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 200, preObj.topic_list);
+                                    return;
+                                }
+                                if (targetUrl.indexOf('/site.json') >= 0 && preObj.site) {
+                                    clearTimeout(timer);
+                                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 200, preObj.site);
+                                    return;
+                                }
+                            }
+                        } catch (_) {}
                     }
                     clearTimeout(timer);
                     window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text);
@@ -819,7 +1084,7 @@ class MainActivity : ComponentActivity() {
             wv.evaluateJavascript(jsCode, null)
         }
 
-        return try {
+        val result = try {
             val res = withTimeoutOrNull(11000L) {
                 deferred.await()
             }
@@ -831,6 +1096,19 @@ class MainActivity : ComponentActivity() {
         } finally {
             pendingHttpCallbacks.remove(reqId)
         }
+
+        if (allowChallengeRetry &&
+            method.equals("GET", ignoreCase = true) &&
+            result != null &&
+            result.first == 403 &&
+            (result.second.contains("Just a moment", ignoreCase = true) ||
+                result.second.contains("challenge-platform", ignoreCase = true))
+        ) {
+            refreshApiWebViewCloudflareClearance()
+            return executeHttpViaWebViewBridge(url, method, formParams, headers, allowChallengeRetry = false)
+        }
+
+        return result
     }
 
     private suspend fun executeMultipartUploadViaWebViewBridge(

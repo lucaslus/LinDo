@@ -672,7 +672,9 @@ object LocalDirectConnectTunnel {
             return listeningPort
         }
         return try {
-            val srv = java.net.ServerSocket(0, 64, InetAddress.getByName("127.0.0.1"))
+            val loopback = InetAddress.getByName("127.0.0.1")
+            val srv = runCatching { java.net.ServerSocket(28081, 64, loopback) }
+                .getOrElse { java.net.ServerSocket(0, 64, loopback) }
             serverSocket = srv
             val port = srv.localPort
             listeningPort = port
@@ -693,6 +695,33 @@ object LocalDirectConnectTunnel {
         } catch (_: Throwable) {
             0
         }
+    }
+
+    private fun handleLocalDohGetRequest(firstLine: String, clientOut: java.io.OutputStream) {
+        val rawTarget = firstLine.substringAfter(' ').substringBefore(' ').trim()
+        val queryPart = rawTarget.substringAfter('?', "")
+        var qName = "linux.do"
+        var qType = "A"
+        queryPart.split('&').forEach { pair ->
+            val k = pair.substringBefore('=').trim().lowercase()
+            val v = runCatching {
+                java.net.URLDecoder.decode(pair.substringAfter('=', ""), "UTF-8").trim()
+            }.getOrDefault(pair.substringAfter('=', "").trim())
+            when (k) {
+                "name" -> if (v.isNotEmpty()) qName = v
+                "type" -> if (v.isNotEmpty()) qType = v
+            }
+        }
+        val bodyBytes = LinuxDoRepository.resolveLocalDohJsonForEch(qName, qType).encodeToByteArray()
+        val headerBytes = (
+            "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/dns-json; charset=utf-8\r\n" +
+                "Content-Length: ${bodyBytes.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            ).encodeToByteArray()
+        clientOut.write(headerBytes)
+        clientOut.write(bodyBytes)
+        clientOut.flush()
     }
 
     private fun handleTunnelClient(client: java.net.Socket) {
@@ -723,6 +752,10 @@ object LocalDirectConnectTunnel {
 
             val headerText = headerBuf.toString("ISO-8859-1")
             val firstLine = headerText.lineSequence().firstOrNull()?.trim().orEmpty()
+            if (firstLine.startsWith("GET ", ignoreCase = true)) {
+                handleLocalDohGetRequest(firstLine, clientOut)
+                return
+            }
             if (!firstLine.startsWith("CONNECT ", ignoreCase = true)) return
             val hostPort = firstLine.substringAfter(' ').substringBefore(' ').trim()
             val host = hostPort.substringBefore(':').trim()
@@ -1080,6 +1113,21 @@ object LinuxDoRepository {
         "172.64.36.2"
     )
 
+    private val oaifreeDohIps = listOf(
+        "104.21.16.56",
+        "172.67.210.33"
+    )
+
+    private val aliDohIps = listOf(
+        "223.5.5.5",
+        "223.6.6.6"
+    )
+
+    private val dnspodDohIps = listOf(
+        "1.12.12.12",
+        "120.53.53.53"
+    )
+
     private val dohBootstrapClient: okhttp3.OkHttpClient by lazy {
         okhttp3.OkHttpClient.Builder()
             .connectTimeout(2500, TimeUnit.MILLISECONDS)
@@ -1087,16 +1135,92 @@ object LinuxDoRepository {
             .socketFactory(TlsRecordFragmentingSocketFactory())
             .dns(object : Dns {
                 override fun lookup(hostname: String): List<InetAddress> {
-                    if (hostname.equals("cloudflare-dns.com", ignoreCase = true)) {
-                        val list = cleanDohAnycastIps.mapNotNull { ip ->
+                    val staticIps = when {
+                        hostname.equals("aaa.ddd.oaifree.com", ignoreCase = true) -> oaifreeDohIps
+                        hostname.equals("dns.alidns.com", ignoreCase = true) -> aliDohIps
+                        hostname.equals("doh.pub", ignoreCase = true) -> dnspodDohIps
+                        hostname.equals("cloudflare-dns.com", ignoreCase = true) -> cleanDohAnycastIps
+                        else -> emptyList()
+                    }
+                    if (staticIps.isNotEmpty()) {
+                        val resolved = staticIps.mapNotNull { ip ->
                             runCatching { InetAddress.getByName(ip) }.getOrNull()
                         }
-                        if (list.isNotEmpty()) return list
+                        if (resolved.isNotEmpty()) return resolved
                     }
                     return Dns.SYSTEM.lookup(hostname)
                 }
             })
             .build()
+    }
+
+    private const val DEFAULT_CLOUDFLARE_ECH_B64 =
+        "AEX+DQBBPwAgACCnVj+GFZ9FYlE7s7N0o/g4xGs1Xupc1SaTdBjpqLyUdgAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+
+    @Volatile
+    private var cachedEchConfigB64: Pair<Long, String>? = null
+
+    private fun fetchLiveCloudflareEchConfigB64(): String {
+        val now = System.currentTimeMillis()
+        cachedEchConfigB64?.let { (expireAt, b64) ->
+            if (b64.isNotBlank() && now < expireAt) return b64
+        }
+        val echEndpoints = listOf(
+            "https://223.5.5.5/resolve?name=cloudflare-ech.com&type=65",
+            "https://223.6.6.6/resolve?name=cloudflare-ech.com&type=65",
+            "https://aaa.ddd.oaifree.com/query-dns?name=linux.do&type=HTTPS"
+        )
+        val echRegex = Regex("""ech="?([A-Za-z0-9+/=_-]{24,})"?""")
+        for (endpoint in echEndpoints) {
+            try {
+                val req = okhttp3.Request.Builder()
+                    .url(endpoint)
+                    .header("Accept", "application/dns-json, application/json")
+                    .build()
+                dohBootstrapClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string().orEmpty()
+                        val match = echRegex.find(body)?.groupValues?.getOrNull(1)?.trim()
+                        if (!match.isNullOrBlank()) {
+                            cachedEchConfigB64 = (now + 600_000L) to match
+                            return match
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        return cachedEchConfigB64?.second ?: DEFAULT_CLOUDFLARE_ECH_B64
+    }
+
+    internal fun resolveLocalDohJsonForEch(rawName: String, rawType: String): String {
+        val host = rawName.trim().lowercase().trimEnd('.').ifBlank { "linux.do" }
+        val normType = rawType.trim().uppercase()
+        return when (normType) {
+            "HTTPS", "65", "TYPE65" -> {
+                val echB64 = fetchLiveCloudflareEchConfigB64()
+                val rdata = "1 . alpn=h3,h2 ipv4hint=104.20.16.234,172.66.166.61 ech=$echB64"
+                """{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Answer":[{"name":"$host","type":65,"TTL":300,"data":"$rdata"}]}"""
+            }
+            "AAAA", "28", "TYPE28" -> {
+                """{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Answer":[]}"""
+            }
+            else -> {
+                val dohIps = resolveViaEncryptedDoh(host)
+                    .mapNotNull { it.hostAddress?.takeIf { ip -> !isPoisonedIp(ip) } }
+                    .sorted()
+                val preferredIps = if (host == "cloudflare-ech.com") {
+                    listOf("104.18.10.118", "104.18.11.118", "104.20.16.234", "172.66.166.61")
+                } else {
+                    listOf("104.20.16.234", "172.66.166.61", "104.18.10.118", "104.18.11.118")
+                }
+                val mergedIps = (preferredIps + dohIps).distinct().take(4)
+                val answersJson = mergedIps.joinToString(",") { ip ->
+                    """{"name":"$host","type":1,"TTL":300,"data":"$ip"}"""
+                }
+                """{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Answer":[$answersJson]}"""
+            }
+        }
     }
 
     private val dohHostCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<InetAddress>>>()
@@ -1124,10 +1248,10 @@ object LinuxDoRepository {
             if (list.isNotEmpty() && now < expireAt) return list
         }
         val dohEndpoints = listOf(
+            "https://1.12.12.12/dns-query?name=$key&type=A",
+            "https://doh.pub/dns-query?name=$key&type=A",
             "https://aaa.ddd.oaifree.com/query-dns?name=$key&type=A",
-            "https://cloudflare-dns.com/dns-query?name=$key&type=A",
-            "https://1.1.1.1/dns-query?name=$key&type=A",
-            "https://1.0.0.1/dns-query?name=$key&type=A"
+            "https://cloudflare-dns.com/dns-query?name=$key&type=A"
         )
         for (endpoint in dohEndpoints) {
             try {
@@ -1455,8 +1579,8 @@ kZC8lQg1
             if (!hasWebCookie) {
                 requestHeaders.remove("Discourse-Logged-In")
             }
-            if (UserApiKeyAuthManager.webViewHttpExecutor == null) {
-                UserApiKeyAuthManager.customUserAgent?.let { requestHeaders["User-Agent"] = it }
+            UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
+                requestHeaders["User-Agent"] = it
             }
             val isMutation = !method.equals("GET", true) && !method.equals("HEAD", true)
             if (isMutation && hasWebCookie && !requestHeaders.containsKey("X-CSRF-Token")) {
