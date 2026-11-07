@@ -684,49 +684,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private var networkCallbackRegistered = false
-
-    private fun detectSystemVpnActive(): Boolean {
-        return runCatching {
-            val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-            val activeNet = cm?.activeNetwork ?: return@runCatching false
-            cm.getNetworkCapabilities(activeNet)?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
-        }.getOrDefault(false)
-    }
-
     private fun installDirectConnectWebViewTunnel() {
         runCatching {
             val port = LocalDirectConnectTunnel.ensureStarted()
             ensureLocalRustEchDaemonStarted(port)
-            LocalDirectConnectTunnel.onNetworkEnvironmentChanged(detectSystemVpnActive())
-            if (!networkCallbackRegistered) {
-                val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-                if (cm != null) {
-                    val req = android.net.NetworkRequest.Builder()
-                        .removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                        .build()
-                    cm.registerNetworkCallback(
-                        req,
-                        object : android.net.ConnectivityManager.NetworkCallback() {
-                            override fun onAvailable(network: android.net.Network) {
-                                LocalDirectConnectTunnel.onNetworkEnvironmentChanged(detectSystemVpnActive())
-                            }
-
-                            override fun onLost(network: android.net.Network) {
-                                LocalDirectConnectTunnel.onNetworkEnvironmentChanged(detectSystemVpnActive())
-                            }
-
-                            override fun onCapabilitiesChanged(
-                                network: android.net.Network,
-                                networkCapabilities: android.net.NetworkCapabilities
-                            ) {
-                                LocalDirectConnectTunnel.onNetworkEnvironmentChanged(detectSystemVpnActive())
-                            }
-                        }
-                    )
-                    networkCallbackRegistered = true
-                }
-            }
             if (port > 0 && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
                 val proxyConfig = ProxyConfig.Builder()
                     .addProxyRule("127.0.0.1:$port")
@@ -906,27 +867,26 @@ class MainActivity : ComponentActivity() {
 
     @Volatile
     private var apiWebViewAwaitingRealDom = false
+    @Volatile
+    private var lastClearanceRefreshEpochMs = 0L
     private val clearanceRefreshLock = kotlinx.coroutines.sync.Mutex()
 
-    private suspend fun refreshApiWebViewCloudflareClearance(clearStaleClearance: Boolean = false): Boolean {
+    private suspend fun refreshApiWebViewCloudflareClearance(): Boolean {
         if (clearanceRefreshLock.isLocked) {
             clearanceRefreshLock.withLock {
                 return apiWebViewReady.isCompleted
             }
         }
         return clearanceRefreshLock.withLock {
+            val now = System.currentTimeMillis()
+            if (now - lastClearanceRefreshEpochMs < 20_000L && apiWebViewReady.isCompleted) {
+                return@withLock true
+            }
+            lastClearanceRefreshEpochMs = now
             val wv = apiWebView ?: return@withLock false
             val cm = CookieManager.getInstance()
             withContext(Dispatchers.Main) {
                 runCatching {
-                    if (clearStaleClearance) {
-                        listOf("cf_clearance", "__cf_bm").forEach { name ->
-                            cm.setCookie("https://linux.do", "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
-                            cm.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly")
-                            cm.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
-                        }
-                        cm.flush()
-                    }
                     wv.onResume()
                     wv.resumeTimers()
                 }
@@ -934,9 +894,13 @@ class MainActivity : ComponentActivity() {
                 if (apiWebViewReady.isCompleted) {
                     apiWebViewReady = CompletableDeferred()
                 }
+                // 导航前立即释放所有旧页面上下文的挂起回调，防止旧 JS 上下文销毁后苦等超时
+                pendingHttpCallbacks.keys.toList().forEach { id ->
+                    pendingHttpCallbacks.remove(id)?.complete(0 to "")
+                }
                 wv.loadUrl("https://linux.do/")
             }
-            for (i in 0 until 80) {
+            for (i in 0 until 60) {
                 if (apiWebViewReady.isCompleted && !apiWebViewAwaitingRealDom) return@withLock true
                 delay(250L)
                 val isDomReady = withContext(Dispatchers.Main) {
@@ -976,10 +940,10 @@ class MainActivity : ComponentActivity() {
         method: String,
         formParams: Map<String, String>?,
         headers: Map<String, String>,
-        remainingRetries: Int = 2
+        allowChallengeRetry: Boolean = true
     ): Pair<Int, String>? {
         val wv = apiWebView ?: return null
-        withTimeoutOrNull(14000L) { apiWebViewReady.await() }
+        withTimeoutOrNull(10000L) { apiWebViewReady.await() }
 
         val reqId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Pair<Int, String>>()
@@ -1010,7 +974,7 @@ class MainActivity : ComponentActivity() {
         val jsCode = """
             (async function() {
                 const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 11000);
+                const timer = setTimeout(() => controller.abort(), 8500);
                 try {
                     const targetUrl = ${JSONObject.quote(url)};
                     const method = ${JSONObject.quote(method.uppercase())};
@@ -1077,7 +1041,7 @@ class MainActivity : ComponentActivity() {
                             }
                         } catch (_) {}
                     }
-                    const maxFetchAttempts = (method === 'GET' || method === 'HEAD') ? 3 : 1;
+                    const maxFetchAttempts = (method === 'GET' || method === 'HEAD') ? 2 : 1;
                     let resp = null;
                     let text = '';
                     for (let attempt = 0; attempt < maxFetchAttempts; attempt++) {
@@ -1093,7 +1057,7 @@ class MainActivity : ComponentActivity() {
                                 throw fetchErr;
                             }
                         }
-                        await new Promise(r => setTimeout(r, 250 * (attempt + 1)));
+                        await new Promise(r => setTimeout(r, 200));
                     }
                     if (method !== 'GET' && method !== 'HEAD' && (resp.status === 403 || (resp.status === 422 && text.indexOf('CSRF') >= 0))) {
                         const freshToken = await refreshCsrfToken();
@@ -1148,7 +1112,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val result = try {
-            val res = withTimeoutOrNull(12000L) {
+            val res = withTimeoutOrNull(9500L) {
                 deferred.await()
             }
             val latestCookies = runCatching { CookieManager.getInstance().getCookie("https://linux.do") }.getOrNull().orEmpty()
@@ -1160,28 +1124,28 @@ class MainActivity : ComponentActivity() {
             pendingHttpCallbacks.remove(reqId)
         }
 
-        val isReadMethod = method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)
-        if (remainingRetries > 0 && isReadMethod) {
-            val isChallenge403 = result != null &&
-                result.first == 403 &&
-                (result.second.contains("Just a moment", ignoreCase = true) ||
-                    result.second.contains("challenge-platform", ignoreCase = true) ||
-                    (!result.second.trimStart().startsWith("{") && !result.second.trimStart().startsWith("[")))
-            if (isChallenge403) {
-                refreshApiWebViewCloudflareClearance(clearStaleClearance = true)
-                return executeHttpViaWebViewBridge(url, method, formParams, headers, remainingRetries = remainingRetries - 1)
-            }
-            val isTransientFailure = result == null ||
-                result.first == 0 ||
-                result.first == 408 ||
-                result.first == 429 ||
-                result.first in 500..599
-            if (isTransientFailure) {
-                val tunnelPort = LocalDirectConnectTunnel.ensureStarted()
-                ensureLocalRustEchDaemonStarted(tunnelPort)
-                delay(320L * (3 - remainingRetries))
-                return executeHttpViaWebViewBridge(url, method, formParams, headers, remainingRetries = remainingRetries - 1)
-            }
+        val isBackgroundAuxUrl = url.contains("/emojis.json") ||
+            url.contains("/badges.json") ||
+            url.contains("/session/current.json")
+        if (allowChallengeRetry &&
+            method.equals("GET", ignoreCase = true) &&
+            !isBackgroundAuxUrl &&
+            result != null &&
+            result.first == 403 &&
+            (result.second.contains("Just a moment", ignoreCase = true) ||
+                result.second.contains("challenge-platform", ignoreCase = true))
+        ) {
+            refreshApiWebViewCloudflareClearance()
+            return executeHttpViaWebViewBridge(url, method, formParams, headers, allowChallengeRetry = false)
+        }
+
+        if (allowChallengeRetry &&
+            method.equals("GET", ignoreCase = true) &&
+            !isBackgroundAuxUrl &&
+            (result == null || result.first == 0 || result.first in 500..599)
+        ) {
+            delay(250L)
+            return executeHttpViaWebViewBridge(url, method, formParams, headers, allowChallengeRetry = false)
         }
 
         return result
