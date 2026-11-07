@@ -560,10 +560,10 @@ data class EdgeCandidateResult(
  */
 object CloudflareEdgeRacer {
     val defaultCandidates = listOf(
-        "104.21.48.1" to "Cloudflare Primary",
-        "172.67.182.1" to "Cloudflare Secondary",
-        "104.16.132.229" to "Cloudflare APAC-1",
-        "104.17.112.1" to "Cloudflare APAC-2"
+        "104.20.16.234" to "Cloudflare Primary",
+        "172.66.166.61" to "Cloudflare Secondary",
+        "104.21.48.1" to "Cloudflare APAC-1",
+        "172.67.182.1" to "Cloudflare APAC-2"
     )
 
     @Volatile
@@ -575,23 +575,28 @@ object CloudflareEdgeRacer {
         private set
 
     suspend fun raceAndPinBestNode(): List<EdgeCandidateResult> = withContext(Dispatchers.IO) {
-        val probeClient = HttpClient(OkHttp) {
-            engine {
-                config {
-                    connectTimeout(2500, TimeUnit.MILLISECONDS)
-                    readTimeout(2500, TimeUnit.MILLISECONDS)
-                }
-            }
-        }
-
         val results = coroutineScope {
             defaultCandidates.map { (ip, label) ->
                 async {
                     val start = System.nanoTime()
-                    try {
-                        val resp = probeClient.get("https://$ip/cdn-cgi/trace") {
-                            header("Host", "linux.do")
+                    val candidateClient = HttpClient(OkHttp) {
+                        engine {
+                            config {
+                                connectTimeout(2500, TimeUnit.MILLISECONDS)
+                                readTimeout(2500, TimeUnit.MILLISECONDS)
+                                dns(object : Dns {
+                                    override fun lookup(hostname: String): List<InetAddress> {
+                                        if (hostname == "linux.do" || hostname.endsWith(".linux.do")) {
+                                            return listOf(InetAddress.getByName(ip))
+                                        }
+                                        return Dns.SYSTEM.lookup(hostname)
+                                    }
+                                })
+                            }
                         }
+                    }
+                    try {
+                        val resp = candidateClient.get("https://linux.do/cdn-cgi/trace")
                         val elapsedMs = ((System.nanoTime() - start) / 1_000_000L).coerceAtLeast(1L)
                         val body = resp.bodyAsText()
                         val colo = Regex("""colo=([A-Z]+)""").find(body)?.groupValues?.getOrNull(1) ?: "CF"
@@ -612,16 +617,15 @@ object CloudflareEdgeRacer {
                             traceVerified = false,
                             colo = "AUTO"
                         )
+                    } finally {
+                        candidateClient.close()
                     }
                 }
             }.awaitAll().sortedWith(compareByDescending<EdgeCandidateResult> { it.traceVerified }.thenBy { it.rttMs })
         }
 
-        probeClient.close()
         lastRaceResults = results
-        results.firstOrNull()?.let { winner ->
-            pinnedEdgeIp = winner.ip
-        }
+        pinnedEdgeIp = results.firstOrNull { it.traceVerified }?.ip
         results
     }
 }
@@ -745,8 +749,19 @@ object LinuxDoRepository {
     @Volatile
     private var cachedDohExpireEpochMs: Long = 0L
 
+    private val poisonedIpPrefixes = listOf(
+        "127.", "0.", "199.59.", "108.160.", "31.13.", "69.63.", "69.171.",
+        "157.240.", "179.60.", "185.60.", "46.82.", "59.24.", "243.185."
+    )
+
+    private fun isPoisonedIp(ip: String): Boolean {
+        val normalized = ip.trim().lowercase()
+        return poisonedIpPrefixes.any { normalized.startsWith(it) } ||
+            normalized.contains("face:b00c")
+    }
+
     /**
-     * 内置免配置加密 DoH 解析器（直连阿里 `223.5.5.5` / 腾讯 `1.12.12.12` DoH JSON 接口，无需通过传统 53 端口解析域名）
+     * 内置免配置加密 DoH 解析器（优先直连无污染 Cloudflare `1.1.1.1` / `1.0.0.1` DoH JSON 接口，并过滤已知 DNS 污染黑洞 IP）
      */
     private fun resolveViaEncryptedDoh(hostname: String): List<InetAddress> {
         val now = System.currentTimeMillis()
@@ -754,8 +769,9 @@ object LinuxDoRepository {
             return cachedDohAddresses
         }
         val dohEndpoints = listOf(
-            "https://223.5.5.5/resolve?name=$hostname&type=A",
-            "https://1.12.12.12/resolve?name=$hostname&type=A"
+            "https://1.1.1.1/dns-query?name=$hostname&type=A",
+            "https://1.0.0.1/dns-query?name=$hostname&type=A",
+            "https://223.5.5.5/resolve?name=$hostname&type=A"
         )
         for (endpoint in dohEndpoints) {
             try {
@@ -772,7 +788,7 @@ object LinuxDoRepository {
                             val obj = elem as? JsonObject ?: return@mapNotNull null
                             val type = obj["type"]?.jsonPrimitive?.intOrNull
                             val data = obj["data"]?.jsonPrimitive?.contentOrNull?.trim()
-                            if (type == 1 && !data.isNullOrBlank() && !data.startsWith("127.") && !data.startsWith("0.")) {
+                            if (type == 1 && !data.isNullOrBlank() && !isPoisonedIp(data)) {
                                 runCatching { InetAddress.getByName(data) }.getOrNull()
                             } else null
                         }.orEmpty()

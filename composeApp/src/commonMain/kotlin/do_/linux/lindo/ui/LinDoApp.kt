@@ -8865,43 +8865,7 @@ private fun CommunityProfileScreen(
                         )
                     }
 
-                    // 3.4 线路与节点优选
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onOpenNetworkSheet() }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.WifiSpeed,
-                            contentDescription = "线路与节点优选",
-                            modifier = Modifier.size(20.dp),
-                            tint = palette.inkSecondary
-                        )
-                        Spacer(modifier = Modifier.width(14.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "线路与节点优选",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.inkPrimary
-                            )
-                            Text(
-                                text = "Cloudflare 边缘节点测速与连接诊断",
-                                fontSize = 11.8.sp,
-                                color = palette.inkSecondary
-                            )
-                        }
-                        Icon(
-                            imageVector = LinDoIcons.ChevronRight,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                            tint = palette.inkTertiary
-                        )
-                    }
-
-                    // 3.5 关于社区
+                    // 3.4 关于社区
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
