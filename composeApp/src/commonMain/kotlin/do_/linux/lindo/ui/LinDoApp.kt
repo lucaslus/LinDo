@@ -1722,9 +1722,9 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                             pmInitialRecipient = targetUser
                             showPrivateMessagesSheet = true
                         },
-                        onSelectTopicId = { tid, title ->
+                        onSelectTopicId = { tid, title, postNum ->
                             inspectedUsername = null
-                            openTopicById(tid, title)
+                            openTopicById(tid, title, postNum)
                         },
                         onInspectBadge = { badge ->
                             inspectedBadge = badge
@@ -12946,22 +12946,27 @@ internal fun UserPrivateMessagesSheet(
 /**
  * 官方功能 8：社区用户公开名片抽屉（点击任意帖子楼层头像/昵称即可弹出查看对方等级、简介、统计与发私信）
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun PublicUserCardSheet(
     username: String,
     onDismiss: () -> Unit,
     onSendPrivateMessage: (String) -> Unit,
-    onSelectTopicId: (Int, String) -> Unit,
+    onSelectTopicId: (Int, String, Int) -> Unit,
     onInspectBadge: (GrantedBadge) -> Unit = {},
     onOpenUserBadges: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
-    var cardProfile by remember { mutableStateOf<UserFullProfileSummary?>(null) }
-    var recentActions by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var reloadToken by remember { mutableIntStateOf(0) }
-    var isLoading by remember { mutableStateOf(true) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var cardProfile by remember(username) { mutableStateOf<UserFullProfileSummary?>(null) }
+    var allActions by remember(username) { mutableStateOf<List<UserActivityItem>>(emptyList()) }
+    var topicActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
+    var replyActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
+    var activeTab by remember(username) { mutableIntStateOf(0) } // 0=全部动态, 1=主帖, 2=回复, 3=徽章
+    var tabLoading by remember(username) { mutableStateOf(false) }
+    var loadError by remember(username) { mutableStateOf<String?>(null) }
+    var reloadToken by remember(username) { mutableIntStateOf(0) }
+    var isLoading by remember(username) { mutableStateOf(true) }
 
     LaunchedEffect(username, reloadToken) {
         isLoading = true
@@ -12969,7 +12974,7 @@ private fun PublicUserCardSheet(
         try {
             cardProfile = LinuxDoRepository.fetchPublicUserCard(username)
                 ?: throw do_.linux.lindo.core.network.ApiReadException(do_.linux.lindo.core.network.ApiFailureKind.Connection)
-            recentActions = LinuxDoRepository.fetchUserActivities(username).take(5)
+            allActions = LinuxDoRepository.fetchUserActivities(username).take(25)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -12979,25 +12984,63 @@ private fun PublicUserCardSheet(
         }
     }
 
+    LaunchedEffect(username, activeTab) {
+        if (activeTab == 1 && topicActions == null) {
+            tabLoading = true
+            try {
+                topicActions = LinuxDoRepository.fetchUserActivities(username, filter = "4").take(25)
+            } catch (_: Exception) {
+                topicActions = allActions.filter { it.actionType == 4 }
+            } finally {
+                tabLoading = false
+            }
+        } else if (activeTab == 2 && replyActions == null) {
+            tabLoading = true
+            try {
+                replyActions = LinuxDoRepository.fetchUserActivities(username, filter = "5").take(25)
+            } catch (_: Exception) {
+                replyActions = allActions.filter { it.actionType == 5 }
+            } finally {
+                tabLoading = false
+            }
+        }
+    }
+
+    fun formatReadTime(seconds: Int): String {
+        if (seconds <= 0) return "0m"
+        val hours = seconds / 3600
+        val mins = (seconds % 3600) / 60
+        return when {
+            hours >= 24 -> "${hours / 24}d ${hours % 24}h"
+            hours > 0 -> "${hours}h"
+            else -> "${mins.coerceAtLeast(1)}m"
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         containerColor = palette.cardSurface
     ) {
+        val p = cardProfile
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .fillMaxHeight(0.84f)
+                .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
-            val p = cardProfile
+            // 顶部固定头部：头像 + 昵称/等级/头衔 + 发私信 + 关闭
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 GoogleAccountRingAvatar(
                     letter = p?.displayName ?: username,
                     avatarUrl = p?.avatarTemplate,
                     animatedAvatar = p?.animatedAvatar,
-                    avatarSize = 56.dp,
+                    avatarSize = 60.dp,
                     strokeWidth = 2.2.dp
                 )
                 Spacer(modifier = Modifier.width(12.dp))
@@ -13008,16 +13051,18 @@ private fun PublicUserCardSheet(
                     ) {
                         Text(
                             text = p?.displayName ?: username,
-                            fontSize = 17.sp,
+                            fontSize = 17.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = if (p?.admin == true || p?.moderator == true) palette.brandGold else palette.inkPrimary,
-                            maxLines = 1
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         if (p?.admin == true || p?.moderator == true) {
                             Icon(
                                 imageVector = LinDoIcons.ShieldCheck,
                                 contentDescription = "管理员/版主",
-                                modifier = Modifier.size(14.dp),
+                                modifier = Modifier.size(14.5.dp),
                                 tint = palette.brandGold
                             )
                         }
@@ -13046,7 +13091,7 @@ private fun PublicUserCardSheet(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(2.dp))
+                    Spacer(modifier = Modifier.height(3.dp))
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -13055,7 +13100,8 @@ private fun PublicUserCardSheet(
                         Text(
                             text = "@$username",
                             fontSize = 12.5.sp,
-                            color = palette.inkSecondary
+                            color = palette.inkSecondary,
+                            maxLines = 1
                         )
                         if (!p?.title.isNullOrBlank()) {
                             Text(
@@ -13075,6 +13121,8 @@ private fun PublicUserCardSheet(
                     }
                 }
 
+                Spacer(modifier = Modifier.width(8.dp))
+
                 Box(
                     modifier = Modifier
                         .height(34.dp)
@@ -13093,118 +13141,410 @@ private fun PublicUserCardSheet(
                 }
             }
 
-            if (isLoading && cardProfile == null) {
-                Spacer(modifier = Modifier.height(12.dp))
-                LinDoLoadingIndicator(label = "加载中")
-            } else if (loadError != null) {
-                Spacer(modifier = Modifier.height(10.dp))
-                LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-            }
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
-            if (p != null && p.bioExcerpt.isNotBlank()) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(
-                    text = p.bioExcerpt,
-                    fontSize = 12.5.sp,
-                    lineHeight = 18.sp,
-                    color = palette.inkSecondary,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            if (p != null && p.badges.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    p.badges.take(6).forEach { badge ->
-                        UniversalBadgeChip(
-                            badge = badge,
-                            compact = true,
-                            onClick = { onInspectBadge(badge) }
-                        )
+            // 下方全量可滚动内容区：签名/元数据 + 徽章横栏 + 8维社区数据矩阵 + 动态/主帖/回复/徽章分栏列表
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (isLoading && cardProfile == null) {
+                    item(key = "loading") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 36.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoLoadingIndicator(label = "加载中")
+                        }
                     }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(palette.subtleSurface)
-                            .clickable { onOpenUserBadges(username) }
-                            .padding(horizontal = 8.dp, vertical = 3.5.dp)
-                    ) {
-                        Text(
-                            text = "全部 ${p.badgeCount.coerceAtLeast(p.badges.size)} 枚",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.inkSecondary
+                } else if (loadError != null && cardProfile == null) {
+                    item(key = "error") {
+                        LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                    }
+                }
+
+                if (p != null) {
+                    // 1. 个人简介、自定义状态与加入/活跃时间等元数据
+                    val hasBioOrStatus = p.bioExcerpt.isNotBlank() || p.statusText.isNotBlank()
+                    val hasMetaTags = p.createdAtText.isNotBlank() || p.lastSeenText.isNotBlank() ||
+                        !p.primaryGroupName.isNullOrBlank() || p.location.isNotBlank() ||
+                        p.websiteName.isNotBlank() || p.solvedCount > 0
+
+                    if (hasBioOrStatus || hasMetaTags) {
+                        item(key = "bio_and_meta") {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (p.statusText.isNotBlank()) {
+                                    Text(
+                                        text = "状态：${p.statusText}",
+                                        fontSize = 12.2.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.brandGold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (p.bioExcerpt.isNotBlank()) {
+                                    Text(
+                                        text = p.bioExcerpt,
+                                        fontSize = 13.sp,
+                                        lineHeight = 19.sp,
+                                        color = palette.inkSecondary,
+                                        maxLines = 4,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (hasMetaTags) {
+                                    FlowRow(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        if (p.createdAtText.isNotBlank()) {
+                                            Text(
+                                                text = "加入于 ${p.createdAtText}",
+                                                fontSize = 11.5.sp,
+                                                color = palette.inkTertiary
+                                            )
+                                        }
+                                        if (p.lastSeenText.isNotBlank()) {
+                                            Text(
+                                                text = "近期活跃 ${p.lastSeenText}",
+                                                fontSize = 11.5.sp,
+                                                color = palette.inkTertiary
+                                            )
+                                        }
+                                        if (!p.primaryGroupName.isNullOrBlank()) {
+                                            Text(
+                                                text = "群组 ${p.primaryGroupName}",
+                                                fontSize = 11.5.sp,
+                                                color = palette.inkTertiary
+                                            )
+                                        }
+                                        if (p.location.isNotBlank()) {
+                                            Text(
+                                                text = "地区 ${p.location}",
+                                                fontSize = 11.5.sp,
+                                                color = palette.inkTertiary
+                                            )
+                                        }
+                                        if (p.websiteName.isNotBlank()) {
+                                            Text(
+                                                text = p.websiteName,
+                                                fontSize = 11.5.sp,
+                                                color = palette.inkTertiary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        if (p.solvedCount > 0) {
+                                            Text(
+                                                text = "已解决 ${p.solvedCount} 个问题",
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = palette.brandGold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. 精选徽章横滑条 + 查看全部徽章入口
+                    if (p.badges.isNotEmpty()) {
+                        item(key = "badges_strip") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                p.badges.take(8).forEach { badge ->
+                                    UniversalBadgeChip(
+                                        badge = badge,
+                                        compact = true,
+                                        onClick = { onInspectBadge(badge) }
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(palette.subtleSurface)
+                                        .clickable { onOpenUserBadges(username) }
+                                        .padding(horizontal = 8.dp, vertical = 3.5.dp)
+                                ) {
+                                    Text(
+                                        text = "全部 ${p.badgeCount.coerceAtLeast(p.badges.size)} 枚",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.inkSecondary
+                                    )
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Icon(
+                                        imageVector = LinDoIcons.ChevronRight,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp),
+                                        tint = palette.inkTertiary
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. 完整 8 维社区核心统计矩阵（2行 × 4列 Bento Grid）
+                    item(key = "stats_matrix") {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                GoogleBentoMetricTile("${p.daysVisited}", "访问天数", Modifier.weight(1f))
+                                GoogleBentoMetricTile(formatReadTime(p.timeReadSeconds), "阅读时长", Modifier.weight(1f))
+                                GoogleBentoMetricTile(formatCompactNumber(p.topicsEntered), "浏览话题", Modifier.weight(1f))
+                                GoogleBentoMetricTile(formatCompactNumber(p.postsReadCount), "阅读帖子", Modifier.weight(1f))
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                GoogleBentoMetricTile(formatCompactNumber(p.likesReceived), "收到赞", Modifier.weight(1f))
+                                GoogleBentoMetricTile(formatCompactNumber(p.likesGiven), "送出赞", Modifier.weight(1f))
+                                GoogleBentoMetricTile(formatCompactNumber(p.topicCount), "主帖", Modifier.weight(1f))
+                                GoogleBentoMetricTile(formatCompactNumber(p.postCount), "回复", Modifier.weight(1f))
+                            }
+                        }
+                    }
+
+                    // 4. 社区轨迹切换栏（全部动态 / 主帖 / 回复 / 徽章）
+                    item(key = "activity_tabs") {
+                        val tabs = listOf(
+                            "全部动态",
+                            "主帖 (${p.topicCount})",
+                            "回复 (${p.postCount})",
+                            "徽章 (${p.badgeCount.coerceAtLeast(p.badges.size)})"
                         )
-                        Spacer(modifier = Modifier.width(2.dp))
-                        Icon(
-                            imageVector = LinDoIcons.ChevronRight,
-                            contentDescription = null,
-                            modifier = Modifier.size(12.dp),
-                            tint = palette.inkTertiary
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            tabs.forEachIndexed { idx, label ->
+                                val selected = activeTab == idx
+                                Box(
+                                    modifier = Modifier
+                                        .height(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (selected) palette.activeChipBg else palette.subtleSurface)
+                                        .then(
+                                            if (selected) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                                            else Modifier
+                                        )
+                                        .clickable { activeTab = idx }
+                                        .padding(horizontal = 11.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = label,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (selected) palette.brandGold else palette.inkSecondary
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. 当前选中分栏的内容列表
+                    if (activeTab == 3) {
+                        if (p.badges.isEmpty()) {
+                            item(key = "empty_badges") {
+                                Text(
+                                    text = "暂无公开展示的徽章",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary,
+                                    modifier = Modifier.padding(vertical = 12.dp)
+                                )
+                            }
+                        } else {
+                            itemsIndexed(p.badges, key = { idx, b -> "badge_${b.id}_$idx" }) { _, badge ->
+                                val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = palette.isDark)
+                                val iconVec = UniversalBadgeEngine.resolveFallbackIcon(badge)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(11.dp))
+                                        .background(palette.canvas)
+                                        .clickable { onInspectBadge(badge) }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .clip(RoundedCornerShape(9.dp))
+                                            .background(tierColor.copy(alpha = 0.14f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = iconVec,
+                                            contentDescription = badge.name,
+                                            tint = tierColor,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                text = badge.name,
+                                                fontSize = 13.5.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = palette.inkPrimary
+                                            )
+                                            if (badge.count > 1) {
+                                                Text(
+                                                    text = "×${badge.count}",
+                                                    fontSize = 11.2.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = tierColor
+                                                )
+                                            }
+                                        }
+                                        if (badge.description.isNotBlank()) {
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = badge.description,
+                                                fontSize = 12.sp,
+                                                lineHeight = 17.sp,
+                                                color = palette.inkSecondary,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                    if (badge.grantedAtText.isNotBlank()) {
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = badge.grantedAtText,
+                                            fontSize = 11.sp,
+                                            color = palette.inkTertiary
+                                        )
+                                    }
+                                }
+                            }
+                            item(key = "open_all_badges_btn") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(38.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(palette.subtleSurface)
+                                        .clickable { onOpenUserBadges(username) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "打开完整社区徽章墙 (${p.badgeCount.coerceAtLeast(p.badges.size)} 枚)",
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.brandGold
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        val activeList = when (activeTab) {
+                            1 -> topicActions ?: allActions.filter { it.actionType == 4 }
+                            2 -> replyActions ?: allActions.filter { it.actionType == 5 }
+                            else -> allActions
+                        }
+                        if (tabLoading && activeList.isEmpty()) {
+                            item(key = "tab_loading") {
+                                LinDoFeedbackRow("正在加载动态…", LinDoMascotState.Loading)
+                            }
+                        } else if (activeList.isEmpty()) {
+                            item(key = "empty_actions") {
+                                Text(
+                                    text = "暂无相关公开社区动态",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary,
+                                    modifier = Modifier.padding(vertical = 12.dp)
+                                )
+                            }
+                        } else {
+                            itemsIndexed(activeList, key = { idx, act -> "act_${act.id}_${act.actionType}_$idx" }) { _, act ->
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(11.dp))
+                                        .background(palette.canvas)
+                                        .clickable { onSelectTopicId(act.topicId, act.title, act.postNumber) }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = if (act.postNumber > 1 && act.actionType == 5) "${act.actionLabel} #${act.postNumber}" else act.actionLabel,
+                                            fontSize = 11.2.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (act.actionType == 4) palette.brandGold else palette.inkSecondary
+                                        )
+                                        if (act.categoryName.isNotBlank()) {
+                                            Text(
+                                                text = "· ${act.categoryName}",
+                                                fontSize = 11.2.sp,
+                                                color = palette.inkTertiary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.weight(1f))
+                                        Text(
+                                            text = act.createdAtText,
+                                            fontSize = 11.sp,
+                                            color = palette.inkTertiary
+                                        )
+                                    }
+                                    Text(
+                                        text = act.title,
+                                        fontSize = 13.8.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (act.excerpt.isNotBlank()) {
+                                        Text(
+                                            text = act.excerpt,
+                                            fontSize = 12.5.sp,
+                                            lineHeight = 18.sp,
+                                            color = palette.inkSecondary,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
-
-            if (p != null) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    GoogleBentoMetricTile("${p.daysVisited}", "访问天数", Modifier.weight(1f))
-                    GoogleBentoMetricTile("${p.likesReceived}", "收到赞", Modifier.weight(1f))
-                    GoogleBentoMetricTile("${p.topicCount}", "主帖", Modifier.weight(1f))
-                    GoogleBentoMetricTile("${p.postCount}", "回复", Modifier.weight(1f))
-                }
-            }
-
-            if (recentActions.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "近期社区动态",
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkSecondary
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                recentActions.take(3).forEach { act ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(9.dp))
-                            .clickable { onSelectTopicId(act.topicId, act.title) }
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = act.title,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.inkPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = act.createdAtText,
-                            fontSize = 11.sp,
-                            color = palette.inkTertiary
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
         }
     }
 }

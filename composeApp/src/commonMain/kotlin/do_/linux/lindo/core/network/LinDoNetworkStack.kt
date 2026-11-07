@@ -2470,6 +2470,10 @@ object LinuxDoRepository {
         var admin = false
         var moderator = false
         var createdAtText = ""
+        var lastSeenText = ""
+        var location = ""
+        var websiteName = ""
+        var statusText = ""
         var badgeCount = 0
 
         val userRes = executeHttp("https://linux.do/u/$clean.json", method = "GET") ?: return@withContext null
@@ -2485,6 +2489,7 @@ object LinuxDoRepository {
                         avatarUrl = if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "240")
                         else "https://linux.do${rawTpl.replace("{size}", "240")}"
                     }
+                    animatedAvatar = uObj["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1
                     title = uObj["title"]?.jsonPrimitive?.contentOrNull ?: ""
                     bioExcerpt = uObj["bio_excerpt"]?.jsonPrimitive?.contentOrNull
@@ -2493,9 +2498,22 @@ object LinuxDoRepository {
                     admin = uObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false
                     moderator = uObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false
                     badgeCount = uObj["badge_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    location = uObj["location"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    websiteName = (uObj["website_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        ?: uObj["website"]?.jsonPrimitive?.contentOrNull)?.trim().orEmpty()
+                    val statusObj = uObj["status"] as? JsonObject
+                    if (statusObj != null) {
+                        val statusDesc = statusObj["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                        statusText = statusDesc
+                    }
                     val createdIso = uObj["created_at"]?.jsonPrimitive?.contentOrNull
                     if (!createdIso.isNullOrBlank() && createdIso.length >= 10) {
                         createdAtText = createdIso.substring(0, 10)
+                    }
+                    val lastActiveIso = uObj["last_seen_at"]?.jsonPrimitive?.contentOrNull
+                        ?: uObj["last_posted_at"]?.jsonPrimitive?.contentOrNull
+                    if (!lastActiveIso.isNullOrBlank()) {
+                        lastSeenText = formatRelativeTime(lastActiveIso)
                     }
                 }
             } catch (_: Throwable) {
@@ -2504,12 +2522,14 @@ object LinuxDoRepository {
 
         var daysVisited = 0
         var timeReadSeconds = 0
+        var recentTimeReadSeconds = 0
         var topicsEntered = 0
         var postsReadCount = 0
         var likesReceived = 0
         var likesGiven = 0
         var topicCount = 0
         var postCount = 0
+        var solvedCount = 0
         val topBadges = mutableListOf<GrantedBadge>()
 
         val summaryRes = executeHttp("https://linux.do/u/$clean/summary.json", method = "GET")
@@ -2520,12 +2540,14 @@ object LinuxDoRepository {
                 if (us != null) {
                     daysVisited = us["days_visited"]?.jsonPrimitive?.intOrNull ?: 0
                     timeReadSeconds = us["time_read"]?.jsonPrimitive?.intOrNull ?: 0
+                    recentTimeReadSeconds = us["recent_time_read"]?.jsonPrimitive?.intOrNull ?: 0
                     topicsEntered = us["topics_entered"]?.jsonPrimitive?.intOrNull ?: 0
                     postsReadCount = us["posts_read_count"]?.jsonPrimitive?.intOrNull ?: 0
                     likesReceived = us["likes_received"]?.jsonPrimitive?.intOrNull ?: 0
                     likesGiven = us["likes_given"]?.jsonPrimitive?.intOrNull ?: 0
                     topicCount = us["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
                     postCount = us["post_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    solvedCount = us["solved_count"]?.jsonPrimitive?.intOrNull ?: 0
                 }
                 val badgeCountById = mutableMapOf<Int, Int>()
                 val badgeGrantedAtById = mutableMapOf<Int, String>()
@@ -2575,6 +2597,7 @@ object LinuxDoRepository {
             createdAtText = createdAtText,
             daysVisited = daysVisited,
             timeReadSeconds = timeReadSeconds,
+            recentTimeReadSeconds = recentTimeReadSeconds,
             topicsEntered = topicsEntered,
             postsReadCount = postsReadCount,
             likesReceived = likesReceived,
@@ -2582,6 +2605,11 @@ object LinuxDoRepository {
             topicCount = topicCount,
             postCount = postCount,
             badgeCount = badgeCount.coerceAtLeast(topBadges.size),
+            lastSeenText = lastSeenText,
+            location = location,
+            websiteName = websiteName,
+            statusText = statusText,
+            solvedCount = solvedCount,
             badges = topBadges
         )
     }

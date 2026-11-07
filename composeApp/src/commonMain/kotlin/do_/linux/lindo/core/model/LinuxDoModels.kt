@@ -390,6 +390,11 @@ data class UserFullProfileSummary(
     val postCount: Int = 0,
     val badgeCount: Int = 0,
     val unreadNotifications: Int = 0,
+    val lastSeenText: String = "",
+    val location: String = "",
+    val websiteName: String = "",
+    val statusText: String = "",
+    val solvedCount: Int = 0,
     val badges: List<GrantedBadge> = emptyList()
 ) {
     val trustLevelName: String
