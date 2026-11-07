@@ -96,13 +96,13 @@ object UniversalBadgeEngine {
     }
 
     /**
-     * 根据徽章等级返回标准色值
+     * 根据徽章等级返回标准色值（1:1 对齐 Discourse / Linux.do 官方 Gold / Silver / Bronze 视觉色板）
      */
     fun badgeTierColor(type: BadgeType, isDark: Boolean = true): Color {
         return when (type) {
-            BadgeType.GOLD -> if (isDark) Color(0xFFFFD54F) else Color(0xFFE5A100)
-            BadgeType.SILVER -> if (isDark) Color(0xFFCFD8DC) else Color(0xFF78909C)
-            BadgeType.BRONZE -> if (isDark) Color(0xFFFFAB91) else Color(0xFFCD7F32)
+            BadgeType.GOLD -> if (isDark) Color(0xFFF5BF03) else Color(0xFFD99B00)
+            BadgeType.SILVER -> if (isDark) Color(0xFFC5C9CE) else Color(0xFF8A939E)
+            BadgeType.BRONZE -> if (isDark) Color(0xFFD98A54) else Color(0xFFCD7F32)
         }
     }
 
@@ -150,7 +150,7 @@ object UniversalBadgeEngine {
     val officialBadgeCatalog: List<GrantedBadge> = listOf(
         // ==================== 金徽章 (Gold, badgeTypeId = 1) ====================
         GrantedBadge(
-            id = 100,
+            id = -100,
             name = "种子用户",
             description = "Linux.do 创站早期种子用户专属荣誉金徽章",
             longDescription = "授予在 Linux.do 创站初期加入并共同见证社区从零成长的早期种子成员。持有者可佩戴全站瞩目的全息流光「种子用户」专属头衔。",
@@ -172,7 +172,7 @@ object UniversalBadgeEngine {
             allowTitle = true
         ),
         GrantedBadge(
-            id = 102,
+            id = -102,
             name = "不二之选",
             description = "Linux.do 两周年盛典限定纪念金徽章",
             longDescription = "真诚、友善、团结、专业 —— 授予参与并见证 Linux.do 两周年里程碑的社区佬友，可佩戴「不二之选」限定纪念头衔。",
@@ -183,7 +183,7 @@ object UniversalBadgeEngine {
             allowTitle = true
         ),
         GrantedBadge(
-            id = 101,
+            id = -101,
             name = "一元复始",
             description = "Linux.do 周年与万象更新纪念金徽章",
             longDescription = "一元复始，万象更新。授予陪伴 Linux.do 走过周年庆典与辞旧迎新时刻的社区成员，可佩戴「一元复始」专属纪念头衔。",
@@ -194,7 +194,18 @@ object UniversalBadgeEngine {
             allowTitle = true
         ),
         GrantedBadge(
-            id = 105,
+            id = -103,
+            name = "万象更新",
+            description = "Linux.do 周年与辞旧迎新纪念金徽章",
+            longDescription = "一元复始，万象更新。授予在社区焕新升级与年度盛典中共同前行的社区成员，可佩戴「万象更新」专属纪念头衔。",
+            badgeTypeId = 1,
+            icon = "sparkles",
+            slug = "all-things-renewed",
+            grantCount = 16800,
+            allowTitle = true
+        ),
+        GrantedBadge(
+            id = -105,
             name = "骐骥驰骋",
             description = "Linux.do 丙午马年新春限定纪念金徽章",
             longDescription = "骐骥一跃，驰骋万里。授予马年新春盛典期间活跃参与社区共建的佬友，可佩戴「骐骥驰骋」限定纪念头衔。",
@@ -205,7 +216,7 @@ object UniversalBadgeEngine {
             allowTitle = true
         ),
         GrantedBadge(
-            id = 106,
+            id = -106,
             name = "岂曰无衣?",
             description = "岂曰无衣？与子同袍 · 社区守望相助荣誉金徽章",
             longDescription = "授予在社区技术共建、开源互助与生态维护中展现同袍情谊的核心贡献者，可佩戴「岂曰无衣?」专属头衔。",
@@ -216,7 +227,7 @@ object UniversalBadgeEngine {
             allowTitle = true
         ),
         GrantedBadge(
-            id = 107,
+            id = -107,
             name = "破界者",
             description = "Linux.do 破界创新先锋荣誉金徽章",
             longDescription = "授予在开源创作、前沿 AI 探索或微应用生态中突破边界的先锋创作者，可佩戴全息流光「破界者」头衔。",
@@ -227,7 +238,7 @@ object UniversalBadgeEngine {
             allowTitle = true
         ),
         GrantedBadge(
-            id = 108,
+            id = -108,
             name = "非我莫属",
             description = "Linux.do 社区杰出贡献与风采纪念金徽章",
             longDescription = "授予在社区专项活动、技术挑战或共建板块中表现卓越的成员，可佩戴「非我莫属」专属头衔。",
@@ -295,7 +306,7 @@ object UniversalBadgeEngine {
 
         // ==================== 银徽章 (Silver, badgeTypeId = 2) ====================
         GrantedBadge(
-            id = 9991,
+            id = -9991,
             name = "Only Apple Can Do",
             description = "Linux.do 官方「Only Apple Can Do」Apple 生态专属徽章",
             longDescription = "授予 Apple 生态深度玩家与参与官方活动解锁的佬友。首次获取或佩戴该徽章时，昵称旁将点亮专属 Apple 标志 ，并可佩戴「Only Apple Can Do」头衔。",
@@ -339,7 +350,7 @@ object UniversalBadgeEngine {
             allowTitle = true
         ),
         GrantedBadge(
-            id = 109,
+            id = -109,
             name = "博学",
             description = "广泛阅读社区文档与技术指南并完成深度互动",
             longDescription = "授予热衷于阅读和钻研社区技术文章的博学佬友，可佩戴「博学」头衔。",
@@ -350,7 +361,7 @@ object UniversalBadgeEngine {
             allowTitle = true
         ),
         GrantedBadge(
-            id = 110,
+            id = -110,
             name = "领航员",
             description = "Linux.do 社区生态领航与引导贡献银徽章",
             longDescription = "为新佬友指路、积极参与文档共建与技术答疑的社区领航员，可佩戴「领航员」头衔。",
@@ -608,6 +619,7 @@ object UniversalBadgeEngine {
         "apple" to "Only Apple Can Do",
         "不二之选" to "不二之选",
         "一元复始" to "一元复始",
+        "万象更新" to "万象更新",
         "骐骥驰骋" to "骐骥驰骋",
         "岂曰无衣?" to "岂曰无衣?",
         "岂曰无衣？" to "岂曰无衣?",
@@ -653,7 +665,7 @@ object UniversalBadgeEngine {
                 return createOnlyAppleCanDoBadge(isFirstGrant = false)
             }
         }
-        if (id > 0) {
+        if (id != 0) {
             officialBadgeCatalog.firstOrNull { it.id == id }?.let { return it }
         }
         return null
@@ -668,7 +680,7 @@ object UniversalBadgeEngine {
         lookupOfficialBadge(name = clean)?.let { return it }
         if (clean.equals("Premium", ignoreCase = true)) {
             return GrantedBadge(
-                id = 9992,
+                id = -9992,
                 name = "Premium",
                 description = "Linux.do Premium 尊享会员专属身份徽章",
                 longDescription = "支持社区长期发展与基础设施建设的 Premium 尊享会员，享有全息流光「Premium」专属头衔。",
@@ -724,7 +736,7 @@ object UniversalBadgeEngine {
                 mergedMap[key] = enriched
             } else {
                 mergedMap[key] = prev.copy(
-                    id = if (prev.id in 1..9000) prev.id else enriched.id,
+                    id = if (prev.id > 0) prev.id else enriched.id,
                     description = prev.description.ifBlank { enriched.description },
                     longDescription = prev.longDescription.ifBlank { enriched.longDescription },
                     icon = prev.icon ?: enriched.icon,
@@ -750,7 +762,7 @@ object UniversalBadgeEngine {
      */
     fun createOnlyAppleCanDoBadge(isFirstGrant: Boolean = false): GrantedBadge {
         return GrantedBadge(
-            id = 9991,
+            id = -9991,
             name = "Only Apple Can Do",
             description = if (isFirstGrant) {
                 "首次获取「Only Apple Can Do」官方徽章 · Apple 生态专属纪念"
@@ -768,17 +780,17 @@ object UniversalBadgeEngine {
     }
 
     /**
-     * 当位图或 SVG 远程图片加载失败时的矢量图标兜底
+     * 当位图或 SVG 远程图片加载失败时的矢量图标兜底（优先按中文徽章名匹配专属语义图标，避免落入通用证书/丝带兜底）
      */
     fun resolveFallbackIcon(badge: GrantedBadge): ImageVector {
         if (isAppleBadge(badge)) return LinDoIcons.AppleLogo
+        val nameKey = badge.name.trim().lowercase()
+        matchBadgeNameIcon(nameKey)?.let { return it }
         val key = normalizeIconKey(badge.icon)
         if (key.isNotEmpty()) {
             matchVectorIcon(key)?.let { return it }
         }
-        val nameKey = badge.name.trim().lowercase()
-        matchVectorIcon(nameKey)?.let { return it }
-        return LinDoIcons.AwardBadge
+        return LinDoIcons.VerifiedBadge
     }
 
     /**
@@ -849,9 +861,11 @@ object UniversalBadgeEngine {
             nameLower.contains("种子") || nameLower.contains("seed") -> LinDoIcons.Seedling
             nameLower.contains("全年不落") || nameLower.contains("狂热") || nameLower.contains("迷恋") ||
                 nameLower.contains("热门") || nameLower.contains("精彩的话题") -> LinDoIcons.Flame
-            nameLower.contains("不二之选") || nameLower.contains("领袖") || nameLower.contains("premium") -> LinDoIcons.Crown
-            nameLower.contains("一元复始") || nameLower.contains("表情") -> LinDoIcons.Sparkles
-            nameLower.contains("骐骥驰骋") -> LinDoIcons.Trophy
+            nameLower.contains("不二之选") || nameLower.contains("领袖") || nameLower.contains("premium") ||
+                nameLower.contains("龙行") -> LinDoIcons.Crown
+            nameLower.contains("一元复始") || nameLower.contains("万象更新") || nameLower.contains("表情") ||
+                nameLower.contains("金蛇") || nameLower.contains("蛇来") -> LinDoIcons.Sparkles
+            nameLower.contains("骐骥驰骋") || nameLower.contains("功成名就") || nameLower.contains("百尺竿头") -> LinDoIcons.Trophy
             nameLower.contains("岂曰无衣") -> LinDoIcons.ShieldCheck
             nameLower.contains("破界") || nameLower.contains("活跃") || nameLower.contains("恢复精力") -> LinDoIcons.Bolt
             nameLower.contains("周年") -> LinDoIcons.Gift

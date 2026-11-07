@@ -53,7 +53,7 @@ enum class LinDoMascotState(val asset: String, val title: String, val detail: St
 
 /**
  * 零度娘统一形象组件：
- * - 加载 / 刷新状态下自带灵动的「左右摇摆」不倒翁动效 + 外圈柔和旋转光弧（转圈圈）
+ * - 加载 / 刷新状态下自带灵动的「左右摇摆」不倒翁动效（不绘制外圈转圈光弧，仅保留零度娘本体）
  */
 @Composable
 fun LinDoMascot(
@@ -61,7 +61,7 @@ fun LinDoMascot(
     size: Dp = 80.dp,
     compact: Boolean = false,
     animate: Boolean = true,
-    showSpinnerRing: Boolean = state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing),
+    showSpinnerRing: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val isActivelyLoading = state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing)
@@ -105,18 +105,6 @@ fun LinDoMascot(
         )
     } else rememberUpdatedState(0f)
 
-    val spinAngle = if (transition != null && isActivelyLoading && showSpinnerRing) {
-        transition.animateFloat(
-            initialValue = 0f,
-            targetValue = 360f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(1050, easing = LinearEasing),
-                repeatMode = RepeatMode.Restart
-            ),
-            label = "spinner_ring"
-        )
-    } else rememberUpdatedState(0f)
-
     val art = when {
         compact -> Res.drawable.lindo_brand_mark
         state == LinDoMascotState.Loading || state == LinDoMascotState.NetworkError -> Res.drawable.lindo_mascot_connecting
@@ -127,38 +115,11 @@ fun LinDoMascot(
         modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        if (moving && isActivelyLoading && showSpinnerRing) {
-            val ringColor = Color(0xFFF59E0B)
-            val trackColor = ringColor.copy(alpha = 0.14f)
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val strokePx = (this.size.minDimension * 0.065f).coerceIn(3f, 6.5f)
-                drawCircle(
-                    color = trackColor,
-                    style = Stroke(width = strokePx)
-                )
-                drawArc(
-                    color = ringColor,
-                    startAngle = spinAngle.value,
-                    sweepAngle = 92f,
-                    useCenter = false,
-                    style = Stroke(width = strokePx, cap = StrokeCap.Round)
-                )
-                drawArc(
-                    color = ringColor.copy(alpha = 0.45f),
-                    startAngle = spinAngle.value + 180f,
-                    sweepAngle = 56f,
-                    useCenter = false,
-                    style = Stroke(width = strokePx, cap = StrokeCap.Round)
-                )
-            }
-        }
-
-        val innerScale = if (moving && isActivelyLoading && showSpinnerRing) 0.78f else 1f
         Image(
             painter = painterResource(art),
             contentDescription = null,
             modifier = Modifier
-                .fillMaxSize(innerScale)
+                .fillMaxSize(1f)
                 .graphicsLayer {
                     rotationZ = rotation.value
                     translationX = swayOffsetX.value * density
@@ -288,7 +249,7 @@ fun LinDoLoadingIndicator(
                     compact = false,
                     size = 56.dp,
                     animate = true,
-                    showSpinnerRing = true
+                    showSpinnerRing = false
                 )
                 Spacer(Modifier.height(10.dp))
                 Row(

@@ -528,6 +528,14 @@ object BadgeInjector {
 
     init {
         UniversalBadgeEngine.officialBadgeCatalog.forEach { badge ->
+            if (badge.id > 0) {
+                knownBadgesById[badge.id] = badge
+            }
+        }
+    }
+
+    fun registerKnownBadge(badge: GrantedBadge) {
+        if (badge.id > 0 && badge.name.isNotBlank() && !badge.name.startsWith("徽章 #")) {
             knownBadgesById[badge.id] = badge
         }
     }
@@ -535,27 +543,53 @@ object BadgeInjector {
     fun lookupBadgeById(badgeId: Int): GrantedBadge? =
         knownBadgesById[badgeId] ?: UniversalBadgeEngine.lookupOfficialBadge(id = badgeId)
 
+    private fun isMeaningfulBadge(badge: GrantedBadge): Boolean {
+        return !badge.name.startsWith("徽章 #") ||
+            !badge.imageUrl.isNullOrBlank() ||
+            !badge.icon.isNullOrBlank()
+    }
+
     private fun ingestBadgesCollection(badgesRaw: JsonElement?, targetMap: MutableMap<Int, GrantedBadge>) {
         when (badgesRaw) {
             is JsonObject -> {
                 for ((key, value) in badgesRaw) {
                     val obj = value as? JsonObject ?: continue
-                    val badgeId = key.toIntOrNull() ?: obj["id"]?.jsonPrimitive?.intOrNull ?: continue
+                    val badgeId = key.toIntOrNull()
+                        ?: obj["badge_id"]?.jsonPrimitive?.intOrNull
+                        ?: obj["id"]?.jsonPrimitive?.intOrNull
+                        ?: continue
                     val parsed = parseGrantedBadge(obj, fallbackId = badgeId)
                     targetMap[badgeId] = parsed
-                    knownBadgesById[badgeId] = parsed
+                    registerKnownBadge(parsed)
                 }
             }
             is JsonArray -> {
                 for (element in badgesRaw) {
                     val obj = element as? JsonObject ?: continue
-                    val badgeId = obj["id"]?.jsonPrimitive?.intOrNull ?: continue
+                    val badgeId = obj["badge_id"]?.jsonPrimitive?.intOrNull
+                        ?: obj["id"]?.jsonPrimitive?.intOrNull
+                        ?: continue
                     val parsed = parseGrantedBadge(obj, fallbackId = badgeId)
                     targetMap[badgeId] = parsed
-                    knownBadgesById[badgeId] = parsed
+                    registerKnownBadge(parsed)
                 }
             }
             else -> Unit
+        }
+    }
+
+    private fun extractUserBadgeObjects(rawElement: JsonElement?): List<JsonObject> {
+        return when (rawElement) {
+            is JsonArray -> rawElement.mapNotNull { it as? JsonObject }
+            is JsonObject -> {
+                val inner = rawElement["user_badges"]
+                when (inner) {
+                    is JsonArray -> inner.mapNotNull { it as? JsonObject }
+                    is JsonObject -> inner.values.mapNotNull { it as? JsonObject }
+                    else -> rawElement.values.mapNotNull { it as? JsonObject }
+                }
+            }
+            else -> emptyList()
         }
     }
 
@@ -563,23 +597,33 @@ object BadgeInjector {
         val badgesById = mutableMapOf<Int, GrantedBadge>()
         badgesById.putAll(knownBadgesById)
 
-        // 1. 收集顶层 `badges` 数组/字典（Discourse 首次授予徽章或完整徽章字典常位于 root["badges"]）
-        ingestBadgesCollection(rootJson["badges"], badgesById)
+        val postStream = rootJson["post_stream"] as? JsonObject
 
-        val rawUserBadges = rootJson["user_badges"] ?: return userBadgesMemoryCache
+        // 1. 收集顶层与 post_stream 内的 `badges` 数组/字典
+        ingestBadgesCollection(rootJson["badges"], badgesById)
+        ingestBadgesCollection(postStream?.get("badges"), badgesById)
+
+        val rawUserBadges = rootJson["user_badges"]
+            ?: postStream?.get("user_badges")
+            ?: return userBadgesMemoryCache
+
         if (rawUserBadges is JsonArray) {
             val groupedByUser = mutableMapOf<Int, MutableList<GrantedBadge>>()
             for (elem in rawUserBadges) {
                 val ubObj = elem as? JsonObject ?: continue
                 val uid = ubObj["user_id"]?.jsonPrimitive?.intOrNull ?: continue
                 val nestedBadge = (ubObj["badge"] as? JsonObject)?.let { parseGrantedBadge(it) }
-                val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: ubObj["id"]?.jsonPrimitive?.intOrNull
+                val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull
+                    ?: (ubObj["badge"] as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull
+                    ?: ubObj["id"]?.jsonPrimitive?.intOrNull
                 val resolved = nestedBadge ?: bid?.let { badgesById[it] } ?: parseGrantedBadge(ubObj)
-                groupedByUser.getOrPut(uid) { mutableListOf() }.add(resolved)
+                if (isMeaningfulBadge(resolved)) {
+                    groupedByUser.getOrPut(uid) { mutableListOf() }.add(resolved)
+                }
             }
             for ((uid, list) in groupedByUser) {
                 if (list.isNotEmpty()) {
-                    userBadgesMemoryCache[uid] = list.distinctBy { "${it.id}_${it.name.lowercase()}" }
+                    userBadgesMemoryCache[uid] = UniversalBadgeEngine.mergeBadgesPreservingRichness(list)
                 }
             }
             return userBadgesMemoryCache
@@ -588,43 +632,58 @@ object BadgeInjector {
         val container = rawUserBadges as? JsonObject ?: return userBadgesMemoryCache
         ingestBadgesCollection(container["badges"], badgesById)
 
+        // 先解析 container["user_badges"]（兼容 JsonArray 和 JsonObject 字典格式），建立 ubId -> badgeId 映射
+        val ubIdToBadgeId = mutableMapOf<Int, Int>()
         val userBadgeIds = mutableMapOf<Int, List<Int>>()
+        for (ubObj in extractUserBadgeObjects(container["user_badges"])) {
+            val ubId = ubObj["id"]?.jsonPrimitive?.intOrNull
+            val uid = ubObj["user_id"]?.jsonPrimitive?.intOrNull
+            val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull
+                ?: (ubObj["badge"] as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull
+            if (ubId != null && bid != null) {
+                ubIdToBadgeId[ubId] = bid
+            }
+            if (uid != null && bid != null) {
+                userBadgeIds[uid] = (userBadgeIds[uid].orEmpty() + bid).distinct()
+            }
+        }
+
+        fun collectUserEntry(userId: Int, obj: JsonObject) {
+            val directBadgeIds = (obj["badge_ids"] as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                .orEmpty()
+            val mappedFromUbIds = (obj["user_badge_ids"] as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                ?.mapNotNull { ubId -> ubIdToBadgeId[ubId] ?: badgesById[ubId]?.id }
+                .orEmpty()
+            val combined = (userBadgeIds[userId].orEmpty() + directBadgeIds + mappedFromUbIds).distinct()
+            if (combined.isNotEmpty()) {
+                userBadgeIds[userId] = combined
+            }
+        }
+
         when (val usersRaw = container["users"]) {
             is JsonObject -> {
                 for ((key, value) in usersRaw) {
                     val obj = value as? JsonObject ?: continue
                     val userId = key.toIntOrNull() ?: obj["id"]?.jsonPrimitive?.intOrNull ?: continue
-                    val ids = (obj["badge_ids"] as? JsonArray)
-                        ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
-                        .orEmpty()
-                    if (ids.isNotEmpty()) userBadgeIds[userId] = ids
+                    collectUserEntry(userId, obj)
                 }
             }
             is JsonArray -> {
                 for (element in usersRaw) {
                     val obj = element as? JsonObject ?: continue
                     val userId = obj["id"]?.jsonPrimitive?.intOrNull ?: continue
-                    val ids = (obj["badge_ids"] as? JsonArray)
-                        ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
-                        .orEmpty()
-                    if (ids.isNotEmpty()) userBadgeIds[userId] = ids
+                    collectUserEntry(userId, obj)
                 }
             }
             else -> Unit
         }
 
-        // 兼容 container["user_badges"] 数组格式
-        (container["user_badges"] as? JsonArray)?.forEach { elem ->
-            val ubObj = elem as? JsonObject ?: return@forEach
-            val uid = ubObj["user_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-            val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-            userBadgeIds[uid] = (userBadgeIds[uid].orEmpty() + bid).distinct()
-        }
-
         for ((userId, ids) in userBadgeIds) {
-            val resolved = ids.mapNotNull { badgesById[it] }
+            val resolved = ids.mapNotNull { badgesById[it] }.filter { isMeaningfulBadge(it) }
             if (resolved.isNotEmpty()) {
-                userBadgesMemoryCache[userId] = resolved
+                userBadgesMemoryCache[userId] = UniversalBadgeEngine.mergeBadgesPreservingRichness(resolved)
             }
         }
         return userBadgesMemoryCache
@@ -637,29 +696,46 @@ object BadgeInjector {
     fun injectTopLevelUserBadges(posts: List<PostItemModel>, rootJson: JsonObject): List<PostItemModel> {
         parseAndCacheUserBadges(rootJson)
 
-        // 同时收集顶层 user_badges 中指定了 post_number 的首次获授徽章（例如本楼首次触发 Only Apple Can Do）
+        val topicTitle = rootJson["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val isAppleTopic = topicTitle.contains("only apple can do", ignoreCase = true)
+
+        // 同时收集顶层 user_badges 中指定了 post_number 的本楼首次获授徽章（兼容 JsonArray 与 JsonObject）
         val postLevelGrants = mutableMapOf<Int, MutableList<GrantedBadge>>()
-        val topUserBadgesArr = (rootJson["user_badges"] as? JsonArray)
-            ?: ((rootJson["user_badges"] as? JsonObject)?.get("user_badges") as? JsonArray)
-        topUserBadgesArr?.forEach { elem ->
-            val ubObj = elem as? JsonObject ?: return@forEach
-            val pNum = ubObj["post_number"]?.jsonPrimitive?.intOrNull ?: return@forEach
+        val rawUbSource = rootJson["user_badges"]
+            ?: (rootJson["post_stream"] as? JsonObject)?.get("user_badges")
+        for (ubObj in extractUserBadgeObjects(rawUbSource)) {
+            val pNum = ubObj["post_number"]?.jsonPrimitive?.intOrNull ?: continue
             val nested = (ubObj["badge"] as? JsonObject)?.let { parseGrantedBadge(it, isFirstGrant = true) }
             val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull
-            val badge = nested ?: bid?.let { knownBadgesById[it]?.copy(isFirstTimeGrant = true) }
-            if (badge != null) {
-                postLevelGrants.getOrPut(pNum) { mutableListOf() }.add(badge)
+                ?: (ubObj["badge"] as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull
+            val resolved = nested
+                ?: bid?.let { lookupBadgeById(it)?.copy(isFirstTimeGrant = true) }
+                ?: if (isAppleTopic) UniversalBadgeEngine.createOnlyAppleCanDoBadge(isFirstGrant = true) else null
+            if (resolved != null && isMeaningfulBadge(resolved)) {
+                postLevelGrants.getOrPut(pNum) { mutableListOf() }.add(resolved)
             }
         }
 
         return posts.map { post ->
             val cachedUserBadges = getBadgesForUser(post.userId)
             val floorGrants = postLevelGrants[post.postNumber].orEmpty()
-            val titleBadge = UniversalBadgeEngine.resolveBadgeForUserTitle(post.userTitle)
 
+            // 修复：在 Only Apple can do 专帖内，若本楼带有未解析出的楼层徽章引用或苹果设备回复获章，归一化为 Only Apple Can Do 徽章
+            val normalizedPostBadges = post.badgesGranted.mapNotNull { b ->
+                when {
+                    isMeaningfulBadge(b) -> b
+                    isAppleTopic || !post.iosDeviceName.isNullOrBlank() ->
+                        UniversalBadgeEngine.createOnlyAppleCanDoBadge(isFirstGrant = b.isFirstTimeGrant)
+                    else -> null
+                }
+            }
+
+            // 严格对齐 Linux.do 官方佩戴逻辑与位置：
+            // 第一行（昵称右侧）仅展示实际佩戴/获授的徽章图标（floorGrants + normalizedPostBadges + cachedUserBadges），
+            // 绝不把第二行的文字头衔 (`user_title`) 重复塞进第一行冒充徽章图标。
             val merged = UniversalBadgeEngine.mergeBadgesPreservingRichness(
-                floorGrants + post.badgesGranted + cachedUserBadges + listOfNotNull(titleBadge)
-            )
+                floorGrants + normalizedPostBadges + cachedUserBadges
+            ).filter { isMeaningfulBadge(it) }
 
             if (merged != post.badgesGranted) {
                 post.copy(badgesGranted = merged)
@@ -670,10 +746,12 @@ object BadgeInjector {
     }
 
     fun parseGrantedBadge(obj: JsonObject, fallbackId: Int = 0, isFirstGrant: Boolean = false): GrantedBadge {
-        val target = (obj["badge"] as? JsonObject) ?: obj
-        val resolvedId = target["id"]?.jsonPrimitive?.intOrNull
+        val nestedBadge = obj["badge"] as? JsonObject
+        val target = nestedBadge ?: obj
+        // 关键修复：当 obj 是 UserBadge 记录（同时含 id=记录主键 与 badge_id=徽章ID）时，必须优先取 badge_id！
+        val resolvedId = nestedBadge?.get("id")?.jsonPrimitive?.intOrNull
             ?: obj["badge_id"]?.jsonPrimitive?.intOrNull
-            ?: obj["id"]?.jsonPrimitive?.intOrNull
+            ?: target["id"]?.jsonPrimitive?.intOrNull
             ?: fallbackId
         val rawNameCandidate = target["name"]?.jsonPrimitive?.contentOrNull
             ?: obj["badge_name"]?.jsonPrimitive?.contentOrNull
@@ -694,7 +772,7 @@ object BadgeInjector {
         val rawIcon = target["icon"]?.jsonPrimitive?.contentOrNull
             ?: known?.icon
             ?: if (rawName.contains("only apple can do", ignoreCase = true) || rawSlug.contains("only-apple-can-do", ignoreCase = true)) "fab-apple" else null
-        return GrantedBadge(
+        val badge = GrantedBadge(
             id = if (resolvedId != 0) resolvedId else (known?.id ?: 0),
             name = rawName,
             description = target["description"]?.jsonPrimitive?.contentOrNull ?: known?.description ?: "",
@@ -719,5 +797,7 @@ object BadgeInjector {
             topicTitle = obj["topic_title"]?.jsonPrimitive?.contentOrNull ?: "",
             postNumber = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 0
         )
+        registerKnownBadge(badge)
+        return badge
     }
 }

@@ -273,15 +273,15 @@ internal fun ComposerSheet(
                 .windowInsetsPadding(WindowInsets.ime)
                 .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
-            // ==================== 1. 一体化紧凑顶栏 (54dp) ====================
+            // ==================== 1. 一体化极简对齐顶栏 (48dp · 纯图标化操作) ====================
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(54.dp)
+                    .height(48.dp)
                     .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 关闭按钮
+                // 左侧：关闭图标按钮
                 Box(
                     modifier = Modifier
                         .size(34.dp)
@@ -291,144 +291,135 @@ internal fun ComposerSheet(
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭编辑器",
+                        contentDescription = "关闭",
                         tint = palette.inkPrimary,
-                        modifier = Modifier.size(19.dp)
+                        modifier = Modifier.size(18.5.dp)
                     )
                 }
 
                 Spacer(modifier = Modifier.width(6.dp))
 
-                // 标题与草稿状态
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = when (action) {
-                                ComposerAction.NEW_TOPIC -> "发布新话题"
-                                ComposerAction.EDIT -> "编辑帖子"
-                                ComposerAction.REPLY -> "发表回复"
-                            },
-                            color = palette.inkPrimary,
-                            fontSize = 15.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
-                        if (draftStatusLabel != null) {
-                            Box(
-                                modifier = Modifier
-                                    .size(5.5.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        when {
-                                            syncError != null -> Color(0xFFF59E0B)
-                                            synced -> Color(0xFF10B981)
-                                            else -> palette.brandGold
-                                        }
-                                    )
-                            )
+                // 中左：单行清爽标题与上下文胶囊 + 云端同步指示点
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val replyPostNum = draft.replyToPostNumber
+                    val editPostNum = draft.postNumber
+                    val headerTitle = when (action) {
+                        ComposerAction.NEW_TOPIC -> "新话题"
+                        ComposerAction.EDIT -> if (editPostNum != null && editPostNum > 0) "编辑 #$editPostNum" else "编辑"
+                        ComposerAction.REPLY -> if (replyPostNum != null && replyPostNum > 0) "回复 #$replyPostNum" else "回复"
+                    }
+                    Text(
+                        text = headerTitle,
+                        color = palette.inkPrimary,
+                        fontSize = 15.2.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+
+                    val contextBadgeText = when (action) {
+                        ComposerAction.REPLY -> draft.replyToUsername?.takeIf { it.isNotBlank() }?.let { "@$it" }
+                            ?: topicTitle.takeIf { it.isNotBlank() }
+                        ComposerAction.EDIT -> topicTitle.takeIf { it.isNotBlank() }
+                        ComposerAction.NEW_TOPIC -> null
+                    }
+                    if (!contextBadgeText.isNullOrBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(palette.subtleSurface)
+                                .border(0.5.dp, palette.hairline, RoundedCornerShape(6.dp))
+                                .padding(horizontal = 7.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
                             Text(
-                                text = draftStatusLabel,
-                                color = if (syncError != null) Color(0xFFF59E0B) else palette.inkTertiary,
-                                fontSize = 10.8.sp,
+                                text = contextBadgeText,
+                                color = palette.inkSecondary,
+                                fontSize = 11.2.sp,
+                                fontWeight = FontWeight.Medium,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = if (syncError != null && !busy) {
-                                    Modifier.clickable { syncRetry++ }
-                                } else {
-                                    Modifier
-                                }
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
 
-                    val subtitleContext = when (action) {
-                        ComposerAction.REPLY -> {
-                            val replyPostNum = draft.replyToPostNumber
-                            if (replyPostNum != null && replyPostNum > 0) {
-                                "回复 #$replyPostNum${draft.replyToUsername?.let { " @$it" }.orEmpty()}" +
-                                    if (topicTitle.isNotBlank()) " · $topicTitle" else ""
-                            } else {
-                                topicTitle
-                            }
-                        }
-                        ComposerAction.EDIT -> {
-                            val editPostNum = draft.postNumber
-                            buildString {
-                                if (editPostNum != null && editPostNum > 0) {
-                                    append("第 #$editPostNum 楼")
+                    if (draftStatusLabel != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    when {
+                                        syncError != null -> Color(0xFFF59E0B)
+                                        synced -> Color(0xFF10B981)
+                                        else -> palette.brandGold
+                                    }
+                                )
+                                .let { mod ->
+                                    if (syncError != null && !busy) mod.clickable { syncRetry++ } else mod
                                 }
-                                if (topicTitle.isNotBlank()) {
-                                    if (isNotEmpty()) append(" · ")
-                                    append(topicTitle)
-                                }
-                            }
-                        }
-                        ComposerAction.NEW_TOPIC -> ""
-                    }
-                    if (subtitleContext.isNotBlank()) {
-                        Text(
-                            text = subtitleContext,
-                            color = palette.inkSecondary,
-                            fontSize = 11.2.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                // 编辑 / 预览 胶囊分段切换器
+                // 右侧：纯图标「预览/编辑切换」+ 图标「发送/保存」按钮（含富文本微金点预览提示）
                 if (prepared && prepareError == null) {
-                    Row(
+                    val isPreview = viewMode == WorkbenchViewMode.PREVIEW
+                    val hasRichMarkdown = remember(draft.raw) {
+                        val txt = draft.raw
+                        txt.contains("![") || txt.contains("```") || txt.contains("[quote") ||
+                            txt.contains("[details") || txt.contains("[poll") || txt.contains("](")
+                    }
+                    Box(
                         modifier = Modifier
-                            .height(30.dp)
-                            .clip(RoundedCornerShape(15.dp))
-                            .background(palette.subtleSurface)
-                            .border(0.5.dp, palette.hairline, RoundedCornerShape(15.dp))
-                            .padding(2.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (isPreview) palette.activeChipBg else palette.subtleSurface)
+                            .border(
+                                width = 0.6.dp,
+                                color = if (isPreview) palette.brandGold else palette.hairline,
+                                shape = CircleShape
+                            )
+                            .clickable(enabled = !busy) {
+                                val nextMode = if (isPreview) WorkbenchViewMode.SOURCE else WorkbenchViewMode.PREVIEW
+                                viewMode = nextMode
+                                if (nextMode == WorkbenchViewMode.PREVIEW) {
+                                    keyboard?.hide()
+                                }
+                            },
+                        contentAlignment = Alignment.Center
                     ) {
-                        WorkbenchViewMode.entries.forEach { mode ->
-                            val isSelected = viewMode == mode
+                        Icon(
+                            imageVector = if (isPreview) LinDoIcons.Edit else LinDoIcons.Eye,
+                            contentDescription = if (isPreview) "切换编辑" else "实时预览",
+                            tint = if (isPreview) palette.brandGold else palette.inkSecondary,
+                            modifier = Modifier.size(16.5.dp)
+                        )
+                        if (!isPreview && hasRichMarkdown) {
                             Box(
                                 modifier = Modifier
-                                    .fillMaxHeight()
-                                    .clip(RoundedCornerShape(13.dp))
-                                    .background(if (isSelected) palette.cardSurface else Color.Transparent)
-                                    .clickable(enabled = !busy) {
-                                        viewMode = mode
-                                        if (mode == WorkbenchViewMode.PREVIEW) {
-                                            keyboard?.hide()
-                                        }
-                                    }
-                                    .padding(horizontal = 9.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = mode.label,
-                                    fontSize = 11.8.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (isSelected) palette.inkPrimary else palette.inkTertiary
-                                )
-                            }
+                                    .align(Alignment.TopEnd)
+                                    .padding(top = 6.dp, end = 6.dp)
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(palette.brandGold)
+                            )
                         }
                     }
 
                     Spacer(modifier = Modifier.width(8.dp))
                 }
 
-                // 主操作胶囊按钮：发布 / 保存
-                val actionLabel = when {
-                    submitting -> if (action == ComposerAction.EDIT) "保存中…" else "发布中…"
-                    action == ComposerAction.EDIT -> "保存"
-                    else -> "发布"
-                }
+                // 主操作图标按钮：发送 / 保存
                 Box(
                     modifier = Modifier
-                        .height(32.dp)
-                        .clip(RoundedCornerShape(16.dp))
+                        .height(34.dp)
+                        .widthIn(min = 42.dp)
+                        .clip(RoundedCornerShape(17.dp))
                         .background(
                             if (canSubmit || submitting) palette.brandGold
                             else palette.subtleSurface
@@ -436,7 +427,7 @@ internal fun ComposerSheet(
                         .border(
                             width = 0.5.dp,
                             color = if (canSubmit || submitting) Color.Transparent else palette.hairline,
-                            shape = RoundedCornerShape(16.dp)
+                            shape = RoundedCornerShape(17.dp)
                         )
                         .clickable(enabled = canSubmit) {
                             if (action == ComposerAction.NEW_TOPIC && LinuxDoSiteRules.requiresTopicCostConfirmation(draft.tags)) {
@@ -445,15 +436,19 @@ internal fun ComposerSheet(
                                 submit()
                             }
                         }
-                        .padding(horizontal = 14.dp),
+                        .padding(horizontal = 12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = actionLabel,
-                        fontSize = 12.8.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (canSubmit || submitting) Color(0xFF111827) else palette.inkTertiary
-                    )
+                    if (submitting) {
+                        LinDoMascot(state = LinDoMascotState.Loading, compact = true, size = 16.dp)
+                    } else {
+                        Icon(
+                            imageVector = if (action == ComposerAction.EDIT) LinDoIcons.Check else LinDoIcons.Send,
+                            contentDescription = if (action == ComposerAction.EDIT) "保存" else "发布",
+                            tint = if (canSubmit) Color(0xFF111827) else palette.inkTertiary,
+                            modifier = Modifier.size(16.5.dp)
+                        )
+                    }
                 }
             }
 
@@ -467,16 +462,15 @@ internal fun ComposerSheet(
                 }
                 !prepared -> {
                     Box(Modifier.weight(1f).fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
-                        LinDoLoadingIndicator(label = if (action == ComposerAction.EDIT) "读取原文" else "准备编辑器")
+                        LinDoLoadingIndicator(label = "加载中")
                     }
                 }
                 else -> {
-                    // ==================== 2. 新建话题专属：版块 + 标签精简胶囊栏 + 大标题输入 ====================
+                    // ==================== 2. 新建话题专属：版块 + 标签胶囊条 + 标题输入（位于文本框上方） ====================
                     if (action == ComposerAction.NEW_TOPIC) {
                         val activeCat = LinuxDoRepository.categories.firstOrNull { it.id == draft.categoryId }
                             ?: LinuxDoRepository.categories.firstOrNull()
 
-                        // 单行版块与标签胶囊条
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -506,14 +500,14 @@ internal fun ComposerSheet(
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(7.5.dp)
+                                        .size(7.dp)
                                         .background(
                                             LinuxDoSiteRules.parseHexColor(activeCat?.colorHex ?: "0E76BD"),
                                             CircleShape
                                         )
                                 )
                                 Text(
-                                    text = activeCat?.name ?: "选择版块",
+                                    text = activeCat?.name ?: "版块",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = palette.inkPrimary
@@ -521,7 +515,7 @@ internal fun ComposerSheet(
                                 Icon(
                                     imageVector = if (showCategoryPicker) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
                                     contentDescription = null,
-                                    modifier = Modifier.size(13.dp),
+                                    modifier = Modifier.size(12.5.dp),
                                     tint = palette.inkSecondary
                                 )
                             }
@@ -547,15 +541,16 @@ internal fun ComposerSheet(
                                         fontWeight = FontWeight.Medium,
                                         color = palette.brandGold
                                     )
-                                    Text(
-                                        text = "✕",
-                                        fontSize = 10.5.sp,
-                                        color = palette.inkSecondary
+                                    Icon(
+                                        imageVector = LinDoIcons.Close,
+                                        contentDescription = "移除标签",
+                                        modifier = Modifier.size(11.dp),
+                                        tint = palette.inkSecondary
                                     )
                                 }
                             }
 
-                            // 添加标签胶囊按钮
+                            // 图标化添加标签胶囊按钮 (`+#`)
                             if (draft.tags.size < 5) {
                                 Row(
                                     modifier = Modifier
@@ -571,14 +566,20 @@ internal fun ComposerSheet(
                                             showTagPicker = !showTagPicker
                                             if (showTagPicker) showCategoryPicker = false
                                         }
-                                        .padding(horizontal = 9.5.dp),
+                                        .padding(horizontal = 9.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(3.dp)
                                 ) {
+                                    Icon(
+                                        imageVector = LinDoIcons.Plus,
+                                        contentDescription = "添加标签",
+                                        modifier = Modifier.size(12.dp),
+                                        tint = if (showTagPicker) palette.brandGold else palette.inkSecondary
+                                    )
                                     Text(
-                                        text = if (draft.tags.isEmpty()) "+ 添加标签" else "+ 标签 (${draft.tags.size}/5)",
+                                        text = if (draft.tags.isEmpty()) "#" else "# ${draft.tags.size}/5",
                                         fontSize = 11.8.sp,
-                                        fontWeight = FontWeight.Medium,
+                                        fontWeight = FontWeight.SemiBold,
                                         color = if (showTagPicker) palette.brandGold else palette.inkSecondary
                                     )
                                 }
@@ -603,17 +604,25 @@ internal fun ComposerSheet(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "选择发布版块",
+                                        text = "版块",
                                         fontSize = 11.8.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = palette.inkSecondary
                                     )
-                                    Text(
-                                        text = "收起 ✕",
-                                        fontSize = 11.sp,
-                                        color = palette.inkTertiary,
-                                        modifier = Modifier.clickable { showCategoryPicker = false }
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(22.dp)
+                                            .clip(CircleShape)
+                                            .clickable { showCategoryPicker = false },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = LinDoIcons.Close,
+                                            contentDescription = "关闭",
+                                            modifier = Modifier.size(13.dp),
+                                            tint = palette.inkTertiary
+                                        )
+                                    }
                                 }
                                 FlowRow(
                                     modifier = Modifier.fillMaxWidth(),
@@ -685,32 +694,40 @@ internal fun ComposerSheet(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "添加话题标签（最多 5 个）",
+                                        text = "标签 (${draft.tags.size}/5)",
                                         fontSize = 11.8.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = palette.inkSecondary
                                     )
-                                    Text(
-                                        text = "完成 ✕",
-                                        fontSize = 11.sp,
-                                        color = palette.inkTertiary,
-                                        modifier = Modifier.clickable { showTagPicker = false }
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(22.dp)
+                                            .clip(CircleShape)
+                                            .clickable { showTagPicker = false },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = LinDoIcons.Close,
+                                            contentDescription = "关闭",
+                                            modifier = Modifier.size(13.dp),
+                                            tint = palette.inkTertiary
+                                        )
+                                    }
                                 }
                                 ComposerTextInput(
                                     value = tagQuery,
                                     onChange = { tagQuery = it },
-                                    placeholder = "搜索本版块可用标签…",
+                                    placeholder = "搜索标签…",
                                     enabled = !busy
                                 )
                                 when {
                                     tagsError != null -> LinDoLoadFailure(tagsError!!, { tagRetry++ })
-                                    tagsLoading -> LinDoFeedbackRow("正在读取版块标签…", LinDoMascotState.Loading)
+                                    tagsLoading -> LinDoFeedbackRow("加载中", LinDoMascotState.Loading)
                                     else -> {
                                         val unselectedTags = availableTags.filterNot { it in draft.tags }
                                         if (unselectedTags.isEmpty()) {
                                             Text(
-                                                text = "未找到更多可用标签",
+                                                text = "暂无更多标签",
                                                 fontSize = 11.5.sp,
                                                 color = palette.inkTertiary
                                             )
@@ -757,7 +774,7 @@ internal fun ComposerSheet(
                             ComposerTextInput(
                                 value = draft.title,
                                 onChange = { update(draft.copy(title = it)) },
-                                placeholder = "输入清晰的话题标题（至少 ${LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH} 字）…",
+                                placeholder = "话题标题（至少 ${LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH} 字）…",
                                 enabled = !busy,
                                 title = true,
                                 autofocus = !focusBodyInitially
@@ -765,8 +782,7 @@ internal fun ComposerSheet(
                         }
                         HorizontalDivider(
                             color = palette.hairline,
-                            thickness = 0.5.dp,
-                            modifier = Modifier.padding(horizontal = 16.dp)
+                            thickness = 0.5.dp
                         )
                     }
 
@@ -777,7 +793,7 @@ internal fun ComposerSheet(
                         }
                     }
 
-                    // ==================== 4. 弹性全高创作画布 + 底部常驻工具栏 ====================
+                    // ==================== 4. 顶部 Action Tools Bar + 弹性全高创作画布 ====================
                     LinDoMarkdownWorkbench(
                         rawValue = draft.raw,
                         onRawValueChange = { update(draft.copy(raw = it)) },

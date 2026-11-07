@@ -355,26 +355,15 @@ fun UserTitleTag(
 
         LinuxDoSiteRules.UserTitleVisualStyle.APPLE_SPECIAL -> {
             val appleTint = if (isDark) Color(0xFFE2E8F0) else Color(0xFF1E293B)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.5.dp),
+            Text(
+                text = title,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = appleTint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = clickableModifier
-            ) {
-                Icon(
-                    imageVector = LinDoIcons.AppleLogo,
-                    contentDescription = "Apple",
-                    tint = appleTint,
-                    modifier = Modifier.size(10.5.dp)
-                )
-                Text(
-                    text = title,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = appleTint,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+            )
         }
 
         LinuxDoSiteRules.UserTitleVisualStyle.SILVER_ACTIVE -> {

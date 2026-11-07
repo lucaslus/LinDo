@@ -283,17 +283,49 @@ class LinDoCoreTest {
         assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.SILVER_ACTIVE, LinuxDoSiteRules.resolveTitleVisualStyle("活跃用户"))
         assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.SILVER_ACTIVE, LinuxDoSiteRules.resolveTitleVisualStyle("狂热"))
 
-        // 3. 验证帖子楼层自动根据头衔补齐对应徽章并去重保真
+        // 3. 验证官方佩戴分离规则：
+        // - user_title 仅在第二行作为头衔展示（通过 resolveBadgeForUserTitle 关联徽章详情），绝不重复注入第一行 badgesGranted
+        // - user_badges 中区分 user_badge.id（授予记录 ID）与 badge_id（真实徽章 ID），绝不误把授予记录 ID 当作徽章 ID
         val seedPost = PostItemModel(
             id = 2001,
             postNumber = 1,
             userId = 777,
             username = "seed_member",
-            displayName = "元老姥友",
+            displayName = "元老佬友",
             userTitle = "全年不落"
         )
-        val rootJson = Json.parseToJsonElement("""{"user_badges": {}}""").jsonObject
+        val rootJson = Json.parseToJsonElement(
+            """
+            {
+              "title": "Only Apple can do (徽章)",
+              "user_badges": {
+                "badges": [
+                  {
+                    "id": 146,
+                    "name": "Only Apple Can Do",
+                    "description": "通过 iOS / iPadOS 回复活动帖解锁",
+                    "icon": "fab fa-apple",
+                    "badge_type_id": 3,
+                    "allow_title": true
+                  }
+                ],
+                "user_badges": [
+                  {
+                    "id": 3891204,
+                    "badge_id": 146,
+                    "user_id": 777,
+                    "post_number": 1,
+                    "is_favorite": true
+                  }
+                ]
+              }
+            }
+            """.trimIndent()
+        ).jsonObject
         val enriched = BadgeInjector.injectTopLevelUserBadges(listOf(seedPost), rootJson).single()
-        assertTrue(enriched.badgesGranted.any { it.name == "全年不落" && it.badgeTypeId == 1 })
+        assertEquals(1, enriched.badgesGranted.size)
+        assertEquals("Only Apple Can Do", enriched.badgesGranted.single().name)
+        assertEquals(146, enriched.badgesGranted.single().id)
+        assertTrue(enriched.badgesGranted.none { it.name == "全年不落" })
     }
 }

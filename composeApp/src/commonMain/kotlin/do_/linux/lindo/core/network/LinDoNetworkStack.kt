@@ -2918,14 +2918,13 @@ object LinuxDoRepository {
         val canDelete = pObj["can_delete"]?.jsonPrimitive?.booleanOrNull ?: false
         val rawMarkdown = pObj["raw"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
 
-        // 同时解析本楼首次获授徽章 (`badges_granted`) 与行内用户徽章 (`user_badges` / `post_badges`)，
-        // 以及根据用户佩戴头衔自动解析对应徽章（如 `种子用户`、`全年不落`、`Only Apple Can Do`、`岂曰无衣?` 等）
+        // 解析本楼首次获授徽章 (`badges_granted`) 与行内用户佩戴徽章 (`user_badges` / `post_badges`)；
+        // 用户佩戴的文字头衔 (`user_title`) 展示在第二行 `UserTitleTag`，不重复塞入第一行徽章图标列。
         val firstGrantedBadges = parseInlinePostBadges(pObj["badges_granted"], isFirstGrant = true)
         val inlineUserBadges = parseInlinePostBadges(pObj["user_badges"], isFirstGrant = false)
         val inlinePostBadges = parseInlinePostBadges(pObj["post_badges"], isFirstGrant = false)
-        val titleBadge = UniversalBadgeEngine.resolveBadgeForUserTitle(userTitle)
         val inlineBadges = UniversalBadgeEngine.mergeBadgesPreservingRichness(
-            firstGrantedBadges + inlineUserBadges + inlinePostBadges + listOfNotNull(titleBadge)
+            firstGrantedBadges + inlineUserBadges + inlinePostBadges
         )
 
         val cakedateRaw = pObj["user_cakedate"]?.jsonPrimitive?.contentOrNull

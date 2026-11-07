@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -15,6 +16,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -310,17 +312,17 @@ private fun buildLinDoPalette(
         LinDoThemePalette(
             isDark = true,
             themeOption = option,
-            canvas = Color(0xFF0D0F13),
-            groupedCanvas = Color(0xFF0D0F13),
-            cardSurface = Color(0xFF161920),
-            subtleSurface = Color(0xFF1F232D),
-            navBarSurface = Color(0xFF14171D),
-            tonalPill = Color(0xFF252A36),
+            canvas = Color(0xFF0B0D11),
+            groupedCanvas = Color(0xFF0B0D11),
+            cardSurface = Color(0xFF13161C),
+            subtleSurface = Color(0xFF1C2029),
+            navBarSurface = Color(0xFF12151B),
+            tonalPill = Color(0xFF232834),
             onTonalPill = Color(0xFFF3F4F6),
             inkPrimary = Color(0xFFF3F4F6),
-            inkSecondary = Color(0xFF9CA3AF),
-            inkTertiary = Color(0xFF9CA3AF),
-            hairline = Color(0xFF222630),
+            inkSecondary = Color(0xFFA1A8B5),
+            inkTertiary = Color(0xFF6E7685),
+            hairline = Color(0xFF232833),
             accent = option.logoDoColor,
             brandGold = option.darkChipText,
             logoDoColor = option.logoDoColor,
@@ -748,6 +750,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
     fun syncUserProfile() {
         scope.launch {
             launch { runCatching { LinuxDoRepository.syncSiteEmojis() } }
+            launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
             val profile = LinuxDoRepository.fetchCurrentUserProfile()
             if (profile != null) {
                 fullUserProfile = profile
@@ -2378,7 +2381,7 @@ private fun CommunityHomeFeedPane(
 ) {
     val palette = LocalPalette.current
     val density = LocalDensity.current
-    val isCompact = isCompactFeed || fontScale < 0.96f
+    val isCompact = isCompactFeed
     val pinnedTopics = remember(topics, selectedCategoryId, selectedTag, searchQuery) {
         if (selectedCategoryId == null && selectedTag == null && searchQuery.isBlank() && currentSort == FeedSortFilter.LATEST) {
             topics.filter { it.pinned }
@@ -2504,24 +2507,6 @@ private fun CommunityHomeFeedPane(
                             showMotto = true
                         )
                     }
-
-                    // 顶部快捷刷新
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .clickable { onRefresh() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.Refresh,
-                            contentDescription = "刷新最新话题",
-                            modifier = Modifier.size(18.dp),
-                            tint = palette.inkPrimary
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(3.dp))
 
                     // 顶部通知铃铛（带主题色未读小红点/琥珀点）
                     Box(
@@ -2801,12 +2786,13 @@ private fun CommunityHomeFeedPane(
                 }
             }
 
-            // 5. 话题流（通栏无框流式列表：整页一体底色 + 0.5dp 极淡内缩细线分隔，彻底告别碎片化圆角卡片盒子感）
+            // 5. 话题流（支持「宽松卡片」与「紧凑列表」双视图体系实时切换）
+            val feedContainerBg = if (isCompact) palette.cardSurface else palette.groupedCanvas
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .background(palette.cardSurface)
+                    .background(feedContainerBg)
                     .nestedScroll(pullNestedScroll)
             ) {
                 if (isLoading && topics.isEmpty()) {
@@ -2826,62 +2812,116 @@ private fun CommunityHomeFeedPane(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(palette.cardSurface),
+                            .background(feedContainerBg),
                         contentPadding = PaddingValues(
-                            top = 2.dp,
+                            top = if (isCompact) 2.dp else 8.dp,
                             bottom = 128.dp
                         )
                     ) {
-                        // 通栏无框置顶公告条（融入整体流式背景，底部极淡细线分隔）
+                        // 置顶公告条（随紧凑/宽松模式自适应外框与间距）
                         if (pinnedTopics.isNotEmpty()) {
                             item(key = "pinned_banner_group") {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(palette.cardSurface)
-                                        .padding(horizontal = 16.dp, vertical = 6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    pinnedTopics.take(2).forEach { pinned ->
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { onSelectTopic(pinned) }
-                                                .padding(vertical = 3.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = "置顶",
-                                                fontSize = 11.5.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = palette.brandGold,
-                                                maxLines = 1,
-                                                softWrap = false
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(
-                                                text = pinned.title,
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = palette.inkPrimary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            Icon(
-                                                imageVector = LinDoIcons.ChevronRight,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(14.dp),
-                                                tint = palette.inkTertiary
-                                            )
+                                if (isCompact) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(palette.cardSurface)
+                                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        pinnedTopics.take(2).forEach { pinned ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { onSelectTopic(pinned) }
+                                                    .padding(vertical = 3.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "置顶",
+                                                    fontSize = 11.2.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = palette.brandGold,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = pinned.title,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = palette.inkPrimary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Icon(
+                                                    imageVector = LinDoIcons.ChevronRight,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp),
+                                                    tint = palette.inkTertiary
+                                                )
+                                            }
+                                        }
+                                    }
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(horizontal = 16.dp),
+                                        thickness = 0.5.dp,
+                                        color = palette.hairline.copy(alpha = 0.5f)
+                                    )
+                                } else {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(palette.cardSurface)
+                                            .border(0.6.dp, palette.hairline, RoundedCornerShape(14.dp))
+                                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        pinnedTopics.take(2).forEach { pinned ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { onSelectTopic(pinned) }
+                                                    .padding(vertical = 2.5.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(5.dp))
+                                                        .background(palette.brandGold.copy(alpha = 0.16f))
+                                                        .padding(horizontal = 6.dp, vertical = 1.5.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "置顶",
+                                                        fontSize = 10.5.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = palette.brandGold,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = pinned.title,
+                                                    fontSize = 13.2.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = palette.inkPrimary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Icon(
+                                                    imageVector = LinDoIcons.ChevronRight,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp),
+                                                    tint = palette.inkTertiary
+                                                )
+                                            }
                                         }
                                     }
                                 }
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(horizontal = 16.dp),
-                                    thickness = 0.5.dp,
-                                    color = palette.hairline.copy(alpha = 0.5f)
-                                )
                             }
                         }
 
@@ -2894,9 +2934,9 @@ private fun CommunityHomeFeedPane(
                                 onSelectTag = { tag -> onSelectTag(tag) },
                                 onClick = { onSelectTopic(topic) }
                             )
-                            if (idx < regularTopics.lastIndex) {
+                            if (isCompact && idx < regularTopics.lastIndex) {
                                 HorizontalDivider(
-                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    modifier = Modifier.padding(horizontal = 14.dp),
                                     thickness = 0.5.dp,
                                     color = palette.hairline.copy(alpha = 0.45f)
                                 )
@@ -3029,29 +3069,53 @@ private fun CommunityTopicItem(
     val catDotColor = remember(topic.categoryColorHex) {
         LinuxDoSiteRules.parseHexColor(topic.categoryColorHex)
     }
-    val (_, morandiFg) = remember(topic.categoryName, palette.isDark) {
+    val (morandiBg, morandiFg) = remember(topic.categoryName, palette.isDark) {
         resolveMorandiCategoryColors(topic.categoryName, palette.isDark)
     }
     val replies = maxOf(0, topic.postsCount - 1).coerceAtLeast(topic.replyCount)
     val rowBgColor = if (isSelected) palette.subtleSurface else palette.cardSurface
+    val itemInteractionSource = remember { MutableInteractionSource() }
+    val isItemPressed by itemInteractionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isItemPressed && enableAnimations) (if (isCompact) 0.992f else 0.985f) else 1f,
+        animationSpec = spring(dampingRatio = 0.75f, stiffness = 620f),
+        label = "topicItemPressScale"
+    )
 
     if (isCompact) {
-        // 模式 B：通栏无框紧凑流式模式（标题独占首行完整展示，底栏聚合头像/作者/●分类/#Tag与互动指标）
+        // 模式 B：紧凑列表模式（高密度双行流式，首行分类色点+单行标题+回复胶囊，次行微头像+作者+分类+#Tag+点赞/浏览/时间）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(rowBgColor)
-                .clickable(onClick = onClick)
-                .padding(horizontal = 16.dp, vertical = 11.dp)
+                .graphicsLayer {
+                    scaleX = pressScale
+                    scaleY = pressScale
+                }
+                .background(if (isItemPressed) palette.subtleSurface else rowBgColor)
+                .clickable(
+                    interactionSource = itemInteractionSource,
+                    indication = null,
+                    onClick = onClick
+                )
+                .padding(horizontal = 14.dp, vertical = 9.dp)
         ) {
-            // 第一行：标题独占整行（不再被长分类名挤压截断）+ 尾部官方未读蓝点
+            // 第一行：版块色点 + 标题独占首行 + 未读蓝点 + 右侧精简回复胶囊
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(6.5.dp)
+                        .clip(CircleShape)
+                        .background(catDotColor)
+                )
+
+                Spacer(modifier = Modifier.width(7.dp))
+
                 Text(
                     text = topic.title,
-                    fontSize = 14.8.sp,
+                    fontSize = 14.2.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = (-0.15).sp,
                     color = palette.inkPrimary,
@@ -3064,16 +3128,42 @@ private fun CommunityTopicItem(
                     Spacer(modifier = Modifier.width(6.dp))
                     Box(
                         modifier = Modifier
-                            .size(6.5.dp)
+                            .size(6.dp)
                             .clip(CircleShape)
                             .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
                     )
                 }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(palette.subtleSurface)
+                        .padding(horizontal = 5.5.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.5.dp)
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.MessageCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(10.5.dp),
+                        tint = if (replies >= 20) palette.brandGold else palette.inkTertiary
+                    )
+                    Text(
+                        text = "$replies",
+                        fontSize = 10.8.sp,
+                        fontWeight = if (replies >= 20) FontWeight.Bold else FontWeight.Medium,
+                        color = if (replies >= 20) palette.brandGold else palette.inkSecondary,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(5.dp))
 
-            // 第二行：头像 + 作者 + ● 分类 + #Tag | 右侧点赞/评论/浏览/时间
+            // 第二行：14dp微头像 + 作者 + 分类名 + #Tag | 右侧点赞/浏览/时间
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -3084,7 +3174,7 @@ private fun CommunityTopicItem(
                     animatedAvatar = op.animatedAvatar,
                     primaryGroupName = op.primaryGroupName,
                     flair = null,
-                    size = 15.dp,
+                    size = 14.dp,
                     enableAnimations = false
                 )
 
@@ -3092,40 +3182,28 @@ private fun CommunityTopicItem(
 
                 Text(
                     text = authorDisplay,
-                    fontSize = 11.5.sp,
+                    fontSize = 11.2.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.inkSecondary,
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 86.dp)
+                    modifier = Modifier.widthIn(max = 84.dp)
                 )
 
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
-                // ● 分类圆点 + 分类名
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(catDotColor)
-                    )
-                    Text(
-                        text = topic.categoryName,
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = morandiFg,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
+                Text(
+                    text = topic.categoryName,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = morandiFg,
+                    maxLines = 1,
+                    softWrap = false
+                )
 
                 if (topic.tags.isNotEmpty()) {
-                    Spacer(modifier = Modifier.width(7.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Row(
                         modifier = Modifier.weight(1f),
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -3134,7 +3212,7 @@ private fun CommunityTopicItem(
                         topic.tags.take(2).forEach { tag ->
                             Text(
                                 text = "#$tag",
-                                fontSize = 11.2.sp,
+                                fontSize = 10.8.sp,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false,
@@ -3156,54 +3234,47 @@ private fun CommunityTopicItem(
                     if (topic.likeCount > 0) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.5.dp)
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
                             Icon(
                                 imageVector = LinDoIcons.Heart,
                                 contentDescription = null,
-                                modifier = Modifier.size(11.5.dp),
+                                modifier = Modifier.size(11.dp),
                                 tint = palette.inkTertiary
                             )
                             Text(
                                 text = "${topic.likeCount}",
-                                fontSize = 11.sp,
+                                fontSize = 10.8.sp,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false
                             )
                         }
                     }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.5.dp)
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.MessageCircle,
-                            contentDescription = null,
-                            modifier = Modifier.size(11.5.dp),
-                            tint = palette.inkTertiary
-                        )
-                        Text(
-                            text = "$replies",
-                            fontSize = 11.sp,
-                            color = palette.inkTertiary,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
                     if (topic.views > 0) {
-                        Text(
-                            text = formatCompactNumber(topic.views),
-                            fontSize = 11.sp,
-                            color = palette.inkTertiary,
-                            maxLines = 1,
-                            softWrap = false
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Icon(
+                                imageVector = LinDoIcons.Eye,
+                                contentDescription = null,
+                                modifier = Modifier.size(11.dp),
+                                tint = palette.inkTertiary
+                            )
+                            Text(
+                                text = formatCompactNumber(topic.views),
+                                fontSize = 10.8.sp,
+                                color = palette.inkTertiary,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                     if (topic.lastPostedAt.isNotBlank()) {
                         Text(
                             text = topic.lastPostedAt,
-                            fontSize = 11.sp,
+                            fontSize = 10.8.sp,
                             color = palette.inkTertiary,
                             maxLines = 1,
                             softWrap = false
@@ -3213,15 +3284,36 @@ private fun CommunityTopicItem(
             }
         }
     } else {
-        // 模式 A：通栏无框舒适流式模式（无圆角盒子外框，整页一体底色 + 0.5dp 极淡细线分隔）
+        // 模式 A：宽松卡片模式（独立圆角卡片容器 + 物理按压回弹 + 莫兰迪版块胶囊 + 双行标题与摘要 + 标签胶囊与纯图标互动指标）
+        val cardShape = RoundedCornerShape(14.dp)
+        val cardBorderColor = when {
+            isSelected -> palette.brandGold.copy(alpha = 0.45f)
+            palette.isDark -> Color.White.copy(alpha = 0.06f)
+            else -> palette.hairline
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(rowBgColor)
-                .clickable(onClick = onClick)
-                .padding(horizontal = 16.dp, vertical = 13.dp)
+                .padding(horizontal = 12.dp, vertical = 4.5.dp)
+                .graphicsLayer {
+                    scaleX = pressScale
+                    scaleY = pressScale
+                }
+                .clip(cardShape)
+                .background(if (isItemPressed) palette.subtleSurface else rowBgColor)
+                .border(
+                    width = 0.6.dp,
+                    color = cardBorderColor,
+                    shape = cardShape
+                )
+                .clickable(
+                    interactionSource = itemInteractionSource,
+                    indication = null,
+                    onClick = onClick
+                )
+                .padding(horizontal = 14.dp, vertical = 12.5.dp)
         ) {
-            // 第一行：头像 + 作者名 + 发布时间 | 右侧 `● 版块名`
+            // 第一行：头像 + 作者名 + 时间 | 右侧莫兰迪版块胶囊
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -3236,7 +3328,7 @@ private fun CommunityTopicItem(
                         animatedAvatar = op.animatedAvatar,
                         primaryGroupName = op.primaryGroupName,
                         flair = null,
-                        size = 20.dp,
+                        size = 22.dp,
                         enableAnimations = enableAnimations
                     )
 
@@ -3244,7 +3336,7 @@ private fun CommunityTopicItem(
 
                     Text(
                         text = authorDisplay,
-                        fontSize = 12.8.sp,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = palette.inkPrimary,
                         maxLines = 1,
@@ -3266,17 +3358,23 @@ private fun CommunityTopicItem(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(99.dp))
+                        .background(morandiBg)
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Box(
                         modifier = Modifier
-                            .size(6.5.dp)
+                            .size(6.dp)
                             .clip(CircleShape)
                             .background(catDotColor)
                     )
-                    Spacer(modifier = Modifier.width(5.dp))
+                    Spacer(modifier = Modifier.width(4.5.dp))
                     Text(
                         text = topic.categoryName,
-                        fontSize = 12.sp,
+                        fontSize = 11.2.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = morandiFg,
                         maxLines = 1,
@@ -3285,18 +3383,18 @@ private fun CommunityTopicItem(
                 }
             }
 
-            Spacer(modifier = Modifier.height(7.dp))
+            Spacer(modifier = Modifier.height(8.5.dp))
 
             // 第二行：加粗清晰标题 + 尾部官方未读蓝点
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.Top
             ) {
                 Text(
                     text = topic.title,
-                    fontSize = 15.5.sp,
+                    fontSize = 15.6.sp,
                     fontWeight = FontWeight.Bold,
-                    lineHeight = 21.5.sp,
+                    lineHeight = 21.8.sp,
                     letterSpacing = (-0.2).sp,
                     color = palette.inkPrimary,
                     maxLines = 2,
@@ -3307,6 +3405,7 @@ private fun CommunityTopicItem(
                     Spacer(modifier = Modifier.width(6.dp))
                     Box(
                         modifier = Modifier
+                            .padding(top = 6.dp)
                             .size(6.5.dp)
                             .clip(CircleShape)
                             .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
@@ -3314,23 +3413,23 @@ private fun CommunityTopicItem(
                 }
             }
 
-            // 单行精炼摘要预览
+            // 摘要预览（最多 2 行，提升宽松卡片阅读呼吸感）
             val cleanExcerpt = topic.excerpt?.trim()?.takeIf { it.isNotEmpty() && it != topic.title }
             if (cleanExcerpt != null) {
-                Spacer(modifier = Modifier.height(3.5.dp))
+                Spacer(modifier = Modifier.height(5.dp))
                 Text(
                     text = cleanExcerpt,
                     fontSize = 12.8.sp,
-                    lineHeight = 18.sp,
+                    lineHeight = 18.2.sp,
                     color = palette.inkSecondary,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // 第三行：左侧自适应不截断 #Tag 标签组（超出宽度预算显示 +N，绝不半截切断单个词） + 右侧线性互动指标
+            // 第三行：左侧轻胶囊 #Tag 标签组 + 右侧纯图标互动指标（Heart / MessageCircle / Eye）
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -3341,7 +3440,7 @@ private fun CommunityTopicItem(
                         var usedUnits = 0
                         for (tag in topic.tags) {
                             val tagUnits = 2 + tag.sumOf { ch -> if (ch.code > 127) 2 else 1 }
-                            if (result.isEmpty() || (result.size < 3 && usedUnits + tagUnits <= 24)) {
+                            if (result.isEmpty() || (result.size < 3 && usedUnits + tagUnits <= 22)) {
                                 result.add(tag)
                                 usedUnits += tagUnits
                             } else {
@@ -3353,19 +3452,26 @@ private fun CommunityTopicItem(
                     val remainingCount = (topic.tags.size - fittedTags.size).coerceAtLeast(0)
                     Row(
                         modifier = Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         fittedTags.forEach { tag ->
-                            Text(
-                                text = "#$tag",
-                                fontSize = 11.8.sp,
-                                fontWeight = FontWeight.Normal,
-                                color = palette.inkSecondary,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier.clickable { onSelectTag(tag) }
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(palette.subtleSurface)
+                                    .clickable { onSelectTag(tag) }
+                                    .padding(horizontal = 6.5.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "#$tag",
+                                    fontSize = 11.2.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                         if (remainingCount > 0) {
                             Text(
@@ -3384,7 +3490,7 @@ private fun CommunityTopicItem(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                // 线性心形点赞数 + 评论数 + 浏览量
+                // 纯图标互动指标：点赞 + 评论 + 浏览（统一用 Eye 图标代替生硬“浏览”文字）
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -3396,7 +3502,7 @@ private fun CommunityTopicItem(
                         Icon(
                             imageVector = LinDoIcons.Heart,
                             contentDescription = null,
-                            modifier = Modifier.size(13.5.dp),
+                            modifier = Modifier.size(13.dp),
                             tint = palette.inkTertiary
                         )
                         Text(
@@ -3428,13 +3534,24 @@ private fun CommunityTopicItem(
                     }
 
                     if (topic.views > 0) {
-                        Text(
-                            text = "${formatCompactNumber(topic.views)} 浏览",
-                            fontSize = 11.2.sp,
-                            color = palette.inkTertiary,
-                            maxLines = 1,
-                            softWrap = false
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = LinDoIcons.Eye,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp),
+                                tint = palette.inkTertiary
+                            )
+                            Text(
+                                text = formatCompactNumber(topic.views),
+                                fontSize = 11.5.sp,
+                                color = palette.inkTertiary,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                 }
             }
@@ -4464,27 +4581,28 @@ internal fun CommunityTopicReaderPane(
             }
         }
 
-        // 底部 QQ音乐级无框灵动回复栏 + 纯线性楼层电梯
+        // 底部统一曲率胶囊回复栏 + 同高胶囊楼层电梯
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(palette.cardSurface)
                 .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
-            HorizontalDivider(thickness = 0.4.dp, color = palette.hairline.copy(alpha = 0.6f))
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 9.dp),
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 全圆角胶囊回复框（无描边柔和底色）
+                // 左侧 38dp 全圆角胶囊回复触发框
                 Row(
                     modifier = Modifier
                         .weight(1f)
-                        .height(36.dp)
+                        .height(38.dp)
                         .clip(RoundedCornerShape(99.dp))
                         .background(palette.subtleSurface)
+                        .border(0.6.dp, palette.hairline, RoundedCornerShape(99.dp))
                         .clickable {
                             replyTargetPostNumber = null
                             replyTargetUsername = null
@@ -4516,25 +4634,34 @@ internal fun CommunityTopicReaderPane(
                     )
                 }
 
-                Spacer(modifier = Modifier.width(14.dp))
+                Spacer(modifier = Modifier.width(10.dp))
 
-                // 纯文字+线性图标楼层电梯（不套底色块，遵循极简无底色设计语言）
+                // 右侧同高 38dp 胶囊楼层电梯（与左侧回复框统一高度与曲率）
                 val currentVisibleNum = remember(lastVisibleFloorIdx, posts) {
                     val idx = (lastVisibleFloorIdx - 1).coerceIn(0, (posts.size - 1).coerceAtLeast(0))
                     posts.getOrNull(idx)?.postNumber ?: 1
                 }
                 Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .height(38.dp)
+                        .clip(RoundedCornerShape(99.dp))
+                        .background(
+                            if (showFloorJumpBar) palette.activeChipBg else palette.subtleSurface
+                        )
+                        .border(
+                            width = 0.6.dp,
+                            color = if (showFloorJumpBar) palette.brandGold else palette.hairline,
+                            shape = RoundedCornerShape(99.dp)
+                        )
                         .clickable {
                             showFloorJumpBar = !showFloorJumpBar
                         }
-                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                        .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         text = "$currentVisibleNum / $totalFloorCount",
-                        fontSize = 12.5.sp,
+                        fontSize = 12.2.sp,
                         fontWeight = FontWeight.Bold,
                         color = if (showFloorJumpBar) palette.brandGold else palette.inkPrimary,
                         maxLines = 1,
@@ -4544,7 +4671,7 @@ internal fun CommunityTopicReaderPane(
                     Icon(
                         imageVector = if (showFloorJumpBar) LinDoIcons.ChevronDown else LinDoIcons.ChevronUp,
                         contentDescription = "楼层电梯",
-                        modifier = Modifier.size(15.dp),
+                        modifier = Modifier.size(14.dp),
                         tint = if (showFloorJumpBar) palette.brandGold else palette.inkSecondary
                     )
                 }
@@ -4949,25 +5076,110 @@ private fun CommunityPostFloor(
     val statusDescText = post.userStatus?.description?.trim()?.takeIf { it.isNotEmpty() }
     var showStatusDescription by remember(post.id) { mutableStateOf(false) }
 
+    // 针对「(帖子已被作者删除)」墓碑楼层：自动折叠为单行静默提示条，隐藏无效的点赞/小火箭/回复底栏
+    if (isDeletedPost) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(palette.cardSurface)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .graphicsLayer { alpha = 0.55f }
+                    .clickable { onInspectUser(post.username) }
+            ) {
+                SmartAvatar(
+                    username = post.username,
+                    avatarTemplate = post.avatarTemplate,
+                    animatedAvatar = null,
+                    primaryGroupName = post.primaryGroupName,
+                    flair = null,
+                    size = 20.dp,
+                    enableAnimations = false
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = primaryName,
+                fontSize = 12.2.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.inkTertiary,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.clickable { onInspectUser(post.username) }
+            )
+            Text(
+                text = " · 帖子已被作者删除",
+                fontSize = 12.sp,
+                color = palette.inkTertiary,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier.weight(1f)
+            )
+            if (isOwnPost && post.canEdit) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .clickable { onEditPost(post) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Edit,
+                        contentDescription = "编辑",
+                        modifier = Modifier.size(14.dp),
+                        tint = palette.inkSecondary
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = buildString {
+                    if (post.createdAtText.isNotBlank()) {
+                        append(post.createdAtText)
+                        append(" ")
+                    }
+                    if (post.postNumber > 1) {
+                        append("#")
+                        append(post.postNumber)
+                    }
+                },
+                fontSize = 11.2.sp,
+                color = palette.inkTertiary,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(palette.cardSurface)
             .padding(horizontal = 16.dp, vertical = 14.dp)
     ) {
-        // 1. 楼层头部（对齐官方 Linux.do 移动 Web & CFluxDo：40dp 头像 + 昵称/管理盾牌/个人状态Emoji/楼主/徽章列 + 第二行用户名/iOS机型/特种头衔/生日纪念日）
+        // 1. 楼层头部（严格顶部对齐：左侧 38dp 头像，右侧首行昵称+佩戴徽章+时间楼号同行对齐，次行 @username + 头衔 + Apple 设备尾巴）
         Row(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.Top
         ) {
-            Box(modifier = Modifier.clickable { onInspectUser(post.username) }) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 1.dp)
+                    .clickable { onInspectUser(post.username) }
+            ) {
                 SmartAvatar(
                     username = post.username,
                     avatarTemplate = post.avatarTemplate,
                     animatedAvatar = post.animatedAvatar,
                     primaryGroupName = post.primaryGroupName,
                     flair = post.flair,
-                    size = 40.dp,
+                    size = 38.dp,
                     enableAnimations = enableAnimations
                 )
             }
@@ -4975,79 +5187,170 @@ private fun CommunityPostFloor(
             Spacer(modifier = Modifier.width(11.dp))
 
             Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable { onInspectUser(post.username) }
+                modifier = Modifier.weight(1f)
             ) {
+                // 第一行：左侧昵称 + 管理盾牌 + 个人状态 Emoji + 楼主 + 佩戴徽章 | 右侧被回复楼层 + 时间 + #楼号 + 未读蓝点（100% 同行基线居中对齐）
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.5.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = primaryName,
-                        fontSize = 14.6.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (post.admin || post.moderator) palette.brandGold else palette.inkPrimary,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-
-                    if (post.admin || post.moderator || post.groupModerator) {
-                        Icon(
-                            imageVector = LinDoIcons.ShieldCheck,
-                            contentDescription = if (post.admin) "管理员" else "版主",
-                            modifier = Modifier.size(13.5.dp),
-                            tint = if (post.admin || post.moderator) palette.brandGold else palette.inkSecondary
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onInspectUser(post.username) },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.5.dp)
+                    ) {
+                        Text(
+                            text = primaryName,
+                            fontSize = 14.6.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (post.admin || post.moderator) palette.brandGold else palette.inkPrimary,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
-                    }
 
-                    if (statusEmojiRaw != null) {
-                        val cleanShortcode = statusEmojiRaw.removeSurrounding(":")
-                        val unicodeEmoji = remember(cleanShortcode) {
-                            LinuxDoEmojiCatalog.shortcodeToUnicode(cleanShortcode)
-                                ?: if (!statusEmojiRaw.startsWith(":") && statusEmojiRaw.any { it.code > 127 }) statusEmojiRaw else null
-                        }
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable(enabled = statusDescText != null) {
-                                    showStatusDescription = !showStatusDescription
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            PostReactionGlyph(
-                                reactionId = cleanShortcode,
-                                emojiFallback = unicodeEmoji ?: "💬",
-                                isSelected = false,
-                                size = 15.dp
+                        if (post.admin || post.moderator || post.groupModerator) {
+                            Icon(
+                                imageVector = LinDoIcons.ShieldCheck,
+                                contentDescription = if (post.admin) "管理员" else "版主",
+                                modifier = Modifier.size(13.5.dp),
+                                tint = if (post.admin || post.moderator) palette.brandGold else palette.inkSecondary
                             )
                         }
+
+                        if (statusEmojiRaw != null) {
+                            val cleanShortcode = statusEmojiRaw.removeSurrounding(":")
+                            val unicodeEmoji = remember(cleanShortcode) {
+                                LinuxDoEmojiCatalog.shortcodeToUnicode(cleanShortcode)
+                                    ?: if (!statusEmojiRaw.startsWith(":") && statusEmojiRaw.any { it.code > 127 }) statusEmojiRaw else null
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .clickable(enabled = statusDescText != null) {
+                                        showStatusDescription = !showStatusDescription
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                PostReactionGlyph(
+                                    reactionId = cleanShortcode,
+                                    emojiFallback = unicodeEmoji ?: "💬",
+                                    isSelected = false,
+                                    size = 15.dp
+                                )
+                            }
+                        }
+
+                        if (isOp) {
+                            Text(
+                                text = "楼主",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.brandGold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+
+                        if (post.badgesGranted.isNotEmpty()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.5.dp)
+                            ) {
+                                post.badgesGranted.take(5).forEach { badge ->
+                                    PostGrantedBadgeIcon(
+                                        badge = badge,
+                                        onClick = { onInspectBadge(badge) }
+                                    )
+                                }
+                            }
+                        }
                     }
 
-                    if (isOp) {
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // 右上角：与第一行昵称严格同行对齐的 `↩ [被回复人头像] #N` + 相对时间 + `#楼号` + 未读小蓝点
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (targetReplyFloorNum != null) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onJumpToFloorNumber(targetReplyFloorNum) }
+                                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.Reply,
+                                    contentDescription = "跳转被回复楼层",
+                                    modifier = Modifier.size(12.5.dp),
+                                    tint = palette.inkSecondary
+                                )
+                                if (repliedPost != null) {
+                                    SmartAvatar(
+                                        username = repliedPost.username,
+                                        avatarTemplate = repliedPost.avatarTemplate,
+                                        animatedAvatar = repliedPost.animatedAvatar,
+                                        size = 15.dp,
+                                        enableAnimations = enableAnimations
+                                    )
+                                }
+                                Text(
+                                    text = "#$targetReplyFloorNum",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+
                         Text(
-                            text = "楼主",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.brandGold,
+                            text = post.createdAtText,
+                            fontSize = 11.8.sp,
+                            color = palette.inkTertiary,
                             maxLines = 1,
                             softWrap = false
                         )
-                    }
 
-                    if (post.badgesGranted.isNotEmpty()) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.5.dp)
-                        ) {
-                            post.badgesGranted.take(5).forEach { badge ->
-                                PostGrantedBadgeIcon(
-                                    badge = badge,
-                                    onClick = { onInspectBadge(badge) }
-                                )
-                            }
+                        if (post.postNumber > 1) {
+                            Text(
+                                text = "#${post.postNumber}",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.inkTertiary,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+
+                        val unreadDotAlpha by animateFloatAsState(
+                            targetValue = if (isUnread) 1f else 0f,
+                            animationSpec = tween(durationMillis = 900),
+                            label = "unreadFloorDotAlpha"
+                        )
+                        if (unreadDotAlpha > 0.01f) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.5.dp)
+                                    .graphicsLayer {
+                                        alpha = unreadDotAlpha
+                                        val scale = 0.65f + 0.35f * unreadDotAlpha
+                                        scaleX = scale
+                                        scaleY = scale
+                                    }
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
+                                    )
+                            )
                         }
                     }
                 }
@@ -5060,56 +5363,32 @@ private fun CommunityPostFloor(
                     (showStatusDescription && statusDescText != null)
 
                 if (hasRow2) {
-                    Spacer(modifier = Modifier.height(2.dp))
+                    Spacer(modifier = Modifier.height(3.dp))
                     Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onInspectUser(post.username) },
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         if (hasDistinctHandle) {
                             Text(
                                 text = post.username,
-                                fontSize = 12.sp,
+                                fontSize = 11.8.sp,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false
                             )
                         }
 
-                        if (hasIosDevice) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(palette.subtleSurface)
-                                    .padding(horizontal = 4.5.dp, vertical = 1.dp)
-                            ) {
-                                Icon(
-                                    imageVector = LinDoIcons.AppleLogo,
-                                    contentDescription = "Apple Device",
-                                    modifier = Modifier.size(9.5.dp),
-                                    tint = palette.inkSecondary
-                                )
+                        if (hasUserTitle) {
+                            if (hasDistinctHandle) {
                                 Text(
-                                    text = post.iosDeviceName.orEmpty(),
-                                    fontSize = 10.2.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkSecondary,
-                                    maxLines = 1,
-                                    softWrap = false
+                                    text = "·",
+                                    fontSize = 11.sp,
+                                    color = palette.inkTertiary
                                 )
                             }
-                        }
-
-                        if ((hasDistinctHandle || hasIosDevice) && hasUserTitle) {
-                            Text(
-                                text = "·",
-                                fontSize = 11.5.sp,
-                                color = palette.inkTertiary
-                            )
-                        }
-
-                        if (hasUserTitle) {
                             val resolvedTitleBadge = remember(post.userTitle) {
                                 UniversalBadgeEngine.resolveBadgeForUserTitle(post.userTitle)
                             }
@@ -5120,10 +5399,36 @@ private fun CommunityPostFloor(
                             )
                         }
 
+                        if (hasIosDevice) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.5.dp),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(palette.subtleSurface)
+                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.AppleLogo,
+                                    contentDescription = "Apple Device",
+                                    modifier = Modifier.size(9.dp),
+                                    tint = palette.inkSecondary
+                                )
+                                Text(
+                                    text = post.iosDeviceName.orEmpty(),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+
                         if (post.isTodayBirthday) {
                             Text(
                                 text = "🎂",
-                                fontSize = 11.2.sp,
+                                fontSize = 11.sp,
                                 maxLines = 1,
                                 softWrap = false
                             )
@@ -5132,7 +5437,7 @@ private fun CommunityPostFloor(
                         if (post.isTodayCakeday) {
                             Text(
                                 text = "🍰",
-                                fontSize = 11.2.sp,
+                                fontSize = 11.sp,
                                 maxLines = 1,
                                 softWrap = false
                             )
@@ -5147,92 +5452,6 @@ private fun CommunityPostFloor(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // 右上角：官方风格 `↩ [被回复人头像] #N` 跳转 + 相对时间 + `#楼号` + 未读小蓝点
-            Column(horizontalAlignment = Alignment.End) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    if (targetReplyFloorNum != null) {
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { onJumpToFloorNumber(targetReplyFloorNum) }
-                                .padding(horizontal = 4.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(
-                                imageVector = LinDoIcons.Reply,
-                                contentDescription = "跳转被回复楼层",
-                                modifier = Modifier.size(13.dp),
-                                tint = palette.inkSecondary
-                            )
-                            if (repliedPost != null) {
-                                SmartAvatar(
-                                    username = repliedPost.username,
-                                    avatarTemplate = repliedPost.avatarTemplate,
-                                    animatedAvatar = repliedPost.animatedAvatar,
-                                    size = 16.dp,
-                                    enableAnimations = enableAnimations
-                                )
-                            }
-                            Text(
-                                text = "#$targetReplyFloorNum",
-                                fontSize = 11.8.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.inkSecondary,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                    }
-
-                    Text(
-                        text = post.createdAtText,
-                        fontSize = 12.sp,
-                        color = palette.inkTertiary,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-
-                    if (post.postNumber > 1) {
-                        Text(
-                            text = "#${post.postNumber}",
-                            fontSize = 11.8.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.inkTertiary,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-
-                    val unreadDotAlpha by animateFloatAsState(
-                        targetValue = if (isUnread) 1f else 0f,
-                        animationSpec = tween(durationMillis = 900),
-                        label = "unreadFloorDotAlpha"
-                    )
-                    if (unreadDotAlpha > 0.01f) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.5.dp)
-                                .graphicsLayer {
-                                    alpha = unreadDotAlpha
-                                    val scale = 0.65f + 0.35f * unreadDotAlpha
-                                    scaleX = scale
-                                    scaleY = scale
-                                }
-                                .clip(CircleShape)
-                                .background(
-                                    if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
-                                )
-                        )
                     }
                 }
             }
@@ -5419,11 +5638,11 @@ private fun CommunityPostFloor(
                     color = if (palette.isDark) Color(0xFFFCA5A5) else Color(0xFFDC2626),
                     modifier = Modifier.weight(1f)
                 )
-                Text(
-                    text = "✕",
-                    fontSize = 11.5.sp,
-                    color = palette.inkTertiary,
-                    modifier = Modifier.padding(start = 8.dp)
+                Icon(
+                    imageVector = LinDoIcons.Close,
+                    contentDescription = "关闭提示",
+                    modifier = Modifier.padding(start = 8.dp).size(13.dp),
+                    tint = palette.inkTertiary
                 )
             }
         }
@@ -5456,18 +5675,23 @@ private fun CommunityPostFloor(
                         fontWeight = FontWeight.SemiBold,
                         color = palette.inkSecondary
                     )
-                    Text(
-                        text = "收起 ✕",
-                        fontSize = 11.2.sp,
-                        color = palette.inkTertiary,
+                    Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
+                            .size(24.dp)
+                            .clip(CircleShape)
                             .clickable {
                                 showBoostEmojiPicker = false
                                 showReactionPopover = false
-                            }
-                            .padding(horizontal = 4.dp, vertical = 1.dp)
-                    )
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.Close,
+                            contentDescription = "收起面板",
+                            modifier = Modifier.size(13.5.dp),
+                            tint = palette.inkTertiary
+                        )
+                    }
                 }
 
                 Row(
@@ -5864,15 +6088,15 @@ private fun CommunityPostFloor(
                 }
             }
 
-            // 右侧：官方移动 Web 纯矢量图标操作栏（♡ 点赞 · 🔗 链接 · 🚀 Boost/表态 · ⋯ 更多 · ↩ 回复）
+            // 右侧：4 项黄金高频动作（♡ 点赞 · 🚀 小火箭/表态 · ⋯ 更多(含引用/复制链接/编辑/删除) · ↩ 回复），拉大触控热区防单手误触
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 // 1. 点赞/取消点赞 (Heart)
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
                         .clickable { toggleReaction("heart", "❤️") },
                     contentAlignment = Alignment.Center
@@ -5885,35 +6109,10 @@ private fun CommunityPostFloor(
                     )
                 }
 
-                // 2. 一键复制本楼链接 (Link)
-                if (!originalUrl.isNullOrBlank()) {
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .clickable {
-                                clipboardManager.setText(AnnotatedString(originalUrl))
-                                copiedFloorLink = true
-                                scope.launch {
-                                    delay(1500L)
-                                    copiedFloorLink = false
-                                }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (copiedFloorLink) LinDoIcons.Check else LinDoIcons.Link,
-                            contentDescription = "复制楼层链接",
-                            modifier = Modifier.size(18.dp),
-                            tint = if (copiedFloorLink) palette.brandGold else palette.inkSecondary
-                        )
-                    }
-                }
-
-                // 3. 小火箭 / 多表情回应选择器 (Rocket / Boost)
+                // 2. 小火箭 / 多表情回应选择器 (Rocket / Boost)
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
                         .clickable { showReactionPopover = !showReactionPopover },
                     contentAlignment = Alignment.Center
@@ -5926,20 +6125,20 @@ private fun CommunityPostFloor(
                     )
                 }
 
-                // 4. 更多操作按钮 (`⋯`)：收纳引用、编辑、删除等低频操作
+                // 3. 更多操作按钮 (`⋯`)：收纳引用、复制链接、编辑、删除等操作
                 Box {
                     Box(
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(36.dp)
                             .clip(CircleShape)
                             .clickable { showFloorMoreMenu = true },
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = LinDoIcons.MoreHoriz,
+                            imageVector = if (copiedFloorLink) LinDoIcons.Check else LinDoIcons.MoreHoriz,
                             contentDescription = "更多楼层操作",
                             modifier = Modifier.size(19.dp),
-                            tint = if (showFloorMoreMenu) palette.brandGold else palette.inkSecondary
+                            tint = if (showFloorMoreMenu || copiedFloorLink) palette.brandGold else palette.inkSecondary
                         )
                     }
 
@@ -5990,6 +6189,11 @@ private fun CommunityPostFloor(
                                 onClick = {
                                     showFloorMoreMenu = false
                                     clipboardManager.setText(AnnotatedString(originalUrl))
+                                    copiedFloorLink = true
+                                    scope.launch {
+                                        delay(1500L)
+                                        copiedFloorLink = false
+                                    }
                                 }
                             )
                         }
@@ -6044,10 +6248,10 @@ private fun CommunityPostFloor(
                     }
                 }
 
-                // 5. 回复本楼 (`↩` 纯图标，与官方移动 Web 保持一致，避免每层重复堆砌“回复”文字)
+                // 4. 回复本楼 (`↩` 纯图标)
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
                         .clickable { onReplyFloor(post) },
                     contentAlignment = Alignment.Center
@@ -7974,13 +8178,8 @@ private fun CommunityProfileScreen(
                 Spacer(modifier = Modifier.height(10.dp))
             }
 
-            // 2. 社区功能与 Connect 看板整体背景板（内容不分割清爽展示）
+            // 2. 社区功能整体背景板（已移除重复的 Connect 看板，统一收敛至“发现”页）
             item {
-                val connectSub = if (isAuthorized && fullProfile != null) {
-                    "访问 ${fullProfile.daysVisited} 天 · 获赞 ${fullProfile.likesReceived} · 保级与信任等级进度"
-                } else {
-                    "查看信任等级周期要求与活跃度指标"
-                }
                 val badgeSub = if (isAuthorized && fullProfile != null) {
                     val count = fullProfile.badgeCount.coerceAtLeast(fullProfile.badges.size)
                     val titleText = userTitle?.let { " · 当前头衔「$it」" }.orEmpty()
@@ -7989,9 +8188,6 @@ private fun CommunityProfileScreen(
                     "查看种子用户、全年不落、Only Apple Can Do 等全站徽章与佩戴规则"
                 }
                 val menuRows = listOf(
-                    Triple("Connect 看板", connectSub, LinDoIcons.AwardBadge) to {
-                        onOpenConnectSheet()
-                    },
                     Triple("我的徽章与头衔", badgeSub, LinDoIcons.Trophy) to {
                         onOpenBadgesCenter()
                     },
@@ -8072,10 +8268,11 @@ private fun CommunityProfileScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            // 3. 外观偏好与网络设置整体背景板（内容不分割清爽展示）
+            // 3. 外观偏好与网络设置整体背景板（含双骨架屏可视化列表布局选择器）
             item {
                 val nextScale = if (fontScale < 0.96f) 1.0f else if (fontScale < 1.05f) 1.10f else 0.92f
                 val scaleLabel = if (fontScale < 0.96f) "小字号" else if (fontScale < 1.05f) "标准" else "大字号"
+                var showLayoutSkeletons by remember { mutableStateOf(true) }
 
                 Column(
                     modifier = Modifier
@@ -8144,41 +8341,306 @@ private fun CommunityProfileScreen(
                         }
                     }
 
-                    // 3.2 首页列表视图（精巧卡片 / 紧凑列表）
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onToggleCompactFeed() }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    // 3.2 首页列表视图（点击展开/收起双骨架屏可视化布局选择器）
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(
-                            imageVector = if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
-                            contentDescription = "列表布局",
-                            modifier = Modifier.size(20.dp),
-                            tint = palette.inkSecondary
-                        )
-                        Spacer(modifier = Modifier.width(14.dp))
-                        Text(
-                            text = "首页列表视图",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.inkPrimary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = if (isCompactFeed) "紧凑列表" else "精巧卡片",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.inkSecondary
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Icon(
-                            imageVector = LinDoIcons.ChevronRight,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                            tint = palette.inkTertiary
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showLayoutSkeletons = !showLayoutSkeletons }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
+                                contentDescription = "列表布局",
+                                modifier = Modifier.size(20.dp),
+                                tint = palette.inkSecondary
+                            )
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Text(
+                                text = "首页列表视图",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.inkPrimary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = if (isCompactFeed) "紧凑列表" else "宽松卡片",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.brandGold
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Icon(
+                                imageVector = if (showLayoutSkeletons) LinDoIcons.ChevronDown else LinDoIcons.ChevronRight,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                                tint = palette.inkTertiary
+                            )
+                        }
+
+                        if (showLayoutSkeletons) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                // 左：宽松卡片骨架屏预览
+                                val isCardSelected = !isCompactFeed
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(
+                                            if (isCardSelected) palette.brandGold.copy(alpha = 0.08f)
+                                            else palette.subtleSurface.copy(alpha = 0.65f)
+                                        )
+                                        .border(
+                                            width = if (isCardSelected) 1.5.dp else 0.7.dp,
+                                            color = if (isCardSelected) palette.brandGold else palette.hairline,
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                        .clickable {
+                                            if (isCompactFeed) onToggleCompactFeed()
+                                        }
+                                        .padding(10.dp)
+                                ) {
+                                    // 标题行 + 选中勾
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = LinDoIcons.LayoutCards,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(13.5.dp),
+                                            tint = if (isCardSelected) palette.brandGold else palette.inkSecondary
+                                        )
+                                        Spacer(modifier = Modifier.width(5.dp))
+                                        Text(
+                                            text = "宽松卡片",
+                                            fontSize = 12.2.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isCardSelected) palette.brandGold else palette.inkPrimary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (isCardSelected) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(15.dp)
+                                                    .clip(CircleShape)
+                                                    .background(palette.brandGold),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = LinDoIcons.Check,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(9.5.dp),
+                                                    tint = Color(0xFF1A1610)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    // 骨架屏：模拟 2 张独立圆角卡片
+                                    repeat(2) { cardIdx ->
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(palette.cardSurface)
+                                                .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
+                                                .padding(horizontal = 7.dp, vertical = 6.dp)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(9.dp)
+                                                        .clip(CircleShape)
+                                                        .background(palette.inkTertiary.copy(alpha = 0.35f))
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(28.dp)
+                                                        .height(4.dp)
+                                                        .clip(RoundedCornerShape(2.dp))
+                                                        .background(palette.inkTertiary.copy(alpha = 0.3f))
+                                                )
+                                                Spacer(modifier = Modifier.weight(1f))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(20.dp)
+                                                        .height(6.dp)
+                                                        .clip(RoundedCornerShape(99.dp))
+                                                        .background(palette.brandGold.copy(alpha = 0.25f))
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(4.5.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth(if (cardIdx == 0) 0.92f else 0.82f)
+                                                    .height(5.dp)
+                                                    .clip(RoundedCornerShape(2.5.dp))
+                                                    .background(palette.inkPrimary.copy(alpha = 0.42f))
+                                            )
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth(0.65f)
+                                                    .height(4.dp)
+                                                    .clip(RoundedCornerShape(2.dp))
+                                                    .background(palette.inkTertiary.copy(alpha = 0.25f))
+                                            )
+                                        }
+                                        if (cardIdx == 0) Spacer(modifier = Modifier.height(5.dp))
+                                    }
+                                }
+
+                                // 右：紧凑列表骨架屏预览
+                                val isCompactSelected = isCompactFeed
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(
+                                            if (isCompactSelected) palette.brandGold.copy(alpha = 0.08f)
+                                            else palette.subtleSurface.copy(alpha = 0.65f)
+                                        )
+                                        .border(
+                                            width = if (isCompactSelected) 1.5.dp else 0.7.dp,
+                                            color = if (isCompactSelected) palette.brandGold else palette.hairline,
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                        .clickable {
+                                            if (!isCompactFeed) onToggleCompactFeed()
+                                        }
+                                        .padding(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = LinDoIcons.LayoutCompact,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(13.5.dp),
+                                            tint = if (isCompactSelected) palette.brandGold else palette.inkSecondary
+                                        )
+                                        Spacer(modifier = Modifier.width(5.dp))
+                                        Text(
+                                            text = "紧凑列表",
+                                            fontSize = 12.2.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isCompactSelected) palette.brandGold else palette.inkPrimary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (isCompactSelected) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(15.dp)
+                                                    .clip(CircleShape)
+                                                    .background(palette.brandGold),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = LinDoIcons.Check,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(9.5.dp),
+                                                    tint = Color(0xFF1A1610)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    // 骨架屏：模拟 3 行高密度通栏列表
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(palette.cardSurface)
+                                            .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
+                                            .padding(horizontal = 7.dp, vertical = 5.dp)
+                                    ) {
+                                        repeat(3) { rowIdx ->
+                                            Column(modifier = Modifier.fillMaxWidth()) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(4.5.dp)
+                                                            .clip(CircleShape)
+                                                            .background(palette.brandGold.copy(alpha = 0.7f))
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(4.5.dp)
+                                                            .clip(RoundedCornerShape(2.dp))
+                                                            .background(palette.inkPrimary.copy(alpha = 0.42f))
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .width(12.dp)
+                                                            .height(4.5.dp)
+                                                            .clip(RoundedCornerShape(2.dp))
+                                                            .background(palette.inkTertiary.copy(alpha = 0.3f))
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(3.dp))
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(6.dp)
+                                                            .clip(CircleShape)
+                                                            .background(palette.inkTertiary.copy(alpha = 0.3f))
+                                                    )
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .width(24.dp)
+                                                            .height(3.5.dp)
+                                                            .clip(RoundedCornerShape(2.dp))
+                                                            .background(palette.inkTertiary.copy(alpha = 0.22f))
+                                                    )
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .width(18.dp)
+                                                            .height(3.5.dp)
+                                                            .clip(RoundedCornerShape(2.dp))
+                                                            .background(palette.inkTertiary.copy(alpha = 0.18f))
+                                                    )
+                                                }
+                                            }
+                                            if (rowIdx < 2) {
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                HorizontalDivider(
+                                                    thickness = 0.5.dp,
+                                                    color = palette.hairline
+                                                )
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // 3.3 阅读字号
@@ -9954,200 +10416,20 @@ internal fun LinDoMarkdownWorkbench(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = if (fillAvailableHeight) Arrangement.Top else Arrangement.spacedBy(8.dp)
     ) {
-        // 1. 仅在未提供外部顶栏切换器时（如私信弹窗内嵌），才展示紧凑内部切换条
-        if (externalViewMode == null) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    modifier = Modifier
-                        .height(28.dp)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(palette.subtleSurface)
-                        .border(0.5.dp, palette.hairline, RoundedCornerShape(999.dp))
-                        .padding(2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    WorkbenchViewMode.entries.forEach { mode ->
-                        val selected = activeViewMode == mode
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(if (selected) palette.cardSurface else Color.Transparent)
-                                .clickable(enabled = enabled) {
-                                    internalViewMode = mode
-                                    if (mode == WorkbenchViewMode.PREVIEW) keyboard?.hide()
-                                }
-                                .padding(horizontal = 10.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = mode.label,
-                                fontSize = 11.5.sp,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (selected) palette.inkPrimary else palette.inkTertiary
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = "${tfv.text.length} 字",
-                    fontSize = 11.5.sp,
-                    color = palette.inkTertiary
-                )
-            }
-        }
-
-        // 2. 核心创作画布 / 实时 AST 预览区
-        val canvasModifier = if (fillAvailableHeight) {
-            Modifier.fillMaxWidth().weight(1f)
-        } else {
-            Modifier.fillMaxWidth().height(defaultEditorHeight)
-        }
-
-        when (activeViewMode) {
-            WorkbenchViewMode.SOURCE -> {
-                WorkbenchSourceEditorBox(
-                    tfv = tfv,
-                    onValueChange = { newVal ->
-                        updateTfv(newVal)
-                        val cursor = newVal.selection.min.coerceIn(0, newVal.text.length)
-                        val mention = Regex("(?:^|[\\s])@([\\p{L}\\p{N}_-]*)$").find(newVal.text.substring(0, cursor))
-                        if (mention != null) {
-                            activeSubPanel = WorkbenchSubPanel.MENTION
-                            mentionSearchTerm = mention.groupValues[1]
-                        }
-                    },
-                    placeholder = placeholder,
-                    enabled = enabled,
-                    autofocus = autofocus,
-                    immersiveCanvas = fillAvailableHeight,
-                    modifier = canvasModifier
-                )
-            }
-            WorkbenchViewMode.PREVIEW -> {
-                WorkbenchAstLivePreviewBox(
-                    rawMarkdown = tfv.text,
-                    immersiveCanvas = fillAvailableHeight,
-                    modifier = canvasModifier
-                )
-            }
-        }
-
-        // 3. 若刚刚上传了图片/附件，提供紧凑状态条与 Discourse 原生图片缩放比例快捷按钮 (100% / 75% / 50%)
-        val latestImg = lastUploadedImage
-        if (latestImg != null || uploadStatusText != null) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = if (fillAvailableHeight) 12.dp else 0.dp, vertical = 4.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(palette.subtleSurface)
-                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                LinDoFeedbackRow(
-                    message = uploadStatusText ?: "图片已插入",
-                    state = when {
-                        isUploadingMedia -> LinDoMascotState.Loading
-                        uploadStatusText?.contains("失败") == true -> LinDoMascotState.NetworkError
-                        else -> LinDoMascotState.Success
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                if (latestImg != null && latestImg.isImage && latestImg.width > 0 && latestImg.height > 0) {
-                    listOf("100%", "75%", "50%").forEach { pct ->
-                        WorkbenchToolChip(
-                            label = pct,
-                            onClick = {
-                                val scaledTag = "![${latestImg.originalFilename}|${latestImg.width}x${latestImg.height}, $pct](${latestImg.shortUrl})"
-                                val replaced = tfv.text.replace(latestImg.markdownSnippet, scaledTag)
-                                updateTfv(tfv.copy(text = replaced))
-                                lastUploadedImage = latestImg.copy(markdownSnippet = scaledTag)
-                            }
-                        )
-                    }
-                }
-                Box(
-                    modifier = Modifier
-                        .size(20.dp)
-                        .clip(CircleShape)
-                        .clickable {
-                            uploadStatusText = null
-                            lastUploadedImage = null
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭提示",
-                        modifier = Modifier.size(12.dp),
-                        tint = palette.inkTertiary
-                    )
-                }
-            }
-        }
-
-        // 4. 动态展开的抽屉式子工具面板（位于底部创作 Dock 栏正上方）
-        AnimatedVisibility(
-            visible = activeSubPanel != WorkbenchSubPanel.NONE,
-            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandVertically(),
-            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkVertically()
-        ) {
-            WorkbenchInteractiveSubPanel(
-                subPanel = activeSubPanel,
-                mentionSearchTerm = mentionSearchTerm,
-                onMentionSearchTermChange = { mentionSearchTerm = it },
-                mentionCandidates = mentionCandidates,
-                isSearchingMentions = isSearchingMentions,
-                mentionError = mentionError,
-                onRetryMention = { mentionReloadToken++ },
-                onToggleLinePrefix = { prefix ->
-                    toggleLinePrefix(prefix)
-                },
-                onWrapSelection = { prefix, suffix, ph ->
-                    wrapSelection(prefix, suffix, ph)
-                },
-                onInsertSnippet = { snippet ->
-                    insertAtCursor(snippet, replaceMention = activeSubPanel == WorkbenchSubPanel.MENTION && snippet.startsWith("@"))
-                    if (activeSubPanel == WorkbenchSubPanel.MENTION || activeSubPanel == WorkbenchSubPanel.LINK || activeSubPanel == WorkbenchSubPanel.POLL) {
-                        activeSubPanel = WorkbenchSubPanel.NONE
-                    }
-                },
-                onOptimizePangu = {
-                    val changed = optimizePanguSpacing()
-                    uploadStatusText = if (changed) "已自动优化中英文与数字混排空格" else "当前排版已符合中英空格规范"
-                },
-                onDismiss = { activeSubPanel = WorkbenchSubPanel.NONE },
-                modifier = Modifier.padding(
-                    horizontal = if (fillAvailableHeight) 10.dp else 0.dp,
-                    vertical = 4.dp
-                )
-            )
-        }
-
-        // 5. 底部拇指区：单行灵动创作 Dock 栏（左滑常用工具 + 右侧固定撤销/重做/字数提示）
+        // 1. 顶部操作工具栏（统一位于文本输入框正上方：全图标化设计，发布新话题、回复评论、编辑帖子、发送私信共享同一逻辑与对齐方式）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.92f else 0.96f))
+                .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.55f else 0.72f))
         ) {
-            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(46.dp)
+                    .height(42.dp)
                     .padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 左侧可横向滑动的图标工具组
+                // 左侧可横向滑动的全矢量图标工具组
                 Row(
                     modifier = Modifier
                         .weight(1f)
@@ -10290,19 +10572,19 @@ internal fun LinDoMarkdownWorkbench(
                     )
                 }
 
-                // 右侧固定操作簇：分隔线 + 撤销 + 重做 + 字数/校验提示
+                // 右侧固定操作簇：分隔线 + 撤销 + 重做 +（内嵌场景下的预览图标切换）+ 字数提示
                 Box(
                     modifier = Modifier
                         .padding(horizontal = 4.dp)
                         .width(0.6.dp)
-                        .height(18.dp)
+                        .height(16.dp)
                         .background(palette.hairline)
                 )
 
                 val canUndo = enabled && undoStack.isNotEmpty()
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
+                        .size(28.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .clickable(enabled = canUndo) {
                             val previous = undoStack.removeAt(undoStack.lastIndex)
@@ -10314,7 +10596,7 @@ internal fun LinDoMarkdownWorkbench(
                     Icon(
                         imageVector = LinDoIcons.Undo,
                         contentDescription = "撤销",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(15.5.dp),
                         tint = if (canUndo) palette.inkSecondary else palette.inkTertiary.copy(alpha = 0.38f)
                     )
                 }
@@ -10322,7 +10604,7 @@ internal fun LinDoMarkdownWorkbench(
                 val canRedo = enabled && redoStack.isNotEmpty()
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
+                        .size(28.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .clickable(enabled = canRedo) {
                             val next = redoStack.removeAt(redoStack.lastIndex)
@@ -10334,19 +10616,173 @@ internal fun LinDoMarkdownWorkbench(
                     Icon(
                         imageVector = LinDoIcons.Redo,
                         contentDescription = "重做",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(15.5.dp),
                         tint = if (canRedo) palette.inkSecondary else palette.inkTertiary.copy(alpha = 0.38f)
                     )
+                }
+
+                if (externalViewMode == null) {
+                    val isPreview = activeViewMode == WorkbenchViewMode.PREVIEW
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isPreview) palette.activeChipBg else Color.Transparent)
+                            .clickable(enabled = enabled) {
+                                val nextMode = if (isPreview) WorkbenchViewMode.SOURCE else WorkbenchViewMode.PREVIEW
+                                internalViewMode = nextMode
+                                if (nextMode == WorkbenchViewMode.PREVIEW) keyboard?.hide()
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isPreview) LinDoIcons.Edit else LinDoIcons.Eye,
+                            contentDescription = if (isPreview) "编辑" else "预览",
+                            modifier = Modifier.size(15.5.dp),
+                            tint = if (isPreview) palette.brandGold else palette.inkSecondary
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(4.dp))
                 val showHint = !validationHint.isNullOrBlank() && tfv.text.isNotEmpty()
                 Text(
-                    text = if (showHint) validationHint.orEmpty() else "${tfv.text.length}字",
-                    fontSize = 10.5.sp,
+                    text = if (showHint) validationHint.orEmpty() else "${tfv.text.length}",
+                    fontSize = 11.sp,
                     fontWeight = if (showHint) FontWeight.SemiBold else FontWeight.Medium,
                     color = if (showHint) palette.brandGold else palette.inkTertiary,
                     maxLines = 1
+                )
+            }
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        }
+
+        // 2. 动态展开的抽屉式子工具面板（紧随顶部操作栏下方、文本输入框上方展开）
+        AnimatedVisibility(
+            visible = activeSubPanel != WorkbenchSubPanel.NONE,
+            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandVertically(),
+            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkVertically()
+        ) {
+            WorkbenchInteractiveSubPanel(
+                subPanel = activeSubPanel,
+                mentionSearchTerm = mentionSearchTerm,
+                onMentionSearchTermChange = { mentionSearchTerm = it },
+                mentionCandidates = mentionCandidates,
+                isSearchingMentions = isSearchingMentions,
+                mentionError = mentionError,
+                onRetryMention = { mentionReloadToken++ },
+                onToggleLinePrefix = { prefix ->
+                    toggleLinePrefix(prefix)
+                },
+                onWrapSelection = { prefix, suffix, ph ->
+                    wrapSelection(prefix, suffix, ph)
+                },
+                onInsertSnippet = { snippet ->
+                    insertAtCursor(snippet, replaceMention = activeSubPanel == WorkbenchSubPanel.MENTION && snippet.startsWith("@"))
+                    if (activeSubPanel == WorkbenchSubPanel.MENTION || activeSubPanel == WorkbenchSubPanel.LINK || activeSubPanel == WorkbenchSubPanel.POLL) {
+                        activeSubPanel = WorkbenchSubPanel.NONE
+                    }
+                },
+                onOptimizePangu = {
+                    val changed = optimizePanguSpacing()
+                    uploadStatusText = if (changed) "已优化中英混排空格" else "当前已符合空格规范"
+                },
+                onDismiss = { activeSubPanel = WorkbenchSubPanel.NONE },
+                modifier = Modifier.padding(
+                    horizontal = if (fillAvailableHeight) 10.dp else 0.dp,
+                    vertical = 4.dp
+                )
+            )
+        }
+
+        // 3. 若刚刚上传了图片/附件，提供紧凑状态条与 Discourse 原生图片缩放比例快捷按钮 (100% / 75% / 50%)
+        val latestImg = lastUploadedImage
+        if (latestImg != null || uploadStatusText != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = if (fillAvailableHeight) 12.dp else 0.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(palette.subtleSurface)
+                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                LinDoFeedbackRow(
+                    message = uploadStatusText ?: "图片已插入",
+                    state = when {
+                        isUploadingMedia -> LinDoMascotState.Loading
+                        uploadStatusText?.contains("失败") == true -> LinDoMascotState.NetworkError
+                        else -> LinDoMascotState.Success
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                if (latestImg != null && latestImg.isImage && latestImg.width > 0 && latestImg.height > 0) {
+                    listOf("100%", "75%", "50%").forEach { pct ->
+                        WorkbenchToolChip(
+                            label = pct,
+                            onClick = {
+                                val scaledTag = "![${latestImg.originalFilename}|${latestImg.width}x${latestImg.height}, $pct](${latestImg.shortUrl})"
+                                val replaced = tfv.text.replace(latestImg.markdownSnippet, scaledTag)
+                                updateTfv(tfv.copy(text = replaced))
+                                lastUploadedImage = latestImg.copy(markdownSnippet = scaledTag)
+                            }
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .clickable {
+                            uploadStatusText = null
+                            lastUploadedImage = null
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "关闭提示",
+                        modifier = Modifier.size(12.dp),
+                        tint = palette.inkTertiary
+                    )
+                }
+            }
+        }
+
+        // 4. 核心创作画布 / 实时 AST 预览区（顶部对齐，占据下方全部可用空间）
+        val canvasModifier = if (fillAvailableHeight) {
+            Modifier.fillMaxWidth().weight(1f)
+        } else {
+            Modifier.fillMaxWidth().height(defaultEditorHeight)
+        }
+
+        when (activeViewMode) {
+            WorkbenchViewMode.SOURCE -> {
+                WorkbenchSourceEditorBox(
+                    tfv = tfv,
+                    onValueChange = { newVal ->
+                        updateTfv(newVal)
+                        val cursor = newVal.selection.min.coerceIn(0, newVal.text.length)
+                        val mention = Regex("(?:^|[\\s])@([\\p{L}\\p{N}_-]*)$").find(newVal.text.substring(0, cursor))
+                        if (mention != null) {
+                            activeSubPanel = WorkbenchSubPanel.MENTION
+                            mentionSearchTerm = mention.groupValues[1]
+                        }
+                    },
+                    placeholder = placeholder,
+                    enabled = enabled,
+                    autofocus = autofocus,
+                    immersiveCanvas = fillAvailableHeight,
+                    modifier = canvasModifier
+                )
+            }
+            WorkbenchViewMode.PREVIEW -> {
+                WorkbenchAstLivePreviewBox(
+                    rawMarkdown = tfv.text,
+                    immersiveCanvas = fillAvailableHeight,
+                    modifier = canvasModifier
                 )
             }
         }
@@ -10369,11 +10805,11 @@ private fun WorkbenchDockIconButton(
     }
     Box(
         modifier = Modifier
-            .size(width = 36.dp, height = 34.dp)
-            .clip(RoundedCornerShape(9.dp))
+            .size(width = 34.dp, height = 32.dp)
+            .clip(RoundedCornerShape(8.dp))
             .background(if (active) palette.activeChipBg else Color.Transparent)
             .then(
-                if (active) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
+                if (active) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
                 else Modifier
             )
             .clickable(enabled = enabled, onClick = onClick),
@@ -10382,7 +10818,7 @@ private fun WorkbenchDockIconButton(
         Icon(
             imageVector = icon,
             contentDescription = label,
-            modifier = Modifier.size(17.5.dp),
+            modifier = Modifier.size(17.dp),
             tint = fg
         )
     }
@@ -10486,7 +10922,7 @@ private fun WorkbenchAstLivePreviewBox(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         if (rawMarkdown.isBlank()) {
-            LinDoEmptyState("还没有预览内容，先写点什么吧")
+            LinDoEmptyState("暂无预览内容")
         } else {
             val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
             PostRichContent(astNodes, palette, onOpenLink = { uriHandler.openUri(it) })
@@ -10524,10 +10960,10 @@ private fun WorkbenchInteractiveSubPanel(
             .clip(RoundedCornerShape(12.dp))
             .background(palette.cardSurface)
             .border(0.6.dp, palette.hairline, RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 9.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // 统一抽屉标题栏 + 一键收起按钮
+        // 统一抽屉标题栏 + 纯图标关闭按钮
         if (subPanel != WorkbenchSubPanel.NONE) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -10540,25 +10976,18 @@ private fun WorkbenchInteractiveSubPanel(
                     color = palette.inkSecondary,
                     modifier = Modifier.weight(1f)
                 )
-                Row(
+                Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
+                        .size(22.dp)
+                        .clip(CircleShape)
                         .background(palette.subtleSurface)
-                        .clickable(onClick = onDismiss)
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "收起",
-                        fontSize = 10.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.inkTertiary
-                    )
                     Icon(
                         imageVector = LinDoIcons.Close,
                         contentDescription = "收起面板",
-                        modifier = Modifier.size(11.dp),
+                        modifier = Modifier.size(12.dp),
                         tint = palette.inkTertiary
                     )
                 }
@@ -10574,42 +11003,30 @@ private fun WorkbenchInteractiveSubPanel(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     WorkbenchToolChip(
-                        label = "B 粗体",
+                        label = "B",
                         onClick = { onWrapSelection("**", "**", "粗体文本") }
                     )
                     WorkbenchToolChip(
-                        label = "I 斜体",
+                        label = "I",
                         onClick = { onWrapSelection("*", "*", "斜体文本") }
                     )
                     WorkbenchToolChip(
-                        label = "S 删除线",
+                        label = "S",
                         onClick = { onWrapSelection("~~", "~~", "删除线") }
                     )
                     WorkbenchToolChip(
-                        label = "`行内代码`",
+                        label = "<>",
                         onClick = { onWrapSelection("`", "`", "code") }
                     )
                     WorkbenchToolChip(
-                        label = "⌨ 按键 <kbd>",
+                        label = "<kbd>",
                         onClick = { onWrapSelection("<kbd>", "</kbd>", "Ctrl+C") }
                     )
-                    WorkbenchToolChip(
-                        label = "✨ 中英空格排版",
-                        highlighted = true,
-                        onClick = onOptimizePangu
-                    )
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
                     listOf(
-                        "H1 一级标题" to "# ",
-                        "H2 二级标题" to "## ",
-                        "H3 三级标题" to "### ",
-                        "H4 四级标题" to "#### "
+                        "H1" to "# ",
+                        "H2" to "## ",
+                        "H3" to "### ",
+                        "H4" to "#### "
                     ).forEach { (label, prefix) ->
                         WorkbenchToolChip(
                             label = label,
@@ -10617,8 +11034,13 @@ private fun WorkbenchInteractiveSubPanel(
                         )
                     }
                     WorkbenchToolChip(
-                        label = "― 分割线",
+                        label = "―",
                         onClick = { onInsertSnippet("\n\n---\n\n") }
+                    )
+                    WorkbenchToolChip(
+                        label = "中英空格",
+                        highlighted = true,
+                        onClick = onOptimizePangu
                     )
                 }
             }
@@ -10631,34 +11053,27 @@ private fun WorkbenchInteractiveSubPanel(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     WorkbenchToolChip(
-                        label = "❝ 引用块",
+                        label = "❝ 引用",
                         onClick = { onToggleLinePrefix("> ") }
                     )
                     WorkbenchToolChip(
-                        label = "• 无序列表",
+                        label = "• 列表",
                         onClick = { onToggleLinePrefix("- ") }
                     )
                     WorkbenchToolChip(
-                        label = "1. 编号列表",
+                        label = "1. 编号",
                         onClick = { onToggleLinePrefix("1. ") }
                     )
                     WorkbenchToolChip(
-                        label = "☑ 待办任务",
+                        label = "☑ 待办",
                         onClick = { onToggleLinePrefix("- [ ] ") }
                     )
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
                     listOf(
-                        "ℹ️ NOTE 说明" to "NOTE",
-                        "💡 TIP 技巧" to "TIP",
-                        "📌 IMPORTANT 重要" to "IMPORTANT",
-                        "⚠️ WARNING 警告" to "WARNING",
-                        "🚨 CAUTION 危险" to "CAUTION"
+                        "NOTE" to "NOTE",
+                        "TIP" to "TIP",
+                        "IMPORTANT" to "IMPORTANT",
+                        "WARNING" to "WARNING",
+                        "CAUTION" to "CAUTION"
                     ).forEach { (label, kind) ->
                         WorkbenchToolChip(
                             label = label,

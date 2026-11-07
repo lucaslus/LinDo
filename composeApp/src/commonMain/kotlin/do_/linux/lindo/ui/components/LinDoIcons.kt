@@ -1889,4 +1889,21 @@ object LinDoIcons {
             }
         }
     }
+
+    /**
+     * 发送/发布纸飞机矢量图标 (`Send`)
+     */
+    val Send: ImageVector by lazy {
+        lucideIcon("Send") {
+            strokePath(1.9f) {
+                moveTo(22f, 2f)
+                lineTo(11f, 13f)
+                moveTo(22f, 2f)
+                lineTo(15f, 22f)
+                lineTo(11f, 13f)
+                lineTo(2f, 9f)
+                close()
+            }
+        }
+    }
 }
