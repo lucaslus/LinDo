@@ -652,6 +652,98 @@ object LocalDirectConnectTunnel {
     @Volatile
     var localEchHttpsPort: Int = 0
 
+    /**
+     * 智能双通道最优路由状态：
+     * - 当用户开启了梯子 (`systemVpnActive == true`) 且经真实 TLS 握手探针确认该 VPN 能够直达 `linux.do:443` (`vpnDirectVerified == true`) 时，
+     *   优先走用户的 VPN 隧道（保留原生 `SNI = linux.do` 以便 Clash/Sing-box 分流规则精准命中代理节点）；
+     * - 当用户未开梯子、或所开的 VPN 属于企业内网/分流未覆盖/节点故障导致握手失败时，
+     *   0 延迟自动切回内置 Rust TLS 1.3 ECH 免梯直连守护进程 (`127.0.0.1:$localEchHttpsPort`)。
+     */
+    @Volatile
+    var systemVpnActive: Boolean = false
+        private set
+
+    @Volatile
+    var vpnDirectVerified: Boolean = false
+        private set
+
+    private val vpnProbeRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun onNetworkEnvironmentChanged(vpnActive: Boolean, onRouteChanged: (() -> Unit)? = null) {
+        val prevVpn = systemVpnActive
+        val prevVerified = vpnDirectVerified
+        systemVpnActive = vpnActive
+        LinuxDoRepository.clearDnsCaches()
+        if (!vpnActive) {
+            vpnDirectVerified = false
+            if (prevVpn || prevVerified) {
+                onRouteChanged?.invoke()
+            }
+            return
+        }
+        probeVpnDirectTlsAsync(onRouteChanged)
+    }
+
+    private fun resolveVpnDirectCandidates(host: String, port: Int): List<java.net.InetSocketAddress> {
+        val sysAddrs = runCatching { Dns.SYSTEM.lookup(host) }
+            .getOrDefault(emptyList())
+            .filterNot { addr -> LinuxDoRepository.isIpPoisoned(addr.hostAddress.orEmpty()) }
+        val fakeIps = sysAddrs.filter { addr ->
+            val ip = addr.hostAddress.orEmpty()
+            ip.startsWith("198.18.") || ip.startsWith("198.19.")
+        }
+        if (fakeIps.isNotEmpty()) {
+            return fakeIps.map { java.net.InetSocketAddress(it, port) }
+        }
+        val cleanAddrs = runCatching { LinuxDoRepository.resolveHostForDirectConnect(host) }.getOrDefault(emptyList())
+        val merged = (sysAddrs + cleanAddrs).distinct().take(4)
+        return if (merged.isNotEmpty()) {
+            merged.map { java.net.InetSocketAddress(it, port) }
+        } else {
+            listOf(java.net.InetSocketAddress(host, port))
+        }
+    }
+
+    private fun probeVpnDirectTlsAsync(onRouteChanged: (() -> Unit)? = null) {
+        if (!vpnProbeRunning.compareAndSet(false, true)) return
+        tunnelExecutor.execute {
+            try {
+                if (!systemVpnActive) {
+                    vpnDirectVerified = false
+                    return@execute
+                }
+                val candidates = resolveVpnDirectCandidates("linux.do", 443)
+                val sslFactory = javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory
+                var ok = false
+                for (addr in candidates.take(2)) {
+                    try {
+                        java.net.Socket().use { raw ->
+                            raw.tcpNoDelay = true
+                            raw.connect(addr, 1500)
+                            raw.soTimeout = 1800
+                            (sslFactory.createSocket(raw, "linux.do", 443, true) as javax.net.ssl.SSLSocket).use { ssl ->
+                                val params = ssl.sslParameters
+                                params.serverNames = listOf(javax.net.ssl.SNIHostName("linux.do"))
+                                ssl.sslParameters = params
+                                ssl.startHandshake()
+                                ok = true
+                            }
+                        }
+                        if (ok) break
+                    } catch (_: Throwable) {
+                    }
+                }
+                val prev = vpnDirectVerified
+                vpnDirectVerified = systemVpnActive && ok
+                if (prev != vpnDirectVerified) {
+                    onRouteChanged?.invoke()
+                }
+            } finally {
+                vpnProbeRunning.set(false)
+            }
+        }
+    }
+
     fun isEchManagedHost(host: String?): Boolean {
         val h = host?.trim()?.lowercase()?.trimEnd('.') ?: return false
         return h == "linux.do" ||
@@ -763,10 +855,34 @@ object LocalDirectConnectTunnel {
             if (host.isEmpty()) return
 
             val echPort = localEchHttpsPort
-            val routeToLocalEch = port == 443 && echPort > 0 && isEchManagedHost(host)
+            val isManaged = port == 443 && echPort > 0 && isEchManagedHost(host)
+            val preferVpnDirect = isManaged && systemVpnActive && vpnDirectVerified
 
             var connectedSocket: java.net.Socket? = null
-            if (routeToLocalEch) {
+            var routedViaVpnDirect = false
+            var routedViaEch = false
+
+            if (preferVpnDirect) {
+                val vpnTargets = resolveVpnDirectCandidates(host, port)
+                for (addr in vpnTargets) {
+                    try {
+                        val s = java.net.Socket()
+                        s.tcpNoDelay = true
+                        s.connect(addr, 1800)
+                        connectedSocket = s
+                        routedViaVpnDirect = true
+                        break
+                    } catch (_: Throwable) {
+                    }
+                }
+                if (connectedSocket == null) {
+                    // VPN 节点连接失败，自动降级至本地 ECH 免梯直连通道并触发后台重探测
+                    vpnDirectVerified = false
+                    probeVpnDirectTlsAsync()
+                }
+            }
+
+            if (connectedSocket == null && isManaged) {
                 val echAddr = java.net.InetSocketAddress("127.0.0.1", echPort)
                 for (attempt in 0 until 15) {
                     try {
@@ -774,6 +890,7 @@ object LocalDirectConnectTunnel {
                         s.tcpNoDelay = true
                         s.connect(echAddr, 1200)
                         connectedSocket = s
+                        routedViaEch = true
                         break
                     } catch (_: Throwable) {
                         if (attempt < 14) {
@@ -783,7 +900,6 @@ object LocalDirectConnectTunnel {
                 }
             }
 
-            val routedViaEch = connectedSocket != null && routeToLocalEch
             if (connectedSocket == null) {
                 val candidateAddresses = runCatching {
                     LinuxDoRepository.resolveHostForDirectConnect(host)
@@ -815,7 +931,7 @@ object LocalDirectConnectTunnel {
             val upIn = upstream.getInputStream()
             val upOut = upstream.getOutputStream()
 
-            if (!routedViaEch) {
+            if (!routedViaEch && !routedViaVpnDirect) {
                 val firstPacket = ByteArray(16384)
                 val firstRead = clientIn.read(firstPacket)
                 if (firstRead <= 0) return
@@ -1225,6 +1341,12 @@ object LinuxDoRepository {
 
     private val dohHostCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<InetAddress>>>()
 
+    internal fun clearDnsCaches() {
+        dohHostCache.clear()
+    }
+
+    internal fun isIpPoisoned(ip: String): Boolean = isPoisonedIp(ip)
+
     private val poisonedIpPrefixes = listOf(
         "127.", "0.", "199.59.", "108.160.", "31.13.", "69.63.", "69.171.",
         "157.240.", "179.60.", "185.60.", "46.82.", "59.24.", "243.185."
@@ -1557,70 +1679,106 @@ kZC8lQg1
 
         // 只要平台已挂载同源 Chromium WebView 通道（Android），所有请求一律优先走 WebView BoringSSL 通道，
         // 严禁先用 OkHttp (Java TLS JA3/JA4 指纹) 携带 Chrome UA 或 cf_clearance 访问 linux.do，从而彻底避免触发 Cloudflare 指纹不一致风控！
+        // 同时对幂等读取请求 (GET / HEAD) 在 Loading 阶段提供最多 3 次无感自动重试，消除偶发网络抖动、H2 连接池过期或切换梯子瞬间的瞬态失败。
+        val isReadMethod = method.equals("GET", true) || method.equals("HEAD", true)
+        val maxReadAttempts = if (isReadMethod) 3 else 1
         var firstBrowserResult: Pair<Int, String>? = null
         if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
-            firstBrowserResult = callWebView()
-            if (firstBrowserResult != null && isSuccessfulApiResponse(firstBrowserResult.first, firstBrowserResult.second)) {
-                if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
-                return@withContext firstBrowserResult
+            for (attempt in 0 until maxReadAttempts) {
+                val res = callWebView()
+                if (res != null) {
+                    firstBrowserResult = res
+                    if (isSuccessfulApiResponse(res.first, res.second)) {
+                        if (mergedHeaders["Discourse-Background"] != "true") {
+                            UserPresenceService.recordSuccessfulForegroundRequest()
+                        }
+                        return@withContext res
+                    }
+                    // 若是明确的业务 404/410 或 JSON 403 权限不足，无需重复重试
+                    val trimmed = res.second.trimStart()
+                    val isDefiniteBusinessError = res.first in listOf(404, 410) ||
+                        (res.first == 403 && (trimmed.startsWith("{") || trimmed.startsWith("[")))
+                    if (isDefiniteBusinessError) break
+                }
+                if (attempt < maxReadAttempts - 1) {
+                    kotlinx.coroutines.delay(320L * (attempt + 1))
+                }
             }
+            // 在已挂载同源 WebView 通道的平台（Android）上，直接返回 WebView 最终结果，
+            // 严禁回落至缺少 cf_clearance 且为 Java TLS 指纹的 OkHttp sharedClient，彻底杜绝触发 Cloudflare 403 风控！
+            return@withContext if (preserveFailure) firstBrowserResult else null
         }
 
         var lastResponse: Pair<Int, String>? = null
-        try {
-            val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
-            fun currentSafeCookieHeader(): String = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
-                .entries
-                .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
-                // 若当前平台存在 WebView，禁止将绑定了 Chromium TLS 指纹的 cf_clearance 放到 OkHttp 请求上发送，防止被 Cloudflare 判定指纹劫持而吊销
-                .filterNot { UserApiKeyAuthManager.webViewHttpExecutor != null && it.key in cfTlsBoundCookies }
-                .joinToString("; ") { "${it.key}=${it.value.value}" }
-            val requestHeaders = mergedHeaders.toMutableMap()
-            if (!hasWebCookie) {
-                requestHeaders.remove("Discourse-Logged-In")
-            }
-            UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
-                requestHeaders["User-Agent"] = it
-            }
-            val isMutation = !method.equals("GET", true) && !method.equals("HEAD", true)
-            if (isMutation && hasWebCookie && !requestHeaders.containsKey("X-CSRF-Token")) {
-                fetchCsrfTokenViaSharedClient(forceRefresh = false)?.let { requestHeaders["X-CSRF-Token"] = it }
-            }
-            val cookieHeader = currentSafeCookieHeader()
-            if (cookieHeader.isNotEmpty()) requestHeaders["Cookie"] = cookieHeader
-            var response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
-            response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                CookieSentinel.ingestRawCookieString(setCookie.substringBefore(';'), domain = "linux.do")
-            }
-            var status = response.status.value
-            var text = response.bodyAsText()
-            if (isMutation && (status == 403 || (status == 422 && text.contains("CSRF", ignoreCase = true))) && hasWebCookie) {
-                val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
-                if (!freshCsrf.isNullOrBlank()) {
-                    requestHeaders["X-CSRF-Token"] = freshCsrf
-                    val updatedCookieHeader = currentSafeCookieHeader()
-                    if (updatedCookieHeader.isNotEmpty()) requestHeaders["Cookie"] = updatedCookieHeader
+        for (attempt in 0 until maxReadAttempts) {
+            try {
+                val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
+                fun currentSafeCookieHeader(): String = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+                    .entries
+                    .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
+                    // 若当前平台存在 WebView，禁止将绑定了 Chromium TLS 指纹的 cf_clearance 放到 OkHttp 请求上发送，防止被 Cloudflare 判定指纹劫持而吊销
+                    .filterNot { UserApiKeyAuthManager.webViewHttpExecutor != null && it.key in cfTlsBoundCookies }
+                    .joinToString("; ") { "${it.key}=${it.value.value}" }
+                val requestHeaders = mergedHeaders.toMutableMap()
+                if (!hasWebCookie) {
+                    requestHeaders.remove("Discourse-Logged-In")
+                }
+                UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
+                    requestHeaders["User-Agent"] = it
+                }
+                val isMutation = !isReadMethod
+                if (isMutation && hasWebCookie && !requestHeaders.containsKey("X-CSRF-Token")) {
+                    fetchCsrfTokenViaSharedClient(forceRefresh = false)?.let { requestHeaders["X-CSRF-Token"] = it }
+                }
+                val cookieHeader = currentSafeCookieHeader()
+                if (cookieHeader.isNotEmpty()) requestHeaders["Cookie"] = cookieHeader
+                var response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+                response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                    CookieSentinel.ingestRawCookieString(setCookie.substringBefore(';'), domain = "linux.do")
+                }
+                var status = response.status.value
+                var text = response.bodyAsText()
+                if (isMutation && (status == 403 || (status == 422 && text.contains("CSRF", ignoreCase = true))) && hasWebCookie) {
+                    val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
+                    if (!freshCsrf.isNullOrBlank()) {
+                        requestHeaders["X-CSRF-Token"] = freshCsrf
+                        val updatedCookieHeader = currentSafeCookieHeader()
+                        if (updatedCookieHeader.isNotEmpty()) requestHeaders["Cookie"] = updatedCookieHeader
+                        response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+                        status = response.status.value
+                        text = response.bodyAsText()
+                    }
+                }
+                // 若携带 Discourse-Logged-In 头遭遇 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次
+                if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In") && method.equals("GET", true)) {
+                    requestHeaders.remove("Discourse-Logged-In")
                     response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
                     status = response.status.value
                     text = response.bodyAsText()
                 }
+                // 避免在已挂载 WebView 的平台上，用 OkHttp 缺少 cf_clearance 触发的 Cloudflare HTML 403 覆盖真实响应
+                val trimmedBody = text.trimStart()
+                val isHtmlChallenge403 = status == 403 &&
+                    UserApiKeyAuthManager.webViewHttpExecutor != null &&
+                    !trimmedBody.startsWith("{") && !trimmedBody.startsWith("[")
+                if (!isHtmlChallenge403) {
+                    lastResponse = status to text
+                }
+                if (isSuccessfulApiResponse(status, text)) {
+                    if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
+                    return@withContext status to text
+                }
+                if (status in listOf(404, 410) || (status == 403 && !isHtmlChallenge403)) {
+                    break
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A read can safely fall back to the existing authenticated browser transport.
             }
-            // 若携带 Discourse-Logged-In 头遭遇 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次
-            if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In") && method.equals("GET", true)) {
-                requestHeaders.remove("Discourse-Logged-In")
-                response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
-                status = response.status.value
-                text = response.bodyAsText()
+            if (attempt < maxReadAttempts - 1) {
+                kotlinx.coroutines.delay(300L * (attempt + 1))
             }
-            lastResponse = status to text
-            if (isSuccessfulApiResponse(status, text)) {
-                if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
-                return@withContext status to text
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            // A read can safely fall back to the existing authenticated browser transport.
         }
         val browserResult = firstBrowserResult ?: callWebView()
         if (browserResult != null && isSuccessfulApiResponse(browserResult.first, browserResult.second)) {
@@ -1792,9 +1950,10 @@ kZC8lQg1
             }
         }
 
-        val specificError = when (statusCode) {
-            404, 410 -> "该话题不存在，或已被作者与管理员删除。"
-            403 -> "当前账号暂无访问该话题的权限（可能属于高信任等级或私密板块）。"
+        val isJsonError = text?.trimStart()?.let { it.startsWith("{") || it.startsWith("[") } == true
+        val specificError = when {
+            statusCode in listOf(404, 410) -> "该话题不存在，或已被作者与管理员删除。"
+            statusCode == 403 && isJsonError -> "当前账号暂无访问该话题的权限（可能属于高信任等级或私密板块）。"
             else -> "网络连接异常，请点击下方按钮重试。"
         }
 
