@@ -644,6 +644,22 @@ object LocalDirectConnectTunnel {
     var listeningPort: Int = 0
         private set
 
+    /**
+     * 本地 Rust ECH 守护进程 (`liblinuxdo_ech.so`) 监听的 HTTPS 端口（默认 `28443`）。
+     * 当 `localEchHttpsPort > 0` 时，所有发往 `linux.do` / `*.linux.do` / `idcflare.com` / `*.idcflare.com` 的 `:443` 流量
+     * 直接转发至 `127.0.0.1:$localEchHttpsPort`，由 `rustls` + `aws-lc-rs` 执行真正的 TLS 1.3 ECH (`Encrypted Client Hello`) 握手。
+     */
+    @Volatile
+    var localEchHttpsPort: Int = 0
+
+    fun isEchManagedHost(host: String?): Boolean {
+        val h = host?.trim()?.lowercase()?.trimEnd('.') ?: return false
+        return h == "linux.do" ||
+            h.endsWith(".linux.do") ||
+            h == "idcflare.com" ||
+            h.endsWith(".idcflare.com")
+    }
+
     private val tunnelExecutor by lazy {
         java.util.concurrent.Executors.newCachedThreadPool { r ->
             Thread(r, "lindo-direct-tunnel").apply { isDaemon = true }
@@ -713,24 +729,47 @@ object LocalDirectConnectTunnel {
             val port = hostPort.substringAfter(':', "443").toIntOrNull() ?: 443
             if (host.isEmpty()) return
 
-            val candidateAddresses = runCatching {
-                LinuxDoRepository.resolveHostForDirectConnect(host)
-            }.getOrDefault(emptyList())
+            val echPort = localEchHttpsPort
+            val routeToLocalEch = port == 443 && echPort > 0 && isEchManagedHost(host)
 
             var connectedSocket: java.net.Socket? = null
-            val targets = if (candidateAddresses.isNotEmpty()) {
-                candidateAddresses.take(4).map { java.net.InetSocketAddress(it, port) }
-            } else {
-                listOf(java.net.InetSocketAddress(host, port))
+            if (routeToLocalEch) {
+                val echAddr = java.net.InetSocketAddress("127.0.0.1", echPort)
+                for (attempt in 0 until 15) {
+                    try {
+                        val s = java.net.Socket()
+                        s.tcpNoDelay = true
+                        s.connect(echAddr, 1200)
+                        connectedSocket = s
+                        break
+                    } catch (_: Throwable) {
+                        if (attempt < 14) {
+                            runCatching { Thread.sleep(120L) }
+                        }
+                    }
+                }
             }
-            for (addr in targets) {
-                try {
-                    val s = java.net.Socket()
-                    s.tcpNoDelay = true
-                    s.connect(addr, 3500)
-                    connectedSocket = s
-                    break
-                } catch (_: Throwable) {
+
+            val routedViaEch = connectedSocket != null && routeToLocalEch
+            if (connectedSocket == null) {
+                val candidateAddresses = runCatching {
+                    LinuxDoRepository.resolveHostForDirectConnect(host)
+                }.getOrDefault(emptyList())
+
+                val targets = if (candidateAddresses.isNotEmpty()) {
+                    candidateAddresses.take(4).map { java.net.InetSocketAddress(it, port) }
+                } else {
+                    listOf(java.net.InetSocketAddress(host, port))
+                }
+                for (addr in targets) {
+                    try {
+                        val s = java.net.Socket()
+                        s.tcpNoDelay = true
+                        s.connect(addr, 3500)
+                        connectedSocket = s
+                        break
+                    } catch (_: Throwable) {
+                    }
                 }
             }
             upstream = connectedSocket ?: return
@@ -743,19 +782,21 @@ object LocalDirectConnectTunnel {
             val upIn = upstream.getInputStream()
             val upOut = upstream.getOutputStream()
 
-            val firstPacket = ByteArray(16384)
-            val firstRead = clientIn.read(firstPacket)
-            if (firstRead <= 0) return
+            if (!routedViaEch) {
+                val firstPacket = ByteArray(16384)
+                val firstRead = clientIn.read(firstPacket)
+                if (firstRead <= 0) return
 
-            val fragments = LinuxDoRepository.TlsRecordFragmenter.fragmentClientHello(firstPacket, 0, firstRead)
-            if (fragments != null) {
-                for (frag in fragments) {
-                    upOut.write(frag)
+                val fragments = LinuxDoRepository.TlsRecordFragmenter.fragmentClientHello(firstPacket, 0, firstRead)
+                if (fragments != null) {
+                    for (frag in fragments) {
+                        upOut.write(frag)
+                        upOut.flush()
+                    }
+                } else {
+                    upOut.write(firstPacket, 0, firstRead)
                     upOut.flush()
                 }
-            } else {
-                upOut.write(firstPacket, 0, firstRead)
-                upOut.flush()
             }
 
             val finalUpstream = upstream
@@ -993,17 +1034,20 @@ object LinuxDoRepository {
 
             override fun getOutputStream(): java.io.OutputStream {
                 val rawOut = super.getOutputStream()
+                val isLoopback = runCatching { inetAddress?.isLoopbackAddress == true }.getOrDefault(false)
                 return object : java.io.FilterOutputStream(rawOut) {
                     override fun write(b: ByteArray, off: Int, len: Int) {
                         if (firstWritePending && len > 0) {
                             firstWritePending = false
-                            val fragments = TlsRecordFragmenter.fragmentClientHello(b, off, len)
-                            if (fragments != null) {
-                                for (frag in fragments) {
-                                    rawOut.write(frag)
-                                    rawOut.flush()
+                            if (!isLoopback) {
+                                val fragments = TlsRecordFragmenter.fragmentClientHello(b, off, len)
+                                if (fragments != null) {
+                                    for (frag in fragments) {
+                                        rawOut.write(frag)
+                                        rawOut.flush()
+                                    }
+                                    return
                                 }
-                                return
                             }
                         }
                         rawOut.write(b, off, len)
@@ -1080,6 +1124,7 @@ object LinuxDoRepository {
             if (list.isNotEmpty() && now < expireAt) return list
         }
         val dohEndpoints = listOf(
+            "https://aaa.ddd.oaifree.com/query-dns?name=$key&type=A",
             "https://cloudflare-dns.com/dns-query?name=$key&type=A",
             "https://1.1.1.1/dns-query?name=$key&type=A",
             "https://1.0.0.1/dns-query?name=$key&type=A"
@@ -1146,6 +1191,100 @@ object LinuxDoRepository {
         return Dns.SYSTEM.lookup(hostname)
     }
 
+    private const val ECH_ROOT_CA_PEM = """-----BEGIN CERTIFICATE-----
+MIIB4jCCAYigAwIBAgIUJs12u5y3qhTMJzp7O5aX66dOH0IwCgYIKoZIzj0EAwIw
+TzELMAkGA1UEBhMCQ04xHjAcBgNVBAoMFUxpbkRvIExvY2FsIEVDSCBUcnVzdDEg
+MB4GA1UEAwwXTGluRG8gTG9jYWwgRUNIIFJvb3QgQ0EwHhcNMjQwMTAxMDAwMDAw
+WhcNMzQwMTAxMDAwMDAwWjBPMQswCQYDVQQGEwJDTjEeMBwGA1UECgwVTGluRG8g
+TG9jYWwgRUNIIFRydXN0MSAwHgYDVQQDDBdMaW5EbyBMb2NhbCBFQ0ggUm9vdCBD
+QTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABGnyOx4W+VpKen0WawJzwT57Fopr
+FdVoeuD2yUrogKMNeJELHTfz9aB6cF/fQD/4kkFomMyAAm2eFM3gKcO0AhujQjBA
+MA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGGMB0GA1UdDgQWBBSgFPi5
+uBcYNMBwPb6mUoYzFlPC0DAKBggqhkjOPQQDAgNIADBFAiEA0ZIbV+oqOkhtN779
+T/P5Khs9vc4PcZGDB3eQZ6ExI7MCICtp3FWT+yPVZCTHc4jOwApqGceUeBhqmG2M
+kZC8lQg1
+-----END CERTIFICATE-----"""
+
+    private val echSslBundle: Pair<javax.net.ssl.SSLSocketFactory, javax.net.ssl.X509TrustManager>? by lazy {
+        runCatching {
+            val sysTmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
+            ).apply { init(null as java.security.KeyStore?) }
+            val sysTm = sysTmf.trustManagers.filterIsInstance<javax.net.ssl.X509TrustManager>().first()
+
+            val cf = java.security.cert.CertificateFactory.getInstance("X.509")
+            val caCert = cf.generateCertificate(
+                ECH_ROOT_CA_PEM.byteInputStream()
+            ) as java.security.cert.X509Certificate
+            val ks = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType()).apply {
+                load(null, null)
+                setCertificateEntry("lindo_ech_root_ca", caCert)
+            }
+            val echTmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
+            ).apply { init(ks) }
+            val echTm = echTmf.trustManagers.filterIsInstance<javax.net.ssl.X509TrustManager>().first()
+
+            val compositeTm = object : javax.net.ssl.X509TrustManager {
+                override fun checkClientTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    authType: String?
+                ) {
+                    sysTm.checkClientTrusted(chain, authType)
+                }
+
+                override fun checkServerTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    authType: String?
+                ) {
+                    try {
+                        echTm.checkServerTrusted(chain, authType)
+                    } catch (_: Throwable) {
+                        sysTm.checkServerTrusted(chain, authType)
+                    }
+                }
+
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> {
+                    return sysTm.acceptedIssuers + echTm.acceptedIssuers
+                }
+            }
+            val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS").apply {
+                init(null, arrayOf<javax.net.ssl.TrustManager>(compositeTm), java.security.SecureRandom())
+            }
+            sslCtx.socketFactory to compositeTm
+        }.getOrNull()
+    }
+
+    private val echProxySelector: java.net.ProxySelector by lazy {
+        object : java.net.ProxySelector() {
+            override fun select(uri: java.net.URI?): List<java.net.Proxy> {
+                val host = uri?.host
+                if (uri?.scheme.equals("https", ignoreCase = true) &&
+                    LocalDirectConnectTunnel.localEchHttpsPort > 0 &&
+                    LocalDirectConnectTunnel.isEchManagedHost(host)
+                ) {
+                    val tunnelPort = LocalDirectConnectTunnel.ensureStarted()
+                    if (tunnelPort > 0) {
+                        return listOf(
+                            java.net.Proxy(
+                                java.net.Proxy.Type.HTTP,
+                                java.net.InetSocketAddress("127.0.0.1", tunnelPort)
+                            )
+                        )
+                    }
+                }
+                return listOf(java.net.Proxy.NO_PROXY)
+            }
+
+            override fun connectFailed(
+                uri: java.net.URI?,
+                sa: java.net.SocketAddress?,
+                ioe: java.io.IOException?
+            ) {
+            }
+        }
+    }
+
     private val sharedClient: HttpClient by lazy {
         HttpClient(OkHttp) {
             engine {
@@ -1153,6 +1292,8 @@ object LinuxDoRepository {
                     connectTimeout(6, TimeUnit.SECONDS)
                     readTimeout(8, TimeUnit.SECONDS)
                     socketFactory(TlsRecordFragmentingSocketFactory())
+                    proxySelector(echProxySelector)
+                    echSslBundle?.let { (sf, tm) -> sslSocketFactory(sf, tm) }
                     dns(object : Dns {
                         override fun lookup(hostname: String): List<InetAddress> {
                             return resolveHostForDirectConnect(hostname)
@@ -1164,7 +1305,7 @@ object LinuxDoRepository {
     }
 
     /**
-     * 供 Coil `AsyncImage` 全局复用的免梯直连图片客户端（自动走无污染 DoH + TLS Record 分片 + 携带 Cookie 与 User-Agent）
+     * 供 Coil `AsyncImage` 全局复用的免梯直连图片客户端（自动走本地 Rust TLS 1.3 ECH 守护进程 + 携带 Cookie 与 User-Agent）
      */
     val imageHttpClient: HttpClient by lazy {
         HttpClient(OkHttp) {
@@ -1173,6 +1314,8 @@ object LinuxDoRepository {
                     connectTimeout(8, TimeUnit.SECONDS)
                     readTimeout(12, TimeUnit.SECONDS)
                     socketFactory(TlsRecordFragmentingSocketFactory())
+                    proxySelector(echProxySelector)
+                    echSslBundle?.let { (sf, tm) -> sslSocketFactory(sf, tm) }
                     dns(object : Dns {
                         override fun lookup(hostname: String): List<InetAddress> {
                             return resolveHostForDirectConnect(hostname)

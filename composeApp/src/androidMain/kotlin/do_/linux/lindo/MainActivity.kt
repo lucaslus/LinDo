@@ -110,6 +110,15 @@ private fun releaseNativeWebView(view: WebView, rendererGone: Boolean = false) {
 }
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        private const val LOCAL_ECH_HTTP_PORT = 28080
+        private const val LOCAL_ECH_HTTPS_PORT = 28443
+        private const val ECH_CONFIG_VERSION_MARKER = "99643bfd6837"
+
+        @Volatile
+        private var echDaemonStarted = false
+    }
+
     private var debugPreviewGeneration by mutableStateOf(0)
 
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -457,8 +466,132 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun ensureLocalRustEchDaemonStarted() {
+        runCatching {
+            val binFile = java.io.File(applicationInfo.nativeLibraryDir, "liblinuxdo_ech.so")
+            if (!binFile.isFile) return
+            LocalDirectConnectTunnel.localEchHttpsPort = LOCAL_ECH_HTTPS_PORT
+            synchronized(MainActivity::class.java) {
+                if (echDaemonStarted) return
+                echDaemonStarted = true
+            }
+            val appFilesDir = filesDir
+            val rawRes = resources
+            Thread({
+                runCatching {
+                    val echRoot = java.io.File(appFilesDir, "ech").apply { mkdirs() }
+                    val certDir = java.io.File(echRoot, "certs").apply { mkdirs() }
+                    java.io.File(echRoot, "runtime").mkdirs()
+
+                    rawRes.openRawResource(R.raw.lindo_ech_root_ca).use { input ->
+                        java.io.File(certDir, "linuxdo-accelerator-root-ca.crt").outputStream().use { input.copyTo(it) }
+                    }
+                    rawRes.openRawResource(R.raw.lindo_ech_server_crt).use { input ->
+                        java.io.File(certDir, "linuxdo-accelerator-server.crt").outputStream().use { input.copyTo(it) }
+                    }
+                    rawRes.openRawResource(R.raw.lindo_ech_server_key).use { input ->
+                        java.io.File(certDir, "linuxdo-accelerator-server.key").outputStream().use { input.copyTo(it) }
+                    }
+
+                    val configFile = java.io.File(echRoot, "linuxdo-accelerator.toml")
+                    val versionFile = java.io.File(echRoot, "linuxdo-accelerator.toml.version")
+                    versionFile.writeText(ECH_CONFIG_VERSION_MARKER)
+                    configFile.writeText(
+                        """
+                        listen_host = "127.0.0.1"
+                        hosts_ip = "127.0.0.1"
+                        http_port = $LOCAL_ECH_HTTP_PORT
+                        https_port = $LOCAL_ECH_HTTPS_PORT
+                        upstream = "https://linux.do"
+                        fake_sni = "www.cloudflare.com"
+
+                        doh_endpoints = [
+                            "https://aaa.ddd.oaifree.com/query-dns",
+                        ]
+                        managed_prefer_ipv6 = false
+                        dns_hosts = {}
+                        edge_node = ""
+
+                        proxy_domains = [
+                            "linux.do",
+                            "*.linux.do",
+                            "idcflare.com",
+                            "*.idcflare.com",
+                        ]
+
+                        hosts_domains = [
+                            "linux.do",
+                            "connect.linux.do",
+                            "credit.linux.do",
+                            "www.linux.do",
+                            "idcflare.com",
+                            "www.idcflare.com",
+                        ]
+
+                        certificate_domains = [
+                            "linux.do",
+                            "www.linux.do",
+                            "*.linux.do",
+                            "connect.linux.do",
+                            "*.s3.linux.do",
+                            "idcflare.com",
+                            "www.idcflare.com",
+                            "*.idcflare.com",
+                        ]
+
+                        ca_common_name = "LinDo Local ECH Root CA"
+                        server_common_name = "linux.do"
+                        """.trimIndent() + "\n"
+                    )
+                    versionFile.writeText(ECH_CONFIG_VERSION_MARKER)
+
+                    while (true) {
+                        val alreadyListening = runCatching {
+                            java.net.Socket().use { s ->
+                                s.connect(java.net.InetSocketAddress("127.0.0.1", LOCAL_ECH_HTTPS_PORT), 400)
+                                true
+                            }
+                        }.getOrDefault(false)
+                        if (!alreadyListening) {
+                            runCatching {
+                                val proc = ProcessBuilder(
+                                    binFile.absolutePath,
+                                    "--config",
+                                    configFile.absolutePath,
+                                    "run"
+                                )
+                                    .directory(echRoot)
+                                    .redirectErrorStream(true)
+                                    .start()
+                                proc.inputStream.bufferedReader().useLines { lines ->
+                                    lines.forEach { _ -> }
+                                }
+                                proc.waitFor()
+                            }
+                        }
+                        Thread.sleep(1500L)
+                    }
+                }
+            }, "lindo-ech-daemon").apply {
+                isDaemon = true
+                start()
+            }
+            for (i in 0 until 12) {
+                val ready = runCatching {
+                    java.net.Socket().use { s ->
+                        s.connect(java.net.InetSocketAddress("127.0.0.1", LOCAL_ECH_HTTPS_PORT), 80)
+                        true
+                    }
+                }.getOrDefault(false)
+                if (ready) break
+                runCatching { Thread.sleep(30L) }
+            }
+        }
+    }
+
     private fun installDirectConnectWebViewTunnel() {
         runCatching {
+            ensureLocalRustEchDaemonStarted()
             val port = LocalDirectConnectTunnel.ensureStarted()
             if (port > 0 && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
                 val proxyConfig = ProxyConfig.Builder()
@@ -495,6 +628,22 @@ class MainActivity : ComponentActivity() {
 
             wv.addJavascriptInterface(LinDoJsBridge(), "LinDoJsBridge")
             wv.webViewClient = object : WebViewClient() {
+                @SuppressLint("WebViewClientOnReceivedSslError")
+                override fun onReceivedSslError(
+                    view: WebView?,
+                    handler: android.webkit.SslErrorHandler?,
+                    error: android.net.http.SslError?
+                ) {
+                    val errHost = runCatching { Uri.parse(error?.url.orEmpty()).host }.getOrNull()
+                        ?: runCatching { Uri.parse(view?.url.orEmpty()).host }.getOrNull()
+                    if (LocalDirectConnectTunnel.localEchHttpsPort > 0 &&
+                        LocalDirectConnectTunnel.isEchManagedHost(errHost)
+                    ) {
+                        handler?.proceed()
+                    } else {
+                        super.onReceivedSslError(view, handler, error)
+                    }
+                }
                 override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                     if (apiWebView === view) apiWebView = null
                     pendingHttpCallbacks.values.forEach { it.cancel() }
@@ -1461,6 +1610,22 @@ private fun AndroidWebLoginModal(
                         }
 
                         webViewClient = object : WebViewClient() {
+                            @SuppressLint("WebViewClientOnReceivedSslError")
+                            override fun onReceivedSslError(
+                                view: WebView?,
+                                handler: android.webkit.SslErrorHandler?,
+                                error: android.net.http.SslError?
+                            ) {
+                                val errHost = runCatching { Uri.parse(error?.url.orEmpty()).host }.getOrNull()
+                                    ?: runCatching { Uri.parse(view?.url.orEmpty()).host }.getOrNull()
+                                if (LocalDirectConnectTunnel.localEchHttpsPort > 0 &&
+                                    LocalDirectConnectTunnel.isEchManagedHost(errHost)
+                                ) {
+                                    handler?.proceed()
+                                } else {
+                                    super.onReceivedSslError(view, handler, error)
+                                }
+                            }
                             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                                 webViewRef = null
                                 rendererGone = true
