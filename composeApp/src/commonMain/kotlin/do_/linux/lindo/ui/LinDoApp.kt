@@ -1049,12 +1049,6 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                 return
             }
         }
-        if (trimmed.equals("https://connect.linux.do", ignoreCase = true) ||
-            trimmed.equals("https://connect.linux.do/", ignoreCase = true)
-        ) {
-            showConnectSheet = true
-            return
-        }
         activeWebLoginUrl = trimmed
     }
 
@@ -1636,7 +1630,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                                     badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
                                                     showBadgesCenterSheet = true
                                                 },
-                                                onOpenConnectSheet = { showConnectSheet = true },
+                                                onOpenConnectSheet = { openSmartUrl("https://connect.linux.do") },
                                                 onOpenNetworkSheet = { showNetworkSheet = true },
                                                 onOpenAuthSheet = { showAuthSheet = true },
                                                 onOpenWebUrl = { openSmartUrl(it) },
@@ -3069,7 +3063,7 @@ private fun CommunityTopicItem(
     val catDotColor = remember(topic.categoryColorHex) {
         LinuxDoSiteRules.parseHexColor(topic.categoryColorHex)
     }
-    val (morandiBg, morandiFg) = remember(topic.categoryName, palette.isDark) {
+    val (_, morandiFg) = remember(topic.categoryName, palette.isDark) {
         resolveMorandiCategoryColors(topic.categoryName, palette.isDark)
     }
     val replies = maxOf(0, topic.postsCount - 1).coerceAtLeast(topic.replyCount)
@@ -3083,7 +3077,7 @@ private fun CommunityTopicItem(
     )
 
     if (isCompact) {
-        // 模式 B：紧凑列表模式（高密度双行流式，首行分类色点+单行标题+回复胶囊，次行微头像+作者+分类+#Tag+点赞/浏览/时间）
+        // 模式 B：紧凑列表模式（高密度双行流式，首行分类色点+单行适度字重标题+无底块回复数，次行 18dp 头像+作者+分类+#Tag+点赞/浏览/时间）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -3097,9 +3091,9 @@ private fun CommunityTopicItem(
                     indication = null,
                     onClick = onClick
                 )
-                .padding(horizontal = 14.dp, vertical = 9.dp)
+                .padding(horizontal = 14.dp, vertical = 9.5.dp)
         ) {
-            // 第一行：版块色点 + 标题独占首行 + 未读蓝点 + 右侧精简回复胶囊
+            // 第一行：版块色点 + 标题独占首行（字重降一档至 Medium）+ 未读蓝点 + 右侧无背景块回复计数
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -3115,9 +3109,9 @@ private fun CommunityTopicItem(
 
                 Text(
                     text = topic.title,
-                    fontSize = 14.2.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = (-0.15).sp,
+                    fontSize = 14.4.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = (-0.1).sp,
                     color = palette.inkPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -3137,23 +3131,19 @@ private fun CommunityTopicItem(
                 Spacer(modifier = Modifier.width(8.dp))
 
                 Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(palette.subtleSurface)
-                        .padding(horizontal = 5.5.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(2.5.dp)
                 ) {
                     Icon(
                         imageVector = LinDoIcons.MessageCircle,
                         contentDescription = null,
-                        modifier = Modifier.size(10.5.dp),
+                        modifier = Modifier.size(11.dp),
                         tint = if (replies >= 20) palette.brandGold else palette.inkTertiary
                     )
                     Text(
                         text = "$replies",
-                        fontSize = 10.8.sp,
-                        fontWeight = if (replies >= 20) FontWeight.Bold else FontWeight.Medium,
+                        fontSize = 11.sp,
+                        fontWeight = if (replies >= 20) FontWeight.SemiBold else FontWeight.Normal,
                         color = if (replies >= 20) palette.brandGold else palette.inkSecondary,
                         maxLines = 1,
                         softWrap = false
@@ -3161,9 +3151,9 @@ private fun CommunityTopicItem(
                 }
             }
 
-            Spacer(modifier = Modifier.height(5.dp))
+            Spacer(modifier = Modifier.height(5.5.dp))
 
-            // 第二行：14dp微头像 + 作者 + 分类名 + #Tag | 右侧点赞/浏览/时间
+            // 第二行：18dp 头像 + 作者 + 分类名（无底色）+ #Tag（无底色）| 右侧点赞/浏览/时间
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -3174,29 +3164,29 @@ private fun CommunityTopicItem(
                     animatedAvatar = op.animatedAvatar,
                     primaryGroupName = op.primaryGroupName,
                     flair = null,
-                    size = 14.dp,
+                    size = 18.dp,
                     enableAnimations = false
                 )
 
-                Spacer(modifier = Modifier.width(5.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
                 Text(
                     text = authorDisplay,
-                    fontSize = 11.2.sp,
+                    fontSize = 11.5.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.inkSecondary,
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 84.dp)
+                    modifier = Modifier.widthIn(max = 88.dp)
                 )
 
                 Spacer(modifier = Modifier.width(6.dp))
 
                 Text(
                     text = topic.categoryName,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 11.2.sp,
+                    fontWeight = FontWeight.Medium,
                     color = morandiFg,
                     maxLines = 1,
                     softWrap = false
@@ -3206,13 +3196,13 @@ private fun CommunityTopicItem(
                     Spacer(modifier = Modifier.width(6.dp))
                     Row(
                         modifier = Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         topic.tags.take(2).forEach { tag ->
                             Text(
                                 text = "#$tag",
-                                fontSize = 10.8.sp,
+                                fontSize = 11.sp,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false,
@@ -3284,7 +3274,7 @@ private fun CommunityTopicItem(
             }
         }
     } else {
-        // 模式 A：宽松卡片模式（独立圆角卡片容器 + 物理按压回弹 + 莫兰迪版块胶囊 + 双行标题与摘要 + 标签胶囊与纯图标互动指标）
+        // 模式 A：宽松卡片模式（独立圆角卡片 + 26dp 头像 + 无底块小圆点彩色分类 + Medium 适度字重标题 + 无底块纯文字 #Tag）
         val cardShape = RoundedCornerShape(14.dp)
         val cardBorderColor = when {
             isSelected -> palette.brandGold.copy(alpha = 0.45f)
@@ -3313,7 +3303,7 @@ private fun CommunityTopicItem(
                 )
                 .padding(horizontal = 14.dp, vertical = 12.5.dp)
         ) {
-            // 第一行：头像 + 作者名 + 时间 | 右侧莫兰迪版块胶囊
+            // 第一行：26dp 头像 + 作者名 + 时间 | 右侧纯小圆点 + 彩色类别名（去背景色块）
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -3328,16 +3318,16 @@ private fun CommunityTopicItem(
                         animatedAvatar = op.animatedAvatar,
                         primaryGroupName = op.primaryGroupName,
                         flair = null,
-                        size = 22.dp,
+                        size = 26.dp,
                         enableAnimations = enableAnimations
                     )
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(8.5.dp))
 
                     Text(
                         text = authorDisplay,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.2.sp,
+                        fontWeight = FontWeight.Medium,
                         color = palette.inkPrimary,
                         maxLines = 1,
                         softWrap = false,
@@ -3359,10 +3349,6 @@ private fun CommunityTopicItem(
                 Spacer(modifier = Modifier.width(8.dp))
 
                 Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(99.dp))
-                        .background(morandiBg)
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
@@ -3374,8 +3360,8 @@ private fun CommunityTopicItem(
                     Spacer(modifier = Modifier.width(4.5.dp))
                     Text(
                         text = topic.categoryName,
-                        fontSize = 11.2.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 11.8.sp,
+                        fontWeight = FontWeight.Medium,
                         color = morandiFg,
                         maxLines = 1,
                         softWrap = false
@@ -3385,7 +3371,7 @@ private fun CommunityTopicItem(
 
             Spacer(modifier = Modifier.height(8.5.dp))
 
-            // 第二行：加粗清晰标题 + 尾部官方未读蓝点
+            // 第二行：适度字重标题（由 Bold 降一档至 Medium，阅读更温和耐看）+ 尾部官方未读蓝点
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Top
@@ -3393,9 +3379,9 @@ private fun CommunityTopicItem(
                 Text(
                     text = topic.title,
                     fontSize = 15.6.sp,
-                    fontWeight = FontWeight.Bold,
-                    lineHeight = 21.8.sp,
-                    letterSpacing = (-0.2).sp,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 22.sp,
+                    letterSpacing = (-0.15).sp,
                     color = palette.inkPrimary,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -3427,9 +3413,9 @@ private fun CommunityTopicItem(
                 )
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(9.5.dp))
 
-            // 第三行：左侧轻胶囊 #Tag 标签组 + 右侧纯图标互动指标（Heart / MessageCircle / Eye）
+            // 第三行：左侧无背景块纯文字 #Tag 标签组 + 右侧纯图标互动指标（Heart / MessageCircle / Eye）
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -3440,7 +3426,7 @@ private fun CommunityTopicItem(
                         var usedUnits = 0
                         for (tag in topic.tags) {
                             val tagUnits = 2 + tag.sumOf { ch -> if (ch.code > 127) 2 else 1 }
-                            if (result.isEmpty() || (result.size < 3 && usedUnits + tagUnits <= 22)) {
+                            if (result.isEmpty() || (result.size < 3 && usedUnits + tagUnits <= 24)) {
                                 result.add(tag)
                                 usedUnits += tagUnits
                             } else {
@@ -3452,32 +3438,25 @@ private fun CommunityTopicItem(
                     val remainingCount = (topic.tags.size - fittedTags.size).coerceAtLeast(0)
                     Row(
                         modifier = Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         fittedTags.forEach { tag ->
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(palette.subtleSurface)
-                                    .clickable { onSelectTag(tag) }
-                                    .padding(horizontal = 6.5.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "#$tag",
-                                    fontSize = 11.2.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkSecondary,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                            }
+                            Text(
+                                text = "#$tag",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Normal,
+                                color = palette.inkSecondary,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.clickable { onSelectTag(tag) }
+                            )
                         }
                         if (remainingCount > 0) {
                             Text(
                                 text = "+$remainingCount",
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
+                                fontWeight = FontWeight.Normal,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false
@@ -8478,10 +8457,17 @@ private fun CommunityProfileScreen(
                                                 Spacer(modifier = Modifier.weight(1f))
                                                 Box(
                                                     modifier = Modifier
-                                                        .width(20.dp)
-                                                        .height(6.dp)
-                                                        .clip(RoundedCornerShape(99.dp))
-                                                        .background(palette.brandGold.copy(alpha = 0.25f))
+                                                        .size(4.dp)
+                                                        .clip(CircleShape)
+                                                        .background(palette.brandGold.copy(alpha = 0.7f))
+                                                )
+                                                Spacer(modifier = Modifier.width(2.5.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(14.dp)
+                                                        .height(3.5.dp)
+                                                        .clip(RoundedCornerShape(2.dp))
+                                                        .background(palette.brandGold.copy(alpha = 0.35f))
                                                 )
                                             }
                                             Spacer(modifier = Modifier.height(4.5.dp))

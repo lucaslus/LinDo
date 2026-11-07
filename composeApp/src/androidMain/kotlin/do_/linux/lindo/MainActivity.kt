@@ -29,13 +29,23 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -1297,7 +1307,21 @@ private fun AndroidWebLoginModal(
         }
     }
 
-    val barBg = if (isDark) androidx.compose.ui.graphics.Color(0xFF1C1815) else androidx.compose.ui.graphics.Color(0xFFFFFBF4)
+    val barBg = if (isDark) androidx.compose.ui.graphics.Color(0xFF13161C) else androidx.compose.ui.graphics.Color(0xFFFFFFFF)
+    val barFg = if (isDark) androidx.compose.ui.graphics.Color(0xFFF3F4F6) else androidx.compose.ui.graphics.Color(0xFF111827)
+    val barSubFg = if (isDark) androidx.compose.ui.graphics.Color(0xFFA1A8B5) else androidx.compose.ui.graphics.Color(0xFF525866)
+    val barBorder = if (isDark) androidx.compose.ui.graphics.Color(0xFF232833) else androidx.compose.ui.graphics.Color(0xFFEDEFF3)
+    var currentPageTitle by remember(initialUrl) {
+        val host = runCatching { Uri.parse(initialUrl).host }.getOrNull().orEmpty()
+        mutableStateOf(
+            when {
+                host.contains("connect.linux.do", ignoreCase = true) -> "LINUX DO Connect"
+                host.contains("credit.linux.do", ignoreCase = true) -> "LINUX DO 社区积分"
+                else -> host.ifBlank { "LINUX DO" }
+            }
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -1306,10 +1330,70 @@ private fun AndroidWebLoginModal(
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
+            if (!isLoginFlow) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .background(barBg)
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .clickable { onDismiss() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.Icon(
+                            imageVector = do_.linux.lindo.ui.components.LinDoIcons.Close,
+                            contentDescription = "关闭网页",
+                            modifier = Modifier.size(18.dp),
+                            tint = barFg
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = currentPageTitle,
+                        fontSize = 14.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = barFg,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .clickable {
+                                pageLoadError = null
+                                rendererGone = false
+                                webViewRef?.reload()
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.Icon(
+                            imageVector = do_.linux.lindo.ui.components.LinDoIcons.Refresh,
+                            contentDescription = "刷新网页",
+                            modifier = Modifier.size(16.5.dp),
+                            tint = barSubFg
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(0.5.dp)
+                        .background(barBorder)
+                )
+            }
+
             // Full-screen browser content; system Back returns to LinDo.
             if (!rendererGone) AndroidView(
                 modifier = Modifier
-                    .fillMaxSize(),
+                    .weight(1f)
+                    .fillMaxWidth(),
                 factory = { ctx ->
                     WebView(ctx).apply {
                         layoutParams = ViewGroup.LayoutParams(
