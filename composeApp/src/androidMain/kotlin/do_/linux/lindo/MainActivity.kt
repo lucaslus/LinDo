@@ -366,7 +366,7 @@ class MainActivity : ComponentActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    val consumed = BackNavigationBridge.onBack?.invoke() ?: false
+                    val consumed = BackNavigationBridge.dispatchBack()
                     if (!consumed) {
                         isEnabled = false
                         onBackPressedDispatcher.onBackPressed()

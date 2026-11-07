@@ -50,13 +50,9 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
         catch (failure: Exception) { error = failure.message ?: "暂时无法同步云端，本机草稿仍可使用" }
         finally { loading = false }
     }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = palette.cardSurface,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().heightIn(min = 340.dp, max = 680.dp).padding(horizontal = 16.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("草稿箱", Modifier.weight(1f), color = palette.inkPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                TextButton(onClick = onDismiss) { Text("关闭", color = palette.inkSecondary) }
-            }
+    LinDoFullScreenPage(onBack = onDismiss, containerColor = palette.cardSurface) {
+        LinDoPageTopBar(title = "草稿箱", onBack = onDismiss)
+        Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             error?.let { LinDoLoadFailure(it, { reload++ }) }
             if (loading && drafts.isEmpty()) Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { LinDoLoadingIndicator(label = "读取草稿") }
             else LazyColumn(Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) {

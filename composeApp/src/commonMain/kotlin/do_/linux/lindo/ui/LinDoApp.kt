@@ -541,8 +541,121 @@ private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
 }
 
 object BackNavigationBridge {
+    private val interceptors = mutableListOf<() -> Unit>()
     var canGoBack: Boolean = false
     var onBack: (() -> Boolean)? = null
+
+    fun pushInterceptor(handler: () -> Unit): () -> Unit {
+        interceptors.add(handler)
+        return { interceptors.remove(handler) }
+    }
+
+    fun dispatchBack(): Boolean {
+        val top = interceptors.lastOrNull()
+        if (top != null) {
+            top.invoke()
+            return true
+        }
+        return onBack?.invoke() ?: false
+    }
+}
+
+@Composable
+internal fun LinDoFullScreenPage(
+    onBack: () -> Unit,
+    containerColor: Color = LocalPalette.current.cardSurface,
+    imePadding: Boolean = true,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit
+) {
+    val latestOnBack by androidx.compose.runtime.rememberUpdatedState(onBack)
+    DisposableEffect(Unit) {
+        val remove = BackNavigationBridge.pushInterceptor { latestOnBack() }
+        onDispose { remove() }
+    }
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {}
+            ),
+        color = containerColor
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .then(if (imePadding) Modifier.windowInsetsPadding(WindowInsets.ime) else Modifier)
+                .windowInsetsPadding(WindowInsets.navigationBars),
+            content = content
+        )
+    }
+}
+
+@Composable
+internal fun LinDoPageTopBar(
+    title: String,
+    onBack: () -> Unit,
+    subtitle: String? = null,
+    navigationIcon: ImageVector = LinDoIcons.ArrowLeft,
+    trailingContent: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {}
+) {
+    val palette = LocalPalette.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(palette.cardSurface)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .clickable(onClick = onBack),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = navigationIcon,
+                    contentDescription = "返回",
+                    modifier = Modifier.size(18.5.dp),
+                    tint = palette.inkPrimary
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (!subtitle.isNullOrBlank()) {
+                    Text(
+                        text = subtitle,
+                        fontSize = 11.5.sp,
+                        color = palette.inkSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                content = trailingContent
+            )
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+    }
 }
 
 /**
@@ -1682,75 +1795,6 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                     }
                 }
 
-                inspectedBadge?.let { badge ->
-                    BadgeDetailBottomSheet(
-                        badge = badge,
-                        currentUsername = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
-                        currentUserTitle = fullUserProfile?.title ?: currentUser?.userTitle.orEmpty(),
-                        isAuthorized = isAuthorized,
-                        onDismiss = { inspectedBadge = null },
-                        onTitleUpdated = {
-                            syncUserProfile()
-                        },
-                        onInspectUser = { uname ->
-                            inspectedBadge = null
-                            inspectedUsername = uname
-                        },
-                        onSelectTopicId = { tid, title, postNum ->
-                            inspectedBadge = null
-                            openTopicById(tid, title, postNum)
-                        }
-                    )
-                }
-
-                if (showBadgesCenterSheet) {
-                    CommunityBadgesSheet(
-                        targetUsername = badgesCenterUsername ?: fullUserProfile?.username ?: currentUser?.username.orEmpty(),
-                        currentUserTitle = if (badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)) fullUserProfile?.title ?: currentUser?.userTitle.orEmpty() else "",
-                        initialEarnedBadges = if (badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)) fullUserProfile?.badges.orEmpty() else emptyList(),
-                        onDismiss = { showBadgesCenterSheet = false },
-                        onInspectBadge = { badge ->
-                            inspectedBadge = badge
-                        }
-                    )
-                }
-
-                inspectedUsername?.let { uname ->
-                    PublicUserCardSheet(
-                        username = uname,
-                        onDismiss = { inspectedUsername = null },
-                        onSendPrivateMessage = { targetUser ->
-                            inspectedUsername = null
-                            pmInitialRecipient = targetUser
-                            showPrivateMessagesSheet = true
-                        },
-                        onSelectTopicId = { tid, title, postNum ->
-                            inspectedUsername = null
-                            openTopicById(tid, title, postNum)
-                        },
-                        onInspectBadge = { badge ->
-                            inspectedBadge = badge
-                        },
-                        onOpenUserBadges = { targetUser ->
-                            inspectedUsername = null
-                            badgesCenterUsername = targetUser
-                            showBadgesCenterSheet = true
-                        }
-                    )
-                }
-
-                if (showLogoutConfirm) LinDoConfirmDialog("退出当前账号？", "本机草稿会保留在当前账号，下次登录后可继续编辑。", "退出登录",
-                    onDismiss = { showLogoutConfirm = false }, onConfirm = {
-                        showLogoutConfirm = false
-                        UserApiKeyAuthManager.logout()
-                        fullUserProfile = null
-                        topics = emptyList()
-                        activeTopicDetail = null
-                        activeTopicSummary = null
-                        mobileShowingDetail = false
-                        currentTab = MainTab.HOME
-                    })
-
                 if (showGlobalSearchSheet) {
                     GlobalSearchModalSheet(
                         initialQuery = searchQuery,
@@ -1760,33 +1804,6 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                             openTopicById(tid, title, postNum)
                         }
                     )
-                }
-
-                if (showCreateTopicSheet) {
-                    CreateTopicModalSheet(
-                        initialCategoryId = pendingNewTopicDraft?.categoryId ?: selectedCategoryId ?: 4,
-                        initialDraft = pendingNewTopicDraft,
-                        onDismiss = {
-                            showCreateTopicSheet = false
-                            pendingNewTopicDraft = null
-                        },
-                        onTopicCreated = { newTopicId, title ->
-                            showCreateTopicSheet = false
-                            pendingNewTopicDraft = null
-                            loadTopics(currentSort, selectedCategoryId)
-                            openTopicById(newTopicId, title)
-                        }
-                    )
-                }
-
-                pendingEditDraft?.let { draft ->
-                    ComposerSheet(ComposerAction.EDIT, topicId = draft.topicId.takeIf { it > 0 }, topicTitle = draft.title,
-                        initialDraft = draft, onDismiss = { pendingEditDraft = null }, onPublished = { result ->
-                            result.post?.let { updated -> activeTopicDetail = activeTopicDetail?.let { detail ->
-                                detail.copy(posts = detail.posts.map { if (it.id == updated.id) it.copy(raw = updated.raw, cookedHtml = updated.cookedHtml) else it })
-                            } }
-                            pendingEditDraft = null
-                        })
                 }
 
                 if (showNotificationsSheet) {
@@ -1800,7 +1817,6 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                             if (tid > 0) openTopicById(tid, title, postNum)
                         },
                         onInspectUser = { uname ->
-                            showNotificationsSheet = false
                             inspectedUsername = uname
                         }
                     )
@@ -1858,22 +1874,6 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                     )
                 }
 
-                if (showPrivateMessagesSheet) {
-                    val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
-                    UserPrivateMessagesSheet(
-                        username = uname,
-                        initialRecipient = pmInitialRecipient,
-                        onDismiss = {
-                            showPrivateMessagesSheet = false
-                            pmInitialRecipient = null
-                        },
-                        onSelectMessageTopic = { topic ->
-                            showPrivateMessagesSheet = false
-                            openTopic(topic)
-                        }
-                    )
-                }
-
                 if (showEditProfileSheet) {
                     val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
                     EditProfileModalSheet(
@@ -1923,6 +1923,120 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                         onDismiss = { showAuthSheet = false }
                     )
                 }
+
+                inspectedUsername?.let { uname ->
+                    PublicUserCardSheet(
+                        username = uname,
+                        onDismiss = { inspectedUsername = null },
+                        onSendPrivateMessage = { targetUser ->
+                            pmInitialRecipient = targetUser
+                            showPrivateMessagesSheet = true
+                        },
+                        onSelectTopicId = { tid, title, postNum ->
+                            inspectedUsername = null
+                            openTopicById(tid, title, postNum)
+                        },
+                        onInspectBadge = { badge ->
+                            inspectedBadge = badge
+                        },
+                        onOpenUserBadges = { targetUser ->
+                            badgesCenterUsername = targetUser
+                            showBadgesCenterSheet = true
+                        }
+                    )
+                }
+
+                if (showPrivateMessagesSheet) {
+                    val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
+                    UserPrivateMessagesSheet(
+                        username = uname,
+                        initialRecipient = pmInitialRecipient,
+                        onDismiss = {
+                            showPrivateMessagesSheet = false
+                            pmInitialRecipient = null
+                        },
+                        onSelectMessageTopic = { topic ->
+                            showPrivateMessagesSheet = false
+                            inspectedUsername = null
+                            openTopic(topic)
+                        }
+                    )
+                }
+
+                if (showBadgesCenterSheet) {
+                    CommunityBadgesSheet(
+                        targetUsername = badgesCenterUsername ?: fullUserProfile?.username ?: currentUser?.username.orEmpty(),
+                        currentUserTitle = if (badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)) fullUserProfile?.title ?: currentUser?.userTitle.orEmpty() else "",
+                        initialEarnedBadges = if (badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)) fullUserProfile?.badges.orEmpty() else emptyList(),
+                        onDismiss = { showBadgesCenterSheet = false },
+                        onInspectBadge = { badge ->
+                            inspectedBadge = badge
+                        }
+                    )
+                }
+
+                inspectedBadge?.let { badge ->
+                    BadgeDetailBottomSheet(
+                        badge = badge,
+                        currentUsername = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
+                        currentUserTitle = fullUserProfile?.title ?: currentUser?.userTitle.orEmpty(),
+                        isAuthorized = isAuthorized,
+                        onDismiss = { inspectedBadge = null },
+                        onTitleUpdated = {
+                            syncUserProfile()
+                        },
+                        onInspectUser = { uname ->
+                            inspectedBadge = null
+                            showBadgesCenterSheet = false
+                            inspectedUsername = uname
+                        },
+                        onSelectTopicId = { tid, title, postNum ->
+                            inspectedBadge = null
+                            showBadgesCenterSheet = false
+                            inspectedUsername = null
+                            openTopicById(tid, title, postNum)
+                        }
+                    )
+                }
+
+                if (showCreateTopicSheet) {
+                    CreateTopicModalSheet(
+                        initialCategoryId = pendingNewTopicDraft?.categoryId ?: selectedCategoryId ?: 4,
+                        initialDraft = pendingNewTopicDraft,
+                        onDismiss = {
+                            showCreateTopicSheet = false
+                            pendingNewTopicDraft = null
+                        },
+                        onTopicCreated = { newTopicId, title ->
+                            showCreateTopicSheet = false
+                            pendingNewTopicDraft = null
+                            loadTopics(currentSort, selectedCategoryId)
+                            openTopicById(newTopicId, title)
+                        }
+                    )
+                }
+
+                pendingEditDraft?.let { draft ->
+                    ComposerSheet(ComposerAction.EDIT, topicId = draft.topicId.takeIf { it > 0 }, topicTitle = draft.title,
+                        initialDraft = draft, onDismiss = { pendingEditDraft = null }, onPublished = { result ->
+                            result.post?.let { updated -> activeTopicDetail = activeTopicDetail?.let { detail ->
+                                detail.copy(posts = detail.posts.map { if (it.id == updated.id) it.copy(raw = updated.raw, cookedHtml = updated.cookedHtml) else it })
+                            } }
+                            pendingEditDraft = null
+                        })
+                }
+
+                if (showLogoutConfirm) LinDoConfirmDialog("退出当前账号？", "本机草稿会保留在当前账号，下次登录后可继续编辑。", "退出登录",
+                    onDismiss = { showLogoutConfirm = false }, onConfirm = {
+                        showLogoutConfirm = false
+                        UserApiKeyAuthManager.logout()
+                        fullUserProfile = null
+                        topics = emptyList()
+                        activeTopicDetail = null
+                        activeTopicSummary = null
+                        mobileShowingDetail = false
+                        currentTab = MainTab.HOME
+                    })
             }
         }
     }
@@ -3864,6 +3978,7 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -4785,6 +4900,7 @@ internal fun CommunityTopicReaderPane(
                 }
             }
         )
+    }
     }
 }
 
@@ -9082,7 +9198,6 @@ private fun BadgeDetailBottomSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val catalogBadge = remember(badge) {
         UniversalBadgeEngine.lookupOfficialBadge(id = badge.id, name = badge.name, slug = badge.slug)
@@ -9129,25 +9244,27 @@ private fun BadgeDetailBottomSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
+        LinDoPageTopBar(
+            title = "徽章详情",
+            onBack = onDismiss
+        )
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 320.dp, max = 640.dp)
-                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .fillMaxSize()
+                .padding(horizontal = 20.dp, vertical = 14.dp)
         ) {
-            // 1. 顶部勋章英雄区：大尺寸等级圆章 + 名称 + 等级胶囊 + 重复次数 + 关闭键
+            // 1. 顶部勋章英雄区：大尺寸等级圆章 + 名称 + 等级胶囊 + 重复次数
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(50.dp)
+                        .size(52.dp)
                         .clip(RoundedCornerShape(14.dp))
                         .background(tierColor.copy(alpha = 0.14f))
                         .border(0.8.dp, tierColor.copy(alpha = 0.38f), RoundedCornerShape(14.dp)),
@@ -9160,7 +9277,7 @@ private fun BadgeDetailBottomSheet(
                         imageVector = fallbackIcon,
                         contentDescription = effectiveBadge.name,
                         tint = tierColor,
-                        modifier = Modifier.size(25.dp)
+                        modifier = Modifier.size(26.dp)
                     )
                 }
 
@@ -9271,21 +9388,6 @@ private fun BadgeDetailBottomSheet(
                             }
                         }
                     }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .clickable { onDismiss() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭",
-                        modifier = Modifier.size(17.dp),
-                        tint = palette.inkSecondary
-                    )
                 }
             }
 
@@ -9447,13 +9549,12 @@ private fun BadgeDetailBottomSheet(
             } else {
                 LazyColumn(
                     modifier = Modifier
-                        .weight(1f, fill = false)
-                        .fillMaxWidth()
-                        .heightIn(max = 280.dp),
+                        .weight(1f)
+                        .fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     contentPadding = PaddingValues(bottom = 16.dp)
                 ) {
-                    itemsIndexed(grantees.take(15), key = { idx, g -> "${g.id}_${g.userId}_$idx" }) { _, grantee ->
+                    itemsIndexed(grantees, key = { idx, g -> "${g.id}_${g.userId}_$idx" }) { _, grantee ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -9532,18 +9633,12 @@ private fun BadgeDetailBottomSheet(
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(10.dp))
         }
     }
 }
 
 /**
- * 原生全站徽章墙与个人已获徽章中心抽屉 (`CommunityBadgesSheet`)
- * 完整对齐 Linux.do Web `/badges` 与 `/u/{username}/badges`：
- * 1. 双模式切换：「已获徽章」与「全站徽章墙（金/银/铜分级）」
- * 2. 支持按「全部 / 金徽章 / 银徽章 / 铜徽章 / 可设头衔」筛选，以及按名称/描述实时搜索（如：种子用户、全年不落、不二之选、Only Apple Can Do）
- * 3. 点击任意徽章即弹出 `BadgeDetailBottomSheet`，查看详细获取规则、最近获得者并支持一键设为个人头衔
+ * 原生全站徽章墙与个人已获徽章中心独立页面 (`CommunityBadgesSheet`)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -9555,7 +9650,6 @@ private fun CommunityBadgesSheet(
     onInspectBadge: (GrantedBadge) -> Unit
 ) {
     val palette = LocalPalette.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = 已获徽章, 1 = 全站徽章墙
     var tierFilter by remember { mutableIntStateOf(0) } // 0=全部, 1=金徽章, 2=银徽章, 3=铜徽章, 4=可设头衔
@@ -9631,56 +9725,19 @@ private fun CommunityBadgesSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
+        LinDoPageTopBar(
+            title = if (targetUsername.isNotBlank()) "社区徽章与头衔 (@$targetUsername)" else "LINUX DO 全站徽章墙",
+            onBack = onDismiss
+        )
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 480.dp, max = 690.dp)
+                .fillMaxSize()
                 .padding(horizontal = 18.dp, vertical = 10.dp)
         ) {
-            // 1. 顶栏：标题 + 已获/全站切换 + 关闭
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = LinDoIcons.Trophy,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint = palette.brandGold
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (targetUsername.isNotBlank()) "社区徽章与头衔 (@$targetUsername)" else "LINUX DO 全站徽章墙",
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Box(
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .clickable { onDismiss() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭",
-                        modifier = Modifier.size(17.dp),
-                        tint = palette.inkSecondary
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
             // 2. 主模式切换：已获徽章 vs 全站徽章墙
             Row(
                 modifier = Modifier
@@ -9972,14 +10029,15 @@ private fun ConnectTrustLevelSheet(onDismiss: () -> Unit) {
         finally { isLoading = false }
     }
     LaunchedEffect(Unit) { refresh() }
-    ModalBottomSheet(onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = palette.cardSurface) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Connect", fontSize = 18.sp, fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary, modifier = Modifier.weight(1f))
+    LinDoFullScreenPage(onBack = onDismiss, containerColor = palette.cardSurface) {
+        LinDoPageTopBar(
+            title = "Connect",
+            onBack = onDismiss,
+            trailingContent = {
                 TextButton(enabled = !isLoading, onClick = { scope.launch { refresh() } }) { Text("刷新") }
             }
+        )
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp)) {
             Text(report?.subtitle ?: "正在查询 Connect 官方页面", color = palette.inkSecondary,
                 fontSize = 12.sp, lineHeight = 19.sp)
             Spacer(Modifier.height(12.dp))
@@ -10043,26 +10101,14 @@ private fun NetworkDiagnosticsSheet(
     }
     var isProbing by remember { mutableStateOf(false) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 12.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "线路加速与节点优选",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary,
-                    modifier = Modifier.weight(1f)
-                )
+        LinDoPageTopBar(
+            title = "线路加速与节点优选",
+            onBack = onDismiss,
+            trailingContent = {
                 TextButton(
                     enabled = !isProbing,
                     onClick = {
@@ -10082,8 +10128,14 @@ private fun NetworkDiagnosticsSheet(
                     )
                 }
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp, vertical = 12.dp)
+        ) {
+            Spacer(modifier = Modifier.height(4.dp))
 
             candidates.forEachIndexed { index, node ->
                 Row(
@@ -10120,7 +10172,7 @@ private fun NetworkDiagnosticsSheet(
 }
 
 /**
- * QQ音乐级极简无框账号登录与切换抽屉（全圆角胶囊按钮 + 纯线性图标）
+ * 极简无框账号登录与切换独立页面
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -10136,14 +10188,18 @@ private fun UserApiKeyAuthSheet(
     val primaryCapsuleBg = if (palette.isDark) palette.publishBtnBg else Color(0xFF111827)
     val primaryCapsuleFg = if (palette.isDark) palette.publishBtnContent else Color.White
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
+        LinDoPageTopBar(
+            title = if (isAuthorized) "账号与会话管理" else "登录 LINUX DO",
+            onBack = onDismiss
+        )
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 14.dp),
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             LinDoGlassAppIcon(tileSize = 56.dp)
@@ -11860,7 +11916,6 @@ private fun GlobalSearchModalSheet(
     val palette = LocalPalette.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     var query by remember { mutableStateOf(initialQuery) }
     var order by remember { mutableStateOf<String?>(null) } // null=相关性, "latest"=最新, "likes"=最多赞
@@ -11914,41 +11969,19 @@ private fun GlobalSearchModalSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
+        LinDoPageTopBar(
+            title = "全站搜索",
+            onBack = onDismiss
+        )
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 460.dp, max = 680.dp)
-                .padding(horizontal = 18.dp, vertical = 6.dp)
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 10.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "全站搜索",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = "关闭",
-                    fontSize = 13.sp,
-                    color = palette.inkSecondary,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onDismiss() }
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
             // 全圆角胶囊搜索输入框（带键盘 ImeAction.Search、一键清空按钮与右侧金底搜索键，光标与 Placeholder 严格居中同轴）
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -12352,27 +12385,14 @@ private fun UserNotificationsSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 380.dp, max = 620.dp)
-                .padding(horizontal = 18.dp, vertical = 8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "通知消息中心",
-                    fontSize = 17.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary,
-                    modifier = Modifier.weight(1f)
-                )
+        LinDoPageTopBar(
+            title = "通知消息中心",
+            onBack = onDismiss,
+            trailingContent = {
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
@@ -12397,9 +12417,12 @@ private fun UserNotificationsSheet(
                     )
                 }
             }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 10.dp)
+        ) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 val tabs = listOf("全部", "未读", "回复与提及", "获赞")
                 tabs.forEachIndexed { idx, label ->
@@ -12561,25 +12584,19 @@ private fun UserActivitiesSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
+        LinDoPageTopBar(
+            title = "我的动态与历史互动",
+            onBack = onDismiss
+        )
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 380.dp, max = 620.dp)
-                .padding(horizontal = 18.dp, vertical = 8.dp)
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 10.dp)
         ) {
-            Text(
-                text = "我的动态与历史互动",
-                fontSize = 17.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 val filters = listOf("全部动态" to null, "发布主帖" to "4", "我的回复" to "5", "送出的赞" to "1")
                 filters.forEach { (label, code) ->
@@ -12674,7 +12691,7 @@ private fun UserActivitiesSheet(
 }
 
 /**
- * 官方功能 6：我的书签收藏抽屉 (`/u/{username}/bookmarks.json`)
+ * 官方功能 6：我的书签收藏独立页面 (`/u/{username}/bookmarks.json`)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -12703,24 +12720,19 @@ private fun UserBookmarksSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
+        LinDoPageTopBar(
+            title = "我的书签与收藏",
+            onBack = onDismiss
+        )
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 340.dp, max = 580.dp)
+                .fillMaxSize()
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
-            Text(
-                text = "我的书签与收藏",
-                fontSize = 17.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
             if (isLoading) {
                 Box(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -12792,7 +12804,7 @@ private fun UserBookmarksSheet(
 }
 
 /**
- * 官方功能 7：站内私信箱与发送私信抽屉 (`/topics/private-messages/{username}.json` + `archetype=private_message`)
+ * 官方功能 7：站内私信箱与发送私信独立页面 (`/topics/private-messages/{username}.json` + `archetype=private_message`)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -12837,26 +12849,19 @@ internal fun UserPrivateMessagesSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
+        LinDoPageTopBar(
+            title = "站内私信中心",
+            onBack = onDismiss
+        )
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 380.dp, max = 620.dp)
-                .windowInsetsPadding(WindowInsets.ime)
-                .padding(horizontal = 18.dp, vertical = 8.dp)
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 10.dp)
         ) {
-            Text(
-                text = "站内私信中心",
-                fontSize = 17.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 val tabs = listOf("收件箱" to 0, "已发送" to 1, "+ 写私信" to 2)
                 tabs.forEach { (label, idx) ->
@@ -12979,7 +12984,6 @@ private fun PublicUserCardSheet(
     onOpenUserBadges: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var cardProfile by remember(username) { mutableStateOf<UserFullProfileSummary?>(null) }
     var allActions by remember(username) { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var topicActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
@@ -13039,23 +13043,44 @@ private fun PublicUserCardSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
         val p = cardProfile
+        LinDoPageTopBar(
+            title = "用户主页",
+            subtitle = "@$username",
+            onBack = onDismiss,
+            trailingContent = {
+                Box(
+                    modifier = Modifier
+                        .height(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(palette.tonalPill)
+                        .clickable { onSendPrivateMessage(username) }
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "发私信",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.brandGold
+                    )
+                }
+            }
+        )
         Column(
             modifier = Modifier
+                .weight(1f)
                 .fillMaxWidth()
-                .fillMaxHeight(0.84f)
-                .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
-            // 顶部固定头部：头像 + 昵称/等级/头衔 + 发私信 + 关闭
+            // 顶部固定头部：头像 + 昵称/等级/头衔
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 20.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
+                    .padding(start = 20.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 GoogleAccountRingAvatar(
@@ -13141,25 +13166,6 @@ private fun PublicUserCardSheet(
                             )
                         }
                     }
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                Box(
-                    modifier = Modifier
-                        .height(34.dp)
-                        .clip(RoundedCornerShape(9.dp))
-                        .background(palette.tonalPill)
-                        .clickable { onSendPrivateMessage(username) }
-                        .padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "发私信",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.brandGold
-                    )
                 }
             }
 
@@ -13592,29 +13598,15 @@ private fun EditProfileModalSheet(
     var isSaving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.ime)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 12.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "编辑个人资料 (@$username)",
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-
+        LinDoPageTopBar(
+            title = "编辑个人资料",
+            subtitle = "@$username",
+            onBack = onDismiss,
+            trailingContent = {
                 Box(
                     modifier = Modifier
                         .height(34.dp)
@@ -13649,13 +13641,18 @@ private fun EditProfileModalSheet(
                     )
                 }
             }
-
+        )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+        ) {
             if (saveError != null) {
-                Spacer(modifier = Modifier.height(8.dp))
                 LinDoFeedbackRow(message = saveError!!, state = LinDoMascotState.NetworkError)
+                Spacer(modifier = Modifier.height(12.dp))
             }
-
-            Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = name,
@@ -13666,7 +13663,7 @@ private fun EditProfileModalSheet(
                 shape = RoundedCornerShape(12.dp)
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             OutlinedTextField(
                 value = title,
@@ -13677,7 +13674,7 @@ private fun EditProfileModalSheet(
                 shape = RoundedCornerShape(12.dp)
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             OutlinedTextField(
                 value = bio,
@@ -13685,7 +13682,7 @@ private fun EditProfileModalSheet(
                 label = { Text("个人简介 (Bio)") },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(110.dp),
+                    .height(140.dp),
                 shape = RoundedCornerShape(12.dp)
             )
 
@@ -13695,7 +13692,7 @@ private fun EditProfileModalSheet(
 }
 
 /**
- * 官方功能 10：阅读历史抽屉 (`GET /read.json`)
+ * 官方功能 10：阅读历史独立页面 (`GET /read.json`)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -13723,24 +13720,20 @@ private fun UserReadHistorySheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
+    LinDoFullScreenPage(
+        onBack = onDismiss,
         containerColor = palette.cardSurface
     ) {
+        LinDoPageTopBar(
+            title = "阅读历史",
+            onBack = onDismiss
+        )
         Column(
             modifier = Modifier
+                .weight(1f)
                 .fillMaxWidth()
-                .heightIn(min = 360.dp, max = 600.dp)
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
-            Text(
-                text = "阅读历史",
-                fontSize = 17.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.inkPrimary
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
             if (isLoading) {
                 Box(
                     modifier = Modifier.weight(1f).fillMaxWidth(),

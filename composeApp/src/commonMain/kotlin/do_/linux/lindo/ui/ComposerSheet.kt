@@ -141,10 +141,6 @@ internal fun ComposerSheet(
         if (busy) return
         if (hasChanges) showExit = true else onDismiss()
     }
-    val latestClose by rememberUpdatedState(::requestClose)
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = {
-        if (it == SheetValue.Hidden) { latestClose(); false } else true
-    })
 
     LaunchedEffect(key, prepareRetry) {
         prepared = false
@@ -263,19 +259,12 @@ internal fun ComposerSheet(
         else -> null
     }
 
-    ModalBottomSheet(
-        onDismissRequest = ::requestClose,
-        sheetState = sheetState,
-        dragHandle = null,
-        containerColor = palette.cardSurface,
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
+    LinDoFullScreenPage(
+        onBack = ::requestClose,
+        containerColor = palette.cardSurface
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.95f)
-                .windowInsetsPadding(WindowInsets.ime)
-                .windowInsetsPadding(WindowInsets.navigationBars)
+            modifier = Modifier.fillMaxSize()
         ) {
             // ==================== 1. 一体化极简对齐顶栏 (48dp · 统一无底色框纯图标设计) ====================
             Row(
@@ -285,7 +274,7 @@ internal fun ComposerSheet(
                     .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 左侧：关闭图标按钮（无底色无边框，与详情页顶栏及下方工具栏严格统一）
+                // 左侧：返回图标按钮（无底色无边框，与详情页顶栏及下方工具栏严格统一）
                 Box(
                     modifier = Modifier
                         .size(36.dp)
@@ -294,8 +283,8 @@ internal fun ComposerSheet(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭",
+                        imageVector = LinDoIcons.ArrowLeft,
+                        contentDescription = "返回",
                         tint = palette.inkPrimary,
                         modifier = Modifier.size(18.5.dp)
                     )
