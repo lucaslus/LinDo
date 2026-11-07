@@ -1837,7 +1837,8 @@ kZC8lQg1
         categoryId: Int? = null,
         page: Int = 0,
         tag: String? = null,
-        topPeriod: String? = null
+        topPeriod: String? = null,
+        background: Boolean = false
     ): List<TopicSummary> = withContext(Dispatchers.IO) {
         val basePath = when {
             !tag.isNullOrBlank() -> {
@@ -1860,7 +1861,8 @@ kZC8lQg1
         }
         val sep = if (basePath.contains("?")) "&" else "?"
         val url = "https://linux.do/${basePath.trimStart('/')}$sep${queryParams.joinToString("&")}"
-        val root = readApiObject(executeHttp(url = url, method = "GET", preserveFailure = true))
+        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
+        val root = readApiObject(executeHttp(url = url, extraHeaders = headers, preserveFailure = true))
         (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
         parseTopicListRoot(root)
     }
@@ -1988,8 +1990,9 @@ kZC8lQg1
      * 2. `/u/{username}.json`（获取 bio_excerpt、title、custom_fields、badge_count）
      * 3. `/u/{username}/summary.json`（获取 days_visited、time_read、posts_read_count、likes_received、likes_given、topic_count、post_count、badges）
      */
-    suspend fun fetchCurrentUserProfile(): UserFullProfileSummary? = withContext(Dispatchers.IO) {
+    suspend fun fetchCurrentUserProfile(background: Boolean = false): UserFullProfileSummary? = withContext(Dispatchers.IO) {
         val generation = UserApiKeyAuthManager.sessionGeneration
+        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         var currentUsername = UserApiKeyAuthManager.currentUser?.username?.takeIf {
             it.isNotBlank() && it != "linuxdo_user"
         }
@@ -2002,7 +2005,7 @@ kZC8lQg1
         var unreadNotifs = 0
 
         // 1. 探测 /session/current.json 获取最权威的当前登录态
-        val sessionRes = executeHttp("https://linux.do/session/current.json", method = "GET")
+        val sessionRes = executeHttp("https://linux.do/session/current.json", extraHeaders = headers)
         if (sessionRes != null && sessionRes.second.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(sessionRes.second).jsonObject
@@ -2049,8 +2052,8 @@ kZC8lQg1
 
         // 2 & 3. 并发拉取 /u/{username}.json 与 /u/{username}/summary.json，将个人中心同步耗时缩短 50%+
         val (userRes, summaryRes) = coroutineScope {
-            val dUser = async { executeHttp("https://linux.do/u/$uname.json", method = "GET") }
-            val dSummary = async { executeHttp("https://linux.do/u/$uname/summary.json", method = "GET") }
+            val dUser = async { executeHttp("https://linux.do/u/$uname.json", extraHeaders = headers) }
+            val dSummary = async { executeHttp("https://linux.do/u/$uname/summary.json", extraHeaders = headers) }
             dUser.await() to dSummary.await()
         }
 

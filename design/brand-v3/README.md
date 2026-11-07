@@ -3,6 +3,8 @@
 本轮最终方案是透明底路径 SVG，保留棕发、狐耳、金瞳、冕冠与黑金服饰。图形不包含截图、文字贴纸、背景板或内嵌 bitmap。
 
 - `lindo-mark.svg`：应用图标与品牌字标的头像。
+- `expressions/`：叠加在同一头像上的四种表情。启动器与首页使用同一组路径。
+- `linuxdo-mark.svg`：按 [LINUX DO 站点图标](https://cdn3.ldstatic.com/original/4X/6/a/6/6a6affc7b1ce8140279e959d32671304db06d5ab.png) 的三色圆标绘制，图标底色由应用提供。
 - `lingdu-welcome.svg`：登录欢迎页、空状态和完成状态。
 - `lingdu-connecting.svg`：加载、刷新和网络异常。
 - `sources/`：内置 imagegen 工具生成的透明 PNG 原稿，仅为设计溯源，不进入 App 资源包。人物参考由用户提供；不代表 LINUX DO 官方设计或背书。
@@ -17,7 +19,7 @@ python3 scripts/generate-brand-vectors.py
 
 脚本仅使用标准库，导出 Compose/Android VectorDrawable 和 adaptive icon 前景。源文件须是扁平 path 或 translate path。每条路径必须低于 30 KB，避免 AAPT 静默写入 STRING_TOO_LARGE。当前矢量经过 vtracer 0.6.15 转换、SVGO 4.1 精度 1 优化，并人工清理欢迎图左侧独立噪点。源 SVG 为后续设计编辑的规范文件。
 
-旧系统 launcher PNG 是最终 SVG 的栅格导出，供 Android 7 等不支持 adaptive icon 的系统使用；主站欢迎图与状态图使用矢量。修改 logo 后也需重导出各 mipmap 密度的方形及圆形图标。
+经典金底保留原有的 Android 7 启动器 PNG。黑白底款由脚本同时导出 adaptive icon 和 Android 7 可用的分层矢量图标。
 
 ## 动效
 

@@ -91,12 +91,10 @@
     <path android:fillColor="#783B0D" android:pathData="M744 771c3 2 3 2 3.6 4.3l.4 2.6c.6 4.2.8 5 4 8.1l4 2c-4 3-5.5 3.5-10.2 4.2l-3.3.5-2.5.3v2l-14 7c-.5-8.4-.4-14.7 4-22 4.2-4.3 8.2-7.2 14-9" android:fillType="nonZero" />
     <path android:fillColor="#E6D975" android:pathData="m448 96 136-.2h19.3l137.6-.2h22.4l31.2-.1c9.8 0 16.3 2 24.4 7.6l2.3 1.4c1.8 1.5 1.8 1.5 3.8 4.5l-10-4v-2l-2.7-.3Q804 101.2 796 99v-1l-348-1z" android:fillType="nonZero" />
     <path android:fillColor="#090100" android:pathData="m1044 1113 2 1-2 4-.6 2.6c-1.4 2.4-1.4 2.4-5.9 3.8l-4.5.6-2-2 2.6-2 3.3-2.4 3.4-2.5c2.7-2.1 2.7-2.1 3.7-3.1" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M418 1214v11h-3l-2 4-2 1c-1.4-8-1.4-8 0-12 5.3-4 5.3-4 7-4m-2 2 1 3Zm-2 3 1 2Zm2 1-1 2h2zm-4 4 1 4Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M887 1137c-27.3 9-27.3 9-40 6v-1h3.3c10.6-.4 19.7-2 29.9-5 3.8-1 3.8-1 6.8 0" android:fillType="nonZero" />
     <path android:fillColor="#070000" android:pathData="M108 661q7.2 5.8 13 13c-4-2-6-3.8-9-7l-2.3-2.2C108 663 108 663 108 661" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m917 1118 2 1v2h-3v2h-2l-1 2-4-1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M889 174h1c1 6.7.8 11.4-1 18-1-4.1-1-7-.6-11.2l.4-3.9z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M424 1214v5h-3l-1 3h-1v-7c4-1 4-1 5-1" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M361 177h1l2 17c-3.3-4.4-3.4-5.5-3.2-10.7v-3.6z" android:fillType="nonZero" />
     <path android:fillColor="#050300" android:pathData="m982 1153 2 1-5.3 3-3 1.8c-2.7 1.2-2.7 1.2-5.7.2l5.9-3 3.3-1.8z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M1079 1057h1v20h-1z" android:fillType="nonZero" />
@@ -104,18 +102,13 @@
     <path android:fillColor="#0B0000" android:pathData="M1109 302c3.6 3.6 4 8.6 4.1 13.5l-.1 2.5h-1l-1.5-6.3-.8-3.6c-.7-3.1-.7-3.1-.7-6.1" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M140 505h1v13h-1c-1.1-9.6-1.1-9.6 0-13" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M1190 782c0 4-1.5 5.1-4 8l-3-1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M965 160v5h-3l-2 2v-5c4-2 4-2 5-2" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M483 1149c4.3.7 8 2.2 12 4-4.7 1.6-7.6-.9-12-3z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M175 1060h1v15h-1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m966 154 3 1v6l-4-1z" android:fillType="nonZero" />
     <path android:fillColor="#090000" android:pathData="m182 1089 6 5-2 1-2-1v-2h-2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M167 568h1l1 12c-2-2-2-2-2.2-4.4z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m111 716 2 1c-2.3 1.6-2.3 1.6-5 3l-3-1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m972 156 3 1v4h-3z" android:fillType="nonZero" />
     <path android:fillColor="#0B0000" android:pathData="m281 1157 7 2-4 1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M957 162h2v5h-2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m835 1112-8 1c4-2 4-2 8-1" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M89 170h2l-1 5h-1z" android:fillType="nonZero" />
     <path android:fillColor="#220900" android:pathData="m288 1160 6 2-3 1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m820 1117 2 2-5 2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m922 1114 2 1-3 3-2-1z" android:fillType="nonZero" />
@@ -130,14 +123,8 @@
     <path android:fillColor="#070000" android:pathData="m1126 710 5 2-2 1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m122 710 2 1-5 2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1131 673 2 1-3 3c0-3 0-3 1-4" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m932 102 3 1v2l-4-2z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m934 100 3 1v2l-4-2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m813 1123 2 1-4 2z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M1085 570h1v6h-1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m142 500 1 2-2 3z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M1166 262h2l-1 3-2-1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m171 138 2 2-1 3z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m928 100 3 1-1 2-2-1z" android:fillType="nonZero" />
     <path android:fillColor="#080000" android:pathData="m277 1155 4 2-4-1z" android:fillType="nonZero" />
     <path android:fillColor="#120A00" android:pathData="m266 1149 4 2-4-1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m894 1132 2 1-4 1z" android:fillType="nonZero" />
@@ -148,9 +135,6 @@
     <path android:fillColor="#000000" android:pathData="M1130 603h5v1h-5z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M1114 323h1v5h-1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="M1113 318h1v5h-1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m985 116 2 1-3 2z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m926 109 3 1-3 1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M928 106h2l1 3h-2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1011 1136 2 1h-3z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1014 1134 2 1h-3z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m455 1134 3 1h-3z" android:fillType="nonZero" />
@@ -165,7 +149,6 @@
     <path android:fillColor="#150000" android:pathData="m1029 1124 2 1h-3z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m343 1124 3 1h-3z" android:fillType="nonZero" />
     <path android:fillColor="#0F0000" android:pathData="m224 1123 3 1h-3z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M931 1123h2v2h-2z" android:fillType="nonZero" />
     <path android:fillColor="#1F0000" android:pathData="m221 1121 3 1h-3z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m218 1119 3 1h-3z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m214 1116 3 1h-3z" android:fillType="nonZero" />
@@ -196,9 +179,6 @@
     <path android:fillColor="#000000" android:pathData="m970 156 1 4Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m875 149 2 1-1 2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m857 120 2 1-1 2z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M925 103h2v2h-2z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M931 99h2v2h-2z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M925 97h2v2h-2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m323 1168 2 2h-2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m889 1134 3 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m816 1121 1 2-2-1z" android:fillType="nonZero" />
@@ -208,9 +188,6 @@
     <path android:fillColor="#000000" android:pathData="m1161 596 3 1Z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m1083 553 1 2-2-1z" android:fillType="nonZero" />
     <path android:fillColor="#150000" android:pathData="m943 248 3 1Z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M925 106h2l-1 2z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="m926 100 1 2-2-1z" android:fillType="nonZero" />
-    <path android:fillColor="#000000" android:pathData="M929 97h2l-1 2z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m411 95 2 1-2 1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m417 89 2 1-2 1z" android:fillType="nonZero" />
     <path android:fillColor="#000000" android:pathData="m613 1174 2 1Z" android:fillType="nonZero" />

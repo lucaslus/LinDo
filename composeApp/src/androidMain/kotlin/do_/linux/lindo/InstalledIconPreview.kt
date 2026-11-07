@@ -1,5 +1,6 @@
 package do_.linux.lindo
 
+import android.content.ComponentName
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.compose.foundation.Image
@@ -15,11 +16,11 @@ private data class IconProbe(val bitmap: Bitmap?, val message: String)
 
 /** Exercises Android's real resource inflater, not Compose's vector parser. Debug entry only. */
 @Composable
-fun InstalledIconPreview() {
+fun InstalledIconPreview(component: ComponentName) {
     val context = LocalContext.current
-    val result = remember<IconProbe> {
+    val result = remember(component) {
         try {
-            val drawable = context.resources.getDrawable(context.applicationInfo.icon, context.theme)
+            val drawable = context.packageManager.getActivityIcon(component)
             val bitmap = Bitmap.createBitmap(432, 432, Bitmap.Config.ARGB_8888)
             drawable.setBounds(0, 0, 432, 432)
             drawable.draw(Canvas(bitmap))

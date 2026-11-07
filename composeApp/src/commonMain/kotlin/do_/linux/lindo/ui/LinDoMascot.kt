@@ -62,7 +62,8 @@ fun LinDoMascot(
     compact: Boolean = false,
     animate: Boolean = true,
     showSpinnerRing: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    useIconArtwork: Boolean = false
 ) {
     val isActivelyLoading = state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing)
     val moving = LocalLinDoAnimations.current && animate &&
@@ -115,19 +116,18 @@ fun LinDoMascot(
         modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        Image(
-            painter = painterResource(art),
-            contentDescription = null,
-            modifier = Modifier
-                .fillMaxSize(1f)
-                .graphicsLayer {
-                    rotationZ = rotation.value
-                    translationX = swayOffsetX.value * density
-                    translationY = bobOffsetY.value * density
-                    transformOrigin = TransformOrigin(0.5f, 0.85f)
-                },
-            contentScale = ContentScale.Fit
-        )
+        val artworkModifier = Modifier.fillMaxSize().graphicsLayer {
+            rotationZ = rotation.value
+            translationX = swayOffsetX.value * density
+            translationY = bobOffsetY.value * density
+            transformOrigin = TransformOrigin(0.5f, 0.85f)
+        }
+        val selected = LocalLinDoAppIcon.current?.artwork
+        if (useIconArtwork && selected != null) {
+            LinDoIconArtworkImage(selected, artworkModifier)
+        } else {
+            Image(painterResource(art), null, artworkModifier, contentScale = ContentScale.Fit)
+        }
     }
 }
 
@@ -189,7 +189,8 @@ fun LinDoLoadingIndicator(
     progress: (() -> Float)? = null,
     label: String = "加载中",
     state: LinDoMascotState = LinDoMascotState.Loading,
-    compactInline: Boolean = false
+    compactInline: Boolean = false,
+    useIconArtwork: Boolean = false
 ) {
     val cleanLabel = remember(label) {
         val stripped = label
@@ -219,7 +220,7 @@ fun LinDoLoadingIndicator(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            LinDoMascot(state = state, compact = true, size = 24.dp, animate = true)
+            LinDoMascot(state = state, compact = true, size = 24.dp, animate = true, useIconArtwork = useIconArtwork)
             Spacer(Modifier.width(7.dp))
             Text(cleanLabel, fontSize = 12.sp, color = color, maxLines = 1)
             Spacer(Modifier.width(4.dp))
@@ -249,7 +250,8 @@ fun LinDoLoadingIndicator(
                     compact = false,
                     size = 56.dp,
                     animate = true,
-                    showSpinnerRing = false
+                    showSpinnerRing = false,
+                    useIconArtwork = useIconArtwork
                 )
                 Spacer(Modifier.height(10.dp))
                 Row(
@@ -282,13 +284,15 @@ fun LinDoStatePanel(
     detail: String? = state.detail,
     onRetry: (() -> Unit)? = null,
     actionLabel: String = "刷新",
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    useIconArtwork: Boolean = false
 ) {
     if (state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing) && onRetry == null) {
         LinDoLoadingIndicator(
             modifier = modifier,
             label = "加载中",
-            state = state
+            state = state,
+            useIconArtwork = useIconArtwork
         )
         return
     }
@@ -302,7 +306,7 @@ fun LinDoStatePanel(
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        LinDoMascot(state = state, size = 60.dp)
+        LinDoMascot(state = state, size = 60.dp, useIconArtwork = useIconArtwork)
         Spacer(Modifier.height(8.dp))
         Text(
             text = displayText,

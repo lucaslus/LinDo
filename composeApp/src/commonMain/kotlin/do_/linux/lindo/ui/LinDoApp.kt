@@ -147,6 +147,8 @@ import do_.linux.lindo.core.model.TopicUser
 import do_.linux.lindo.core.model.UserActivityItem
 import do_.linux.lindo.core.model.UserFullProfileSummary
 import do_.linux.lindo.core.model.UserNotificationItem
+import do_.linux.lindo.core.network.ApiFailureKind
+import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CloudDraftItem
 import do_.linux.lindo.core.network.CloudflareEdgeRacer
@@ -171,6 +173,7 @@ import do_.linux.lindo.ui.components.SmartAvatar
 import do_.linux.lindo.ui.components.UniversalBadgeChip
 import do_.linux.lindo.ui.components.UserTitleTag
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -446,6 +449,7 @@ private fun LinearPulseLoadingFooter(
     moreText: String = "加载更多",
     errorText: String = "网络异常",
     doneText: String = "没有更多了",
+    useIconArtwork: Boolean = false,
     onLoadMore: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -473,7 +477,7 @@ private fun LinearPulseLoadingFooter(
             )
             Spacer(Modifier.width(10.dp))
         }
-        LinDoMascot(state = state, compact = true, size = 22.dp, animate = isLoadingMore)
+        LinDoMascot(state = state, compact = true, size = 22.dp, animate = isLoadingMore, useIconArtwork = useIconArtwork)
         Spacer(Modifier.width(6.dp))
         Text(
             text = when {
@@ -527,7 +531,7 @@ private fun LinearPulseLoadingFooter(
  * 全局统一的屏幕居中零度娘摇摆 Loading 视图
  */
 @Composable
-private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
+private fun LinearShimmerTopicSkeletonList(useIconArtwork: Boolean = false) {
     val palette = LocalPalette.current
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -535,7 +539,8 @@ private fun LinearShimmerTopicSkeletonList(isCompact: Boolean = false) {
     ) {
         LinDoLoadingIndicator(
             color = palette.inkSecondary,
-            label = "加载中"
+            label = "加载中",
+            useIconArtwork = useIconArtwork
         )
     }
 }
@@ -747,7 +752,12 @@ internal fun GoogleAccountRingAvatar(
 }
 
 @Composable
-fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Boolean = true) {
+internal fun LinDoApp(
+    onThemeChanged: (Boolean) -> Unit = {},
+    systemAnimationsEnabled: Boolean = true,
+    appIcon: LinDoAppIcon? = null,
+    onApplyAppIcon: ((LinDoAppIcon) -> Boolean)? = null
+) {
     coil3.compose.setSingletonImageLoaderFactory { context ->
         coil3.ImageLoader.Builder(context)
             .components {
@@ -844,6 +854,8 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
     var showBadgesCenterSheet by remember { mutableStateOf(false) }
     var badgesCenterUsername by remember { mutableStateOf<String?>(null) }
     var showNetworkSheet by remember { mutableStateOf(false) }
+    var showAppIconPage by remember { mutableStateOf(false) }
+    val openAppIconPage: (() -> Unit)? = onApplyAppIcon?.let { { showAppIconPage = true } }
     var showAuthSheet by remember { mutableStateOf(false) }
     var showConnectSheet by remember { mutableStateOf(false) }
     var showGlobalSearchSheet by remember { mutableStateOf(false) }
@@ -870,9 +882,9 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    fun syncUserProfile() {
+    fun syncUserProfile(background: Boolean = false) {
         scope.launch {
-            val profile = LinuxDoRepository.fetchCurrentUserProfile()
+            val profile = LinuxDoRepository.fetchCurrentUserProfile(background = background)
             if (profile != null) {
                 fullUserProfile = profile
             }
@@ -919,31 +931,15 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
             currentPage = 0
             hasMoreTopics = true
             try {
-                var fetched: List<TopicSummary> = emptyList()
-                var lastErr: Throwable? = null
-                for (attempt in 0 until 2) {
-                    try {
-                        fetched = LinuxDoRepository.fetchTopics(
-                            path = sort.apiPath,
-                            categoryId = categoryId,
-                            page = 0,
-                            tag = tag,
-                            topPeriod = if (sort == FeedSortFilter.TOP) topPeriod.apiPeriod else null
-                        )
-                        lastErr = null
-                        break
-                    } catch (ce: kotlinx.coroutines.CancellationException) {
-                        throw ce
-                    } catch (err: Throwable) {
-                        lastErr = err
-                        if (attempt == 0) {
-                            delay(400L)
-                        }
-                    }
-                }
-                if (lastErr != null && fetched.isEmpty()) {
-                    throw lastErr
-                }
+                val fetched = kotlinx.coroutines.withTimeoutOrNull(24_000L) {
+                    LinuxDoRepository.fetchTopics(
+                        path = sort.apiPath,
+                        categoryId = categoryId,
+                        page = 0,
+                        tag = tag,
+                        topPeriod = if (sort == FeedSortFilter.TOP) topPeriod.apiPeriod else null
+                    )
+                } ?: throw ApiReadException(ApiFailureKind.Connection)
                 if (fetched.isNotEmpty()) {
                     val isUnchanged = isManualRefresh &&
                         previousTopId != null &&
@@ -972,13 +968,13 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Throwable) {
+            } catch (error: Exception) {
                 if (topics.isEmpty()) {
-                    feedError = "网络连接异常，请点击下方按钮手动重试"
+                    feedError = (error as? ApiReadException)?.message ?: "加载失败，请重试"
                     hasMoreTopics = false
                 }
             } finally {
-                isLoadingTopics = false
+                if (isActive) isLoadingTopics = false
             }
         }
     }
@@ -1197,7 +1193,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
     LaunchedEffect(Unit) {
         launch { LinuxDoRepository.syncSiteCategories() }
         loadTopics(FeedSortFilter.LATEST, null)
-        syncUserProfile()
+        syncUserProfile(background = true)
     }
 
     LaunchedEffect(isAuthorized) {
@@ -1223,7 +1219,8 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                         categoryId = selectedCategoryId,
                         page = 0,
                         tag = selectedTag,
-                        topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null
+                        topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null,
+                        background = true
                     )
                 } catch (_: Throwable) {
                     emptyList()
@@ -1372,6 +1369,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
         LocalPalette provides palette,
         LocalLinDoAnimations provides (enableAnimations && systemAnimationsEnabled),
         LocalLinDoDarkTheme provides isDarkTheme,
+        LocalLinDoAppIcon provides appIcon,
         LocalFontScale provides fontScale,
         LocalDensity provides scaledDensity
     ) {
@@ -1387,6 +1385,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
 
                     if (!isAuthorized) {
                         GoogleWelcomeLoginScreen(
+                            onOpenAppIcon = openAppIconPage,
                             onPrimaryWebLogin = {
                                 activeWebLoginUrl = "https://linux.do/login"
                             },
@@ -1571,6 +1570,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                         onChangeFontScale = { updateFontScalePref(it) },
                                         onToggleAnimations = { updateAnimationsPref(!enableAnimations) },
                                         onSelectThemeOption = { updateBrandThemeOption(it) },
+                                        onOpenAppIcon = openAppIconPage,
                                         onToggleCompactFeed = { updateCompactFeedMode(!isCompactFeed) },
                                         onOpenNotifications = { currentTab = MainTab.MESSAGES },
                                         onOpenActivities = { showActivitiesSheet = true },
@@ -1756,6 +1756,7 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                                                 onChangeFontScale = { updateFontScalePref(it) },
                                                 onToggleAnimations = { updateAnimationsPref(!enableAnimations) },
                                                 onSelectThemeOption = { updateBrandThemeOption(it) },
+                                                onOpenAppIcon = openAppIconPage,
                                                 onToggleCompactFeed = { updateCompactFeedMode(!isCompactFeed) },
                                                 onOpenNotifications = { currentTab = MainTab.MESSAGES },
                                                 onOpenActivities = { showActivitiesSheet = true },
@@ -1820,6 +1821,14 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
                             )
                         }
                     }
+                }
+
+                if (showAppIconPage && appIcon != null && onApplyAppIcon != null) {
+                    LinDoAppIconPage(
+                        current = appIcon,
+                        onDismiss = { showAppIconPage = false },
+                        onApply = onApplyAppIcon
+                    )
                 }
 
                 if (showGlobalSearchSheet) {
@@ -2933,7 +2942,7 @@ private fun CommunityHomeFeedPane(
                     .nestedScroll(pullNestedScroll)
             ) {
                 if (isLoading && topics.isEmpty()) {
-                    LinearShimmerTopicSkeletonList(isCompact = isCompact)
+                    LinearShimmerTopicSkeletonList(useIconArtwork = true)
                 } else if (topics.isEmpty() && !isLoading) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         LinDoStatePanel(
@@ -2941,7 +2950,8 @@ private fun CommunityHomeFeedPane(
                             title = if (errorMessage != null) "暂时没能加载讨论" else "这里还没有匹配的讨论",
                             detail = errorMessage ?: "换个关键词，或看看其他板块吧",
                             onRetry = onRefresh,
-                            actionLabel = if (errorMessage != null) "重新加载" else "刷新看看"
+                            actionLabel = if (errorMessage != null) "重新加载" else "刷新看看",
+                            useIconArtwork = true
                         )
                     }
                 } else {
@@ -3088,6 +3098,7 @@ private fun CommunityHomeFeedPane(
                                     hasMore = hasMoreTopics,
                                     loadedCount = regularTopics.size,
                                     isError = loadMoreError,
+                                    useIconArtwork = true,
                                     onLoadMore = onLoadMore
                                 )
                             }
@@ -3130,7 +3141,8 @@ private fun CommunityHomeFeedPane(
                                 state = mascotState,
                                 compact = true,
                                 size = 22.dp,
-                                animate = isLoading || showPullOverlay
+                                animate = isLoading || showPullOverlay,
+                                useIconArtwork = true
                             )
                             Text(
                                 text = pillText,
@@ -7554,7 +7566,7 @@ private fun CommunityMessagesScreen(
         if (subTab == 1) {
             // 私信列表与写私信入口
             if (isLoading && privateMessages.isEmpty()) {
-                LinearShimmerTopicSkeletonList(isCompact = true)
+                LinearShimmerTopicSkeletonList()
             } else {
                 LazyColumn(
                     state = pmListState,
@@ -7726,7 +7738,7 @@ private fun CommunityMessagesScreen(
             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
             if (isLoading && notifications.isEmpty()) {
-                LinearShimmerTopicSkeletonList(isCompact = true)
+                LinearShimmerTopicSkeletonList()
             } else {
                 LazyColumn(
                     state = notifListState,
@@ -8081,6 +8093,7 @@ private fun CommunityProfileScreen(
     fullProfile: UserFullProfileSummary?,
     onRefreshProfile: () -> Unit,
     onSelectThemeOption: (BrandThemeOption) -> Unit = {},
+    onOpenAppIcon: (() -> Unit)? = null,
     onToggleCompactFeed: () -> Unit = {},
     onToggleDark: () -> Unit,
     onChangeFontScale: (Float) -> Unit,
@@ -8543,6 +8556,25 @@ private fun CommunityProfileScreen(
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    if (onOpenAppIcon != null) {
+                        val icon = LocalLinDoAppIcon.current ?: LinDoAppIcon.Classic
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(onClick = onOpenAppIcon)
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(LinDoIcons.Image, null, Modifier.size(20.dp), tint = palette.inkSecondary)
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("应用图标", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+                                Text("${icon.artwork.label} · ${icon.background.label}", fontSize = 11.8.sp, color = palette.inkSecondary)
+                            }
+                            LinDoLauncherIconTile(icon, Modifier.size(30.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
                         }
                     }
 
@@ -10303,13 +10335,15 @@ private fun UserApiKeyAuthSheet(
 private fun GoogleWelcomeLoginScreen(
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
-    onToggleDark: () -> Unit = {}
+    onToggleDark: () -> Unit = {},
+    onOpenAppIcon: (() -> Unit)? = null
 ) {
     LinDoWelcomeScreen(
         isDark = LocalPalette.current.isDark,
         onPrimaryWebLogin = onPrimaryWebLogin,
         onBrowserOneClickAuth = onBrowserOneClickAuth,
-        onToggleDark = onToggleDark
+        onToggleDark = onToggleDark,
+        onOpenAppIcon = onOpenAppIcon
     )
 }
 

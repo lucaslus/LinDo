@@ -25,7 +25,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import do_.linux.lindo.ui.components.LinDoIcons
 import lindo.composeapp.generated.resources.Res
-import lindo.composeapp.generated.resources.lindo_brand_mark
 import lindo.composeapp.generated.resources.lindo_mascot_welcome
 import org.jetbrains.compose.resources.painterResource
 
@@ -38,12 +37,11 @@ private fun brandSecondary(dark: Boolean) = if (dark) Color(0xFFB8AFA2) else Col
 /** The exact same vector paths are used by SVG, Compose and Android adaptive icons. */
 @Composable
 internal fun LinDoGlassAppIcon(tileSize: Dp = 84.dp, isCircle: Boolean = false, modifier: Modifier = Modifier) {
-    Image(
-        painter = painterResource(Res.drawable.lindo_brand_mark),
-        contentDescription = "Lindo 零度娘",
+    val icon = LocalLinDoAppIcon.current ?: LinDoAppIcon.Classic
+    LinDoIconArtworkImage(
+        artwork = icon.artwork,
         modifier = modifier.size(tileSize).clip(if (isCircle) CircleShape else RoundedCornerShape(tileSize * 0.25f))
-            .background(BrandGold).padding(tileSize * 0.07f),
-        contentScale = ContentScale.Fit
+            .background(icon.background.color).padding(tileSize * 0.07f)
     )
 }
 
@@ -91,11 +89,9 @@ fun LinDoBrandWordmark(
             modifier = Modifier.size(iconSize),
             contentAlignment = Alignment.Center
         ) {
-            Image(
-                painter = painterResource(Res.drawable.lindo_brand_mark),
-                contentDescription = "零度娘",
-                modifier = Modifier.size(iconSize * 1.12f),
-                contentScale = ContentScale.Fit
+            LinDoIconArtworkImage(
+                artwork = LocalLinDoAppIcon.current?.artwork ?: LinDoIconArtwork.Classic,
+                modifier = Modifier.size(iconSize)
             )
         }
         Row(
@@ -126,16 +122,27 @@ internal fun LinDoWelcomeScreen(
     isDark: Boolean,
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
-    onToggleDark: () -> Unit
+    onToggleDark: () -> Unit,
+    onOpenAppIcon: (() -> Unit)? = null
 ) {
     BoxWithConstraints(Modifier.fillMaxSize().background(brandCanvas(isDark))
         .windowInsetsPadding(WindowInsets.statusBars).windowInsetsPadding(WindowInsets.navigationBars)) {
-        val heroSize = if (maxHeight < 660.dp) 212.dp else 264.dp
+        val artwork = LocalLinDoAppIcon.current?.artwork
+        val heroSize = if (artwork == null) {
+            if (maxHeight < 660.dp) 212.dp else 264.dp
+        } else {
+            if (maxHeight < 660.dp) 176.dp else 212.dp
+        }
         Column(Modifier.align(Alignment.Center).widthIn(max = 440.dp).fillMaxSize()
             .padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 16.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-                LinDoBrandWordmark(isDark = isDark)
-                Spacer(Modifier.weight(1f))
+                LinDoBrandWordmark(isDark = isDark, modifier = Modifier.weight(1f))
+                if (onOpenAppIcon != null) {
+                    IconButton(onClick = onOpenAppIcon, modifier = Modifier.size(48.dp)) {
+                        Icon(LinDoIcons.Image, contentDescription = "应用图标",
+                            tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
+                    }
+                }
                 IconButton(onClick = onToggleDark, modifier = Modifier.size(48.dp)) {
                     Icon(if (isDark) LinDoIcons.Sun else LinDoIcons.Moon,
                         contentDescription = if (isDark) "切换至浅色模式" else "切换至深色模式",
@@ -145,8 +152,12 @@ internal fun LinDoWelcomeScreen(
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    Image(painterResource(Res.drawable.lindo_mascot_welcome), contentDescription = "零度娘向你挥手",
-                        modifier = Modifier.size(heroSize), contentScale = ContentScale.Fit)
+                    if (artwork != null) {
+                        LinDoIconArtworkImage(artwork, Modifier.size(heroSize))
+                    } else {
+                        Image(painterResource(Res.drawable.lindo_mascot_welcome), "零度娘向你挥手",
+                            Modifier.size(heroSize), contentScale = ContentScale.Fit)
+                    }
                     Spacer(Modifier.height(20.dp))
                     Text("你好，佬友。", fontSize = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp,
                         color = brandText(isDark), textAlign = TextAlign.Center, lineHeight = 36.sp)
