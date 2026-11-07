@@ -872,12 +872,13 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
 
     fun syncUserProfile() {
         scope.launch {
-            launch { runCatching { LinuxDoRepository.syncSiteEmojis() } }
-            launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
             val profile = LinuxDoRepository.fetchCurrentUserProfile()
             if (profile != null) {
                 fullUserProfile = profile
             }
+            delay(1800L)
+            launch { runCatching { LinuxDoRepository.syncSiteEmojis() } }
+            launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
         }
     }
 
@@ -918,13 +919,31 @@ fun LinDoApp(onThemeChanged: (Boolean) -> Unit = {}, systemAnimationsEnabled: Bo
             currentPage = 0
             hasMoreTopics = true
             try {
-                val fetched = LinuxDoRepository.fetchTopics(
-                    path = sort.apiPath,
-                    categoryId = categoryId,
-                    page = 0,
-                    tag = tag,
-                    topPeriod = if (sort == FeedSortFilter.TOP) topPeriod.apiPeriod else null
-                )
+                var fetched: List<TopicSummary> = emptyList()
+                var lastErr: Throwable? = null
+                for (attempt in 0 until 2) {
+                    try {
+                        fetched = LinuxDoRepository.fetchTopics(
+                            path = sort.apiPath,
+                            categoryId = categoryId,
+                            page = 0,
+                            tag = tag,
+                            topPeriod = if (sort == FeedSortFilter.TOP) topPeriod.apiPeriod else null
+                        )
+                        lastErr = null
+                        break
+                    } catch (ce: kotlinx.coroutines.CancellationException) {
+                        throw ce
+                    } catch (err: Throwable) {
+                        lastErr = err
+                        if (attempt == 0) {
+                            delay(400L)
+                        }
+                    }
+                }
+                if (lastErr != null && fetched.isEmpty()) {
+                    throw lastErr
+                }
                 if (fetched.isNotEmpty()) {
                     val isUnchanged = isManualRefresh &&
                         previousTopId != null &&

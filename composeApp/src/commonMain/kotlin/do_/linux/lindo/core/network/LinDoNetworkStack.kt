@@ -652,6 +652,97 @@ object LocalDirectConnectTunnel {
     @Volatile
     var localEchHttpsPort: Int = 0
 
+    @Volatile
+    var systemVpnActive: Boolean = false
+        private set
+
+    @Volatile
+    var vpnDirectVerified: Boolean = false
+        private set
+
+    @Volatile
+    private var vpnProbeEvaluated: Boolean = false
+
+    private val vpnProbeLock = Any()
+
+    fun onNetworkEnvironmentChanged(vpnActive: Boolean) {
+        val changed = systemVpnActive != vpnActive
+        systemVpnActive = vpnActive
+        if (!vpnActive) {
+            vpnDirectVerified = false
+            vpnProbeEvaluated = true
+            if (changed) {
+                LinuxDoRepository.clearDnsCaches()
+            }
+            return
+        }
+        if (changed || !vpnProbeEvaluated) {
+            vpnProbeEvaluated = false
+            LinuxDoRepository.clearDnsCaches()
+            tunnelExecutor.execute {
+                ensureVpnDirectEvaluated()
+            }
+        }
+    }
+
+    private fun resolveVpnDirectCandidates(host: String, port: Int): List<java.net.InetSocketAddress> {
+        val sysAddrs = runCatching { Dns.SYSTEM.lookup(host) }
+            .getOrDefault(emptyList())
+            .filterNot { addr -> LinuxDoRepository.isIpPoisoned(addr.hostAddress.orEmpty()) }
+        val fakeIps = sysAddrs.filter { addr ->
+            val ip = addr.hostAddress.orEmpty()
+            ip.startsWith("198.18.") || ip.startsWith("198.19.")
+        }
+        if (fakeIps.isNotEmpty()) {
+            return fakeIps.map { java.net.InetSocketAddress(it, port) }
+        }
+        val staticCleanAddrs = listOf("104.20.16.234", "172.66.166.61").mapNotNull { ip ->
+            runCatching { InetAddress.getByName(ip) }.getOrNull()
+        }
+        val merged = (sysAddrs + staticCleanAddrs).distinct().take(3)
+        return if (merged.isNotEmpty()) {
+            merged.map { java.net.InetSocketAddress(it, port) }
+        } else {
+            listOf(java.net.InetSocketAddress(host, port))
+        }
+    }
+
+    private fun ensureVpnDirectEvaluated(): Boolean {
+        if (!systemVpnActive) {
+            vpnDirectVerified = false
+            vpnProbeEvaluated = true
+            return false
+        }
+        if (vpnProbeEvaluated) return vpnDirectVerified
+        synchronized(vpnProbeLock) {
+            if (vpnProbeEvaluated) return vpnDirectVerified
+            val candidates = resolveVpnDirectCandidates("linux.do", 443)
+            val sslFactory = javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory
+            var ok = false
+            for (addr in candidates.take(2)) {
+                try {
+                    java.net.Socket().use { raw ->
+                        raw.tcpNoDelay = true
+                        raw.connect(addr, 1100)
+                        raw.soTimeout = 1200
+                        (sslFactory.createSocket(raw, "linux.do", 443, true) as javax.net.ssl.SSLSocket).use { ssl ->
+                            val params = ssl.sslParameters
+                            params.serverNames = listOf(javax.net.ssl.SNIHostName("linux.do"))
+                            ssl.sslParameters = params
+                            ssl.startHandshake()
+                            ok = true
+                        }
+                    }
+                    if (ok) break
+                } catch (_: Throwable) {
+                }
+            }
+            vpnDirectVerified = systemVpnActive && ok
+            vpnProbeEvaluated = true
+            return vpnDirectVerified
+        }
+    }
+
     fun isEchManagedHost(host: String?): Boolean {
         val h = host?.trim()?.lowercase()?.trimEnd('.') ?: return false
         return h == "linux.do" ||
@@ -678,6 +769,9 @@ object LocalDirectConnectTunnel {
             serverSocket = srv
             val port = srv.localPort
             listeningPort = port
+            tunnelExecutor.execute {
+                runCatching { LinuxDoRepository.prewarmEchConfig() }
+            }
             Thread({
                 while (!srv.isClosed) {
                     try {
@@ -763,10 +857,31 @@ object LocalDirectConnectTunnel {
             if (host.isEmpty()) return
 
             val echPort = localEchHttpsPort
-            val routeToLocalEch = port == 443 && echPort > 0 && isEchManagedHost(host)
+            val isManaged = port == 443 && echPort > 0 && isEchManagedHost(host)
+            val preferVpnDirect = isManaged && systemVpnActive && ensureVpnDirectEvaluated()
 
             var connectedSocket: java.net.Socket? = null
-            if (routeToLocalEch) {
+            var routedViaVpnDirect = false
+            var routedViaEch = false
+
+            if (preferVpnDirect) {
+                for (addr in resolveVpnDirectCandidates(host, port)) {
+                    try {
+                        val s = java.net.Socket()
+                        s.tcpNoDelay = true
+                        s.connect(addr, 1500)
+                        connectedSocket = s
+                        routedViaVpnDirect = true
+                        break
+                    } catch (_: Throwable) {
+                    }
+                }
+                if (connectedSocket == null) {
+                    vpnDirectVerified = false
+                }
+            }
+
+            if (connectedSocket == null && isManaged) {
                 val echAddr = java.net.InetSocketAddress("127.0.0.1", echPort)
                 for (attempt in 0 until 15) {
                     try {
@@ -774,6 +889,7 @@ object LocalDirectConnectTunnel {
                         s.tcpNoDelay = true
                         s.connect(echAddr, 1200)
                         connectedSocket = s
+                        routedViaEch = true
                         break
                     } catch (_: Throwable) {
                         if (attempt < 14) {
@@ -783,7 +899,6 @@ object LocalDirectConnectTunnel {
                 }
             }
 
-            val routedViaEch = connectedSocket != null && routeToLocalEch
             if (connectedSocket == null) {
                 val candidateAddresses = runCatching {
                     LinuxDoRepository.resolveHostForDirectConnect(host)
@@ -815,7 +930,7 @@ object LocalDirectConnectTunnel {
             val upIn = upstream.getInputStream()
             val upOut = upstream.getOutputStream()
 
-            if (!routedViaEch) {
+            if (!routedViaEch && !routedViaVpnDirect) {
                 val firstPacket = ByteArray(16384)
                 val firstRead = clientIn.read(firstPacket)
                 if (firstRead <= 0) return
@@ -1130,16 +1245,13 @@ object LinuxDoRepository {
 
     private val dohBootstrapClient: okhttp3.OkHttpClient by lazy {
         okhttp3.OkHttpClient.Builder()
-            .connectTimeout(2500, TimeUnit.MILLISECONDS)
-            .readTimeout(2500, TimeUnit.MILLISECONDS)
-            .socketFactory(TlsRecordFragmentingSocketFactory())
+            .connectTimeout(1500, TimeUnit.MILLISECONDS)
+            .readTimeout(1500, TimeUnit.MILLISECONDS)
             .dns(object : Dns {
                 override fun lookup(hostname: String): List<InetAddress> {
                     val staticIps = when {
-                        hostname.equals("aaa.ddd.oaifree.com", ignoreCase = true) -> oaifreeDohIps
                         hostname.equals("dns.alidns.com", ignoreCase = true) -> aliDohIps
                         hostname.equals("doh.pub", ignoreCase = true) -> dnspodDohIps
-                        hostname.equals("cloudflare-dns.com", ignoreCase = true) -> cleanDohAnycastIps
                         else -> emptyList()
                     }
                     if (staticIps.isNotEmpty()) {
@@ -1155,10 +1267,14 @@ object LinuxDoRepository {
     }
 
     private const val DEFAULT_CLOUDFLARE_ECH_B64 =
-        "AEX+DQBBPwAgACCnVj+GFZ9FYlE7s7N0o/g4xGs1Xupc1SaTdBjpqLyUdgAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+        "AEX+DQBBVgAgACAeeACn4Pv8MXGtNDZHIYaygv7LFVWo5brRBKikvtdBYgAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
 
     @Volatile
     private var cachedEchConfigB64: Pair<Long, String>? = null
+
+    internal fun prewarmEchConfig() {
+        fetchLiveCloudflareEchConfigB64()
+    }
 
     private fun fetchLiveCloudflareEchConfigB64(): String {
         val now = System.currentTimeMillis()
@@ -1167,8 +1283,7 @@ object LinuxDoRepository {
         }
         val echEndpoints = listOf(
             "https://223.5.5.5/resolve?name=cloudflare-ech.com&type=65",
-            "https://223.6.6.6/resolve?name=cloudflare-ech.com&type=65",
-            "https://aaa.ddd.oaifree.com/query-dns?name=linux.do&type=HTTPS"
+            "https://223.6.6.6/resolve?name=cloudflare-ech.com&type=65"
         )
         val echRegex = Regex("""ech="?([A-Za-z0-9+/=_-]{24,})"?""")
         for (endpoint in echEndpoints) {
@@ -1206,16 +1321,12 @@ object LinuxDoRepository {
                 """{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Answer":[]}"""
             }
             else -> {
-                val dohIps = resolveViaEncryptedDoh(host)
-                    .mapNotNull { it.hostAddress?.takeIf { ip -> !isPoisonedIp(ip) } }
-                    .sorted()
                 val preferredIps = if (host == "cloudflare-ech.com") {
                     listOf("104.18.10.118", "104.18.11.118", "104.20.16.234", "172.66.166.61")
                 } else {
                     listOf("104.20.16.234", "172.66.166.61", "104.18.10.118", "104.18.11.118")
                 }
-                val mergedIps = (preferredIps + dohIps).distinct().take(4)
-                val answersJson = mergedIps.joinToString(",") { ip ->
+                val answersJson = preferredIps.joinToString(",") { ip ->
                     """{"name":"$host","type":1,"TTL":300,"data":"$ip"}"""
                 }
                 """{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Answer":[$answersJson]}"""
@@ -1244,7 +1355,7 @@ object LinuxDoRepository {
 
     /**
      * 内置免配置加密 DoH 解析器：
-     * - 优先通过 Cloudflare Anycast IP (`104.16.248.249` / `104.16.249.249`) 直连 `cloudflare-dns.com` 获取 100% 无污染 A 记录；
+     * - 通过国内低延迟 DoH (`1.12.12.12` / `doh.pub`) 获取无污染 A 记录；
      * - 自动过滤全部已知 GFW 投毒黑洞 IP。
      */
     private fun resolveViaEncryptedDoh(hostname: String): List<InetAddress> {
@@ -1255,9 +1366,7 @@ object LinuxDoRepository {
         }
         val dohEndpoints = listOf(
             "https://1.12.12.12/dns-query?name=$key&type=A",
-            "https://doh.pub/dns-query?name=$key&type=A",
-            "https://aaa.ddd.oaifree.com/query-dns?name=$key&type=A",
-            "https://cloudflare-dns.com/dns-query?name=$key&type=A"
+            "https://doh.pub/dns-query?name=$key&type=A"
         )
         for (endpoint in dohEndpoints) {
             try {
