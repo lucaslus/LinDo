@@ -1227,6 +1227,10 @@ object LinuxDoRepository {
                     topicCount = us["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
                     postCount = us["post_count"]?.jsonPrimitive?.intOrNull ?: 0
                 }
+                val summaryBadges = parseUserBadgesFromRoot(root)
+                if (summaryBadges.isNotEmpty()) {
+                    topBadges = (topBadges + summaryBadges).distinctBy { it.id }
+                }
             } catch (_: Throwable) {
             }
         }
@@ -2443,6 +2447,10 @@ object LinuxDoRepository {
                     postCount = us["post_count"]?.jsonPrimitive?.intOrNull ?: 0
                     solvedCount = us["solved_count"]?.jsonPrimitive?.intOrNull ?: 0
                 }
+                val summaryBadges = parseUserBadgesFromRoot(root)
+                if (summaryBadges.isNotEmpty()) {
+                    topBadges = (topBadges + summaryBadges).distinctBy { it.id }
+                }
             } catch (_: Throwable) {
             }
         }
@@ -2498,23 +2506,19 @@ object LinuxDoRepository {
         false
     }
 
-    /**
-     * 获取指定用户的完整已获徽章列表 (`GET /user-badges/{username}.json?grouped=true`)
-     */
-    suspend fun fetchUserBadges(username: String): List<GrantedBadge> = withContext(Dispatchers.IO) {
-        val clean = username.trim().removePrefix("@")
-        if (clean.isBlank()) return@withContext emptyList()
-        val root = readApiObject(
-            executeHttp("https://linux.do/user-badges/$clean.json?grouped=true", method = "GET", preserveFailure = true)
-        )
+    private fun parseUserBadgesFromRoot(root: JsonObject): List<GrantedBadge> {
         val badges = BadgeInjector.readBadgeDefinitions(root["badges"]).associateBy { it.id }
         val topicTitles = (root["topics"] as? JsonArray).orEmpty()
             .mapNotNull { it as? JsonObject }
             .associate { it["id"]?.jsonPrimitive?.intOrNull to it["title"]?.jsonPrimitive?.contentOrNull.orEmpty() }
-        root.requireArray("user_badges").mapNotNull { element ->
+        val userBadgesArr = root["user_badges"] as? JsonArray ?: return emptyList()
+        return userBadgesArr.mapNotNull { element ->
             val grant = element as? JsonObject ?: return@mapNotNull null
             val badgeId = grant["badge_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
-            val badge = badges[badgeId] ?: BadgeInjector.lookupBadgeById(badgeId) ?: return@mapNotNull null
+            val badge = badges[badgeId]
+                ?: BadgeInjector.lookupBadgeById(badgeId)
+                ?: BadgeInjector.parseGrantedBadge(grant, fallbackId = badgeId).takeIf { it.id > 0 }
+                ?: return@mapNotNull null
             val topicId = grant["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
             badge.copy(
                 count = grant["count"]?.jsonPrimitive?.intOrNull ?: 1,
@@ -2527,6 +2531,77 @@ object LinuxDoRepository {
         }.distinctBy { it.first.id }
             .sortedWith(compareBy({ it.second }, { it.first.badgeTypeId }, { it.first.id }))
             .map { it.first }
+    }
+
+    internal suspend fun executeDirectReadFallback(
+        url: String,
+        extraHeaders: Map<String, String> = emptyMap()
+    ): Pair<Int, String>? = withContext(Dispatchers.IO) {
+        try {
+            val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
+            val cookieHeader = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+                .entries
+                .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
+                .filterNot { it.key in cfTlsBoundCookies }
+                .joinToString("; ") { "${it.key}=${it.value.value}" }
+            val requestHeaders = LinkedHashMap<String, String>().apply {
+                put("Accept", "application/json")
+                put("X-Requested-With", "XMLHttpRequest")
+                extraHeaders.forEach { (k, v) -> put(k, v) }
+                UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
+                    put("User-Agent", it)
+                }
+                if (cookieHeader.isNotEmpty()) put("Cookie", cookieHeader)
+            }
+            var response = executeApiRequest(sharedClient, url, "GET", null, requestHeaders)
+            response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                CookieSentinel.ingestRawCookieString(setCookie.substringBefore(';'), domain = "linux.do")
+            }
+            var status = response.status.value
+            var text = response.bodyAsText()
+            if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In")) {
+                requestHeaders.remove("Discourse-Logged-In")
+                response = executeApiRequest(sharedClient, url, "GET", null, requestHeaders)
+                status = response.status.value
+                text = response.bodyAsText()
+            }
+            if (isSuccessfulApiResponse(status, text)) status to text else null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 获取指定用户的完整已获徽章列表 (`GET /user-badges/{username}.json?grouped=true`)
+     */
+    suspend fun fetchUserBadges(username: String): List<GrantedBadge> = withContext(Dispatchers.IO) {
+        val clean = username.trim().removePrefix("@")
+        if (clean.isBlank()) return@withContext emptyList()
+        val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
+        val primaryRes = executeHttp("https://linux.do/user-badges/$encoded.json?grouped=true", method = "GET", preserveFailure = true)
+        val effectiveRes = if (primaryRes != null && isSuccessfulApiResponse(primaryRes.first, primaryRes.second)) {
+            primaryRes
+        } else {
+            executeHttp("https://linux.do/user_badges.json?username=$encoded&grouped=true", method = "GET", preserveFailure = true)
+                ?: primaryRes
+        }
+        try {
+            val root = readApiObject(effectiveRes)
+            root.requireArray("user_badges")
+            parseUserBadgesFromRoot(root)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (apiErr: Exception) {
+            val cached = UserApiKeyAuthManager.fullProfileCache
+                ?.takeIf { it.username.equals(clean, ignoreCase = true) && it.badges.isNotEmpty() }
+                ?.badges
+            if (!cached.isNullOrEmpty()) return@withContext cached
+            val cardBadges = runCatching { fetchPublicUserCard(clean)?.badges }.getOrNull()
+            if (!cardBadges.isNullOrEmpty()) return@withContext cardBadges
+            throw apiErr
+        }
     }
 
     suspend fun fetchBadgeDefinition(badgeId: Int): GrantedBadge? = withContext(Dispatchers.IO) {

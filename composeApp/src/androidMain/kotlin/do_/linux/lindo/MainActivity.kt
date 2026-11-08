@@ -133,19 +133,8 @@ class MainActivity : ComponentActivity() {
 
     // 常驻同源 Chromium WebView 引擎：共享 BoringSSL JA3/JA4 指纹、cf_clearance、_t 与 CSRF Token
     private var apiWebView: WebView? = null
-    private class ApiWebDocument(val view: WebView) {
-        val ready = CompletableDeferred<Boolean>()
-        val originReady = CompletableDeferred<Boolean>()
-        var committed = false
-        var failed = false
-        var challenged = false
-    }
-
-    private data class BrowserHttpResult(val status: Int, val body: String, val challenged: Boolean = false)
-
-    private var apiWebDocument: ApiWebDocument? = null
-    private var apiWebNavigation: Job? = null
-    private val pendingHttpCallbacks = ConcurrentHashMap<String, CompletableDeferred<BrowserHttpResult?>>()
+    private var apiWebViewReady = CompletableDeferred<Boolean>()
+    private val pendingHttpCallbacks = ConcurrentHashMap<String, CompletableDeferred<Pair<Int, String>>>()
     private var pendingMediaPickCallback: ((fileName: String, mimeType: String, bytes: ByteArray) -> Unit)? = null
     private var pendingWebFileChooserCallback: ValueCallback<Array<Uri>>? = null
 
@@ -212,8 +201,8 @@ class MainActivity : ComponentActivity() {
 
     inner class LinDoJsBridge {
         @JavascriptInterface
-        fun onHttpResult(reqId: String, status: Int, body: String, challenged: Boolean) {
-            pendingHttpCallbacks.remove(reqId)?.complete(BrowserHttpResult(status, body, challenged))
+        fun onHttpResult(reqId: String, status: Int, body: String) {
+            pendingHttpCallbacks.remove(reqId)?.complete(status to body)
         }
 
         @JavascriptInterface
@@ -552,6 +541,9 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun initPersistentApiWebView() {
+        activityScope.launch(Dispatchers.IO) {
+            runCatching { java.io.File(filesDir, "ech").deleteRecursively() }
+        }
         runCatching {
             val wv = WebView(this)
             // 严禁手动删改 "; wv" 或覆盖 userAgentString：
@@ -562,118 +554,20 @@ class MainActivity : ComponentActivity() {
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
-                cacheMode = WebSettings.LOAD_NO_CACHE
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             }
             val cm = CookieManager.getInstance()
             cm.setAcceptCookie(true)
             cm.setAcceptThirdPartyCookies(wv, true)
 
-            val interceptStaticSubresource: (android.webkit.WebResourceRequest?) -> android.webkit.WebResourceResponse? = { request ->
-                if (request != null && !request.isForMainFrame) {
-                    val path = request.url?.path.orEmpty()
-                    if (path == "/service-worker.js" || path.contains("service-worker")) {
-                        // 返回 404 彻底阻止 Discourse 注册 ServiceWorker，避免其劫持后续冷/热启动的同源请求
-                        android.webkit.WebResourceResponse(
-                            "application/javascript",
-                            "UTF-8",
-                            404,
-                            "Not Found",
-                            emptyMap(),
-                            java.io.ByteArrayInputStream(ByteArray(0))
-                        )
-                    } else if (!path.startsWith("/cdn-cgi/") && (
-                            path.endsWith(".woff2") ||
-                                path.endsWith(".woff") ||
-                                path.endsWith(".ttf") ||
-                                path.endsWith(".svg") ||
-                                path.endsWith(".png") ||
-                                path.endsWith(".webp") ||
-                                path.endsWith(".gif") ||
-                                path.endsWith(".ico") ||
-                                path.startsWith("/assets/") ||
-                                path.startsWith("/stylesheets/") ||
-                                path.startsWith("/svg-sprite/") ||
-                                path.startsWith("/extra-locales/") ||
-                                path.startsWith("/theme-javascripts/") ||
-                                path.startsWith("/images/") ||
-                                path.startsWith("/uploads/") ||
-                                path.startsWith("/letter_avatar_proxy/") ||
-                                path.startsWith("/user_avatar/") ||
-                                path.startsWith("/message-bus/") ||
-                                path == "/srv/pv"
-                            )
-                    ) {
-                        val mime = when {
-                            path.endsWith(".css") -> "text/css"
-                            path.endsWith(".js") -> "application/javascript"
-                            path.endsWith(".json") -> "application/json"
-                            else -> "text/plain"
-                        }
-                        android.webkit.WebResourceResponse(
-                            mime,
-                            "UTF-8",
-                            java.io.ByteArrayInputStream(ByteArray(0))
-                        )
-                    } else {
-                        null
-                    }
-                } else {
-                    null
-                }
-            }
-
             wv.addJavascriptInterface(LinDoJsBridge(), "LinDoJsBridge")
             wv.webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: android.webkit.WebResourceRequest?
-                ): android.webkit.WebResourceResponse? {
-                    interceptStaticSubresource(request)?.let { return it }
-                    return super.shouldInterceptRequest(view, request)
-                }
-
-                override fun onReceivedError(
-                    view: WebView?,
-                    request: android.webkit.WebResourceRequest?,
-                    error: android.webkit.WebResourceError?
-                ) {
-                    super.onReceivedError(view, request, error)
-                    if (request?.isForMainFrame == true) {
-                        apiWebDocument?.takeIf { it.view === view }?.failed = true
-                    }
-                }
-                override fun onReceivedHttpError(
-                    view: WebView?,
-                    request: android.webkit.WebResourceRequest?,
-                    errorResponse: android.webkit.WebResourceResponse?
-                ) {
-                    val challenged = errorResponse?.responseHeaders?.any { (name, value) ->
-                        name.equals("cf-mitigated", ignoreCase = true) && value.equals("challenge", ignoreCase = true)
-                    } == true
-                    if (request?.isForMainFrame == true && !challenged && (errorResponse?.statusCode ?: 0) in 500..599) {
-                        apiWebDocument?.takeIf { it.view === view }?.failed = true
-                    }
-                }
-                override fun onPageCommitVisible(view: WebView?, url: String?) {
-                    apiWebDocument?.takeIf { it.view === view }?.committed = true
-                }
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    apiWebDocument?.takeIf { it.view === view }?.committed = true
-                }
                 override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
-                    if (apiWebView !== view) {
-                        releaseNativeWebView(view, rendererGone = true)
-                        return true
-                    }
-                    apiWebView = null
-                    apiWebNavigation?.cancel()
-                    apiWebDocument?.ready?.complete(false)
-                    apiWebDocument?.originReady?.complete(false)
-                    apiWebDocument = null
-                    pendingHttpCallbacks.values.forEach { it.complete(null) }
+                    if (apiWebView === view) apiWebView = null
+                    pendingHttpCallbacks.values.forEach { it.cancel() }
                     pendingHttpCallbacks.clear()
                     releaseNativeWebView(view, rendererGone = true)
+                    apiWebViewReady = CompletableDeferred()
                     activityScope.launch {
                         delay(250L)
                         if (!isFinishing && !isDestroyed) {
@@ -699,150 +593,47 @@ class MainActivity : ComponentActivity() {
                     }
                     return true
                 }
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    val cookies = cm.getCookie("https://linux.do").orEmpty()
+                    if (cookies.isNotBlank()) {
+                        CookieSentinel.ingestRawCookieString(cookies)
+                    }
+                    if (!apiWebViewReady.isCompleted) {
+                        apiWebViewReady.complete(true)
+                    }
+                }
             }
             apiWebView = wv
             wv.onResume()
             wv.resumeTimers()
-            startApiWebNavigation(wv)
+            // 使用轻量级同源空文档初始化 https://linux.do 上下文（historyUrl 传 https://linux.do/ 确保 SiteForCookies 与 SameSite=Lax Cookie 100% 生效）
+            wv.loadDataWithBaseURL(
+                "https://linux.do/",
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
+                "text/html",
+                "UTF-8",
+                "https://linux.do/"
+            )
         }.onFailure { android.util.Log.w("LinDoNetwork", "Could not initialize API WebView", it) }
-    }
-
-    private var lastClearanceRefreshMs: Long? = null
-
-    // All callers share one navigation. A request's timeout must not cancel it for other callers.
-    private fun startApiWebNavigation(view: WebView, clearClearance: Boolean = false): ApiWebDocument {
-        apiWebNavigation?.cancel()
-        val document = ApiWebDocument(view)
-        apiWebDocument = document
-        pendingHttpCallbacks.values.forEach { it.complete(null) }
-        pendingHttpCallbacks.clear()
-        apiWebNavigation = activityScope.launch {
-            try {
-                val ready = withTimeoutOrNull(11_000L) {
-                    val cookies = CookieManager.getInstance()
-                    if (clearClearance) {
-                        for (name in listOf("cf_clearance", "__cf_bm", "_cfuvid")) {
-                            cookies.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
-                            cookies.setCookie("https://linux.do", "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
-                        }
-                        withContext(Dispatchers.IO) { cookies.flush() }
-                    }
-                    loadApiWebDocument(document)
-                } == true
-                if (ready) {
-                    CookieManager.getInstance().getCookie("https://linux.do")?.let { cookies ->
-                        if (cookies.isNotBlank()) CookieSentinel.ingestRawCookieString(cookies)
-                    }
-                }
-                document.ready.complete(ready)
-                if (ready) withContext(Dispatchers.IO) { persistSessionToDisk() }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                android.util.Log.w("LinDoNetwork", "API WebView navigation failed", error)
-            } finally {
-                document.ready.complete(false)
-                document.originReady.complete(false)
-            }
-        }
-        return document
-    }
-
-    private suspend fun loadApiWebDocument(document: ApiWebDocument): Boolean {
-        var retried = false
-        fun navigate() {
-            document.committed = false
-            document.failed = false
-            document.challenged = false
-            document.view.loadUrl("https://linux.do/", mapOf("Cache-Control" to "no-cache"))
-        }
-        navigate()
-        while (true) {
-            if (document.failed) {
-                if (retried) return false
-                retried = true
-                delay(350L)
-                navigate()
-            } else if (document.committed) {
-                val result = CompletableDeferred<String?>()
-                document.view.evaluateJavascript(
-                    """
-                    (function() {
-                        if (location.origin !== 'https://linux.do' ||
-                            document.getElementById('main-frame-error')) return 0;
-                        if (window._cf_chl_opt || document.title === 'Just a moment...') return 2;
-                        if (document.readyState === 'loading') return 0;
-                        window.__lindoPreloadTs = Date.now();
-                        return 1;
-                    })()
-                    """.trimIndent()
-                ) { state -> result.complete(state) }
-                when (withTimeoutOrNull(500L) { result.await() }) {
-                    "1" -> if (!document.failed) {
-                        document.challenged = false
-                        document.originReady.complete(true)
-                        return true
-                    }
-                    "2" -> if (!document.failed) {
-                        document.challenged = true
-                        document.originReady.complete(true)
-                    }
-                }
-            }
-            delay(150L)
-        }
-    }
-
-    private suspend fun awaitApiWebDocument(
-        allowNavigation: Boolean = true,
-        timeoutMs: Long = 11_500L
-    ): ApiWebDocument? = withContext(Dispatchers.Main) {
-        val view = apiWebView ?: return@withContext null
-        val current = apiWebDocument ?: return@withContext null
-        val hasUsableOrigin = current.challenged && !current.failed
-        val document = if (allowNavigation && !hasUsableOrigin && current.ready.isCompleted && !current.ready.await()) {
-            startApiWebNavigation(view)
-        } else {
-            current
-        }
-        // The document origin can be usable while the homepage is still waiting on verification.
-        val ready = withTimeoutOrNull(timeoutMs) { document.originReady.await() }
-        document.takeIf { apiWebDocument === it && ready == true && !it.failed }
-    }
-
-    private suspend fun refreshApiWebViewCloudflareClearance(
-        previous: ApiWebDocument? = null
-    ): Boolean = withContext(Dispatchers.Main) {
-        val current = apiWebDocument ?: return@withContext false
-        val now = android.os.SystemClock.elapsedRealtime()
-        val document = if (!current.ready.isCompleted || (previous != null && current !== previous)) {
-            current
-        } else {
-            val lastRefresh = lastClearanceRefreshMs
-            if (lastRefresh != null && now - lastRefresh < 15_000L) return@withContext false
-            lastClearanceRefreshMs = now
-            startApiWebNavigation(current.view, clearClearance = true)
-        }
-        document.ready.await()
     }
 
     private suspend fun executeHttpViaWebViewBridge(
         url: String,
         method: String,
         formParams: Map<String, String>?,
-        headers: Map<String, String>,
-        allowChallengeRetry: Boolean = true
+        headers: Map<String, String>
     ): Pair<Int, String>? {
-        val path = Uri.parse(url).path.orEmpty()
-        val isBackgroundRequest = headers["Discourse-Background"] == "true" ||
-            path in setOf("/site.json", "/session/current.json", "/emojis.json", "/badges.json")
         val isRead = method.equals("GET", true) || method.equals("HEAD", true)
-        val isForegroundRead = isRead && !isBackgroundRequest
-        val document = awaitApiWebDocument(allowNavigation = !isBackgroundRequest) ?: return null
-        val usingChallengeDocument = withContext(Dispatchers.Main) { document.challenged }
+        val wv = apiWebView
+        if (wv == null) {
+            return if (isRead) LinuxDoRepository.executeDirectReadFallback(url, headers) else null
+        }
+        withTimeoutOrNull(3500L) { apiWebViewReady.await() }
 
         val reqId = UUID.randomUUID().toString()
-        val deferred = CompletableDeferred<BrowserHttpResult?>()
+        val deferred = CompletableDeferred<Pair<Int, String>>()
+        pendingHttpCallbacks[reqId] = deferred
 
         val formBodyEncoded = if (!formParams.isNullOrEmpty()) {
             do_.linux.lindo.core.network.formEntries(formParams).joinToString("&") { (k, v) ->
@@ -871,9 +662,8 @@ class MainActivity : ComponentActivity() {
                 const controller = new AbortController();
                 const method = ${JSONObject.quote(method.uppercase())};
                 const isRead = method === 'GET' || method === 'HEAD';
-                const timer = setTimeout(() => controller.abort(), isRead ? 6500 : 14000);
+                const timer = setTimeout(() => controller.abort(), isRead ? 9500 : 14000);
                 try {
-                    if (location.origin !== 'https://linux.do') throw new Error('API document changed');
                     const targetUrl = ${JSONObject.quote(url)};
                     const hdrs = $headersJson;
                     hdrs['Accept'] = 'application/json, text/javascript, */*; q=0.01';
@@ -903,7 +693,7 @@ class MainActivity : ComponentActivity() {
                         if (!token) {
                             clearTimeout(timer);
                             const body = JSON.stringify({errors: ['暂时无法验证会话，请打开官网检查登录状态']});
-                            window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 403, body, false);
+                            window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 403, body);
                             return;
                         }
                         hdrs['X-CSRF-Token'] = token;
@@ -924,39 +714,6 @@ class MainActivity : ComponentActivity() {
                             o.body = bodyStr;
                         }
                         return o;
-                    }
-                    if (method === 'GET') {
-                        try {
-                            const target = new URL(targetUrl);
-                            const preEl = document.getElementById('data-preloaded');
-                            const preloadAge = Date.now() - window.__lindoPreloadTs;
-                            if (target.origin === location.origin && preEl && preloadAge < 15000) {
-                                const preload = window.__lindoPreloadObj || JSON.parse(preEl.dataset.preloaded);
-                                window.__lindoPreloadObj = preload;
-                                const decode = value => typeof value === 'string' ? JSON.parse(value) : value;
-                                let payload = null;
-                                if (target.pathname === '/latest.json' &&
-                                    [...target.searchParams.keys()].every(key => key === 'no_definitions') &&
-                                    !window.__lindoConsumedLatest) {
-                                    const latest = decode(preload.topic_list);
-                                    if (latest && latest.topic_list && Array.isArray(latest.topic_list.topics)) {
-                                        window.__lindoConsumedLatest = true;
-                                        payload = latest;
-                                    }
-                                } else if (target.pathname === '/site.json' && !target.search) {
-                                    payload = decode(preload.site);
-                                } else if (target.pathname === '/session/current.json' && !target.search &&
-                                    !window.__lindoConsumedCurrentUser && preload.currentUser) {
-                                    window.__lindoConsumedCurrentUser = true;
-                                    payload = { current_user: decode(preload.currentUser) };
-                                }
-                                if (payload) {
-                                    clearTimeout(timer);
-                                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 200, JSON.stringify(payload), false);
-                                    return;
-                                }
-                            }
-                        } catch (_) {}
                     }
                     const maxFetchAttempts = (method === 'GET' || method === 'HEAD') ? 2 : 1;
                     let resp = null;
@@ -984,55 +741,49 @@ class MainActivity : ComponentActivity() {
                             text = await resp.text();
                         }
                     }
-                    const challenged = resp.headers.get('cf-mitigated') === 'challenge' ||
-                        (resp.status === 403 && /challenge-platform|<title>Just a moment/i.test(text));
                     clearTimeout(timer);
-                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text, challenged);
+                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text);
                 } catch (err) {
                     clearTimeout(timer);
-                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 0, '', false);
+                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 0, '');
                 }
             })();
         """.trimIndent()
 
-        val result = try {
-            val dispatched = withContext(Dispatchers.Main) {
-                if (apiWebDocument !== document) return@withContext false
-                val cm = CookieManager.getInstance()
-                val cookieStr = cm.getCookie("https://linux.do").orEmpty()
-                val sentinelWinners = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
-                val sentinelT = sentinelWinners["_t"]?.value
-                if (!sentinelT.isNullOrBlank() && sentinelT != "demo_session_token" && !cookieStr.contains("_t=")) {
-                    cm.setCookie("https://linux.do", "_t=$sentinelT; Path=/; Secure; HttpOnly; SameSite=Lax")
-                    sentinelWinners["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
-                        cm.setCookie("https://linux.do", "_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
-                    }
-                } else if (cookieStr.isNotBlank()) {
-                    CookieSentinel.ingestRawCookieString(cookieStr)
+        withContext(Dispatchers.Main) {
+            val cm = CookieManager.getInstance()
+            val cookieStr = cm.getCookie("https://linux.do").orEmpty()
+            val sentinelWinners = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+            val sentinelT = sentinelWinners["_t"]?.value
+            if (!sentinelT.isNullOrBlank() && sentinelT != "demo_session_token" && !cookieStr.contains("_t=")) {
+                cm.setCookie("https://linux.do", "_t=$sentinelT; Path=/; Secure; HttpOnly; SameSite=Lax")
+                sentinelWinners["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
+                    cm.setCookie("https://linux.do", "_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
                 }
-                pendingHttpCallbacks[reqId] = deferred
-                document.view.evaluateJavascript(jsCode, null)
-                true
+                cm.flush()
+            } else if (cookieStr.isNotBlank()) {
+                CookieSentinel.ingestRawCookieString(cookieStr)
             }
-            val response = if (dispatched) withTimeoutOrNull(if (isRead) 7_500L else 15_000L) { deferred.await() } else null
+            wv.evaluateJavascript(jsCode, null)
+        }
+
+        val res = try {
+            val response = withTimeoutOrNull(11000L) {
+                deferred.await()
+            }
             val latestCookies = runCatching { CookieManager.getInstance().getCookie("https://linux.do") }.getOrNull().orEmpty()
-            if (latestCookies.isNotBlank()) CookieSentinel.ingestRawCookieString(latestCookies)
+            if (latestCookies.isNotBlank()) {
+                CookieSentinel.ingestRawCookieString(latestCookies)
+            }
             response
         } finally {
             pendingHttpCallbacks.remove(reqId)
         }
 
-        if (allowChallengeRetry && isForegroundRead) {
-            val replaced = result == null && withContext(Dispatchers.Main) { apiWebDocument !== document }
-            if (replaced || (!usingChallengeDocument && result?.challenged == true &&
-                    refreshApiWebViewCloudflareClearance(previous = document))
-            ) {
-                return executeHttpViaWebViewBridge(url, method, formParams, headers, allowChallengeRetry = false)
-            }
+        if (isRead && (res == null || res.first == 0 || (res.first == 403 && !res.second.trimStart().let { it.startsWith("{") || it.startsWith("[") }))) {
+            LinuxDoRepository.executeDirectReadFallback(url, headers)?.let { return it }
         }
-
-        if (isRead && usingChallengeDocument && (result == null || result.status == 0)) return 403 to ""
-        return result?.let { it.status to it.body }
+        return res
     }
 
     private suspend fun executeMultipartUploadViaWebViewBridge(
@@ -1040,17 +791,18 @@ class MainActivity : ComponentActivity() {
         mimeType: String,
         base64Bytes: String
     ): Pair<Int, String>? {
-        val document = awaitApiWebDocument(timeoutMs = 3_500L) ?: return null
+        val wv = apiWebView ?: return null
+        withTimeoutOrNull(3500L) { apiWebViewReady.await() }
 
         val reqId = UUID.randomUUID().toString()
-        val deferred = CompletableDeferred<BrowserHttpResult?>()
+        val deferred = CompletableDeferred<Pair<Int, String>>()
+        pendingHttpCallbacks[reqId] = deferred
 
         val jsCode = """
             (async function() {
                 const controller = new AbortController();
                 const timer = setTimeout(() => controller.abort(), 14000);
                 try {
-                    if (location.origin !== 'https://linux.do') throw new Error('API document changed');
                     const hdrs = {
                         'Accept': 'application/json, text/javascript, */*; q=0.01',
                         'X-Requested-With': 'XMLHttpRequest'
@@ -1068,13 +820,16 @@ class MainActivity : ComponentActivity() {
                             });
                             if (csrfResp.ok) {
                                 const csrfData = await csrfResp.json();
-                                if (csrfData && csrfData.csrf) hdrs['X-CSRF-Token'] = csrfData.csrf;
+                                if (csrfData && csrfData.csrf) {
+                                    window.__lindoCsrf = csrfData.csrf;
+                                    hdrs['X-CSRF-Token'] = csrfData.csrf;
+                                }
                             }
                         } catch (_) {}
                     }
                     if (!hdrs['X-CSRF-Token']) {
                         clearTimeout(timer);
-                        window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 403, '', false);
+                        window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 403, '');
                         return;
                     }
                     const b64 = ${JSONObject.quote(base64Bytes)};
@@ -1098,23 +853,22 @@ class MainActivity : ComponentActivity() {
                     });
                     const text = await resp.text();
                     clearTimeout(timer);
-                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text, false);
+                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, resp.status, text);
                 } catch (err) {
                     clearTimeout(timer);
-                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 0, '', false);
+                    window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 0, '');
                 }
             })();
         """.trimIndent()
 
+        withContext(Dispatchers.Main) {
+            wv.evaluateJavascript(jsCode, null)
+        }
+
         return try {
-            val dispatched = withContext(Dispatchers.Main) {
-                if (apiWebDocument !== document) return@withContext false
-                pendingHttpCallbacks[reqId] = deferred
-                document.view.evaluateJavascript(jsCode, null)
-                true
+            withTimeoutOrNull(15_000L) {
+                deferred.await()
             }
-            if (!dispatched) return null
-            withTimeoutOrNull(15_000L) { deferred.await() }?.let { it.status to it.body }
         } finally {
             pendingHttpCallbacks.remove(reqId)
         }
@@ -1277,8 +1031,7 @@ class MainActivity : ComponentActivity() {
 
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)
-            val cfCookieNames = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
-            // Keep Chromium's existing clearance. Cloudflare cookies are never restored from preferences.
+            // 优先采用原生 WebKit CookieManager 中已持久化的完整 Cookie（包含 cf_clearance / _t / _forum_session）
             val webKitCookies = cookieManager.getCookie("https://linux.do").orEmpty()
             val savedCookies = prefs.getString("raw_cookies", "").orEmpty()
             val hasLiveWebKitSession = webKitCookies.contains("_t=") && !webKitCookies.contains("_t=demo_session_token")
@@ -1287,36 +1040,41 @@ class MainActivity : ComponentActivity() {
             } else {
                 savedCookies.ifBlank { webKitCookies }
             }
-            val discourseOnlyPairs = LinkedHashMap<String, String>()
             if (mergedCookies.isNotBlank()) {
+                // 关键修复：Discourse `_t` / `_forum_session` 是 host-only Cookie（无 Domain 属性），
+                // 若附加 `Domain=.linux.do` 会导致 Chromium CookieJar 中出现两份同名 `_t`（一份 host-only，一份 domain），
+                // 进而导致旧 `_t` 覆盖新登录 `_t` 或无法正常覆盖！
+                // 仅当 WebKit CookieJar 中尚无有效 `_t` 会话时，才从 SharedPreferences 回填恢复，且绝不附加 `Domain=.linux.do`。
+                val cfCrossSubdomainNames = setOf("cf_clearance", "__cf_bm", "_cfuvid")
                 val discourseHostOnlyNames = setOf("_t", "_forum_session")
                 mergedCookies.split(";").forEach { segment ->
                     val pair = segment.trim()
                     if (pair.contains("=") && !pair.startsWith("_t=demo_session_token")) {
                         val name = pair.substringBefore("=").trim()
                         val value = pair.substringAfter("=").trim()
-                        if (name.isNotEmpty() && value.isNotEmpty() && name !in cfCookieNames) {
-                            discourseOnlyPairs[name] = "$name=$value"
-                        }
-                    }
-                }
-                discourseOnlyPairs.forEach { (name, pair) ->
-                    when (name) {
-                        in discourseHostOnlyNames -> {
-                            if (!hasLiveWebKitSession) {
-                                cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure; HttpOnly; SameSite=Lax")
-                            }
-                        }
-                        else -> {
-                            if (!webKitCookies.contains("$name=")) {
-                                cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure")
+                        if (name.isNotEmpty() && value.isNotEmpty()) {
+                            when {
+                                name in cfCrossSubdomainNames -> {
+                                    if (!webKitCookies.contains("$name=")) {
+                                        cookieManager.setCookie("https://linux.do", "$pair; Domain=.linux.do; Path=/; Secure; HttpOnly; SameSite=None")
+                                    }
+                                }
+                                name in discourseHostOnlyNames -> {
+                                    if (!hasLiveWebKitSession) {
+                                        cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure; HttpOnly; SameSite=Lax")
+                                    }
+                                }
+                                else -> {
+                                    if (!webKitCookies.contains("$name=")) {
+                                        cookieManager.setCookie("https://linux.do", "$pair; Path=/; Secure")
+                                    }
+                                }
                             }
                         }
                     }
                 }
                 cookieManager.flush()
             }
-            val cleanPersistedCookies = discourseOnlyPairs.values.joinToString("; ")
 
             val savedApiKey = prefs.getString("api_key", null)
             val username = prefs.getString("username", null)
@@ -1344,7 +1102,7 @@ class MainActivity : ComponentActivity() {
             UserApiKeyAuthManager.restorePersistedSession(
                 profile = userProfile,
                 apiKey = savedApiKey,
-                rawCookies = cleanPersistedCookies
+                rawCookies = mergedCookies
             )
         }
     }
@@ -1358,16 +1116,8 @@ class MainActivity : ComponentActivity() {
                 CookieSentinel.ingestRawCookieString(latestWebKitCookies)
             }
 
-            val cfCookieNames = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
             val editor = prefs.edit()
             val mergedCookieHeader = CookieSentinel.buildCookieHeader().ifBlank { latestWebKitCookies }
-                .split(";")
-                .map { it.trim() }
-                .filter { pair ->
-                    val name = pair.substringBefore("=").trim()
-                    name.isNotEmpty() && name !in cfCookieNames
-                }
-                .joinToString("; ")
             if (mergedCookieHeader.isNotBlank()) {
                 editor.putString("raw_cookies", mergedCookieHeader)
             }
@@ -1422,7 +1172,7 @@ class MainActivity : ComponentActivity() {
             CookieSentinel.clear()
             CookieSentinel.ingestRawCookieString(accepted.joinToString("; "))
             prefs.edit().putString("raw_cookies", accepted.joinToString("; ")).apply()
-            apiWebView?.let { startApiWebNavigation(it) }
+            apiWebView?.reload()
             withContext(Dispatchers.IO) { LinuxDoRepository.fetchCurrentUserProfile() }
             persistSessionToDisk()
             UserApiKeyAuthManager.onAuthStateChanged?.invoke()
@@ -1539,8 +1289,6 @@ private val EXTRACT_PRELOADED_USER_JS = """
     })();
 """.trimIndent()
 
-private const val WEB_PAGE_VISUAL_TIMEOUT_MS = 35_000L
-
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun AndroidWebLoginModal(
@@ -1559,56 +1307,20 @@ private fun AndroidWebLoginModal(
     var completed by remember { mutableStateOf(false) }
     var pageLoadError by remember { mutableStateOf<String?>(null) }
     var rendererGone by remember { mutableStateOf(false) }
-    var pageLoading by remember { mutableStateOf(true) }
-    var navigation by remember { mutableLongStateOf(0L) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
-    var visualRequest by remember { mutableLongStateOf(-1L) }
     val isDark = remember { UserApiKeyAuthManager.uiDarkTheme }
-
-    fun beginLoading(url: String?) {
-        navigation++
-        pendingUrl = url
-        pageLoadError = null
-        pageLoading = true
-    }
-
-    fun failLoading(message: String) {
-        pageLoadError = message
-        pageLoading = false
-    }
-
-    fun revealDocument(view: WebView?, url: String?, allowRedirect: Boolean = false) {
-        if (view == null || view !== webViewRef || !pageLoading || url == null || url != view.url) return
-        if (!allowRedirect && pendingUrl != null && pendingUrl != url) return
-        if (visualRequest == navigation) return
-        visualRequest = navigation
-        view.postVisualStateCallback(navigation, object : WebView.VisualStateCallback() {
-            override fun onComplete(requestId: Long) {
-                if (webViewRef === view && requestId == navigation && pageLoadError == null) {
-                    pageLoading = false
-                }
-            }
-        })
-    }
 
     fun retryPage() {
         val view = webViewRef
-        val url = (if (pageLoading || pageLoadError != null) pendingUrl else view?.url) ?: initialUrl
-        beginLoading(url)
+        val url = (if (pageLoadError != null) pendingUrl else view?.url) ?: initialUrl
+        pendingUrl = url
+        pageLoadError = null
         rendererGone = false
         if (view?.url == url) view.reload() else view?.loadUrl(url)
     }
 
     BackHandler {
         if (pageLoadError == null && webViewRef?.canGoBack() == true) webViewRef?.goBack() else onDismiss()
-    }
-
-    LaunchedEffect(pageLoading, navigation) {
-        if (pageLoading) {
-            delay(WEB_PAGE_VISUAL_TIMEOUT_MS)
-            failLoading("网页加载超时")
-            webViewRef?.stopLoading()
-        }
     }
 
     fun completeWithUserObject(u: JSONObject) {
@@ -1722,7 +1434,8 @@ private fun AndroidWebLoginModal(
     LaunchedEffect(initialUrl, webViewRef) {
         val wv = webViewRef ?: return@LaunchedEffect
         if (initialUrl.isNotBlank() && wv.url != initialUrl) {
-            beginLoading(initialUrl)
+            pendingUrl = initialUrl
+            pageLoadError = null
             wv.loadUrl(initialUrl)
         }
     }
@@ -1833,8 +1546,6 @@ private fun AndroidWebLoginModal(
                             val cookieManager = CookieManager.getInstance()
                             cookieManager.setAcceptCookie(true)
                             cookieManager.setAcceptThirdPartyCookies(this, true)
-                            // CookieManager already owns the browser session, including domain and path scope.
-                            // Rebuilding these as Domain=.linux.do would widen host-only session cookies.
                             cookieManager.flush()
 
                             webChromeClient = object : WebChromeClient() {
@@ -1850,9 +1561,6 @@ private fun AndroidWebLoginModal(
 
                             setDownloadListener { url, _, _, _, _ ->
                                 if (!url.isNullOrBlank()) {
-                                    if (pageLoading && url == pendingUrl && copyBackForwardList().size > 0) {
-                                        pageLoading = false
-                                    }
                                     UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
                                 }
                             }
@@ -1862,18 +1570,18 @@ private fun AndroidWebLoginModal(
                                     if (webViewRef === view) {
                                         webViewRef = null
                                         rendererGone = true
-                                        failLoading("网页已停止运行")
+                                        pageLoadError = "网页已停止运行"
                                     }
                                     releaseNativeWebView(view, rendererGone = true)
                                     return true
                                 }
                                 override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                                     super.onReceivedError(view, request, error)
-                                    if (view === webViewRef && pageLoading && request?.isForMainFrame == true) {
+                                    if (view === webViewRef && request?.isForMainFrame == true) {
                                         val failedUrl = request.url.toString()
                                         if (failedUrl == pendingUrl || failedUrl == view?.url || request.isRedirect) {
                                             pendingUrl = failedUrl
-                                            failLoading("网络连接失败")
+                                            pageLoadError = "网络连接失败"
                                         }
                                     }
                                 }
@@ -1905,28 +1613,23 @@ private fun AndroidWebLoginModal(
                                     if (view === webViewRef && request.isForMainFrame && !request.isRedirect &&
                                         (scheme == "http" || scheme == "https")
                                     ) {
-                                        val currentUrl = view?.url
-                                        // Fragment links stay in the current document and have no frame commit.
-                                        val fragmentOnly = currentUrl != target &&
-                                            currentUrl?.substringBefore('#') == target.substringBefore('#')
-                                        if (!fragmentOnly) beginLoading(target)
+                                        pendingUrl = target
+                                        pageLoadError = null
                                     }
                                     return false
                                 }
 
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     super.onPageStarted(view, url, favicon)
-                                    if (view === webViewRef && (!pageLoading || url != pendingUrl)) beginLoading(url)
+                                    if (view === webViewRef) {
+                                        pendingUrl = url
+                                        pageLoadError = null
+                                    }
                                     tryExtractSessionAndComplete(view)
-                                }
-
-                                override fun onPageCommitVisible(view: WebView?, url: String?) {
-                                    revealDocument(view, url, allowRedirect = true)
                                 }
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     super.onPageFinished(view, url)
-                                    revealDocument(view, url)
                                     tryExtractSessionAndComplete(view)
                                 }
                             }
@@ -1935,7 +1638,7 @@ private fun AndroidWebLoginModal(
                         }
                     },
                     update = { view ->
-                        view.importantForAccessibility = if (pageLoading || pageLoadError != null) {
+                        view.importantForAccessibility = if (pageLoadError != null) {
                             View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                         } else {
                             View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
@@ -1947,7 +1650,7 @@ private fun AndroidWebLoginModal(
                     }
                 )
                 val loadError = pageLoadError
-                if (pageLoading || loadError != null) {
+                if (loadError != null) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Box(Modifier.matchParentSize().background(barBg).pointerInput(Unit) {
                             awaitPointerEventScope {
@@ -1955,13 +1658,13 @@ private fun AndroidWebLoginModal(
                             }
                         })
                         CompositionLocalProvider(LocalLinDoDarkTheme provides isDark) {
-                            when {
-                                loadError == null -> LinDoLoadingIndicator(color = barSubFg, label = "加载网页")
-                                isLoginFlow -> LinDoMascotLoginTransitionView(
+                            if (isLoginFlow) {
+                                LinDoMascotLoginTransitionView(
                                     isDark = isDark, progress = Float.NaN, statusTitle = loadError,
                                     onCancel = onDismiss, onRetry = ::retryPage
                                 )
-                                else -> LinDoStatePanel(
+                            } else {
+                                LinDoStatePanel(
                                     state = LinDoMascotState.NetworkError, detail = loadError, onRetry = ::retryPage
                                 )
                             }
