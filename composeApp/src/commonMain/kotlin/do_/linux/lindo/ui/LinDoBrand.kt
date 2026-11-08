@@ -211,51 +211,39 @@ fun LinDoMascotLoginTransitionView(
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(Modifier.widthIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(vertical = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    LinDoMascot(state = if (onRetry != null) LinDoMascotState.NetworkError else LinDoMascotState.Loading, size = 64.dp)
-                    Spacer(Modifier.height(12.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = statusTitle,
-                            color = brandSecondary(isDark),
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            textAlign = TextAlign.Center,
-                            lineHeight = 19.sp
+                    if (onRetry != null) {
+                        LinDoStatePanel(
+                            LinDoMascotState.NetworkError,
+                            detail = statusSubtitle.ifBlank { statusTitle },
+                            onRetry = onRetry
                         )
-                        if (onRetry == null) {
+                    } else {
+                        LinDoMascot(state = LinDoMascotState.Loading, size = 64.dp)
+                        Spacer(Modifier.height(12.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = statusTitle,
+                                color = brandSecondary(isDark),
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 19.sp
+                            )
                             Spacer(Modifier.width(5.dp))
                             LinDoWaveDots(color = brandSecondary(isDark), dotSize = 4.dp)
                         }
-                    }
-                    if (statusSubtitle.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(statusSubtitle, color = brandSecondary(isDark), fontSize = 13.sp,
-                            lineHeight = 20.sp, textAlign = TextAlign.Center)
-                    }
-                    if (onRetry != null) {
-                        Spacer(Modifier.height(14.dp))
-                        TextButton(
-                            onClick = onRetry,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Icon(
-                                imageVector = LinDoIcons.Refresh,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                                tint = brandSecondary(isDark)
-                            )
-                            Spacer(Modifier.width(5.dp))
-                            Text("重新连接", fontSize = 13.sp, color = brandSecondary(isDark))
+                        if (statusSubtitle.isNotBlank()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(statusSubtitle, color = brandSecondary(isDark), fontSize = 13.sp,
+                                lineHeight = 20.sp, textAlign = TextAlign.Center)
                         }
-                    } else if (progress.isFinite()) {
-                        Spacer(Modifier.height(22.dp))
-                        // Actual WebView progress only. Session verification has no measured percentage.
-                        LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) },
-                            color = BrandGold, trackColor = if (isDark) Color(0xFF39332A) else Color(0xFFEDE6DC),
-                            modifier = Modifier.width(144.dp).height(3.dp))
+                        if (progress.isFinite()) {
+                            Spacer(Modifier.height(22.dp))
+                            // Actual WebView progress only. Session verification has no measured percentage.
+                            LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) },
+                                color = BrandGold, trackColor = if (isDark) Color(0xFF39332A) else Color(0xFFEDE6DC),
+                                modifier = Modifier.width(144.dp).height(3.dp))
+                        }
                     }
                 }
             }

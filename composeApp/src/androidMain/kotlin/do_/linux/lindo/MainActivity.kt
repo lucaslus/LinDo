@@ -115,7 +115,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val LOCAL_ECH_HTTP_PORT = 28080
         private const val LOCAL_ECH_HTTPS_PORT = 28443
+        // The bundled daemon uses this exact marker to decide whether to replace its TOML.
         private const val ECH_CONFIG_VERSION_MARKER = "99643bfd6837"
+        private const val ECH_DNS_BRIDGE_VERSION = "ech-dns-ttl-v2"
 
         @Volatile
         private var echDaemonStarted = false
@@ -458,7 +460,11 @@ class MainActivity : ComponentActivity() {
                     onThemeChanged = updateSystemBars,
                     systemAnimationsEnabled = systemAnimationsEnabled,
                     appIcon = appIcon,
-                    onApplyAppIcon = { iconManager.apply(appIcon, it) }
+                    onApplyAppIcon = { iconManager.apply(appIcon, it) },
+                    addPlatformImageDecoders = {
+                        if (android.os.Build.VERSION.SDK_INT >= 28) add(coil3.gif.AnimatedImageDecoder.Factory())
+                        else add(coil3.gif.GifDecoder.Factory())
+                    }
                 )
             }
         }
@@ -574,7 +580,7 @@ class MainActivity : ComponentActivity() {
             val configFile = java.io.File(echRoot, "linuxdo-accelerator.toml")
             val versionFile = java.io.File(echRoot, "linuxdo-accelerator.toml.version")
             val lindoMarkerFile = java.io.File(echRoot, "lindo-ech-doh.marker")
-            val expectedMarker = "$ECH_CONFIG_VERSION_MARKER:$effectiveDohPort"
+            val expectedMarker = "$ECH_DNS_BRIDGE_VERSION:$effectiveDohPort"
 
             val configTomlContent = """
                 listen_host = "127.0.0.1"
@@ -633,7 +639,6 @@ class MainActivity : ComponentActivity() {
                     resources.openRawResource(R.raw.lindo_ech_server_key).use { input ->
                         java.io.File(certDir, "linuxdo-accelerator-server.key").outputStream().use { input.copyTo(it) }
                     }
-                    versionFile.writeText(ECH_CONFIG_VERSION_MARKER)
                     configFile.writeText(configTomlContent)
                     versionFile.writeText(ECH_CONFIG_VERSION_MARKER)
                     lindoMarkerFile.writeText(expectedMarker)
@@ -2097,14 +2102,14 @@ private fun AndroidWebLoginModal(
                             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                                 webViewRef = null
                                 rendererGone = true
-                                pageLoadError = "网页渲染进程已停止，可以返回应用或重新打开。"
+                                pageLoadError = "网页已停止运行"
                                 releaseNativeWebView(view, rendererGone = true)
                                 return true
                             }
                             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                                 super.onReceivedError(view, request, error)
                                 if (request?.isForMainFrame == true) {
-                                    pageLoadError = "网络暂时不可用，请检查连接后再试一次。"
+                                    pageLoadError = "网络连接失败"
                                 }
                             }
 
@@ -2161,8 +2166,7 @@ private fun AndroidWebLoginModal(
             LinDoMascotLoginTransitionView(
                 isDark = isDark,
                 progress = Float.NaN,
-                statusTitle = if (rendererGone) "网页已停止运行" else "暂时连接不上 LINUX DO",
-                statusSubtitle = pageLoadError.orEmpty(),
+                statusTitle = pageLoadError.orEmpty(),
                 onCancel = onDismiss,
                 onRetry = ::retryPage
             )

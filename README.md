@@ -60,3 +60,5 @@ adb shell am start -n do_.linux.lindo/.MainActivity --ez lindo.brand_preview tru
 Connect 展示取得的官方周期指标；获取失败时明确标为账户累计数据，不推算保级资格。动态头像使用 CDN 原件，尊重动效开关及窗口焦点。正文支持常用富文本格式，投票/公式等互动块提供明确的原网页入口；实时消息、WebView 文件下载等与 Web 仍有差距。详细发现、修复、测试证据和后续方案见[审查报告](docs/review-2026-11-06.md)。
 
 Cookie、令牌及调试导入文件不得加入仓库。
+
+徽章内置矢量由 LinuxDo 提供的 Font Awesome Free SVG 转换而来。图标 © Fonticons, Inc.，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。 [Font Awesome Free 许可](https://fontawesome.com/license/free)

@@ -33,6 +33,19 @@ import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 @Composable
 internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
     onOpenLink: (String) -> Unit, heading: Boolean = false) {
+    val plain = rich.runs.singleOrNull()
+    if (plain != null && plain.href == null && plain.imageUrl == null && !plain.bold &&
+        !plain.italic && !plain.code && !plain.strike && !plain.underline
+    ) {
+        SelectionContainer {
+            Text(
+                plain.text, color = palette.inkPrimary,
+                fontSize = if (heading) 17.sp else 15.sp, lineHeight = 24.sp,
+                fontWeight = if (heading) FontWeight.SemiBold else null
+            )
+        }
+        return
+    }
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
     val clipboard = LocalClipboardManager.current
     var unavailableMailLink by remember { mutableStateOf<String?>(null) }

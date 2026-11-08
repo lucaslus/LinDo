@@ -239,8 +239,9 @@ def offline():
         adb("shell", "svc", "wifi", "disable")
         adb("shell", "svc", "data", "disable")
         start("web")
-        wait_for("暂时连接不上 LINUX DO", timeout=25)
-        find("重新连接")
+        wait_for("网络连接失败", timeout=25)
+        find("重试")
+        assert not any("暂时连接不上 LINUX DO" in n.get("text", "") for n in tree().iter("node"))
         screen("offline-error")
     finally:
         adb("shell", "svc", "wifi", "enable")

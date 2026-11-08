@@ -1,6 +1,5 @@
 package do_.linux.lindo.core.network
 
-import do_.linux.lindo.core.badge.UniversalBadgeEngine
 import do_.linux.lindo.core.connect.ConnectStatsParser
 import do_.linux.lindo.core.connect.ConnectTrustLevelReport
 import do_.linux.lindo.core.connect.ConsolidatedTimingBatch
@@ -1221,18 +1220,6 @@ object LinuxDoRepository {
             }
     }
 
-    private val cleanDohAnycastIps = listOf(
-        "104.16.248.249",
-        "104.16.249.249",
-        "172.64.36.1",
-        "172.64.36.2"
-    )
-
-    private val oaifreeDohIps = listOf(
-        "104.21.16.56",
-        "172.67.210.33"
-    )
-
     private val aliDohIps = listOf(
         "223.5.5.5",
         "223.6.6.6"
@@ -1247,6 +1234,8 @@ object LinuxDoRepository {
         okhttp3.OkHttpClient.Builder()
             .connectTimeout(1500, TimeUnit.MILLISECONDS)
             .readTimeout(1500, TimeUnit.MILLISECONDS)
+            .callTimeout(2700, TimeUnit.MILLISECONDS)
+            .proxy(java.net.Proxy.NO_PROXY)
             .dns(object : Dns {
                 override fun lookup(hostname: String): List<InetAddress> {
                     val staticIps = when {
@@ -1266,78 +1255,113 @@ object LinuxDoRepository {
             .build()
     }
 
-    private const val DEFAULT_CLOUDFLARE_ECH_B64 =
-        "AEX+DQBBVgAgACAeeACn4Pv8MXGtNDZHIYaygv7LFVWo5brRBKikvtdBYgAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
-
-    @Volatile
-    private var cachedEchConfigB64: Pair<Long, String>? = null
+    private const val cloudflareEchName = "cloudflare-ech.com"
+    private val echDnsHosts = Regex("""[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?""")
+    private val echDnsExecutor = java.util.concurrent.Executors.newFixedThreadPool(8) { task ->
+        Thread(task, "lindo-ech-dns").apply { isDaemon = true }
+    }
+    private data class CachedEchDns(val untilNanos: Long, val answers: List<EchDnsAnswer>)
+    private val echDnsCache = java.util.concurrent.ConcurrentHashMap<Pair<String, Int>, CachedEchDns>()
+    private val dohHostCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<InetAddress>>>()
 
     internal fun prewarmEchConfig() {
-        fetchLiveCloudflareEchConfigB64()
+        lookupEchDns("linux.do", 65)
     }
 
-    private fun fetchLiveCloudflareEchConfigB64(): String {
-        val now = System.currentTimeMillis()
-        cachedEchConfigB64?.let { (expireAt, b64) ->
-            if (b64.isNotBlank() && now < expireAt) return b64
-        }
-        val echEndpoints = listOf(
-            "https://223.5.5.5/resolve?name=cloudflare-ech.com&type=65",
-            "https://223.6.6.6/resolve?name=cloudflare-ech.com&type=65"
-        )
-        val echRegex = Regex("""ech="?([A-Za-z0-9+/=_-]{24,})"?""")
-        for (endpoint in echEndpoints) {
-            try {
-                val req = okhttp3.Request.Builder()
-                    .url(endpoint)
-                    .header("Accept", "application/dns-json, application/json")
-                    .build()
-                dohBootstrapClient.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val body = resp.body?.string().orEmpty()
-                        val match = echRegex.find(body)?.groupValues?.getOrNull(1)?.trim()
-                        if (!match.isNullOrBlank()) {
-                            cachedEchConfigB64 = (now + 600_000L) to match
-                            return match
-                        }
-                    }
-                }
-            } catch (_: Throwable) {
+    private fun lookupEchDns(host: String, type: Int): List<EchDnsAnswer> {
+        val key = host to type
+        val entry = echDnsCache.compute(key) { _, cached ->
+            if (cached != null && cached.untilNanos - System.nanoTime() >= TimeUnit.SECONDS.toNanos(1)) {
+                cached
+            } else {
+                val answers = queryEchDns(host, type)
+                val ttl = answers.minOfOrNull { it.ttlSeconds }?.coerceAtMost(60) ?: 2
+                CachedEchDns(System.nanoTime() + TimeUnit.SECONDS.toNanos(ttl.toLong()), answers)
             }
+        } ?: return emptyList()
+        val remaining = entry.untilNanos - System.nanoTime()
+        if (remaining <= 0) return emptyList()
+        val ttl = TimeUnit.NANOSECONDS.toSeconds(remaining).toInt().coerceAtLeast(1)
+        return entry.answers.map { it.copy(ttlSeconds = ttl) }
+    }
+
+    private fun queryEchDns(host: String, type: Int): List<EchDnsAnswer> {
+        // Query the site's own records via independent resolvers. Domestic DoH can still
+        // resolve Cloudflare's public ECH name when the target HTTPS record is filtered.
+        val providers = if (type == 65) listOf(
+            "https://cloudflare-dns.com/dns-query" to host,
+            "https://dns.google/resolve" to host,
+            "https://223.5.5.5/resolve" to cloudflareEchName,
+            "https://dns.alidns.com/resolve" to cloudflareEchName,
+            "https://1.12.12.12/dns-query" to cloudflareEchName
+        ) else listOf(
+            "https://1.12.12.12/dns-query" to host,
+            "https://223.5.5.5/resolve" to host,
+            "https://cloudflare-dns.com/dns-query" to host
+        )
+        val completion = java.util.concurrent.ExecutorCompletionService<List<EchDnsAnswer>>(echDnsExecutor)
+        val jobs = providers.map { (endpoint, name) ->
+            completion.submit(java.util.concurrent.Callable {
+                val request = okhttp3.Request.Builder()
+                    .url("$endpoint?name=$name&type=$type")
+                    .header("Accept", "application/dns-json")
+                    .build()
+                runCatching {
+                    dohBootstrapClient.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) return@use emptyList()
+                        val answers = parseEchDnsAnswers(response.body?.string().orEmpty(), name, type)
+                        if (type == 65 && name != host) {
+                            answers.mapNotNull { record ->
+                                extractEchConfig(record.data)?.let { config ->
+                                    record.copy(data = "1 . alpn=h3,h2 ech=$config")
+                                }
+                            }
+                        } else answers
+                    }
+                }.getOrDefault(emptyList())
+            })
         }
-        return cachedEchConfigB64?.second ?: DEFAULT_CLOUDFLARE_ECH_B64
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2900)
+        try {
+            repeat(jobs.size) {
+                val next = completion.poll((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+                    ?: return emptyList()
+                val answers = next.get()
+                if (answers.isNotEmpty()) return answers
+            }
+        } finally {
+            jobs.forEach { it.cancel(true) }
+        }
+        return emptyList()
     }
 
     internal fun resolveLocalDohJsonForEch(rawName: String, rawType: String): String {
-        val host = rawName.trim().lowercase().trimEnd('.').ifBlank { "linux.do" }
-        val normType = rawType.trim().uppercase()
-        return when (normType) {
-            "HTTPS", "65", "TYPE65" -> {
-                val echB64 = fetchLiveCloudflareEchConfigB64()
-                val rdata = "1 . alpn=h3,h2 ipv4hint=104.20.16.234,172.66.166.61 ech=$echB64"
-                """{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Answer":[{"name":"$host","type":65,"TTL":300,"data":"$rdata"}]}"""
-            }
-            "AAAA", "28", "TYPE28" -> {
-                """{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Answer":[]}"""
-            }
-            else -> {
-                val preferredIps = if (host == "cloudflare-ech.com") {
-                    listOf("104.18.10.118", "104.18.11.118", "104.20.16.234", "172.66.166.61")
-                } else {
-                    listOf("104.20.16.234", "172.66.166.61", "104.18.10.118", "104.18.11.118")
-                }
-                val answersJson = preferredIps.joinToString(",") { ip ->
-                    """{"name":"$host","type":1,"TTL":300,"data":"$ip"}"""
-                }
-                """{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Answer":[$answersJson]}"""
-            }
+        val host = rawName.trim().lowercase().trimEnd('.')
+        val type = when (rawType.trim().uppercase()) {
+            "A", "1", "TYPE1" -> 1
+            "AAAA", "28", "TYPE28" -> 28
+            "HTTPS", "65", "TYPE65" -> 65
+            else -> return """{"Status":4,"Answer":[]}"""
         }
+        if (!echDnsHosts.matches(host) || (host != cloudflareEchName && !LocalDirectConnectTunnel.isEchManagedHost(host))) {
+            return """{"Status":5,"Answer":[]}"""
+        }
+        // The native proxy currently prefers IPv4. If the site A record was filtered it can
+        // still use the real A addresses of the public name supplied by the HTTPS record.
+        val answers = if (type == 28) emptyList() else lookupEchDns(host, type)
+        val status = if (type == 65 && answers.isEmpty()) 2 else 0
+        val records = answers.map { answer ->
+            JsonObject(mapOf(
+                "name" to JsonPrimitive(host), "type" to JsonPrimitive(type),
+                "TTL" to JsonPrimitive(answer.ttlSeconds), "data" to JsonPrimitive(answer.data)
+            ))
+        }
+        return JsonObject(mapOf("Status" to JsonPrimitive(status), "Answer" to JsonArray(records))).toString()
     }
-
-    private val dohHostCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<InetAddress>>>()
 
     internal fun clearDnsCaches() {
         dohHostCache.clear()
+        echDnsCache.clear()
     }
 
     internal fun isIpPoisoned(ip: String): Boolean = isPoisonedIp(ip)
@@ -1579,15 +1603,6 @@ kZC8lQg1
                 }
             }
         }
-    }
-
-    init {
-        UniversalBadgeEngine.registerDiscourseSpriteBundle(
-            """
-            <symbol id="linuxdo-cyber-lotus" viewBox="0 0 24 24"><path d="M12 2L15 8L22 9L17 14L18 21L12 18L6 21L7 14L2 9L9 8Z"/></symbol>
-            <symbol id="d-icon-ld-pioneer-2026" viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></symbol>
-            """.trimIndent()
-        )
     }
 
     @Volatile
@@ -1933,7 +1948,11 @@ kZC8lQg1
         val specificError = when {
             statusCode in listOf(404, 410) -> "该话题不存在，或已被作者与管理员删除。"
             statusCode == 403 && isJsonError -> "当前账号暂无访问该话题的权限（可能属于高信任等级或私密板块）。"
-            else -> "网络连接异常，请点击下方按钮重试。"
+            statusCode == 401 -> "登录已失效"
+            statusCode == 403 -> "需要完成站点验证"
+            statusCode == 429 -> "请求太频繁，请稍后再试"
+            statusCode in 500..599 -> "服务暂时不可用"
+            else -> "网络连接失败"
         }
 
         // Preserve the real summary, but never fabricate a first post from an excerpt on failure.
@@ -1956,24 +1975,25 @@ kZC8lQg1
      */
     suspend fun fetchMoreTopicPosts(
         topicId: Int,
-        postIds: List<Int>
+        postIds: List<Int>,
+        knownAuthorBadges: Map<Int, List<GrantedBadge>>
     ): List<PostItemModel> = withContext(Dispatchers.IO) {
         if (postIds.isEmpty()) return@withContext emptyList()
         val query = postIds.take(20).joinToString("&") { "post_ids[]=$it" }
         val url = "https://linux.do/t/$topicId/posts.json?$query"
         try {
             val root = readApiObject(executeHttp(url = url, method = "GET", preserveFailure = true))
-            BadgeInjector.parseAndCacheUserBadges(root)
+            val authorBadges = BadgeInjector.readTopicAuthorBadges(root) ?: knownAuthorBadges
             val postStream = root["post_stream"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
             val postsArr = postStream.requireArray("posts")
-            val rawPosts = postsArr.mapIndexedNotNull { idx, elem ->
+            postsArr.mapIndexedNotNull { idx, elem ->
                 parseSinglePostObject(
                     pObj = elem as? JsonObject ?: return@mapIndexedNotNull null,
                     fallbackIdx = idx,
-                    topicId = topicId
+                    topicId = topicId,
+                    authorBadges = authorBadges
                 )
             }
-            BadgeInjector.injectTopLevelUserBadges(rawPosts, root)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: ApiReadException) {
@@ -2038,6 +2058,8 @@ kZC8lQg1
         var moderator = false
         var createdAtText = ""
         var badgeCount = 0
+        var topBadges = emptyList<GrantedBadge>()
+        var flair = FlairInfo()
 
         var daysVisited = 0
         var timeReadSeconds = 0
@@ -2048,7 +2070,7 @@ kZC8lQg1
         var likesGiven = 0
         var topicCount = 0
         var postCount = 0
-        val topBadges = mutableListOf<GrantedBadge>()
+
 
         // 2 & 3. 并发拉取 /u/{username}.json 与 /u/{username}/summary.json，将个人中心同步耗时缩短 50%+
         val (userRes, summaryRes) = coroutineScope {
@@ -2080,6 +2102,8 @@ kZC8lQg1
                     admin = uObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false
                     moderator = uObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false
                     badgeCount = uObj["badge_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    topBadges = BadgeInjector.readFeaturedBadges(root, uObj)
+                    flair = parseFlair(uObj)
                     val createdIso = uObj["created_at"]?.jsonPrimitive?.contentOrNull
                     if (!createdIso.isNullOrBlank() && createdIso.length >= 10) {
                         createdAtText = createdIso.substring(0, 10)
@@ -2103,35 +2127,6 @@ kZC8lQg1
                     likesGiven = us["likes_given"]?.jsonPrimitive?.intOrNull ?: 0
                     topicCount = us["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
                     postCount = us["post_count"]?.jsonPrimitive?.intOrNull ?: 0
-                }
-                val badgeCountById = mutableMapOf<Int, Int>()
-                val badgeGrantedAtById = mutableMapOf<Int, String>()
-                (root["user_badges"] as? JsonArray)?.forEach { ubElem ->
-                    val ubObj = ubElem as? JsonObject ?: return@forEach
-                    val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    val cnt = ubObj["count"]?.jsonPrimitive?.intOrNull ?: 1
-                    badgeCountById[bid] = (badgeCountById[bid] ?: 0).coerceAtLeast(cnt)
-                    ubObj["granted_at"]?.jsonPrimitive?.contentOrNull?.let { grantedAt ->
-                        if (grantedAt.length >= 10) {
-                            badgeGrantedAtById[bid] = grantedAt.substring(0, 10)
-                        }
-                    }
-                }
-                (root["badges"] as? JsonArray)?.forEach { bElem ->
-                    val bObj = bElem as? JsonObject ?: return@forEach
-                    val parsed = BadgeInjector.parseGrantedBadge(bObj)
-                    topBadges.add(
-                        parsed.copy(
-                            count = badgeCountById[parsed.id] ?: parsed.count,
-                            grantedAtText = badgeGrantedAtById[parsed.id] ?: parsed.grantedAtText,
-                            isEarned = true
-                        )
-                    )
-                }
-                UniversalBadgeEngine.resolveBadgeForUserTitle(title)?.let { titleBadge ->
-                    if (topBadges.none { UniversalBadgeEngine.badgeDedupeKey(it) == UniversalBadgeEngine.badgeDedupeKey(titleBadge) }) {
-                        topBadges.add(0, titleBadge.copy(isEarned = true))
-                    }
                 }
             } catch (_: Throwable) {
             }
@@ -2173,7 +2168,8 @@ kZC8lQg1
             postCount = postCount,
             badgeCount = badgeCount.coerceAtLeast(topBadges.size),
             unreadNotifications = unreadNotifs,
-            badges = topBadges
+            badges = topBadges,
+            flair = flair
         )
         if (generation != UserApiKeyAuthManager.sessionGeneration) return@withContext null
         UserApiKeyAuthManager.fullProfileCache = fullProfile
@@ -3253,6 +3249,8 @@ kZC8lQg1
         var websiteName = ""
         var statusText = ""
         var badgeCount = 0
+        var topBadges = emptyList<GrantedBadge>()
+        var flair = FlairInfo()
 
         val userRes = executeHttp("https://linux.do/u/$clean.json", method = "GET") ?: return@withContext null
         if (userRes.second.trimStart().startsWith("{")) {
@@ -3276,6 +3274,8 @@ kZC8lQg1
                     admin = uObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false
                     moderator = uObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false
                     badgeCount = uObj["badge_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    topBadges = BadgeInjector.readFeaturedBadges(root, uObj)
+                    flair = parseFlair(uObj)
                     location = uObj["location"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                     websiteName = (uObj["website_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                         ?: uObj["website"]?.jsonPrimitive?.contentOrNull)?.trim().orEmpty()
@@ -3308,7 +3308,7 @@ kZC8lQg1
         var topicCount = 0
         var postCount = 0
         var solvedCount = 0
-        val topBadges = mutableListOf<GrantedBadge>()
+
 
         val summaryRes = executeHttp("https://linux.do/u/$clean/summary.json", method = "GET")
         if (summaryRes != null && summaryRes.second.trimStart().startsWith("{")) {
@@ -3326,35 +3326,6 @@ kZC8lQg1
                     topicCount = us["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
                     postCount = us["post_count"]?.jsonPrimitive?.intOrNull ?: 0
                     solvedCount = us["solved_count"]?.jsonPrimitive?.intOrNull ?: 0
-                }
-                val badgeCountById = mutableMapOf<Int, Int>()
-                val badgeGrantedAtById = mutableMapOf<Int, String>()
-                (root["user_badges"] as? JsonArray)?.forEach { ubElem ->
-                    val ubObj = ubElem as? JsonObject ?: return@forEach
-                    val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    val cnt = ubObj["count"]?.jsonPrimitive?.intOrNull ?: 1
-                    badgeCountById[bid] = (badgeCountById[bid] ?: 0).coerceAtLeast(cnt)
-                    ubObj["granted_at"]?.jsonPrimitive?.contentOrNull?.let { grantedAt ->
-                        if (grantedAt.length >= 10) {
-                            badgeGrantedAtById[bid] = grantedAt.substring(0, 10)
-                        }
-                    }
-                }
-                (root["badges"] as? JsonArray)?.forEach { bElem ->
-                    val bObj = bElem as? JsonObject ?: return@forEach
-                    val parsed = BadgeInjector.parseGrantedBadge(bObj)
-                    topBadges.add(
-                        parsed.copy(
-                            count = badgeCountById[parsed.id] ?: parsed.count,
-                            grantedAtText = badgeGrantedAtById[parsed.id] ?: parsed.grantedAtText,
-                            isEarned = true
-                        )
-                    )
-                }
-                UniversalBadgeEngine.resolveBadgeForUserTitle(title)?.let { titleBadge ->
-                    if (topBadges.none { UniversalBadgeEngine.badgeDedupeKey(it) == UniversalBadgeEngine.badgeDedupeKey(titleBadge) }) {
-                        topBadges.add(0, titleBadge.copy(isEarned = true))
-                    }
                 }
             } catch (_: Throwable) {
             }
@@ -3388,7 +3359,8 @@ kZC8lQg1
             websiteName = websiteName,
             statusText = statusText,
             solvedCount = solvedCount,
-            badges = topBadges
+            badges = topBadges,
+            flair = flair
         )
     }
 
@@ -3448,102 +3420,64 @@ kZC8lQg1
     suspend fun fetchUserBadges(username: String): List<GrantedBadge> = withContext(Dispatchers.IO) {
         val clean = username.trim().removePrefix("@")
         if (clean.isBlank()) return@withContext emptyList()
-        val res = executeHttp("https://linux.do/user-badges/$clean.json?grouped=true", method = "GET")
-        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
-            try {
-                val root = json.parseToJsonElement(res.second).jsonObject
-                val badgesMap = mutableMapOf<Int, GrantedBadge>()
-                (root["badges"] as? JsonArray)?.forEach { bElem ->
-                    val bObj = bElem as? JsonObject ?: return@forEach
-                    val parsed = BadgeInjector.parseGrantedBadge(bObj)
-                    badgesMap[parsed.id] = parsed
-                }
-                val topicsMap = mutableMapOf<Int, String>()
-                (root["topics"] as? JsonArray)?.forEach { tElem ->
-                    val tObj = tElem as? JsonObject ?: return@forEach
-                    val tid = tObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    val tTitle = tObj["title"]?.jsonPrimitive?.contentOrNull ?: ""
-                    topicsMap[tid] = tTitle
-                }
-                val result = mutableListOf<GrantedBadge>()
-                (root["user_badges"] as? JsonArray)?.forEach { ubElem ->
-                    val ubObj = ubElem as? JsonObject ?: return@forEach
-                    val bid = ubObj["badge_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    val base = badgesMap[bid]
-                        ?: BadgeInjector.lookupBadgeById(bid)
-                        ?: BadgeInjector.parseGrantedBadge(ubObj, fallbackId = bid)
-                    val count = ubObj["count"]?.jsonPrimitive?.intOrNull ?: 1
-                    val grantedIso = ubObj["granted_at"]?.jsonPrimitive?.contentOrNull
-                    val grantedText = if (!grantedIso.isNullOrBlank() && grantedIso.length >= 10) {
-                        grantedIso.substring(0, 10)
-                    } else ""
-                    val tid = ubObj["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
-                    val pNum = ubObj["post_number"]?.jsonPrimitive?.intOrNull ?: 0
-                    result.add(
-                        base.copy(
-                            count = count,
-                            grantedAtText = grantedText,
-                            isEarned = true,
-                            topicId = tid,
-                            topicTitle = topicsMap[tid].orEmpty(),
-                            postNumber = pNum
-                        )
-                    )
-                }
-                if (result.isNotEmpty()) {
-                    return@withContext result.sortedWith(
-                        compareBy<GrantedBadge> { it.badgeTypeId }
-                            .thenByDescending { it.allowTitle }
-                            .thenByDescending { it.count }
-                    )
-                }
-            } catch (_: Throwable) {
-            }
-        }
-        fetchPublicUserCard(clean)?.badges.orEmpty()
+        val root = readApiObject(
+            executeHttp("https://linux.do/user-badges/$clean.json?grouped=true", method = "GET", preserveFailure = true)
+        )
+        val badges = BadgeInjector.readBadgeDefinitions(root["badges"]).associateBy { it.id }
+        val topicTitles = (root["topics"] as? JsonArray).orEmpty()
+            .mapNotNull { it as? JsonObject }
+            .associate { it["id"]?.jsonPrimitive?.intOrNull to it["title"]?.jsonPrimitive?.contentOrNull.orEmpty() }
+        root.requireArray("user_badges").mapNotNull { element ->
+            val grant = element as? JsonObject ?: return@mapNotNull null
+            val badgeId = grant["badge_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+            val badge = badges[badgeId] ?: BadgeInjector.lookupBadgeById(badgeId) ?: return@mapNotNull null
+            val topicId = grant["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
+            badge.copy(
+                count = grant["count"]?.jsonPrimitive?.intOrNull ?: 1,
+                grantedAtText = grant["granted_at"]?.jsonPrimitive?.contentOrNull.orEmpty().take(10),
+                isEarned = true,
+                topicId = topicId,
+                topicTitle = grant["topic_title"]?.jsonPrimitive?.contentOrNull ?: topicTitles[topicId].orEmpty(),
+                postNumber = grant["post_number"]?.jsonPrimitive?.intOrNull ?: 0,
+                holderUsername = clean
+            ) to (grant["grouping_position"]?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE)
+        }.distinctBy { it.first.id }
+            .sortedWith(compareBy({ it.second }, { it.first.badgeTypeId }, { it.first.id }))
+            .map { it.first }
     }
 
-    /**
-     * 获取全站所有徽章目录 (`GET /badges.json`) 并与本地官方目录深度合并
-     */
+    suspend fun fetchBadgeDefinition(badgeId: Int): GrantedBadge? = withContext(Dispatchers.IO) {
+        val response = executeHttp("https://linux.do/badges/$badgeId.json", method = "GET")
+        try {
+            val badge = readApiObject(response)["badge"] as? JsonObject ?: return@withContext null
+            BadgeInjector.parseGrantedBadge(badge).copy(
+                isEarned = badge["has_badge"]?.jsonPrimitive?.booleanOrNull == true
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Loads the visible catalog in LinuxDo's badge-group order. */
     suspend fun fetchAllSiteBadges(): List<GrantedBadge> = withContext(Dispatchers.IO) {
-        val remoteBadges = mutableListOf<GrantedBadge>()
-        val res = executeHttp("https://linux.do/badges.json", method = "GET")
-        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
-            try {
-                val root = json.parseToJsonElement(res.second).jsonObject
-                (root["badges"] as? JsonArray)?.forEach { bElem ->
-                    val bObj = bElem as? JsonObject ?: return@forEach
-                    val parsed = BadgeInjector.parseGrantedBadge(bObj).copy(isEarned = false)
-                    remoteBadges.add(parsed)
-                }
-            } catch (_: Throwable) {
-            }
+        val root = readApiObject(executeHttp("https://linux.do/badges.json", method = "GET", preserveFailure = true))
+        val groups = (root["badge_groupings"] as? JsonArray).orEmpty()
+            .mapNotNull { it as? JsonObject }
+            .associateBy { it["id"]?.jsonPrimitive?.intOrNull }
+        root.requireArray("badges").mapNotNull { element ->
+            val badge = element as? JsonObject ?: return@mapNotNull null
+            if (badge["listable"]?.jsonPrimitive?.booleanOrNull == false ||
+                badge["enabled"]?.jsonPrimitive?.booleanOrNull == false) return@mapNotNull null
+            val parsed = BadgeInjector.parseGrantedBadge(badge)
+            parsed.copy(
+                isEarned = false,
+                badgeGroupingName = groups[parsed.badgeGroupingId]?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
+            )
+        }.distinctBy { it.id }.sortedBy { badge ->
+            groups[badge.badgeGroupingId]?.get("position")?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE
         }
-        val catalogDefaults = UniversalBadgeEngine.officialBadgeCatalog.map { it.copy(isEarned = false) }
-        val mergedByKey = linkedMapOf<String, GrantedBadge>()
-        for (badge in (remoteBadges + catalogDefaults)) {
-            val key = UniversalBadgeEngine.badgeDedupeKey(badge)
-            val existing = mergedByKey[key]
-            if (existing == null) {
-                mergedByKey[key] = badge
-            } else {
-                mergedByKey[key] = existing.copy(
-                    description = existing.description.ifBlank { badge.description },
-                    longDescription = existing.longDescription.ifBlank { badge.longDescription },
-                    icon = existing.icon ?: badge.icon,
-                    imageUrl = existing.imageUrl ?: badge.imageUrl,
-                    slug = existing.slug.ifBlank { badge.slug },
-                    grantCount = maxOf(existing.grantCount, badge.grantCount),
-                    allowTitle = existing.allowTitle || badge.allowTitle
-                )
-            }
-        }
-        mergedByKey.values.sortedWith(
-            compareBy<GrantedBadge> { it.badgeTypeId }
-                .thenByDescending { it.allowTitle }
-                .thenBy { it.id }
-        )
     }
 
     /**
@@ -3558,7 +3492,7 @@ kZC8lQg1
         val url = buildString {
             append("https://linux.do/user_badges.json?badge_id=$badgeId")
             if (queryUser != null) {
-                append("&username=$queryUser")
+                append("&username=").append(java.net.URLEncoder.encode(queryUser, "UTF-8"))
             }
         }
         val res = executeHttp(url, method = "GET") ?: return@withContext emptyList()
@@ -3596,29 +3530,36 @@ kZC8lQg1
                 val tTitle = tObj["title"]?.jsonPrimitive?.contentOrNull ?: ""
                 topicsMap[tid] = tTitle
             }
+            val records = (root["user_badge_info"] as? JsonObject)?.get("user_badges") ?: root["user_badges"]
             val grantees = mutableListOf<BadgeGranteeItem>()
-            (root["user_badges"] as? JsonArray)?.forEach { ubElem ->
-                val ubObj = ubElem as? JsonObject ?: return@forEach
-                val ubId = ubObj["id"]?.jsonPrimitive?.intOrNull ?: 0
-                val uid = ubObj["user_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                val uMeta = usersMap[uid] ?: return@forEach
-                val grantedIso = ubObj["granted_at"]?.jsonPrimitive?.contentOrNull
-                val tid = ubObj["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
+            (records as? JsonArray)?.forEach { ubElem ->
+                val grant = ubElem as? JsonObject ?: return@forEach
+                val embeddedUser = grant["user"] as? JsonObject
+                val uid = embeddedUser?.get("id")?.jsonPrimitive?.intOrNull
+                    ?: grant["user_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                val user = usersMap[uid]
+                val username = embeddedUser?.get("username")?.jsonPrimitive?.contentOrNull
+                    ?: user?.username ?: return@forEach
+                val topic = grant["topic"] as? JsonObject
+                val topicId = topic?.get("id")?.jsonPrimitive?.intOrNull
+                    ?: grant["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
                 grantees.add(
                     BadgeGranteeItem(
-                        id = ubId,
+                        id = grant["id"]?.jsonPrimitive?.intOrNull ?: 0,
                         userId = uid,
-                        username = uMeta.username,
-                        displayName = uMeta.displayName,
-                        avatarTemplate = uMeta.avatarTemplate,
-                        admin = uMeta.admin,
-                        moderator = uMeta.moderator,
-                        trustLevel = uMeta.trustLevel,
-                        grantedAtText = formatRelativeTime(grantedIso),
-                        count = ubObj["count"]?.jsonPrimitive?.intOrNull ?: 1,
-                        topicId = tid,
-                        topicTitle = topicsMap[tid].orEmpty(),
-                        postNumber = ubObj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
+                        username = username,
+                        displayName = embeddedUser?.get("name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                            ?: user?.displayName ?: username,
+                        avatarTemplate = embeddedUser?.get("avatar_template")?.jsonPrimitive?.contentOrNull
+                            ?: user?.avatarTemplate.orEmpty(),
+                        admin = embeddedUser?.get("admin")?.jsonPrimitive?.booleanOrNull ?: user?.admin ?: false,
+                        moderator = embeddedUser?.get("moderator")?.jsonPrimitive?.booleanOrNull ?: user?.moderator ?: false,
+                        trustLevel = embeddedUser?.get("trust_level")?.jsonPrimitive?.intOrNull ?: user?.trustLevel ?: 1,
+                        grantedAtText = formatRelativeTime(grant["granted_at"]?.jsonPrimitive?.contentOrNull),
+                        count = grant["count"]?.jsonPrimitive?.intOrNull ?: 1,
+                        topicId = topicId,
+                        topicTitle = topic?.get("title")?.jsonPrimitive?.contentOrNull ?: topicsMap[topicId].orEmpty(),
+                        postNumber = grant["post_number"]?.jsonPrimitive?.intOrNull ?: 1
                     )
                 )
             }
@@ -3643,12 +3584,21 @@ kZC8lQg1
         }
     }
 
+    private fun parseFlair(user: JsonObject) = FlairInfo(
+        url = user["flair_url"]?.jsonPrimitive?.contentOrNull,
+        name = user["flair_name"]?.jsonPrimitive?.contentOrNull,
+        bgColorHex = user["flair_bg_color"]?.jsonPrimitive?.contentOrNull,
+        fgColorHex = user["flair_color"]?.jsonPrimitive?.contentOrNull,
+        groupId = user["flair_group_id"]?.jsonPrimitive?.intOrNull
+    )
+
     private fun parseSinglePostObject(
         pObj: JsonObject,
         fallbackIdx: Int,
         topicId: Int = 0,
         lastReadPostNumber: Int? = null,
-        forceRead: Boolean = false
+        forceRead: Boolean = false,
+        authorBadges: Map<Int, List<GrantedBadge>> = emptyMap()
     ): PostItemModel? {
         val pid = pObj["id"]?.jsonPrimitive?.intOrNull ?: return null
         val postNumber = pObj["post_number"]?.jsonPrimitive?.intOrNull ?: (fallbackIdx + 1)
@@ -3725,14 +3675,7 @@ kZC8lQg1
         val canDelete = pObj["can_delete"]?.jsonPrimitive?.booleanOrNull ?: false
         val rawMarkdown = pObj["raw"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
 
-        // 解析本楼首次获授徽章 (`badges_granted`) 与行内用户佩戴徽章 (`user_badges` / `post_badges`)；
-        // 用户佩戴的文字头衔 (`user_title`) 展示在第二行 `UserTitleTag`，不重复塞入第一行徽章图标列。
-        val firstGrantedBadges = parseInlinePostBadges(pObj["badges_granted"], isFirstGrant = true)
-        val inlineUserBadges = parseInlinePostBadges(pObj["user_badges"], isFirstGrant = false)
-        val inlinePostBadges = parseInlinePostBadges(pObj["post_badges"], isFirstGrant = false)
-        val inlineBadges = UniversalBadgeEngine.mergeBadgesPreservingRichness(
-            firstGrantedBadges + inlineUserBadges + inlinePostBadges
-        )
+        val grantedBadges = parsePostGrantedBadges(pObj["badges_granted"])
 
         val cakedateRaw = pObj["user_cakedate"]?.jsonPrimitive?.contentOrNull
         val birthdateRaw = pObj["user_birthdate"]?.jsonPrimitive?.contentOrNull
@@ -3748,6 +3691,7 @@ kZC8lQg1
             animatedAvatar = animatedAvatar,
             primaryGroupName = primaryGroupName,
             userTitle = userTitle,
+            titleIsGroup = pObj["title_is_group"]?.jsonPrimitive?.booleanOrNull == true,
             trustLevel = trustLevel,
             admin = admin,
             moderator = moderator,
@@ -3757,14 +3701,9 @@ kZC8lQg1
             isTodayBirthday = isTodayDateMonthDay(birthdateRaw, requirePreviousYear = false),
             iosDeviceName = iosDeviceName,
             userStatus = userStatus,
-            flair = FlairInfo(
-                url = pObj["flair_url"]?.jsonPrimitive?.contentOrNull,
-                name = pObj["flair_name"]?.jsonPrimitive?.contentOrNull,
-                bgColorHex = pObj["flair_bg_color"]?.jsonPrimitive?.contentOrNull,
-                fgColorHex = pObj["flair_color"]?.jsonPrimitive?.contentOrNull,
-                groupId = pObj["flair_group_id"]?.jsonPrimitive?.intOrNull
-            ),
-            badgesGranted = inlineBadges,
+            flair = parseFlair(pObj),
+            badgesGranted = grantedBadges,
+            authorBadges = authorBadges[userId].orEmpty(),
             createdAtText = formatRelativeTime(createdAtIso),
             cookedHtml = cooked,
             replyCount = replyCount,
@@ -3797,8 +3736,7 @@ kZC8lQg1
         val bookmarked = root["bookmarked"]?.jsonPrimitive?.booleanOrNull ?: false
         val lastReadPostNumber = root["last_read_post_number"]?.jsonPrimitive?.intOrNull
 
-        // 预先将顶层 badges / user_badges 缓存进 BadgeInjector，以便 parseSinglePostObject 内解析 badges_granted 的 badge_id 引用
-        BadgeInjector.parseAndCacheUserBadges(root)
+        val authorBadges = BadgeInjector.readTopicAuthorBadges(root).orEmpty()
 
         val postStream = root["post_stream"] as? JsonObject
         val postsArr = postStream?.get("posts") as? JsonArray ?: JsonArray(emptyList())
@@ -3806,16 +3744,16 @@ kZC8lQg1
             it.jsonPrimitive.intOrNull
         }.orEmpty()
 
-        val rawPosts = postsArr.mapIndexedNotNull { idx, elem ->
+        val posts = postsArr.mapIndexedNotNull { idx, elem ->
             parseSinglePostObject(
                 pObj = elem as? JsonObject ?: return@mapIndexedNotNull null,
                 fallbackIdx = idx,
                 topicId = id,
-                lastReadPostNumber = lastReadPostNumber
+                lastReadPostNumber = lastReadPostNumber,
+                authorBadges = authorBadges
             )
         }
 
-        val enrichedPosts = BadgeInjector.injectTopLevelUserBadges(rawPosts, root)
         return TopicDetailModel(
             id = id,
             title = title,
@@ -3827,37 +3765,20 @@ kZC8lQg1
             likeCount = likeCount,
             postsCount = postsCount,
             highestPostNumber = root["highest_post_number"]?.jsonPrimitive?.intOrNull,
-            posts = enrichedPosts,
+            posts = posts,
             streamIds = streamIds,
             bookmarked = bookmarked
         )
     }
 
-    private fun parseInlinePostBadges(element: JsonElement?, isFirstGrant: Boolean = false): List<GrantedBadge> {
-        return when (element) {
-            is JsonArray -> element.mapNotNull { item ->
-                when (item) {
-                    is JsonObject -> BadgeInjector.parseGrantedBadge(item, isFirstGrant = isFirstGrant)
-                    is JsonPrimitive -> item.intOrNull?.let { bid ->
-                        BadgeInjector.lookupBadgeById(bid)?.copy(isFirstTimeGrant = isFirstGrant)
-                    }
-                    else -> null
-                }
+    private fun parsePostGrantedBadges(element: JsonElement?): List<GrantedBadge> =
+        (element as? JsonArray).orEmpty().mapNotNull { item ->
+            when (item) {
+                is JsonObject -> BadgeInjector.parseGrantedBadge(item, isFirstGrant = true)
+                is JsonPrimitive -> item.intOrNull?.let(BadgeInjector::lookupBadgeById)?.copy(isFirstTimeGrant = true)
+                else -> null
             }
-            is JsonObject -> {
-                val badgesObj = element["badges"] as? JsonObject
-                if (badgesObj != null) {
-                    badgesObj.entries.mapNotNull { (k, v) ->
-                        val bObj = v as? JsonObject ?: return@mapNotNull null
-                        BadgeInjector.parseGrantedBadge(bObj, fallbackId = k.toIntOrNull() ?: 0, isFirstGrant = isFirstGrant)
-                    }
-                } else {
-                    listOf(BadgeInjector.parseGrantedBadge(element, isFirstGrant = isFirstGrant))
-                }
-            }
-            else -> emptyList()
-        }
-    }
+        }.filter { it.id > 0 }.distinctBy { it.id }
 
     private fun parseTopicListRoot(root: JsonObject): List<TopicSummary> {
         val usersMap = mutableMapOf<Int, TopicUser>()

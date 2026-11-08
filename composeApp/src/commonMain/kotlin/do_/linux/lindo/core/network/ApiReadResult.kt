@@ -26,7 +26,7 @@ internal fun requireMutationObject(response: Pair<Int, String>?): JsonObject {
 
 enum class ApiFailureKind { Connection, Authentication, Verification, RateLimited, Server, InvalidPayload }
 class ApiReadException(val kind: ApiFailureKind, cause: Throwable? = null) : IOException(when (kind) {
-    ApiFailureKind.Connection -> "网络连接失败，请检查网络后重试"
+    ApiFailureKind.Connection -> "网络连接失败"
     ApiFailureKind.Authentication -> "登录状态已失效，请重新登录后重试"
     ApiFailureKind.Verification -> "没有访问权限或需要站点验证，请打开官网检查"
     ApiFailureKind.RateLimited -> "请求过于频繁，请稍后重试"

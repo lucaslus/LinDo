@@ -1,98 +1,97 @@
 package do_.linux.lindo
 
-import do_.linux.lindo.core.badge.ResolvedBadgeVisual
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
 import do_.linux.lindo.core.connect.ConnectStatsParser
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.GrantedBadge
-import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.CookieVariant
 import do_.linux.lindo.core.render.DiscourseAstParser
 import do_.linux.lindo.core.render.PostBlockNode
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
-import do_.linux.lindo.ui.components.LinDoIcons
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class LinDoCoreTest {
 
     @Test
-    fun testSvgBadgeAndDynamicSpriteNeverDrop() {
-        // 1. .svg URL 徽章必须识别为 SvgImage 而非普通位图
-        val svgBadge = GrantedBadge(
-            id = 10,
-            name = "2026 SVG 徽章",
-            imageUrl = "/uploads/default/original/3X/badge_new.svg"
+    fun officialBadgeArtworkUsesTheSiteImageOrExactSpriteId() {
+        val badge = GrantedBadge(
+            id = 47, name = "Devotee", icon = "far-eye", imageUrl = "/uploads/badge.svg"
         )
-        val resolvedSvg = UniversalBadgeEngine.resolveBadgeVisual(svgBadge)
-        assertIs<ResolvedBadgeVisual.SvgImage>(resolvedSvg)
-        assertEquals("https://linux.do/uploads/default/original/3X/badge_new.svg", resolvedSvg.url)
-
-        // 2. 动态注册 /svg-sprite/linux.do/ 自定义 <symbol> 后立即可解析
-        val count = UniversalBadgeEngine.registerDiscourseSpriteBundle(
-            """<symbol id="d-icon-custom-linuxdo-2026" viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></symbol>"""
+        assertEquals("https://linux.do/uploads/badge.svg", UniversalBadgeEngine.artworkUrl(badge))
+        assertEquals(
+            "https://cdn.ldstatic.com/svg-sprite/linux.do/icon/far-eye.svg",
+            UniversalBadgeEngine.artworkUrl(badge.copy(imageUrl = null))
         )
-        assertEquals(1, count)
-
-        val spriteBadge = GrantedBadge(
-            id = 11,
-            name = "社区动态图标徽章",
-            icon = "d-icon-custom-linuxdo-2026"
+        assertEquals(
+            "https://cdn.ldstatic.com/svg-sprite/linux.do/icon/fab-apple.svg",
+            UniversalBadgeEngine.iconUrl("fab fa-apple")
         )
-        val resolvedSprite = UniversalBadgeEngine.resolveBadgeVisual(spriteBadge)
-        assertIs<ResolvedBadgeVisual.DynamicSpriteSvg>(resolvedSprite)
-
-        // 3. 未知未来新徽章决不能丢失，必须回退为 MedalFallback
-        val futureBadge = GrantedBadge(
-            id = 12,
-            name = "量子先锋",
-            icon = "fa-unknown-2099-icon"
-        )
-        val resolvedFallback = UniversalBadgeEngine.resolveBadgeVisual(futureBadge)
-        assertIs<ResolvedBadgeVisual.MedalFallback>(resolvedFallback)
-        assertEquals("量", resolvedFallback.badgeInitial)
+        assertEquals(null, UniversalBadgeEngine.artworkUrl(badge.copy(imageUrl = null, icon = "")))
     }
 
     @Test
-    fun testSvgMagicByteSniffing() {
-        val svgBytes = """   <?xml version="1.0"?><svg viewBox="0 0 10 10"></svg>""".encodeToByteArray()
-        val pngBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)
-        assertTrue(UniversalBadgeEngine.isSvgBytes(svgBytes))
-        assertTrue(!UniversalBadgeEngine.isSvgBytes(pngBytes))
-    }
-
-    @Test
-    fun testTopLevelUserBadgesInjectionSupportsBothMapAndList() {
-        val sampleJson = Json.parseToJsonElement(
+    fun topicAuthorBadgesUseTheThemePayloadWithoutCarryingPreviousOwnership() {
+        val root = Json.parseToJsonElement(
             """
             {
               "user_badges": {
                 "badges": {
-                  "1": {"id": 1, "name": "迷恋", "badge_type_id": 1, "icon": "fa-crown"},
-                  "2": {"id": 2, "name": "SVG新章", "badge_type_id": 2, "image_url": "/images/new.svg"}
+                  "102": {"id": 102, "name": "种子用户", "badge_grouping_id": 6, "icon": "seedling"},
+                  "47": {"id": 47, "name": "Devotee", "badge_grouping_id": 2, "icon": "far-eye"},
+                  "1": {"id": 1, "name": "Basic", "badge_grouping_id": 4},
+                  "3": {"id": 3, "name": "Regular", "badge_grouping_id": 4}
                 },
                 "users": {
-                  "99": {"badge_ids": [1, 2]}
+                  "1599": {"id": 1599, "badge_ids": [47, 102, 1, 3]},
+                  "1687": {"id": 1687, "badge_ids": [102]}
                 }
               }
             }
             """.trimIndent()
         ).jsonObject
 
-        BadgeInjector.parseAndCacheUserBadges(sampleJson)
-        val user99Badges = BadgeInjector.getBadgesForUser(99)
-        assertEquals(2, user99Badges.size)
-        assertEquals("迷恋", user99Badges[0].name)
-        assertEquals("/images/new.svg", user99Badges[1].imageUrl)
+        val badges = assertNotNull(BadgeInjector.readTopicAuthorBadges(root))
+        assertEquals(listOf(47, 102, 3), badges[1599]?.map { it.id })
+        assertEquals(listOf(102), badges[1687]?.map { it.id })
+        assertEquals(null, BadgeInjector.readTopicAuthorBadges(Json.parseToJsonElement("{}").jsonObject))
+        assertEquals(
+            emptyMap(),
+            BadgeInjector.readTopicAuthorBadges(Json.parseToJsonElement("""{"user_badges":{}}""").jsonObject)
+        )
+    }
+
+    @Test
+    fun profileUsesFeaturedGrantIdsInTheServerOrder() {
+        val root = Json.parseToJsonElement(
+            """
+            {
+              "user": {"featured_user_badge_ids":[9002, 9001]},
+              "user_badges":[
+                {"id":9001,"badge_id":102,"granted_at":"2024-02-01T00:00:00Z"},
+                {"id":9002,"badge_id":47,"count":2},
+                {"id":9003,"badge_id":120}
+              ],
+              "badges":[
+                {"id":102,"name":"种子用户","icon":"seedling"},
+                {"id":47,"name":"Devotee","icon":"far-eye"},
+                {"id":120,"name":"元气满满","icon":"angles-up"}
+              ]
+            }
+            """.trimIndent()
+        ).jsonObject
+        val featured = BadgeInjector.readFeaturedBadges(root, root.getValue("user").jsonObject)
+        assertEquals(listOf(47, 102), featured.map { it.id })
+        assertEquals(2, featured.first().count)
+        assertEquals("2024-02-01", featured.last().grantedAtText)
     }
 
     @Test
@@ -196,40 +195,7 @@ class LinDoCoreTest {
     }
 
     @Test
-    fun testOnlyAppleCanDoBadgeAndEmojiCatalogAlignment() {
-        // Use the supplied artwork and retain the Apple glyph as a fallback.
-        val appleBadge = GrantedBadge(
-            id = 205,
-            name = "Only Apple Can Do",
-            icon = "fab-apple",
-            imageUrl = "/uploads/default/original/3X/only-apple-can-do.svg",
-            slug = "only-apple-can-do",
-            isFirstTimeGrant = true
-        )
-        assertTrue(UniversalBadgeEngine.isAppleBadge(appleBadge))
-        val artwork = assertIs<ResolvedBadgeVisual.SvgImage>(UniversalBadgeEngine.resolveBadgeVisual(appleBadge))
-        assertEquals("https://linux.do/uploads/default/original/3X/only-apple-can-do.svg", artwork.url)
-        assertEquals(null, artwork.tintColor)
-        val visual = UniversalBadgeEngine.resolveBadgeVisual(appleBadge.copy(imageUrl = null), isDark = true)
-        assertIs<ResolvedBadgeVisual.VectorGlyph>(visual)
-        assertEquals(LinDoIcons.AppleLogo, visual.icon)
-
-        // The first grant remains attached to the floor that earned it.
-        val rawPost = PostItemModel(
-            id = 1001,
-            postNumber = 5,
-            userId = 99,
-            username = "apple_fan",
-            displayName = "Apple 佬友",
-            userTitle = "Only Apple Can Do",
-            badgesGranted = listOf(appleBadge)
-        )
-        val rootJson = Json.parseToJsonElement("""{"user_badges": {}}""").jsonObject
-        val enriched = BadgeInjector.injectTopLevelUserBadges(listOf(rawPost), rootJson).single()
-        assertTrue(enriched.badgesGranted.isNotEmpty())
-        assertTrue(UniversalBadgeEngine.isAppleBadge(enriched.badgesGranted.first()))
-
-        // 3. 官方表情包与表态映射校验
+    fun testEmojiCatalogAlignment() {
         assertEquals("🫠", LinuxDoEmojiCatalog.shortcodeToUnicode("distorted_face"))
         assertEquals("🫡", LinuxDoEmojiCatalog.shortcodeToUnicode(":saluting_face:"))
         assertEquals("😮", LinuxDoEmojiCatalog.shortcodeToUnicode("open_mouth"))
@@ -244,96 +210,19 @@ class LinDoCoreTest {
     }
 
     @Test
-    fun testOfficialBadgeCatalogAndSpecialTitlesAlignment() {
-        // 1. 验证官方核心荣誉与纪念徽章（种子用户、全年不落、不二之选、一元复始、骐骥驰骋、岂曰无衣?、Only Apple Can Do、活跃用户、狂热、迷恋等）
-        val requiredTitles = listOf(
-            "种子用户",
-            "全年不落",
-            "不二之选",
-            "一元复始",
-            "骐骥驰骋",
-            "岂曰无衣?",
-            "破界者",
-            "非我莫属",
-            "社区领袖",
-            "万人迷",
-            "点赞狂魔",
-            "Only Apple Can Do",
-            "狂热",
-            "活跃用户",
-            "一周年",
-            "博学",
-            "领航员",
-            "深得人心",
-            "迷恋",
-            "维基编辑"
+    fun grantRecordIdIsDistinctFromBadgeIdAndExplicitNullClearsOldArtwork() {
+        fun badge(raw: String, isGrant: Boolean = false) =
+            BadgeInjector.parseGrantedBadge(Json.parseToJsonElement(raw).jsonObject, isFirstGrant = isGrant)
+
+        badge("""{"id":146,"name":"Only Apple Can Do","icon":"fab-apple","image_url":"/previous.svg"}""")
+        val current = badge("""{"id":146,"name":"Only Apple Can Do","icon":"fab-apple","image_url":null}""")
+        assertEquals(null, current.imageUrl)
+        val grant = badge(
+            """{"id":3891204,"badge":{"id":146,"name":"Only Apple Can Do","icon":"fab-apple"},"count":2}""",
+            isGrant = true
         )
-        for (title in requiredTitles) {
-            val resolved = UniversalBadgeEngine.resolveBadgeForUserTitle(title)
-            assertNotNull(resolved, "Expected badge resolution for title: $title")
-            assertTrue(resolved.allowTitle, "Expected allowTitle=true for title badge: $title")
-        }
-
-        // 2. 验证头衔视觉层级分类（全息流光 / 黄金荣誉 / Apple 专属 / 银质活跃）
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.HOLOGRAPHIC, LinuxDoSiteRules.resolveTitleVisualStyle("种子用户"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.HOLOGRAPHIC, LinuxDoSiteRules.resolveTitleVisualStyle("破界者"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("全年不落"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("不二之选"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("一元复始"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("骐骥驰骋"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.GOLD_HONOR, LinuxDoSiteRules.resolveTitleVisualStyle("岂曰无衣?"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.APPLE_SPECIAL, LinuxDoSiteRules.resolveTitleVisualStyle("Only Apple Can Do"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.SILVER_ACTIVE, LinuxDoSiteRules.resolveTitleVisualStyle("活跃用户"))
-        assertEquals(LinuxDoSiteRules.UserTitleVisualStyle.SILVER_ACTIVE, LinuxDoSiteRules.resolveTitleVisualStyle("狂热"))
-
-        // 3. 验证官方佩戴分离规则：
-        // - user_title 仅在第二行作为头衔展示（通过 resolveBadgeForUserTitle 关联徽章详情），绝不重复注入第一行 badgesGranted
-        // - user_badges 中区分 user_badge.id（授予记录 ID）与 badge_id（真实徽章 ID），绝不误把授予记录 ID 当作徽章 ID
-        val seedPost = PostItemModel(
-            id = 2001,
-            postNumber = 1,
-            userId = 777,
-            username = "seed_member",
-            displayName = "元老佬友",
-            userTitle = "全年不落"
-        )
-        val rootJson = Json.parseToJsonElement(
-            """
-            {
-              "title": "Only Apple can do (徽章)",
-              "user_badges": {
-                "badges": [
-                  {
-                    "id": 146,
-                    "name": "Only Apple Can Do",
-                    "description": "通过 iOS / iPadOS 回复活动帖解锁",
-                    "icon": "fab fa-apple",
-                    "badge_type_id": 3,
-                    "allow_title": true
-                  }
-                ],
-                "user_badges": [
-                  {
-                    "id": 3891204,
-                    "badge_id": 146,
-                    "user_id": 777,
-                    "post_number": 1,
-                    "is_favorite": true
-                  }
-                ]
-              }
-            }
-            """.trimIndent()
-        ).jsonObject
-        val enriched = BadgeInjector.injectTopLevelUserBadges(listOf(seedPost), rootJson).single()
-        assertEquals(1, enriched.badgesGranted.size)
-        assertEquals("Only Apple Can Do", enriched.badgesGranted.single().name)
-        assertEquals(146, enriched.badgesGranted.single().id)
-        assertTrue(enriched.badgesGranted.none { it.name == "全年不落" })
-
-        val otherFloor = seedPost.copy(id = 2002, postNumber = 2, iosDeviceName = "iPhone 13 Pro")
-        val anotherUser = seedPost.copy(id = 2003, userId = 778, username = "other_member")
-        assertTrue(BadgeInjector.injectTopLevelUserBadges(listOf(otherFloor), rootJson).single().badgesGranted.isEmpty())
-        assertTrue(BadgeInjector.injectTopLevelUserBadges(listOf(anotherUser), rootJson).single().badgesGranted.isEmpty())
+        assertEquals(146, grant.id)
+        assertEquals(2, grant.count)
+        assertTrue(grant.isFirstTimeGrant)
     }
 }

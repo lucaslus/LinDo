@@ -283,7 +283,7 @@ fun LinDoStatePanel(
     title: String = state.title,
     detail: String? = state.detail,
     onRetry: (() -> Unit)? = null,
-    actionLabel: String = "刷新",
+    actionLabel: String = if (state == LinDoMascotState.NetworkError) "重试" else "刷新",
     modifier: Modifier = Modifier,
     useIconArtwork: Boolean = false
 ) {
@@ -305,19 +305,29 @@ fun LinDoStatePanel(
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        LinDoMascot(state = state, size = 60.dp, useIconArtwork = useIconArtwork)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = title,
-            color = secondaryText,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-            lineHeight = 18.sp
-        )
-        if (!detail.isNullOrBlank() && detail != title) {
-            Spacer(Modifier.height(5.dp))
-            Text(detail, color = secondaryText, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 18.sp)
+        if (state == LinDoMascotState.NetworkError) {
+            LinDoMascot(state = state, size = 48.dp, useIconArtwork = useIconArtwork, animate = false)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                detail?.takeIf { it.isNotBlank() } ?: title,
+                color = secondaryText, fontSize = 12.sp,
+                textAlign = TextAlign.Center, lineHeight = 17.sp
+            )
+        } else {
+            LinDoMascot(state = state, size = 60.dp, useIconArtwork = useIconArtwork)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = title,
+                color = secondaryText,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
+                lineHeight = 18.sp
+            )
+            if (!detail.isNullOrBlank() && detail != title) {
+                Spacer(Modifier.height(5.dp))
+                Text(detail, color = secondaryText, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 18.sp)
+            }
         }
         if (onRetry != null) {
             Spacer(Modifier.height(8.dp))

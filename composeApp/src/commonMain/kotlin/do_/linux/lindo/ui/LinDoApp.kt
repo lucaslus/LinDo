@@ -51,6 +51,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -98,11 +99,13 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
@@ -139,6 +142,7 @@ import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.BadgeType
 import do_.linux.lindo.core.model.BoostInputStats
 import do_.linux.lindo.core.model.CommunitySearchResult
+import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.model.mergeTopicPosts
 import do_.linux.lindo.core.model.previousUnloadedStreamIds
@@ -172,13 +176,18 @@ import do_.linux.lindo.core.render.PostBlockNode
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
+import do_.linux.lindo.ui.components.OfficialBadgeArtwork
 import do_.linux.lindo.ui.components.PostGrantedBadgeIcon
 import lindo.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.painterResource
 import do_.linux.lindo.ui.components.SmartAvatar
 import do_.linux.lindo.ui.components.UniversalBadgeChip
 import do_.linux.lindo.ui.components.UserTitleTag
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -735,13 +744,14 @@ internal fun GoogleAccountRingAvatar(
     avatarSize: Dp = 76.dp,
     strokeWidth: Dp = 0.5.dp,
     onClick: (() -> Unit)? = null,
-    animatedAvatar: String? = null
+    animatedAvatar: String? = null,
+    flair: FlairInfo? = null
 ) {
     Box(Modifier.size(avatarSize).let {
         if (onClick != null) it.clickable(onClick = onClick) else it
     }, contentAlignment = Alignment.Center) {
         SmartAvatar(username = letter, avatarTemplate = avatarUrl, animatedAvatar = animatedAvatar,
-            size = avatarSize, enableAnimations = LocalLinDoAnimations.current)
+            size = avatarSize, flair = flair, enableAnimations = LocalLinDoAnimations.current)
     }
 }
 
@@ -750,13 +760,15 @@ internal fun LinDoApp(
     onThemeChanged: (Boolean) -> Unit = {},
     systemAnimationsEnabled: Boolean = true,
     appIcon: LinDoAppIcon? = null,
-    onApplyAppIcon: ((LinDoAppIcon) -> Boolean)? = null
+    onApplyAppIcon: ((LinDoAppIcon) -> Boolean)? = null,
+    addPlatformImageDecoders: coil3.ComponentRegistry.Builder.() -> Unit = {}
 ) {
     coil3.compose.setSingletonImageLoaderFactory { context ->
         coil3.ImageLoader.Builder(context)
             .components {
                 add(coil3.network.ktor3.KtorNetworkFetcherFactory(httpClient = { LinuxDoRepository.imageHttpClient }))
                 add(coil3.svg.SvgDecoder.Factory())
+                addPlatformImageDecoders()
             }
             .build()
     }
@@ -946,13 +958,6 @@ internal fun LinDoApp(
                         scope.launch {
                             delay(2200L)
                             refreshUpToDateNotice = false
-                        }
-                    }
-                    if (activeTopicSummary == null) {
-                        val first = fetched.firstOrNull { !it.pinned } ?: fetched.first()
-                        activeTopicSummary = first
-                        scope.launch {
-                            activeTopicDetail = LinuxDoRepository.fetchTopicDetail(first.id, first)
                         }
                     }
                     feedListState.scrollToItem(0)
@@ -1149,7 +1154,6 @@ internal fun LinDoApp(
             val bSlug = badgeMatch.groupValues.getOrNull(2)
             if (bid != null && bid > 0) {
                 val resolved = BadgeInjector.lookupBadgeById(bid)
-                    ?: UniversalBadgeEngine.lookupOfficialBadge(id = bid, slug = bSlug)
                     ?: GrantedBadge(id = bid, name = bSlug?.replace("-", " ") ?: "徽章 #$bid", slug = bSlug.orEmpty())
                 inspectedBadge = resolved
             } else {
@@ -1376,6 +1380,20 @@ internal fun LinDoApp(
             ) {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     val isDesktop = maxWidth >= 840.dp
+                    LaunchedEffect(isDesktop, isAuthorized, topics.isNotEmpty()) {
+                        if (!isDesktop || !isAuthorized || activeTopicSummary != null) return@LaunchedEffect
+                        val first = topics.firstOrNull { !it.pinned } ?: topics.firstOrNull() ?: return@LaunchedEffect
+                        activeTopicSummary = first
+                        detailLoadJob = scope.launch {
+                            isLoadingDetail = true
+                            try {
+                                val loaded = LinuxDoRepository.fetchTopicDetail(first.id, first, trackVisit = false)
+                                if (activeTopicSummary == first && !mobileShowingDetail) activeTopicDetail = loaded
+                            } finally {
+                                if (activeTopicSummary == first && !mobileShowingDetail) isLoadingDetail = false
+                            }
+                        }
+                    }
 
                     if (!isAuthorized) {
                         GoogleWelcomeLoginScreen(
@@ -2540,18 +2558,18 @@ private fun CommunityHomeFeedPane(
     val maxPullPx = with(density) { 148.dp.toPx() }
 
     // 兜底：若用户手指抬起未产生 Fling（例如轻点首条帖子微滑后松手），自动归零或触发刷新
-    LaunchedEffect(listState.isScrollInProgress, isLoading) {
-        if (!listState.isScrollInProgress && !isLoading && pullDownPx > 0f) {
-            if (pullDownPx >= pullThresholdPx) {
+    val refreshAction by androidx.compose.runtime.rememberUpdatedState(onRefresh)
+    LaunchedEffect(listState, isLoading, pullThresholdPx) {
+        androidx.compose.runtime.snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling && !isLoading && pullDownPx > 0f) {
+                val refresh = pullDownPx >= pullThresholdPx
                 pullDownPx = 0f
-                onRefresh()
-            } else {
-                pullDownPx = 0f
+                if (refresh) refreshAction()
             }
         }
     }
 
-    val pullNestedScroll = remember(isLoading, pullThresholdPx, maxPullPx) {
+    val pullNestedScroll = remember(listState, isLoading, pullThresholdPx, maxPullPx) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                 if (pullDownPx > 0f && available.y < 0f) {
@@ -2583,7 +2601,7 @@ private fun CommunityHomeFeedPane(
             override suspend fun onPreFling(available: Velocity): Velocity {
                 if (pullDownPx >= pullThresholdPx && !isLoading) {
                     pullDownPx = 0f
-                    onRefresh()
+                    refreshAction()
                 } else {
                     pullDownPx = 0f
                 }
@@ -2595,16 +2613,13 @@ private fun CommunityHomeFeedPane(
     // 滚动触底自动加载下一页（一旦发生网络异常 loadMoreError=true 立即停止自动重试，仅允许手动点击重试）
     val shouldLoadMore by remember(isLoading, isLoadingMore, hasMoreTopics, loadMoreError, searchQuery) {
         derivedStateOf {
+            if (isLoading || isLoadingMore || !hasMoreTopics || loadMoreError || searchQuery.isNotBlank()) {
+                return@derivedStateOf false
+            }
             val info = listState.layoutInfo
             val total = info.totalItemsCount
             val lastIdx = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            total > 4 &&
-                lastIdx >= total - 3 &&
-                !isLoading &&
-                !isLoadingMore &&
-                hasMoreTopics &&
-                !loadMoreError &&
-                searchQuery.isBlank()
+            total > 4 && lastIdx >= total - 3
         }
     }
     LaunchedEffect(shouldLoadMore, regularTopics.size) {
@@ -2939,14 +2954,23 @@ private fun CommunityHomeFeedPane(
                     LinearShimmerTopicSkeletonList(useIconArtwork = true)
                 } else if (topics.isEmpty() && !isLoading) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        LinDoStatePanel(
-                            state = if (errorMessage != null) LinDoMascotState.NetworkError else LinDoMascotState.Empty,
-                            title = if (errorMessage != null) "暂时没能加载讨论" else "这里还没有匹配的讨论",
-                            detail = errorMessage ?: "换个关键词，或看看其他板块吧",
-                            onRetry = onRefresh,
-                            actionLabel = if (errorMessage != null) "重新加载" else "刷新看看",
-                            useIconArtwork = true
-                        )
+                        if (errorMessage != null) {
+                            LinDoStatePanel(
+                                LinDoMascotState.NetworkError,
+                                detail = errorMessage,
+                                onRetry = onRefresh,
+                                useIconArtwork = true
+                            )
+                        } else {
+                            LinDoStatePanel(
+                                LinDoMascotState.Empty,
+                                title = "这里还没有匹配的讨论",
+                                detail = "换个关键词，或看看其他板块吧",
+                                onRetry = onRefresh,
+                                actionLabel = "刷新看看",
+                                useIconArtwork = true
+                            )
+                        }
                     }
                 } else {
                     LazyColumn(
@@ -2961,7 +2985,7 @@ private fun CommunityHomeFeedPane(
                     ) {
                         // 置顶公告条（随紧凑/宽松模式自适应外框与间距）
                         if (pinnedTopics.isNotEmpty()) {
-                            item(key = "pinned_banner_group") {
+                            item(key = "pinned_banner_group", contentType = "pinned") {
                                 if (isCompact) {
                                     Column(
                                         modifier = Modifier
@@ -3066,7 +3090,7 @@ private fun CommunityHomeFeedPane(
                             }
                         }
 
-                        itemsIndexed(regularTopics, key = { _, item -> item.id }) { idx, topic ->
+                        itemsIndexed(regularTopics, key = { _, item -> item.id }, contentType = { _, _ -> isCompact }) { idx, topic ->
                             CommunityTopicItem(
                                 topic = topic,
                                 isSelected = topic.id == selectedTopicId,
@@ -3086,7 +3110,7 @@ private fun CommunityHomeFeedPane(
 
                         // 底部波浪呼吸脉冲分页加载栏（触底无更多时展示零度娘“没有更多了”）
                         if (regularTopics.isNotEmpty()) {
-                            item(key = "load_more_footer") {
+                            item(key = "load_more_footer", contentType = "footer") {
                                 LinearPulseLoadingFooter(
                                     isLoadingMore = isLoadingMore,
                                     hasMore = hasMoreTopics,
@@ -3101,9 +3125,18 @@ private fun CommunityHomeFeedPane(
                 }
 
                 // 顶部悬浮下拉刷新指示胶囊 & “已是最新，没有更多新内容了”零度娘反馈胶囊（Overlay 悬浮，不挤推列表）
-                val showPullOverlay = pullDownPx > pullDeadZonePx || (isLoading && topics.isNotEmpty())
+                val pullStage by remember(pullDeadZonePx, pullThresholdPx) {
+                    derivedStateOf {
+                        when {
+                            pullDownPx >= pullThresholdPx -> 2
+                            pullDownPx > pullDeadZonePx -> 1
+                            else -> 0
+                        }
+                    }
+                }
+                val showPullOverlay = pullStage > 0 || (isLoading && topics.isNotEmpty())
                 if (showPullOverlay || refreshUpToDateNotice) {
-                    val ready = pullDownPx >= pullThresholdPx
+                    val ready = pullStage == 2
                     val mascotState = when {
                         isLoading -> LinDoMascotState.Refreshing
                         showPullOverlay -> LinDoMascotState.Refreshing
@@ -3278,22 +3311,16 @@ private fun CommunityTopicItem(
     val rowBgColor = if (isSelected) palette.subtleSurface else palette.cardSurface
     val itemInteractionSource = remember { MutableInteractionSource() }
     val isItemPressed by itemInteractionSource.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
-        targetValue = if (isItemPressed && enableAnimations) (if (isCompact) 0.992f else 0.985f) else 1f,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 620f),
-        label = "topicItemPressScale"
-    )
+    val pressBackground = Modifier.drawBehind {
+        drawRect(if (isItemPressed) palette.subtleSurface else rowBgColor)
+    }
 
     if (isCompact) {
         // 模式 B：紧凑列表模式（高密度双行流式，首行分类色点+单行适度字重标题+无底块回复数，次行 18dp 头像+作者+分类+#Tag+点赞/浏览/时间）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .graphicsLayer {
-                    scaleX = pressScale
-                    scaleY = pressScale
-                }
-                .background(if (isItemPressed) palette.subtleSurface else rowBgColor)
+                .then(pressBackground)
                 .clickable(
                     interactionSource = itemInteractionSource,
                     indication = null,
@@ -3493,12 +3520,8 @@ private fun CommunityTopicItem(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 4.5.dp)
-                .graphicsLayer {
-                    scaleX = pressScale
-                    scaleY = pressScale
-                }
                 .clip(cardShape)
-                .background(if (isItemPressed) palette.subtleSurface else rowBgColor)
+                .then(pressBackground)
                 .border(
                     width = 0.6.dp,
                     color = cardBorderColor,
@@ -3853,6 +3876,10 @@ internal fun CommunityTopicReaderPane(
     }
     val op = summary.originalPoster
     val posts = detail?.posts.orEmpty()
+    val postsByNumber = remember(posts) { posts.associateBy { it.postNumber } }
+    val repliesByParent = remember(posts) {
+        posts.filter { it.replyToPostNumber != null }.groupBy { it.replyToPostNumber }
+    }
     val effectiveOpUsername = remember(posts, op.username, detail?.originalPosterUsername) {
         detail?.originalPosterUsername ?: posts.firstOrNull { it.postNumber == 1 }?.username?.takeIf { it.isNotBlank() } ?: op.username
     }
@@ -3944,7 +3971,8 @@ internal fun CommunityTopicReaderPane(
             loadMorePostsError = false
             try {
                 val batchIds = if (earlier) previousPostIds.takeLast(batchSize) else remainingPostIds.take(batchSize)
-                val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds)
+                val knownAuthorBadges = currentDetail.posts.associate { it.userId to it.authorBadges }
+                val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds, knownAuthorBadges)
                 if (morePosts.isNotEmpty()) {
                     val merged = mergeTopicPosts(latestDetail?.posts.orEmpty(), morePosts)
                     latestDetail?.let { onDetailUpdated(it.copy(posts = merged)) }
@@ -3962,14 +3990,34 @@ internal fun CommunityTopicReaderPane(
     }
 
     // 当滚动接近当前已加载楼层末尾时，自动拉取下一批 20 条评论楼层（若发生网络错误则停止自动重试，仅允许手动点击重试）
-    val lastVisibleFloorIdx by remember {
+    val shouldLoadMoreFloors by remember(
+        readerListState, posts.size, remainingPostIds.size, isLoadingMorePosts, loadMorePostsError, changingReaderFilter
+    ) {
         derivedStateOf {
-            readerListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            posts.isNotEmpty() && remainingPostIds.isNotEmpty() && !isLoadingMorePosts &&
+                !loadMorePostsError && !changingReaderFilter &&
+                (readerListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= posts.size - 2
         }
     }
-    LaunchedEffect(lastVisibleFloorIdx, posts.size, remainingPostIds.size, isLoadingMorePosts, loadMorePostsError, changingReaderFilter) {
-        if (posts.isNotEmpty() && remainingPostIds.isNotEmpty() && !isLoadingMorePosts && !loadMorePostsError && lastVisibleFloorIdx >= posts.size - 2) {
-            loadMoreFloorBatch(20)
+    LaunchedEffect(shouldLoadMoreFloors, posts.size) {
+        if (shouldLoadMoreFloors) loadMoreFloorBatch(20)
+    }
+
+    LaunchedEffect(readerListState, posts) {
+        if (posts.isEmpty()) return@LaunchedEffect
+        // Prepare a small window around the viewport off the main thread.
+        androidx.compose.runtime.snapshotFlow { readerListState.firstVisibleItemIndex / 4 }.collectLatest { page ->
+            withContext(Dispatchers.Default) {
+                val first = (page * 4 - 4).coerceAtLeast(0)
+                val end = (page * 4 + 12).coerceAtMost(posts.size)
+                for (index in first until end) {
+                    ensureActive()
+                    val post = posts[index]
+                    if (post.cookedHtml.length <= 32_000) {
+                        DiscourseAstParser.parseOrGetCached(post.id, post.cookedHtml)
+                    }
+                }
+            }
         }
     }
 
@@ -3983,6 +4031,7 @@ internal fun CommunityTopicReaderPane(
         while (true) {
             delay(400L)
             val nowMs = System.currentTimeMillis()
+            if (readerListState.isScrollInProgress) ScreenTrackEngine.onUserScrolled(nowMs)
             val visiblePostNums = readerListState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
                 latestReaderPosts.getOrNull(item.index - 1)?.postNumber
             }.toSet()
@@ -4004,9 +4053,11 @@ internal fun CommunityTopicReaderPane(
         }
     }
     LaunchedEffect(summary.id, readerListState) {
-        androidx.compose.runtime.snapshotFlow {
-            readerListState.firstVisibleItemIndex to readerListState.firstVisibleItemScrollOffset
-        }.collect { ScreenTrackEngine.onUserScrolled() }
+        var wasScrolling = false
+        androidx.compose.runtime.snapshotFlow { readerListState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling || wasScrolling) ScreenTrackEngine.onUserScrolled()
+            wasScrolling = scrolling
+        }
     }
     DisposableEffect(summary.id) {
         onDispose { ScreenTrackEngine.onTopicExited(summary.id) }
@@ -4028,8 +4079,8 @@ internal fun CommunityTopicReaderPane(
     val resolvedTitle = detail?.title ?: summary.title
     val resolvedCategoryName = detail?.categoryName ?: summary.categoryName
 
-    val localSmartDigest = remember(posts, resolvedTitle) {
-        if (posts.isEmpty()) {
+    val localSmartDigest = remember(showAiSummaryPanel, posts, resolvedTitle) {
+        if (!showAiSummaryPanel || posts.isEmpty()) {
             ""
         } else {
             fun cleanHtmlSnippet(html: String, maxChars: Int): String {
@@ -4334,7 +4385,7 @@ internal fun CommunityTopicReaderPane(
             contentPadding = PaddingValues(bottom = 24.dp)
         ) {
             // 话题标题与版块/全量 Tag 头部区域（对标官方 Linux.do 移动 Web `#topic-title` 排版，直接衔接 #1 主帖）
-            item(key = "header_${summary.id}") {
+            item(key = "header_${summary.id}", contentType = "header") {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -4427,27 +4478,21 @@ internal fun CommunityTopicReaderPane(
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
-                        LinDoStatePanel(LinDoMascotState.NetworkError,
-                            title = "暂时没能加载完整话题", detail = detail.loadError,
-                            onRetry = {
-                                scope.launch {
-                                    onDetailUpdated(LinuxDoRepository.fetchTopicDetail(summary.id, summary))
-                                }
-                            })
+                        LinDoStatePanel(
+                            LinDoMascotState.NetworkError,
+                            detail = detail.loadError,
+                            onRetry = onRefresh
+                        )
                     }
                 }
             }
 
-            itemsIndexed(posts, key = { _, post -> post.id }) { idx, post ->
-                val repliedPost = remember(post.replyToPostNumber, posts) {
-                    val targetNum = post.replyToPostNumber
-                    if (targetNum != null && targetNum > 0) {
-                        posts.firstOrNull { it.postNumber == targetNum }
-                    } else null
-                }
-                val childReplies = remember(post.postNumber, posts) {
-                    posts.filter { it.replyToPostNumber == post.postNumber }
-                }
+            items(
+                posts, key = { it.id },
+                contentType = { post -> if (post.postNumber == 1) "original-post" else "reply" }
+            ) { post ->
+                val repliedPost = postsByNumber[post.replyToPostNumber]
+                val childReplies = repliesByParent[post.postNumber].orEmpty()
                 val isFloorUnread = !post.isRead && locallyReadPostNumbers[post.postNumber] != true
                 CommunityPostFloor(
                     post = post,
@@ -4588,7 +4633,7 @@ internal fun CommunityTopicReaderPane(
 
             // 剩余未加载楼层 / 已读完全部楼层的零度娘底部收尾条
             if (posts.isNotEmpty()) {
-                item(key = "load_more_posts_${remainingPostIds.size}") {
+                item(key = "load_more_posts", contentType = "footer") {
                     LinearPulseLoadingFooter(
                         isLoadingMore = isLoadingMorePosts,
                         hasMore = remainingPostIds.isNotEmpty(),
@@ -4849,8 +4894,10 @@ private fun TonalCircleIconButton(
     }
 }
 
+private const val OfficialModeratorIcon = "https://cdn.ldstatic.com/svg-sprite/linux.do/icon/shield-halved.svg"
+
 /**
- * 1:1 还原 Linux.do Web 帖子/评论楼层 (`article.onscreen-post`)：
+ * Linux.do Web 帖子/评论楼层 (`article.onscreen-post`)：
  * - 头部：左侧 40dp 原生圆形头像 (`SmartAvatar`) + 中间用户名/楼主/Web 行内徽章 + 右侧 `↰ #N` 回复跳转、相对时间与 `#楼号`
  * - 正文：干净通透的 AST 渲染（引用块、代码高亮与一键复制、配图、折叠块）
  * - 底部操作栏 (`nav.post-controls`)：
@@ -5123,32 +5170,13 @@ private fun CommunityPostFloor(
     val targetReplyDisplayName = remember(repliedPost?.displayName, targetReplyUsername) {
         repliedPost?.displayName?.takeIf { it.isNotBlank() } ?: targetReplyUsername
     }
-    val repliedSnippetText = remember(repliedPost?.cookedHtml) {
-        repliedPost?.cookedHtml
-            ?.replace(Regex("<aside[\\s\\S]*?</aside>"), "")
-            ?.replace(Regex("<[^>]+>"), " ")
-            ?.replace("&nbsp;", " ")
-            ?.replace("&quot;", "\"")
-            ?.replace("&amp;", "&")
-            ?.replace(Regex("\\s+"), " ")
-            ?.trim()
-            .orEmpty()
-    }
-
-    val astNodes by androidx.compose.runtime.produceState(
-        initialValue = DiscourseAstParser.getCached(post.id, post.cookedHtml).orEmpty(),
-        post.id, post.cookedHtml
-    ) {
-        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-            DiscourseAstParser.parseOrGetCached(post.id, post.cookedHtml)
-        }
-    }
-
-    val (floorAwards, inlineBadges) = remember(post.badgesGranted) {
-        post.badgesGranted.partition { it.isFirstTimeGrant }
-    }
+    val floorAwards = remember(post.badgesGranted) { post.badgesGranted.filter { it.isFirstTimeGrant } }
+    val inlineBadges = post.authorBadges
     val primaryName = post.displayName?.takeIf { it.isNotBlank() } ?: post.username
-    val hasDistinctHandle = !post.displayName.isNullOrBlank() && !post.displayName.equals(post.username, ignoreCase = true)
+    val hasDistinctHandle = remember(post.displayName, post.username) {
+        fun normalizeName(value: String) = value.lowercase().filterNot { it.isWhitespace() || it in "._-" }
+        !post.displayName.isNullOrBlank() && normalizeName(post.displayName) != normalizeName(post.username)
+    }
     val hasUserTitle = !post.userTitle.isNullOrBlank()
     val hasIosDevice = !post.iosDeviceName.isNullOrBlank()
     val statusEmojiRaw = post.userStatus?.emoji?.trim()?.takeIf { it.isNotEmpty() }
@@ -5284,20 +5312,34 @@ private fun CommunityPostFloor(
                             text = primaryName,
                             fontSize = 14.6.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (post.admin || post.moderator) palette.brandGold else palette.inkPrimary,
+                            color = palette.inkPrimary,
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
 
-                        if (post.admin || post.moderator || post.groupModerator) {
-                            Icon(
-                                imageVector = LinDoIcons.ShieldCheck,
-                                contentDescription = if (post.admin) "管理员" else "版主",
-                                modifier = Modifier.size(13.5.dp),
-                                tint = if (post.admin || post.moderator) palette.brandGold else palette.inkSecondary
+                        if (post.moderator || post.groupModerator) {
+                            OfficialBadgeArtwork(
+                                url = OfficialModeratorIcon,
+                                description = "版主",
+                                colorFilter = ColorFilter.tint(palette.inkSecondary),
+                                modifier = Modifier.size(13.5.dp)
                             )
+                        }
+
+                        if (inlineBadges.isNotEmpty()) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                inlineBadges.forEach { badge ->
+                                    PostGrantedBadgeIcon(
+                                        badge = badge, size = 13.dp,
+                                        onClick = { onInspectBadge(it.copy(holderUsername = post.username)) }
+                                    )
+                                }
+                            }
                         }
 
                         if (statusEmojiRaw != null) {
@@ -5334,20 +5376,7 @@ private fun CommunityPostFloor(
                             )
                         }
 
-                        if (inlineBadges.isNotEmpty()) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(2.5.dp),
-                                modifier = Modifier.widthIn(max = 76.dp).horizontalScroll(rememberScrollState())
-                            ) {
-                                inlineBadges.forEach { badge ->
-                                    PostGrantedBadgeIcon(
-                                        badge = badge,
-                                        onClick = { onInspectBadge(badge) }
-                                    )
-                                }
-                            }
-                        }
+
                     }
 
                     Spacer(modifier = Modifier.width(8.dp))
@@ -5435,21 +5464,10 @@ private fun CommunityPostFloor(
                     }
                 }
 
-                val hasRow2 = hasDistinctHandle ||
-                    hasIosDevice ||
-                    hasUserTitle ||
-                    post.isTodayBirthday ||
-                    post.isTodayCakeday ||
-                    (showStatusDescription && statusDescText != null)
-
-                if (hasRow2) {
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onInspectUser(post.username) },
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                if (hasDistinctHandle || hasUserTitle || floorAwards.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         if (hasDistinctHandle) {
                             Text(
@@ -5457,28 +5475,39 @@ private fun CommunityPostFloor(
                                 fontSize = 11.8.sp,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
-                                softWrap = false
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
-
                         if (hasUserTitle) {
-                            if (hasDistinctHandle) {
-                                Text(
-                                    text = "·",
-                                    fontSize = 11.sp,
-                                    color = palette.inkTertiary
-                                )
-                            }
-                            val resolvedTitleBadge = remember(post.userTitle) {
-                                UniversalBadgeEngine.resolveBadgeForUserTitle(post.userTitle)
-                            }
                             UserTitleTag(
                                 title = post.userTitle.orEmpty(),
-                                enableAnimations = enableAnimations,
-                                onClick = resolvedTitleBadge?.let { b -> { onInspectBadge(b) } }
+                                animatePostTitle = enableAnimations,
+                                merchantGroupTitle = post.titleIsGroup &&
+                                    (post.primaryGroupName == "g-merchant" || post.primaryGroupName == "g-merchant2")
                             )
                         }
+                        if (floorAwards.isNotEmpty()) {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                floorAwards.forEach { badge ->
+                                    PostGrantedBadgeIcon(
+                                        badge = badge,
+                                        onClick = { onInspectBadge(it.copy(holderUsername = post.username)) },
+                                        description = "${post.username} 因此楼获授 ${badge.name}"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
 
+                if (hasIosDevice || post.isTodayBirthday || post.isTodayCakeday ||
+                    (showStatusDescription && statusDescText != null)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
                         if (hasIosDevice) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -5533,78 +5562,12 @@ private fun CommunityPostFloor(
             }
         }
 
-        // 1.5 清晰展现「谁回复谁 / 回复哪条评论」的归属上下文条（点击直达原楼层）
-        if (targetReplyFloorNum != null && astNodes.firstOrNull() !is PostBlockNode.QuoteBlock) {
-            Spacer(modifier = Modifier.height(9.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(palette.subtleSurface)
-                    .clickable { onJumpToFloorNumber(targetReplyFloorNum) }
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .width(2.5.dp)
-                        .height(14.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(palette.brandGold)
-                )
-                Spacer(modifier = Modifier.width(7.dp))
-                Text(
-                    text = buildString {
-                        append("回复 #")
-                        append(targetReplyFloorNum)
-                        if (!targetReplyDisplayName.isNullOrBlank()) {
-                            append(" @")
-                            append(targetReplyDisplayName)
-                        }
-                    },
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.inkPrimary,
-                    maxLines = 1,
-                    softWrap = false
-                )
-                if (repliedSnippetText.isNotBlank()) {
-                    Text(
-                        text = "：$repliedSnippetText",
-                        fontSize = 12.sp,
-                        color = palette.inkSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                } else {
-                    Spacer(modifier = Modifier.weight(1f))
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        PostRichContent(astNodes, palette, onOpenWebUrl, originalUrl, post.id)
-
-        if (floorAwards.isNotEmpty()) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                floorAwards.forEach { badge ->
-                    Row(
-                        Modifier.heightIn(min = 42.dp).clickable { onInspectBadge(badge) },
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        PostGrantedBadgeIcon(badge)
-                        Text(
-                            "本楼获授 · ${badge.name}", fontSize = 11.5.sp,
-                            color = palette.inkSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
-        }
-
+        CommunityPostContent(
+            postId = post.id, cookedHtml = post.cookedHtml, originalUrl = originalUrl,
+            targetReplyFloorNum = targetReplyFloorNum, targetReplyDisplayName = targetReplyDisplayName,
+            repliedHtml = repliedPost?.cookedHtml, onJumpToFloorNumber = onJumpToFloorNumber,
+            onOpenWebUrl = onOpenWebUrl
+        )
 
         // 2.2 官方小火箭 Boost 气泡列表 (`discourse-boosts`：气泡与 `+🚀` 统一 28dp 同高且严格垂直居中对齐)
         if (localBoosts.isNotEmpty()) {
@@ -6468,6 +6431,91 @@ private sealed interface BoostInlineSegment {
     data class EmojiRun(val shortcode: String) : BoostInlineSegment
 }
 
+private val readerReplyQuotePattern = Regex("<aside[\\s\\S]*?</aside>")
+private val readerReplyTagPattern = Regex("<[^>]+>")
+private val readerReplyWhitespacePattern = Regex("\\s+")
+
+@Composable
+private fun CommunityPostContent(
+    postId: Int,
+    cookedHtml: String,
+    originalUrl: String?,
+    targetReplyFloorNum: Int?,
+    targetReplyDisplayName: String?,
+    repliedHtml: String?,
+    onJumpToFloorNumber: (Int) -> Unit,
+    onOpenWebUrl: (String) -> Unit
+) {
+    val palette = LocalPalette.current
+    androidx.compose.runtime.key(postId, cookedHtml) {
+        val cached = remember { DiscourseAstParser.getCached(postId, cookedHtml) }
+        val astNodes by androidx.compose.runtime.produceState(cached.orEmpty()) {
+            if (cached == null) value = withContext(Dispatchers.Default) {
+                DiscourseAstParser.parseOrGetCached(postId, cookedHtml)
+            }
+        }
+        if (targetReplyFloorNum != null && astNodes.firstOrNull() !is PostBlockNode.QuoteBlock) {
+            val repliedSnippetText = remember(repliedHtml) {
+                repliedHtml?.replace(readerReplyQuotePattern, "")
+                    ?.replace(readerReplyTagPattern, " ")
+                    ?.replace("&nbsp;", " ")?.replace("&quot;", "\"")?.replace("&amp;", "&")
+                    ?.replace(readerReplyWhitespacePattern, " ")?.trim()?.take(200).orEmpty()
+            }
+            Spacer(modifier = Modifier.height(9.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.subtleSurface)
+                    .clickable { onJumpToFloorNumber(targetReplyFloorNum) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(2.5.dp)
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(palette.brandGold)
+                )
+                Spacer(modifier = Modifier.width(7.dp))
+                Text(
+                    text = buildString {
+                        append("回复 #")
+                        append(targetReplyFloorNum)
+                        if (!targetReplyDisplayName.isNullOrBlank()) {
+                            append(" @")
+                            append(targetReplyDisplayName)
+                        }
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.inkPrimary,
+                    maxLines = 1,
+                    softWrap = false
+                )
+                if (repliedSnippetText.isNotBlank()) {
+                    Text(
+                        text = "：$repliedSnippetText",
+                        fontSize = 12.sp,
+                        color = palette.inkSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        PostRichContent(astNodes, palette, onOpenWebUrl, originalUrl, postId)
+
+    }
+}
+
 @Composable
 private fun BoostInlineContent(
     plainText: String,
@@ -7258,10 +7306,8 @@ private fun CommunityMessagesScreen(
                             ) {
                                 LinDoStatePanel(
                                     state = LinDoMascotState.NetworkError,
-                                    title = "私信列表暂时无法加载",
                                     detail = loadError!!,
-                                    onRetry = { reloadToken++ },
-                                    actionLabel = "重新加载"
+                                    onRetry = { reloadToken++ }
                                 )
                             }
                         }
@@ -7277,7 +7323,7 @@ private fun CommunityMessagesScreen(
                             }
                         }
                     } else if (privateMessages.isNotEmpty()) {
-                        itemsIndexed(privateMessages, key = { _, m -> m.id }) { _, msg ->
+                        itemsIndexed(privateMessages, key = { _, m -> m.id }, contentType = { _, _ -> "topic" }) { _, msg ->
                             CommunityTopicItem(
                                 topic = msg,
                                 isSelected = false,
@@ -7395,10 +7441,8 @@ private fun CommunityMessagesScreen(
                             ) {
                                 LinDoStatePanel(
                                     state = LinDoMascotState.NetworkError,
-                                    title = "通知消息暂时无法加载",
                                     detail = loadError!!,
-                                    onRetry = { reloadToken++ },
-                                    actionLabel = "重新同步"
+                                    onRetry = { reloadToken++ }
                                 )
                             }
                         }
@@ -7414,7 +7458,7 @@ private fun CommunityMessagesScreen(
                             }
                         }
                     } else if (filteredNotifications.isNotEmpty()) {
-                        itemsIndexed(filteredNotifications, key = { _, item -> item.id }) { _, item ->
+                        itemsIndexed(filteredNotifications, key = { _, item -> item.id }, contentType = { _, _ -> "notification" }) { _, item ->
                             val primaryActor = item.actingUsername.substringBefore("、").trim()
                             val (badgeIcon, badgeColor) = when (item.notificationType) {
                                 5, 19, 25 -> LinDoIcons.HeartFilled to Color(0xFFE11D48)
@@ -7839,6 +7883,7 @@ private fun CommunityProfileScreen(
                             letter = displayName.ifBlank { "L" },
                             avatarUrl = avatarUrl,
                             animatedAvatar = fullProfile?.animatedAvatar ?: currentUser?.animatedAvatar,
+                            flair = fullProfile?.flair,
                             avatarSize = 54.dp,
                             onClick = if (isAuthorized) onOpenEditProfile else onPrimaryWebLogin
                         )
@@ -7884,14 +7929,7 @@ private fun CommunityProfileScreen(
                                     maxLines = 1
                                 )
                                 if (!userTitle.isNullOrBlank()) {
-                                    val resolvedTitleBadge = remember(userTitle) {
-                                        UniversalBadgeEngine.resolveBadgeForUserTitle(userTitle)
-                                    }
-                                    UserTitleTag(
-                                        title = userTitle,
-                                        enableAnimations = enableAnimations,
-                                        onClick = resolvedTitleBadge?.let { b -> { onInspectBadge(b) } }
-                                    )
+                                    UserTitleTag(title = userTitle)
                                 }
                             }
                         }
@@ -7924,11 +7962,11 @@ private fun CommunityProfileScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            fullProfile.badges.take(8).forEach { badge ->
+                            fullProfile.badges.forEach { badge ->
                                 UniversalBadgeChip(
                                     badge = badge,
                                     compact = true,
-                                    onClick = { onInspectBadge(badge) }
+                                    onClick = { onInspectBadge(it.copy(holderUsername = fullProfile.username)) }
                                 )
                             }
                             Row(
@@ -8841,31 +8879,12 @@ private fun BadgeDetailBottomSheet(
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
 
-    val catalogBadge = remember(badge) {
-        UniversalBadgeEngine.lookupOfficialBadge(id = badge.id, name = badge.name, slug = badge.slug)
-    }
-    val effectiveBadge = remember(badge, catalogBadge) {
-        if (catalogBadge != null) {
-            badge.copy(
-                id = if (badge.id > 0 && badge.id < 9000) badge.id else catalogBadge.id,
-                description = badge.description.ifBlank { catalogBadge.description },
-                longDescription = badge.longDescription.ifBlank { catalogBadge.longDescription },
-                badgeTypeId = if (badge.description.isBlank() && badge.badgeTypeId == 3) catalogBadge.badgeTypeId else badge.badgeTypeId,
-                icon = badge.icon ?: catalogBadge.icon,
-                imageUrl = badge.imageUrl ?: catalogBadge.imageUrl,
-                slug = badge.slug.ifBlank { catalogBadge.slug },
-                grantCount = maxOf(badge.grantCount, catalogBadge.grantCount),
-                allowTitle = badge.allowTitle || catalogBadge.allowTitle
-            )
-        } else {
-            badge
-        }
-    }
+    var officialBadge by remember(badge.id) { mutableStateOf<GrantedBadge?>(null) }
+    val effectiveBadge = officialBadge ?: badge
 
-    val isApple = remember(effectiveBadge) { UniversalBadgeEngine.isAppleBadge(effectiveBadge) }
-    val tierColor = remember(effectiveBadge, palette.isDark) {
-        UniversalBadgeEngine.badgeTierColor(effectiveBadge.badgeType, isDark = palette.isDark)
-    }
+    val tierColor = UniversalBadgeEngine.badgeTierColor(effectiveBadge.badgeType)
+    val canSetTitle = isAuthorized && currentUsername.isNotBlank() &&
+        officialBadge?.let { it.allowTitle && it.isEarned } == true
 
     var grantees by remember(effectiveBadge.id) { mutableStateOf<List<BadgeGranteeItem>>(emptyList()) }
     var isLoadingGrantees by remember(effectiveBadge.id) { mutableStateOf(false) }
@@ -8875,11 +8894,20 @@ private fun BadgeDetailBottomSheet(
         mutableStateOf(currentUserTitle.trim().equals(effectiveBadge.name.trim(), ignoreCase = true))
     }
 
-    LaunchedEffect(effectiveBadge.id) {
-        if (effectiveBadge.id in 1..8999) {
+    LaunchedEffect(badge.id, badge.holderUsername) {
+        if (badge.id > 0) {
             isLoadingGrantees = true
             try {
-                grantees = LinuxDoRepository.fetchBadgeGrantees(effectiveBadge.id)
+                kotlinx.coroutines.coroutineScope {
+                    launch {
+                        officialBadge = LinuxDoRepository.fetchBadgeDefinition(badge.id)?.copy(
+                            isFirstTimeGrant = badge.isFirstTimeGrant,
+                            count = badge.count, grantedAtText = badge.grantedAtText,
+                            topicId = badge.topicId, topicTitle = badge.topicTitle, postNumber = badge.postNumber
+                        )
+                    }
+                    grantees = LinuxDoRepository.fetchBadgeGrantees(badge.id, badge.holderUsername)
+                }
             } finally {
                 isLoadingGrantees = false
             }
@@ -8904,24 +8932,7 @@ private fun BadgeDetailBottomSheet(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(tierColor.copy(alpha = 0.14f))
-                        .border(0.8.dp, tierColor.copy(alpha = 0.38f), RoundedCornerShape(14.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    val fallbackIcon = remember(effectiveBadge) {
-                        UniversalBadgeEngine.resolveFallbackIcon(effectiveBadge)
-                    }
-                    Icon(
-                        imageVector = fallbackIcon,
-                        contentDescription = effectiveBadge.name,
-                        tint = tierColor,
-                        modifier = Modifier.size(26.dp)
-                    )
-                }
+                PostGrantedBadgeIcon(effectiveBadge, size = 40.dp)
 
                 Spacer(modifier = Modifier.width(12.dp))
 
@@ -8984,7 +8995,7 @@ private fun BadgeDetailBottomSheet(
                             )
                         }
 
-                        if (effectiveBadge.isFirstTimeGrant || isApple) {
+                        if (effectiveBadge.isFirstTimeGrant) {
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
@@ -8992,13 +9003,13 @@ private fun BadgeDetailBottomSheet(
                                     .padding(horizontal = 6.5.dp, vertical = 2.dp)
                             ) {
                                 Text(
-                                    text = if (effectiveBadge.isFirstTimeGrant) "🎉 本楼首次解锁" else " Apple 生态徽章",
+                                    text = "本楼获授",
                                     fontSize = 10.8.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = palette.brandGold
                                 )
                             }
-                        } else if (effectiveBadge.isEarned) {
+                        } else if (officialBadge?.isEarned == true) {
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
@@ -9046,8 +9057,7 @@ private fun BadgeDetailBottomSheet(
             ) {
                 Text(
                     text = effectiveBadge.plainDescription.ifBlank {
-                        if (isApple) "Linux.do 官方「Only Apple Can Do」Apple 生态专属徽章"
-                        else "Linux.do 社区荣誉徽章"
+                        "暂无徽章说明"
                     },
                     fontSize = 13.8.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -9088,7 +9098,7 @@ private fun BadgeDetailBottomSheet(
                         color = palette.inkTertiary
                     )
 
-                    if (effectiveBadge.allowTitle && isAuthorized && currentUsername.isNotBlank()) {
+                    if (canSetTitle) {
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
@@ -9297,57 +9307,53 @@ private fun CommunityBadgesSheet(
     var tierFilter by remember { mutableIntStateOf(0) } // 0=全部, 1=金徽章, 2=银徽章, 3=铜徽章, 4=可设头衔
     var searchQuery by remember { mutableStateOf("") }
 
-    var earnedBadges by remember(targetUsername) {
-        mutableStateOf(
-            UniversalBadgeEngine.mergeBadgesPreservingRichness(
-                initialEarnedBadges + listOfNotNull(
-                    UniversalBadgeEngine.resolveBadgeForUserTitle(currentUserTitle)?.copy(isEarned = true)
-                )
-            )
-        )
-    }
-    var allSiteBadges by remember {
-        mutableStateOf(UniversalBadgeEngine.officialBadgeCatalog)
-    }
+    var earnedBadges by remember(targetUsername) { mutableStateOf(initialEarnedBadges.distinctBy { it.id }) }
+    var allSiteBadges by remember { mutableStateOf<List<GrantedBadge>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+    var loadingOwned by remember(targetUsername) { mutableStateOf(targetUsername.isNotBlank()) }
+    var ownedError by remember(targetUsername) { mutableStateOf(false) }
+    var catalogError by remember { mutableStateOf(false) }
+    var retryCatalog by remember { mutableIntStateOf(0) }
+    var retryOwned by remember(targetUsername) { mutableIntStateOf(0) }
 
-    LaunchedEffect(targetUsername) {
-        isLoading = true
+    LaunchedEffect(targetUsername, retryOwned) {
+        val cleanUser = targetUsername.trim().removePrefix("@")
+        if (cleanUser.isBlank()) return@LaunchedEffect
+        loadingOwned = true
+        ownedError = false
         try {
-            val cleanUser = targetUsername.trim().removePrefix("@")
-            val fetchedUserBadges = if (cleanUser.isNotBlank()) {
-                LinuxDoRepository.fetchUserBadges(cleanUser)
-            } else {
-                emptyList()
-            }
-            val titleBadge = UniversalBadgeEngine.resolveBadgeForUserTitle(currentUserTitle)?.copy(isEarned = true)
-            val mergedEarned = UniversalBadgeEngine.mergeBadgesPreservingRichness(
-                fetchedUserBadges + initialEarnedBadges + listOfNotNull(titleBadge)
-            ).map { it.copy(isEarned = true) }
-            earnedBadges = mergedEarned
-
-            val earnedByKey = mergedEarned.associateBy { UniversalBadgeEngine.badgeDedupeKey(it) }
-            val siteCatalog = LinuxDoRepository.fetchAllSiteBadges().map { siteBadge ->
-                val earnedMatch = earnedByKey[UniversalBadgeEngine.badgeDedupeKey(siteBadge)]
-                if (earnedMatch != null) {
-                    siteBadge.copy(
-                        isEarned = true,
-                        count = maxOf(siteBadge.count, earnedMatch.count),
-                        grantedAtText = earnedMatch.grantedAtText
-                    )
-                } else {
-                    siteBadge
-                }
-            }
-            if (siteCatalog.isNotEmpty()) {
-                allSiteBadges = siteCatalog
-            }
+            earnedBadges = LinuxDoRepository.fetchUserBadges(cleanUser)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            ownedError = true
+        } finally {
+            loadingOwned = false
+        }
+    }
+    LaunchedEffect(retryCatalog) {
+        isLoading = true
+        catalogError = false
+        try {
+            allSiteBadges = LinuxDoRepository.fetchAllSiteBadges()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            catalogError = true
         } finally {
             isLoading = false
         }
     }
 
-    val sourceList = if (selectedTab == 0) earnedBadges else allSiteBadges
+    val siteBadgesWithOwnership = remember(allSiteBadges, earnedBadges) {
+        val ownedById = earnedBadges.associateBy { it.id }
+        allSiteBadges.map { badge ->
+            ownedById[badge.id]?.let { owned ->
+                badge.copy(isEarned = true, count = owned.count, grantedAtText = owned.grantedAtText)
+            } ?: badge
+        }
+    }
+    val sourceList = if (selectedTab == 0) earnedBadges else siteBadgesWithOwnership
     val filteredBadges = remember(sourceList, tierFilter, searchQuery) {
         val q = searchQuery.trim()
         sourceList.filter { badge ->
@@ -9455,7 +9461,7 @@ private fun CommunityBadgesSheet(
             Spacer(modifier = Modifier.height(10.dp))
 
             // 5. 徽章列表
-            if (isLoading && filteredBadges.isEmpty()) {
+            if ((if (selectedTab == 0) loadingOwned else isLoading) && sourceList.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -9464,6 +9470,10 @@ private fun CommunityBadgesSheet(
                 ) {
                     LinDoLoadingIndicator(label = "正在同步社区徽章目录")
                 }
+            } else if (selectedTab == 0 && ownedError && sourceList.isEmpty()) {
+                LinDoLoadFailure("暂时没能加载已获徽章") { retryOwned++ }
+            } else if (selectedTab == 1 && catalogError) {
+                LinDoLoadFailure("暂时没能加载徽章目录") { retryCatalog++ }
             } else if (filteredBadges.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -9506,15 +9516,18 @@ private fun CommunityBadgesSheet(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(top = 2.dp, bottom = 24.dp)
                 ) {
-                    itemsIndexed(
-                        filteredBadges,
-                        key = { idx, b -> "${selectedTab}_${b.id}_${b.name}_$idx" }
-                    ) { _, badge ->
-                        val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = palette.isDark)
-                        val fallbackIcon = remember(badge) {
-                            UniversalBadgeEngine.resolveFallbackIcon(badge)
+                    itemsIndexed(filteredBadges, key = { _, badge -> badge.id }, contentType = { _, _ -> "badge" }) { index, badge ->
+                        if (badge.badgeGroupingName.isNotBlank() &&
+                            filteredBadges.getOrNull(index - 1)?.badgeGroupingId != badge.badgeGroupingId
+                        ) {
+                            Text(
+                                badge.badgeGroupingName, fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold, color = palette.inkSecondary,
+                                modifier = Modifier.padding(top = 10.dp, bottom = 8.dp)
+                            )
                         }
-                        val isCurrentTitle = currentUserTitle.isNotBlank() &&
+                        val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType)
+                        val isCurrentTitle = badge.isEarned && badge.allowTitle && currentUserTitle.isNotBlank() &&
                             currentUserTitle.trim().equals(badge.name.trim(), ignoreCase = true)
 
                         Row(
@@ -9531,20 +9544,7 @@ private fun CommunityBadgesSheet(
                                 .padding(horizontal = 13.dp, vertical = 11.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(11.dp))
-                                    .background(tierColor.copy(alpha = 0.13f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = fallbackIcon,
-                                    contentDescription = badge.name,
-                                    tint = tierColor,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
+                            PostGrantedBadgeIcon(badge, size = 28.dp)
 
                             Spacer(modifier = Modifier.width(12.dp))
 
@@ -9686,8 +9686,8 @@ private fun ConnectTrustLevelSheet(onDismiss: () -> Unit) {
             if (isLoading) LinDoLoadingIndicator(label = "零度娘正在同步 Connect")
             val current = report
             if (!isLoading && current?.metrics.isNullOrEmpty()) {
-                LinDoStatePanel(LinDoMascotState.NetworkError, title = "暂未取得 Connect 数据",
-                    detail = "当前未获得可核实的周期统计，请稍后重试。",
+                LinDoStatePanel(LinDoMascotState.NetworkError,
+                    detail = "暂未取得 Connect 统计",
                     onRetry = { scope.launch { refresh() } })
             }
             current?.metrics?.forEach { metric ->
@@ -11649,10 +11649,8 @@ private fun GlobalSearchModalSheet(
                         ) {
                             LinDoStatePanel(
                                 state = LinDoMascotState.NetworkError,
-                                title = "搜索暂时遇到问题",
                                 detail = loadError!!,
-                                onRetry = { performSearch() },
-                                actionLabel = "重新搜索"
+                                onRetry = { performSearch() }
                             )
                         }
                     }
@@ -11666,7 +11664,7 @@ private fun GlobalSearchModalSheet(
                         }
                     }
                 } else {
-                    itemsIndexed(results, key = { idx, item -> "${item.topicId}_${item.postNumber}_$idx" }) { _, item ->
+                    itemsIndexed(results, key = { idx, item -> "${item.topicId}_${item.postNumber}_$idx" }, contentType = { _, _ -> "search-result" }) { _, item ->
                         val catDotColor = remember(item.categoryColorHex) {
                             LinuxDoSiteRules.parseHexColor(item.categoryColorHex)
                         }
@@ -11937,7 +11935,7 @@ private fun UserNotificationsSheet(
                             }
                         }
                     } else {
-                        itemsIndexed(filtered, key = { _, item -> item.id }) { _, item ->
+                        itemsIndexed(filtered, key = { _, item -> item.id }, contentType = { _, _ -> "bookmark" }) { _, item ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -12119,7 +12117,7 @@ private fun UserActivitiesSheet(
                             }
                         }
                     } else {
-                        itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }) { _, item ->
+                        itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }, contentType = { _, _ -> "activity" }) { _, item ->
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -12241,7 +12239,7 @@ private fun UserBookmarksSheet(
                             }
                         }
                     } else {
-                        itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }) { _, item ->
+                        itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }, contentType = { _, _ -> "activity" }) { _, item ->
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -12425,7 +12423,7 @@ internal fun UserPrivateMessagesSheet(
                                 }
                             }
                         } else {
-                            itemsIndexed(messages, key = { _, m -> m.id }) { _, msg ->
+                            itemsIndexed(messages, key = { _, m -> m.id }, contentType = { _, _ -> "topic" }) { _, msg ->
                                 CommunityTopicItem(
                                     topic = msg,
                                     isSelected = false,
@@ -12493,6 +12491,9 @@ private fun PublicUserCardSheet(
     var allActions by remember(username) { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var topicActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
     var replyActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
+    var profileBadges by remember(username) { mutableStateOf<List<GrantedBadge>?>(null) }
+    var profileBadgeError by remember(username) { mutableStateOf(false) }
+    var retryProfileBadges by remember(username) { mutableIntStateOf(0) }
     var activeTab by remember(username) { mutableIntStateOf(0) } // 0=全部动态, 1=主帖, 2=回复, 3=徽章
     var tabLoading by remember(username) { mutableStateOf(false) }
     var loadError by remember(username) { mutableStateOf<String?>(null) }
@@ -12515,8 +12516,17 @@ private fun PublicUserCardSheet(
         }
     }
 
-    LaunchedEffect(username, activeTab) {
-        if (activeTab == 1 && topicActions == null) {
+    LaunchedEffect(username, activeTab, retryProfileBadges) {
+        if (activeTab == 3 && profileBadges == null) {
+            profileBadgeError = false
+            try {
+                profileBadges = LinuxDoRepository.fetchUserBadges(username)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                profileBadgeError = true
+            }
+        } else if (activeTab == 1 && topicActions == null) {
             tabLoading = true
             try {
                 topicActions = LinuxDoRepository.fetchUserActivities(username, filter = "4").take(25)
@@ -12592,6 +12602,7 @@ private fun PublicUserCardSheet(
                     letter = p?.displayName ?: username,
                     avatarUrl = p?.avatarTemplate,
                     animatedAvatar = p?.animatedAvatar,
+                    flair = p?.flair,
                     avatarSize = 60.dp,
                     strokeWidth = 2.2.dp
                 )
@@ -12605,27 +12616,16 @@ private fun PublicUserCardSheet(
                             text = p?.displayName ?: username,
                             fontSize = 17.5.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (p?.admin == true || p?.moderator == true) palette.brandGold else palette.inkPrimary,
+                            color = palette.inkPrimary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        if (p?.admin == true || p?.moderator == true) {
-                            Icon(
-                                imageVector = LinDoIcons.ShieldCheck,
-                                contentDescription = "管理员/版主",
-                                modifier = Modifier.size(14.5.dp),
-                                tint = palette.brandGold
-                            )
-                        }
-                        if (p != null) {
-                            Text(
-                                text = p.trustLevelName,
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.brandGold,
-                                maxLines = 1,
-                                softWrap = false
+                        if (p?.moderator == true) {
+                            OfficialBadgeArtwork(
+                                url = OfficialModeratorIcon, description = "版主",
+                                colorFilter = ColorFilter.tint(palette.inkSecondary),
+                                modifier = Modifier.size(13.5.dp)
                             )
                         }
                     }
@@ -12648,14 +12648,7 @@ private fun PublicUserCardSheet(
                                 fontSize = 12.sp,
                                 color = palette.inkTertiary
                             )
-                            val titleBadge = remember(p?.title) {
-                                UniversalBadgeEngine.resolveBadgeForUserTitle(p?.title)
-                            }
-                            UserTitleTag(
-                                title = p?.title.orEmpty(),
-                                enableAnimations = true,
-                                onClick = titleBadge?.let { b -> { onInspectBadge(b) } }
-                            )
+                            UserTitleTag(title = p?.title.orEmpty())
                         }
                     }
                 }
@@ -12785,11 +12778,11 @@ private fun PublicUserCardSheet(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                p.badges.take(8).forEach { badge ->
+                                p.badges.forEach { badge ->
                                     UniversalBadgeChip(
                                         badge = badge,
                                         compact = true,
-                                        onClick = { onInspectBadge(badge) }
+                                        onClick = { onInspectBadge(it.copy(holderUsername = p.username)) }
                                     )
                                 }
                                 Row(
@@ -12885,7 +12878,12 @@ private fun PublicUserCardSheet(
 
                     // 5. 当前选中分栏的内容列表
                     if (activeTab == 3) {
-                        if (p.badges.isEmpty()) {
+                        val ownedBadges = profileBadges
+                        if (profileBadgeError) {
+                            item(key = "error_badges") { LinDoLoadFailure("暂时没能加载徽章") { retryProfileBadges++ } }
+                        } else if (ownedBadges == null) {
+                            item(key = "loading_badges") { LinDoLoadingIndicator(label = "加载徽章") }
+                        } else if (ownedBadges.isEmpty()) {
                             item(key = "empty_badges") {
                                 Text(
                                     text = "暂无公开展示的徽章",
@@ -12895,9 +12893,8 @@ private fun PublicUserCardSheet(
                                 )
                             }
                         } else {
-                            itemsIndexed(p.badges, key = { idx, b -> "badge_${b.id}_$idx" }) { _, badge ->
-                                val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType, isDark = palette.isDark)
-                                val iconVec = UniversalBadgeEngine.resolveFallbackIcon(badge)
+                            items(ownedBadges, key = { "badge_${it.id}" }, contentType = { "badge" }) { badge ->
+                                val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType)
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -12907,20 +12904,8 @@ private fun PublicUserCardSheet(
                                         .padding(horizontal = 12.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(34.dp)
-                                            .clip(RoundedCornerShape(9.dp))
-                                            .background(tierColor.copy(alpha = 0.14f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = iconVec,
-                                            contentDescription = badge.name,
-                                            tint = tierColor,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
+                                    PostGrantedBadgeIcon(badge, size = 24.dp)
+
                                     Spacer(modifier = Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Row(
@@ -13253,7 +13238,7 @@ private fun UserReadHistorySheet(
                             }
                         }
                     } else {
-                        itemsIndexed(items, key = { _, item -> item.id }) { _, topic ->
+                        itemsIndexed(items, key = { _, item -> item.id }, contentType = { _, _ -> "topic" }) { _, topic ->
                             CommunityTopicItem(
                                 topic = topic,
                                 isSelected = false,
