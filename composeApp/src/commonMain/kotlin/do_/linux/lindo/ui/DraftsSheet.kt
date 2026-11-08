@@ -47,7 +47,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
             drafts = (cloud + mergedLocal).associateBy { it.draftKey }.values.toList()
         }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (failure: Exception) { error = failure.message ?: "暂时无法同步云端，本机草稿仍可使用" }
+        catch (failure: Exception) { error = failure.message ?: "云端草稿同步失败" }
         finally { loading = false }
     }
     LinDoFullScreenPage(onBack = onDismiss, containerColor = palette.cardSurface) {
@@ -56,7 +56,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
             error?.let { LinDoLoadFailure(it, { reload++ }) }
             if (loading && drafts.isEmpty()) Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { LinDoLoadingIndicator(label = "读取草稿") }
             else LazyColumn(Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) {
-                if (drafts.isEmpty() && error == null) item { LinDoEmptyState("暂无草稿，未发送的内容会保存在这里") }
+                if (drafts.isEmpty() && error == null) item { LinDoEmptyState("暂无草稿") }
                 items(drafts, key = { it.draftKey }) { draft ->
                     Row(Modifier.fillMaxWidth().clickable { onOpen(draft) }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -71,21 +71,35 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
             }
         }
     }
-    deleting?.let { draft -> LinDoConfirmDialog("删除这份草稿？", "「${draft.title}」的本机与云端草稿将被移除，已发布内容不会受影响。", "确认删除",
-        busy = busy, error = deleteError, onDismiss = { deleting = null }, onConfirm = {
-            if (!busy) {
+    deleting?.let { draft ->
+        LinDoConfirmDialog(
+            title = "删除草稿？",
+            confirmLabel = "删除",
+            busy = busy,
+            error = deleteError,
+            destructive = true,
+            onDismiss = { deleting = null },
+            onConfirm = {
+                if (busy) return@LinDoConfirmDialog
                 busy = true
-                scope.launch { try {
-                    val sequence = if (draft.sequenceKnown) draft.sequence else LinuxDoRepository.fetchDraftSequence(draft.draftKey)
-                    if (LinuxDoRepository.deleteCloudDraft(draft.draftKey, sequence)) {
-                        LocalComposerDrafts.remove(owner, draft.draftKey)
-                        LocalComposerDrafts.forgetSequence(owner, draft.draftKey)
-                        drafts = drafts.filterNot { it.draftKey == draft.draftKey }
-                        deleting = null
-                    } else deleteError = "草稿已在其他设备更新，请重新读取后核对"
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (failure: Exception) { deleteError = failure.message ?: "删除失败，草稿已保留" }
-                finally { busy = false } }
+                scope.launch {
+                    try {
+                        val sequence = if (draft.sequenceKnown) draft.sequence else LinuxDoRepository.fetchDraftSequence(draft.draftKey)
+                        if (LinuxDoRepository.deleteCloudDraft(draft.draftKey, sequence)) {
+                            LocalComposerDrafts.remove(owner, draft.draftKey)
+                            LocalComposerDrafts.forgetSequence(owner, draft.draftKey)
+                            drafts = drafts.filterNot { it.draftKey == draft.draftKey }
+                            deleting = null
+                        } else deleteError = "草稿已在其他设备更新，请重新核对"
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        deleteError = failure.message ?: "删除失败，草稿已保留"
+                    } finally {
+                        busy = false
+                    }
+                }
             }
-        }) }
+        )
+    }
 }

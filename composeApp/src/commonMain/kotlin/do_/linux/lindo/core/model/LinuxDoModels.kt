@@ -440,10 +440,16 @@ data class UserNotificationItem(
     val badgeName: String = "",
     val chatChannelId: Int = 0
 ) {
+    val isGroupedReply: Boolean get() = notificationType == 2 && count > 1
+
+    val actorUsername: String?
+        get() = actingUsername.substringBefore("、").trim()
+            .takeIf { !isGroupedReply && it.isNotEmpty() && it != "系统" }
+
     val typeLabel: String
         get() = when (notificationType) {
             1 -> "提及了你"
-            2 -> "回复了你"
+            2 -> if (isGroupedReply) "收到 $count 条回复" else "回复了你"
             3 -> "引用了你的发言"
             4 -> "编辑了帖子"
             5 -> if (postNumber > 1) "赞了你的回复" else "赞了你的主帖"
@@ -453,7 +459,7 @@ data class UserNotificationItem(
             9 -> "回复了话题"
             10 -> "移动了帖子"
             11 -> "链接了你的帖子"
-            12 -> "授予你社区徽章"
+            12 -> "获得徽章"
             13 -> "邀请你参与话题"
             14 -> "系统通知"
             15 -> "提及了你所在的群组"
@@ -466,10 +472,7 @@ data class UserNotificationItem(
             22 -> "群组申请已通过"
             23 -> "群组加入申请"
             24 -> "书签定时提醒"
-            25 -> when {
-                count > 1 -> "回应了你的 $count 条发言"
-                else -> "回应了你的发言"
-            }
+            25 -> "给你的发言加了表情"
             26 -> "投票额度已归还"
             27 -> "活动即将开始"
             28 -> "邀请你参加活动"
@@ -482,7 +485,7 @@ data class UserNotificationItem(
             36, 800 -> "关注了你"
             37, 801 -> "发布了新话题"
             38, 802 -> "发表了新回复"
-            else -> if (topicId > 0) "参与了话题互动" else "与你产生了社区互动"
+            else -> if (topicId > 0) "参与了话题互动" else "社区动态"
         }
 }
 

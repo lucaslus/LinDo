@@ -117,6 +117,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
@@ -478,7 +479,11 @@ private fun LinearPulseLoadingFooter(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 52.dp)
-            .clickable(enabled = !isLoadingMore && (hasMore || isError), onClick = onLoadMore)
+            .clickable(
+                enabled = !isLoadingMore && (hasMore || isError),
+                onClickLabel = if (isError) "重试" else null,
+                onClick = onLoadMore
+            )
             .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
@@ -518,12 +523,12 @@ private fun LinearPulseLoadingFooter(
             ) {
                 Icon(
                     imageVector = LinDoIcons.Refresh,
-                    contentDescription = "刷新",
+                    contentDescription = null,
                     modifier = Modifier.size(13.dp),
                     tint = palette.inkSecondary
                 )
                 Text(
-                    text = "刷新",
+                    text = "重试",
                     color = palette.inkSecondary,
                     fontSize = 11.8.sp,
                     fontWeight = FontWeight.Medium
@@ -969,7 +974,7 @@ internal fun LinDoApp(
                 throw e
             } catch (error: Exception) {
                 if (topics.isEmpty()) {
-                    feedError = (error as? ApiReadException)?.message ?: "加载失败，请重试"
+                    feedError = (error as? ApiReadException)?.message ?: "加载失败"
                     hasMoreTopics = false
                 }
             } finally {
@@ -1555,7 +1560,7 @@ internal fun LinDoApp(
                                         onUnreadCountSynced = { unread ->
                                             fullUserProfile = fullUserProfile?.copy(unreadNotifications = unread)
                                         },
-                                        onOpenNewPrivateMessage = {
+                                        onManagePrivateMessages = {
                                             pmInitialRecipient = null
                                             showPrivateMessagesSheet = true
                                         },
@@ -1741,7 +1746,7 @@ internal fun LinDoApp(
                                                 onUnreadCountSynced = { unread ->
                                                     fullUserProfile = fullUserProfile?.copy(unreadNotifications = unread)
                                                 },
-                                                onOpenNewPrivateMessage = {
+                                                onManagePrivateMessages = {
                                                     pmInitialRecipient = null
                                                     showPrivateMessagesSheet = true
                                                 },
@@ -2074,7 +2079,7 @@ internal fun LinDoApp(
                         })
                 }
 
-                if (showLogoutConfirm) LinDoConfirmDialog("退出当前账号？", "本机草稿会保留在当前账号，下次登录后可继续编辑。", "退出登录",
+                if (showLogoutConfirm) LinDoConfirmDialog(title = "退出登录？", confirmLabel = "退出",
                     onDismiss = { showLogoutConfirm = false }, onConfirm = {
                         showLogoutConfirm = false
                         UserApiKeyAuthManager.logout()
@@ -2964,10 +2969,9 @@ private fun CommunityHomeFeedPane(
                         } else {
                             LinDoStatePanel(
                                 LinDoMascotState.Empty,
-                                title = "这里还没有匹配的讨论",
-                                detail = "换个关键词，或看看其他板块吧",
+                                title = "暂无话题",
+                                detail = null,
                                 onRetry = onRefresh,
-                                actionLabel = "刷新看看",
                                 useIconArtwork = true
                             )
                         }
@@ -3244,6 +3248,7 @@ private fun GoogleM3FilterPill(
     label: String,
     dotColor: Color?,
     selected: Boolean,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -3252,7 +3257,7 @@ private fun GoogleM3FilterPill(
     val focused by interactionSource.collectIsFocusedAsState()
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .heightIn(min = 48.dp)
             .selectable(
                 selected = selected,
@@ -3262,6 +3267,7 @@ private fun GoogleM3FilterPill(
                 onClick = onClick
             )
             .padding(horizontal = 2.dp),
+        horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -3845,7 +3851,7 @@ internal fun CommunityTopicReaderPane(
                     showRemoveBookmark = false
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (error: Exception) { bookmarkError = error.message ?: "收藏操作失败，请重试" }
+            catch (error: Exception) { bookmarkError = error.message ?: "收藏操作失败" }
             finally { bookmarkBusy = false }
         }
     }
@@ -4640,8 +4646,8 @@ internal fun CommunityTopicReaderPane(
                         loadedCount = posts.size,
                         isError = loadMorePostsError,
                         loadingText = "正在同步后续楼层 (${posts.size}/$totalFloorCount)",
-                        moreText = "加载后续评论 (剩余 ${remainingPostIds.size} 楼 · 已载入 ${posts.size}/$totalFloorCount)",
-                        errorText = "评论加载异常 · 点击手动重试",
+                        moreText = "加载后续楼层",
+                        errorText = "楼层加载失败",
                         doneText = "已到话题末尾",
                         onLoadMore = { loadMoreFloorBatch(20) }
                     )
@@ -4721,7 +4727,7 @@ internal fun CommunityTopicReaderPane(
         AlertDialog(
             onDismissRequest = { showFloorJumpDialog = false },
             containerColor = palette.cardSurface,
-            title = { Text("跳转到楼层", color = palette.inkPrimary, fontSize = 18.sp) },
+            title = { LinDoDialogTitle("跳转到楼层") },
             text = {
                 Column {
                     OutlinedTextField(
@@ -4752,11 +4758,22 @@ internal fun CommunityTopicReaderPane(
         )
     }
 
-    if (showRemoveBookmark) LinDoConfirmDialog("移除话题收藏？", "这个话题中的书签将被移除，话题内容不会被删除。", "移除收藏", busy = bookmarkBusy, error = bookmarkError,
-        onDismiss = { showRemoveBookmark = false }, onConfirm = { setBookmark(false) })
+    if (showRemoveBookmark) LinDoConfirmDialog(
+        title = "移除此话题的全部书签？",
+        confirmLabel = "移除",
+        busy = bookmarkBusy,
+        error = bookmarkError,
+        onDismiss = { showRemoveBookmark = false },
+        onConfirm = { setBookmark(false) }
+    )
     pendingDeletePost?.let { target ->
-        LinDoConfirmDialog("删除 ${target.postNumber} 楼的回复？", "确认删除这条评论？删除后将从话题中移除。", "确认删除", busy = deletingPost,
-            error = deletePostError, onDismiss = { pendingDeletePost = null }, onConfirm = {
+        LinDoConfirmDialog(
+            title = "删除 ${target.postNumber} 楼的回复？",
+            confirmLabel = "删除",
+            busy = deletingPost,
+            error = deletePostError,
+            destructive = true,
+            onDismiss = { pendingDeletePost = null }, onConfirm = {
                 if (!deletingPost) {
                     deletingPost = true
                     scope.launch {
@@ -4767,9 +4784,9 @@ internal fun CommunityTopicReaderPane(
                                     streamIds = current.streamIds.filterNot { it == target.id },
                                     postsCount = (current.postsCount - 1).coerceAtLeast(1))) }
                                 pendingDeletePost = null
-                            } else deletePostError = "删除失败，请重试。当前内容已保留。"
+                            } else deletePostError = "删除失败"
                         } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                        catch (error: Exception) { deletePostError = error.message ?: "删除失败，请重试" }
+                        catch (error: Exception) { deletePostError = error.message ?: "删除失败" }
                         finally { deletingPost = false }
                     }
                 }
@@ -5122,7 +5139,7 @@ private fun CommunityPostFloor(
                     if (expandedBoostId == boostId) expandedBoostId = null
                     pendingBoostDelete = null
                 } else {
-                    floorActionError = res.errorMessage ?: "删除小火箭 Boost 失败，请稍后重试"
+                    floorActionError = res.errorMessage ?: "删除助力失败"
                 }
             } finally {
                 isDeletingBoostId = null
@@ -6327,11 +6344,11 @@ private fun CommunityPostFloor(
     }
     pendingBoostDelete?.let { boostId ->
         LinDoConfirmDialog(
-            title = "删除这条助力？",
-            message = "这条小火箭短评将从楼层中移除。",
-            confirmLabel = "删除助力",
+            title = "删除助力？",
+            confirmLabel = "删除",
             busy = isDeletingBoostId != null,
             error = floorActionError,
+            destructive = true,
             onDismiss = { pendingBoostDelete = null; floorActionError = null },
             onConfirm = { deleteBoost(boostId) }
         )
@@ -7105,13 +7122,6 @@ private fun CategoryBentoCard(
     }
 }
 
-/**
- * 理想型社区（Warm Minimalist Editorial）「消息」页（对齐参考图 3）：
- * - 顶栏：左侧「消息」大标题 + 右侧「✓ 全部已读」按钮
- * - 二级 Tab：`通知` | `私信` | `聊天`（带 2.5dp 主题色短下划线）
- * - 4 大莫兰迪圆角方形快捷入口：`回复我的`（莫兰迪蓝）、`收到的赞`（莫兰迪粉）、`@ 我的`（莫兰迪暖金）、`系统通知`（莫兰迪森绿）
- * - 消息流列表：左侧莫兰迪色块头像 + 用户名与操作 + 右侧未读圆点 + `#F4F5F7` 浅灰圆角引用内容框 + 时间
- */
 private fun notificationCategory(type: Int): Int = when (type) {
     2, 3, 9, 11, 38, 802 -> 1
     5, 19, 25 -> 2
@@ -7129,7 +7139,7 @@ private fun CommunityMessagesScreen(
     onInspectUser: (String) -> Unit = {},
     onInspectBadge: (GrantedBadge) -> Unit = {},
     onUnreadCountSynced: (Int) -> Unit = {},
-    onOpenNewPrivateMessage: () -> Unit,
+    onManagePrivateMessages: () -> Unit,
     onOpenWebUrl: (String) -> Unit,
     onMarkedAllRead: () -> Unit
 ) {
@@ -7138,7 +7148,7 @@ private fun CommunityMessagesScreen(
     var showMarkAllConfirm by remember { mutableStateOf(false) }
     var markingAll by remember { mutableStateOf(false) }
     var markAllError by remember { mutableStateOf<String?>(null) }
-    var subTab by remember { mutableStateOf(0) } // 0=通知, 1=私信, 2=聊天
+    var subTab by remember { mutableStateOf(0) } // 0=通知, 1=私信
     var categoryFilter by remember { mutableStateOf(0) } // 0=全部, 1=回复我的, 2=收到的赞, 3=@我的, 4=系统通知
     var notifications by remember { mutableStateOf<List<UserNotificationItem>>(emptyList()) }
     var privateMessages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
@@ -7170,7 +7180,7 @@ private fun CommunityMessagesScreen(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            loadError = error.message ?: "加载失败，请重试"
+            loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
         }
@@ -7193,7 +7203,6 @@ private fun CommunityMessagesScreen(
             .background(palette.canvas)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        // 顶栏：消息 + 一键已读 ✓ + 二级 Tab (通知 | 私信 | 聊天)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -7213,37 +7222,37 @@ private fun CommunityMessagesScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                if (subTab == 0) {
-                    IconButton(onClick = {
-                        if (isAuthorized) showMarkAllConfirm = true else onRequestLogin()
-                    }) {
-                        Icon(LinDoIcons.Check, "全部标为已读", Modifier.size(20.dp), tint = palette.inkPrimary)
-                    }
+                when {
+                    !isAuthorized -> TextButton(onClick = onRequestLogin) { Text("登录") }
+                    subTab == 0 -> LinDoNotificationActions(
+                        canMarkAll = notifications.isNotEmpty(),
+                        enabled = !isLoading && !markingAll,
+                        onMarkAll = { showMarkAllConfirm = true },
+                        onRefresh = { reloadToken++ }
+                    )
+                    else -> TextButton(onClick = onManagePrivateMessages) { Text("管理私信") }
                 }
             }
             LinDoSectionTabs(listOf("通知", "私信", "聊天"), subTab) {
-                subTab = it
-                if (it == 2) onOpenWebUrl("https://linux.do/chat")
+                if (it == 2) onOpenWebUrl("https://linux.do/chat") else subTab = it
             }
         }
 
         if (subTab == 0 && isAuthorized) {
-            val labels = listOf("全部", "回复", "赞", "提及", "系统")
-            val unreadByCategory = remember(notifications) {
-                notifications.filterNot { it.read }.groupingBy { notificationCategory(it.notificationType) }.eachCount()
-            }
+            val labels = listOf("全部", "回复", "表态", "提及", "系统")
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(palette.cardSurface)
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 18.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    .padding(horizontal = 12.dp)
+                    .selectableGroup(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 labels.forEachIndexed { index, label ->
-                    val count = unreadByCategory[index] ?: 0
-                    val title = if (count > 0) "$label $count" else label
-                    GoogleM3FilterPill(title, null, categoryFilter == index) { categoryFilter = index }
+                    GoogleM3FilterPill(label, null, categoryFilter == index, Modifier.widthIn(min = 48.dp)) {
+                        categoryFilter = index
+                    }
                 }
             }
         }
@@ -7260,42 +7269,6 @@ private fun CommunityMessagesScreen(
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 128.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    item(key = "pm_header") {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "近期私信会话",
-                                fontSize = 14.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.inkPrimary,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { onOpenNewPrivateMessage() }
-                                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = LinDoIcons.Edit,
-                                    contentDescription = "写私信",
-                                    modifier = Modifier.size(14.dp),
-                                    tint = palette.brandGold
-                                )
-                                Text(
-                                    text = "写私信 / 全部",
-                                    fontSize = 12.2.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.brandGold
-                                )
-                            }
-                        }
-                    }
-
                     if (loadError != null && privateMessages.isEmpty()) {
                         item(key = "pm_error") {
                             Box(
@@ -7319,7 +7292,7 @@ private fun CommunityMessagesScreen(
                                     .padding(vertical = 48.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                LinDoEmptyState(message = "暂无私信记录，点击右上角可发起私信")
+                                LinDoEmptyState(message = "暂无私信")
                             }
                         }
                     } else if (privateMessages.isNotEmpty()) {
@@ -7337,7 +7310,6 @@ private fun CommunityMessagesScreen(
                                 isLoadingMore = false,
                                 hasMore = false,
                                 loadedCount = privateMessages.size,
-                                doneText = "没有更多私信了 · 零度娘已经翻到底啦",
                                 onLoadMore = {}
                             )
                         }
@@ -7345,82 +7317,6 @@ private fun CommunityMessagesScreen(
                 }
             }
         } else {
-            // 通知流列表（顶部当前筛选概览栏 + 直观三层结构：谁做了什么 -> 回复内容 -> 原帖与楼层）
-            val activeCategoryTitle = when (categoryFilter) {
-                1 -> "回复我的"
-                2 -> "收到的赞"
-                3 -> "@ 我的"
-                4 -> "系统通知"
-                else -> "全部通知"
-            }
-            val unreadFilteredCount = remember(filteredNotifications) {
-                filteredNotifications.count { !it.read }
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(palette.cardSurface)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = buildString {
-                        append(activeCategoryTitle)
-                        if (filteredNotifications.isNotEmpty()) {
-                            append(" · ")
-                            append(filteredNotifications.size)
-                            append(" 条")
-                        }
-                        if (unreadFilteredCount > 0) {
-                            append(" (")
-                            append(unreadFilteredCount)
-                            append(" 未读)")
-                        }
-                    },
-                    fontSize = 12.2.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.inkSecondary,
-                    modifier = Modifier.weight(1f)
-                )
-
-                if (categoryFilter != 0) {
-                    Text(
-                        text = "查看全部",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.brandGold,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable { categoryFilter = 0 }
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
-
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable { reloadToken++ }
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Refresh,
-                        contentDescription = "刷新通知",
-                        modifier = Modifier.size(13.dp),
-                        tint = palette.inkSecondary
-                    )
-                    Text(
-                        text = "刷新",
-                        fontSize = 11.8.sp,
-                        color = palette.inkSecondary
-                    )
-                }
-            }
-            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-
             if (isLoading && notifications.isEmpty()) {
                 LinearShimmerTopicSkeletonList()
             } else {
@@ -7431,7 +7327,11 @@ private fun CommunityMessagesScreen(
                         .background(palette.cardSurface),
                     contentPadding = PaddingValues(top = 2.dp, bottom = 128.dp)
                 ) {
-                    if (loadError != null && notifications.isEmpty()) {
+                    val error = loadError
+                    if (error != null && notifications.isNotEmpty()) {
+                        item(key = "notif_refresh_error") { LinDoLoadFailure(error) { reloadToken++ } }
+                    }
+                    if (error != null && notifications.isEmpty()) {
                         item(key = "notif_error") {
                             Box(
                                 modifier = Modifier
@@ -7441,7 +7341,7 @@ private fun CommunityMessagesScreen(
                             ) {
                                 LinDoStatePanel(
                                     state = LinDoMascotState.NetworkError,
-                                    detail = loadError!!,
+                                    detail = error,
                                     onRetry = { reloadToken++ }
                                 )
                             }
@@ -7454,254 +7354,43 @@ private fun CommunityMessagesScreen(
                                     .padding(vertical = 56.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                LinDoEmptyState(message = "暂无相关通知消息")
+                                LinDoEmptyState(message = "暂无通知")
                             }
                         }
                     } else if (filteredNotifications.isNotEmpty()) {
                         itemsIndexed(filteredNotifications, key = { _, item -> item.id }, contentType = { _, _ -> "notification" }) { _, item ->
-                            val primaryActor = item.actingUsername.substringBefore("、").trim()
-                            val (badgeIcon, badgeColor) = when (item.notificationType) {
-                                5, 19, 25 -> LinDoIcons.HeartFilled to Color(0xFFE11D48)
-                                2, 3, 6, 7, 9, 11, 38, 802 -> LinDoIcons.MessageCircle to Color(0xFF0E76BD)
-                                1, 15, 29, 30, 31, 32, 33 -> LinDoIcons.AtSign to Color(0xFFD97706)
-                                12 -> LinDoIcons.Sparkles to Color(0xFF059669)
-                                else -> LinDoIcons.Bell to Color(0xFF059669)
-                            }
-                            val hasDistinctExcerpt = item.excerpt.isNotBlank() &&
-                                !item.excerpt.equals(item.title, ignoreCase = true)
-                            val contextTypeTag = when {
-                                item.topicId > 0 -> "原帖"
-                                item.badgeId > 0 -> "徽章"
-                                item.notificationType in 29..33 -> "聊天"
-                                else -> "详情"
-                            }
-
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(
-                                        if (!item.read) {
-                                            palette.brandGold.copy(alpha = if (palette.isDark) 0.07f else 0.045f)
-                                        } else {
-                                            Color.Transparent
+                            val actor = item.actorUsername
+                            LinDoNotificationRow(
+                                item = item,
+                                onInspectUser = onInspectUser,
+                                onClick = {
+                                    if (!item.read) {
+                                        val updated = notifications.map {
+                                            if (it.id == item.id) it.copy(read = true) else it
                                         }
-                                    )
-                                    .clickable {
-                                        if (!item.read) {
-                                            val updated = notifications.map {
-                                                if (it.id == item.id) it.copy(read = true) else it
-                                            }
-                                            notifications = updated
-                                            onUnreadCountSynced(updated.count { !it.read })
-                                        }
-                                        when {
-                                            item.topicId > 0 -> {
-                                                onSelectTopicId(item.topicId, item.title, item.postNumber)
-                                            }
-                                            item.badgeId > 0 -> {
-                                                onInspectBadge(
-                                                    GrantedBadge(
-                                                        id = item.badgeId,
-                                                        name = item.badgeName.ifBlank { item.title },
-                                                        description = "LINUX DO 社区授予徽章"
-                                                    )
-                                                )
-                                            }
-                                            item.notificationType in 29..33 -> {
-                                                val chatUrl = if (item.chatChannelId > 0) {
-                                                    "https://linux.do/chat/c/-/${item.chatChannelId}"
-                                                } else {
-                                                    "https://linux.do/chat"
-                                                }
-                                                onOpenWebUrl(chatUrl)
-                                            }
-                                            primaryActor.isNotBlank() && primaryActor != "系统" -> {
-                                                onInspectUser(primaryActor)
-                                            }
-                                        }
+                                        notifications = updated
+                                        onUnreadCountSynced(updated.count { !it.read })
                                     }
-                                    .padding(horizontal = 16.dp, vertical = 13.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.Top
-                                ) {
-                                    // 头像 + 右下角语义动作类型小角标（点赞红心 / 回复气泡 / @ 提及 / 徽章星标）
-                                    Box(
-                                        modifier = Modifier
-                                            .size(40.dp)
-                                            .clickable(
-                                                enabled = primaryActor.isNotBlank() && primaryActor != "系统"
-                                            ) {
-                                                onInspectUser(primaryActor)
-                                            }
-                                    ) {
-                                        SmartAvatar(
-                                            username = item.actingUsername.ifBlank { "L" },
-                                            avatarTemplate = item.actingAvatarTemplate,
-                                            animatedAvatar = null,
-                                            primaryGroupName = null,
-                                            flair = null,
-                                            size = 38.dp,
-                                            enableAnimations = false
+                                    when {
+                                        item.topicId > 0 -> onSelectTopicId(item.topicId, item.title, item.postNumber)
+                                        item.badgeId > 0 -> onInspectBadge(
+                                            GrantedBadge(
+                                                id = item.badgeId,
+                                                name = item.badgeName.ifBlank { item.title },
+                                                description = "LINUX DO 社区授予徽章"
+                                            )
                                         )
-                                        Box(
-                                            modifier = Modifier
-                                                .align(Alignment.BottomEnd)
-                                                .size(16.dp)
-                                                .clip(CircleShape)
-                                                .background(badgeColor)
-                                                .border(1.2.dp, palette.cardSurface, CircleShape),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = badgeIcon,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(9.5.dp),
-                                                tint = Color.White
-                                            )
+                                        item.notificationType in 29..33 -> {
+                                            val url = if (item.chatChannelId > 0) {
+                                                "https://linux.do/chat/c/-/${item.chatChannelId}"
+                                            } else {
+                                                "https://linux.do/chat"
+                                            }
+                                            onOpenWebUrl(url)
                                         }
-                                    }
-
-                                    Spacer(modifier = Modifier.width(12.dp))
-
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        // 第一行：触发用户 + 具体楼层动作标签 | 右侧相对时间 + 未读圆点
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.weight(1f),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(
-                                                    text = item.actingUsername,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = palette.inkPrimary,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    modifier = Modifier.weight(1f, fill = false)
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = item.typeLabel,
-                                                    fontSize = 12.8.sp,
-                                                    fontWeight = if (!item.read) FontWeight.SemiBold else FontWeight.Medium,
-                                                    color = badgeColor,
-                                                    maxLines = 1,
-                                                    softWrap = false
-                                                )
-                                            }
-
-                                            Spacer(modifier = Modifier.width(8.dp))
-
-                                            if (item.createdAtText.isNotBlank()) {
-                                                Text(
-                                                    text = item.createdAtText,
-                                                    fontSize = 11.5.sp,
-                                                    color = palette.inkTertiary,
-                                                    maxLines = 1,
-                                                    softWrap = false
-                                                )
-                                            }
-                                            if (!item.read) {
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(7.dp)
-                                                        .clip(CircleShape)
-                                                        .background(palette.tabIndicatorColor)
-                                                )
-                                            }
-                                        }
-
-                                        Spacer(modifier = Modifier.height(7.dp))
-
-                                        if (hasDistinctExcerpt) {
-                                            // 有具体回复/提及正文：带左竖线突出显示对方说的话，再在下方展示「原帖」来源条
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .width(2.5.dp)
-                                                        .height(18.dp)
-                                                        .clip(RoundedCornerShape(2.dp))
-                                                        .background(badgeColor.copy(alpha = 0.65f))
-                                                )
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                Text(
-                                                    text = item.excerpt,
-                                                    fontSize = 13.8.sp,
-                                                    lineHeight = 19.5.sp,
-                                                    fontWeight = if (!item.read) FontWeight.Medium else FontWeight.Normal,
-                                                    color = palette.inkPrimary,
-                                                    maxLines = 2,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    modifier = Modifier.weight(1f)
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.height(7.dp))
-                                        }
-
-                                        // 目标话题 / 详情行（明确带有「原帖 / 徽章」前置标签与右侧 `#楼层 >`，一目了然）
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(palette.subtleSurface)
-                                                .padding(horizontal = 10.dp, vertical = 7.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = "$contextTypeTag ·",
-                                                fontSize = 11.2.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = palette.inkTertiary,
-                                                maxLines = 1,
-                                                softWrap = false
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(
-                                                text = item.title,
-                                                fontSize = 12.8.sp,
-                                                lineHeight = 18.sp,
-                                                fontWeight = if (!item.read && !hasDistinctExcerpt) FontWeight.SemiBold else FontWeight.Normal,
-                                                color = if (!item.read) palette.inkPrimary else palette.inkSecondary,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            if (item.topicId > 0 && item.postNumber > 1) {
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                Text(
-                                                    text = "${item.postNumber} 楼",
-                                                    fontSize = 11.2.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = palette.inkTertiary,
-                                                    maxLines = 1,
-                                                    softWrap = false
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.width(3.dp))
-                                            Icon(
-                                                imageVector = LinDoIcons.ChevronRight,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(13.dp),
-                                                tint = palette.inkTertiary
-                                            )
-                                        }
+                                        actor != null -> onInspectUser(actor)
                                     }
                                 }
-                            }
-
-                            HorizontalDivider(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                thickness = 0.5.dp,
-                                color = palette.hairline
                             )
                         }
                         item(key = "notifications_end_footer") {
@@ -7709,7 +7398,6 @@ private fun CommunityMessagesScreen(
                                 isLoadingMore = false,
                                 hasMore = false,
                                 loadedCount = filteredNotifications.size,
-                                doneText = "没有更多通知了 · 零度娘已经翻到底啦",
                                 onLoadMore = {}
                             )
                         }
@@ -7718,7 +7406,7 @@ private fun CommunityMessagesScreen(
             }
         }
     }
-    if (showMarkAllConfirm) LinDoConfirmDialog("全部标为已读？", "当前账号的所有未读通知将标记为已读。", "确认标记", busy = markingAll, error = markAllError, destructive = false,
+    if (showMarkAllConfirm) LinDoConfirmDialog(title = "全部标为已读？", confirmLabel = "标为已读", busy = markingAll, error = markAllError,
         onDismiss = { showMarkAllConfirm = false; markAllError = null }, onConfirm = {
             if (!markingAll) {
                 markingAll = true
@@ -7731,10 +7419,10 @@ private fun CommunityMessagesScreen(
                             notifications = notifications.map { it.copy(read = true) }
                             onMarkedAllRead()
                         } else {
-                            markAllError = "操作失败，请重试"
+                            markAllError = "标记失败"
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                    catch (error: Exception) { markAllError = error.message ?: "操作失败，请重试" }
+                    catch (error: Exception) { markAllError = error.message ?: "标记失败" }
                     finally { markingAll = false }
                 }
             }
@@ -8882,7 +8570,6 @@ private fun BadgeDetailBottomSheet(
     var officialBadge by remember(badge.id) { mutableStateOf<GrantedBadge?>(null) }
     val effectiveBadge = officialBadge ?: badge
 
-    val tierColor = UniversalBadgeEngine.badgeTierColor(effectiveBadge.badgeType)
     val canSetTitle = isAuthorized && currentUsername.isNotBlank() &&
         officialBadge?.let { it.allowTitle && it.isEarned } == true
 
@@ -8891,7 +8578,7 @@ private fun BadgeDetailBottomSheet(
     var isEquippingTitle by remember(effectiveBadge.id) { mutableStateOf(false) }
     var titleEquipStatus by remember(effectiveBadge.id) { mutableStateOf<String?>(null) }
     var equippedNow by remember(effectiveBadge.name, currentUserTitle) {
-        mutableStateOf(currentUserTitle.trim().equals(effectiveBadge.name.trim(), ignoreCase = true))
+        mutableStateOf(currentUserTitle.isNotBlank() && currentUserTitle.trim().equals(effectiveBadge.name.trim(), ignoreCase = true))
     }
 
     LaunchedEffect(badge.id, badge.holderUsername) {
@@ -8927,132 +8614,36 @@ private fun BadgeDetailBottomSheet(
                 .fillMaxSize()
                 .padding(horizontal = 20.dp, vertical = 14.dp)
         ) {
-            // 1. 顶部勋章英雄区：大尺寸等级圆章 + 名称 + 等级胶囊 + 重复次数
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                PostGrantedBadgeIcon(effectiveBadge, size = 40.dp)
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = effectiveBadge.name,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (effectiveBadge.count > 1) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(tierColor.copy(alpha = 0.15f))
-                                    .padding(horizontal = 6.dp, vertical = 1.5.dp)
-                            ) {
-                                Text(
-                                    text = "×${effectiveBadge.count}",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = tierColor
-                                )
-                            }
+                Box(Modifier.width(40.dp), contentAlignment = Alignment.Center) {
+                    PostGrantedBadgeIcon(effectiveBadge, size = 36.dp)
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        effectiveBadge.name, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                        color = palette.inkPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                    val metadata = listOfNotNull(
+                        effectiveBadge.badgeType.labelZh,
+                        "获授 ${effectiveBadge.count} 次".takeIf { effectiveBadge.count > 1 },
+                        "本楼获授".takeIf { effectiveBadge.isFirstTimeGrant },
+                        when {
+                            equippedNow -> "当前头衔"
+                            effectiveBadge.allowTitle && !canSetTitle -> "可设头衔"
+                            else -> null
                         }
-                    }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        // 金/银/铜徽章等级胶囊
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.5.dp),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(tierColor.copy(alpha = 0.14f))
-                                .padding(horizontal = 6.5.dp, vertical = 2.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .clip(CircleShape)
-                                    .background(tierColor)
-                            )
-                            Text(
-                                text = effectiveBadge.badgeType.labelZh,
-                                fontSize = 10.8.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = tierColor
-                            )
-                        }
-
-                        if (effectiveBadge.isFirstTimeGrant) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(palette.subtleSurface)
-                                    .padding(horizontal = 6.5.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "本楼获授",
-                                    fontSize = 10.8.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.brandGold
-                                )
-                            }
-                        } else if (officialBadge?.isEarned == true) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(palette.subtleSurface)
-                                    .padding(horizontal = 6.5.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "✓ 已获得",
-                                    fontSize = 10.8.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.brandGold
-                                )
-                            }
-                        }
-
-                        if (effectiveBadge.allowTitle) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(palette.subtleSurface)
-                                    .padding(horizontal = 6.5.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "可设头衔",
-                                    fontSize = 10.8.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkSecondary
-                                )
-                            }
-                        }
-                    }
+                    )
+                    Text(metadata.joinToString(" · "), fontSize = 12.sp, color = palette.inkSecondary)
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 2. 徽章简介与详细获取规则卡片
+            Spacer(modifier = Modifier.height(16.dp))
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(palette.subtleSurface.copy(alpha = 0.65f))
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
@@ -9075,68 +8666,45 @@ private fun BadgeDetailBottomSheet(
                     )
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                val grantDate = effectiveBadge.grantedAtText.takeIf { it.isNotBlank() }
+                val grantMetadata = listOfNotNull(
+                    "全站授予 ${formatCompactNumber(effectiveBadge.grantCount)} 次".takeIf { effectiveBadge.grantCount > 0 },
+                    grantDate?.let { "获授于 $it" },
+                    "已获得".takeIf { grantDate == null && officialBadge?.isEarned == true && !effectiveBadge.isFirstTimeGrant }
+                )
+                if (grantMetadata.isNotEmpty()) {
                     Text(
-                        text = buildString {
-                            if (effectiveBadge.grantCount > 0) {
-                                append("全站共授予 ")
-                                append(formatCompactNumber(effectiveBadge.grantCount))
-                                append(" 次")
-                            } else {
-                                append("LINUX DO 官方荣誉徽章")
-                            }
-                            effectiveBadge.grantedAtText?.takeIf { it.isNotBlank() }?.let {
-                                append(" · 获授于 ")
-                                append(it)
-                            }
-                        },
-                        fontSize = 11.5.sp,
-                        color = palette.inkTertiary
+                        grantMetadata.joinToString(" · "),
+                        fontSize = 11.5.sp, color = palette.inkTertiary
                     )
+                }
 
-                    if (canSetTitle) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    if (equippedNow) palette.tonalPill else palette.brandGold.copy(alpha = 0.16f)
+                if (canSetTitle && !equippedNow) {
+                    TextButton(
+                        enabled = !isEquippingTitle,
+                        onClick = {
+                            scope.launch {
+                                isEquippingTitle = true
+                                titleEquipStatus = null
+                                val ok = LinuxDoRepository.updateUserTitle(
+                                    username = currentUsername,
+                                    title = effectiveBadge.name
                                 )
-                                .clickable(enabled = !isEquippingTitle && !equippedNow) {
-                                    scope.launch {
-                                        isEquippingTitle = true
-                                        titleEquipStatus = null
-                                        val ok = LinuxDoRepository.updateUserTitle(
-                                            username = currentUsername,
-                                            title = effectiveBadge.name
-                                        )
-                                        isEquippingTitle = false
-                                        if (ok) {
-                                            equippedNow = true
-                                            titleEquipStatus = "已佩戴「${effectiveBadge.name}」为个人头衔"
-                                            onTitleUpdated()
-                                        } else {
-                                            titleEquipStatus = "需要先解锁该徽章才可设为头衔"
-                                        }
-                                    }
+                                isEquippingTitle = false
+                                if (ok) {
+                                    equippedNow = true
+                                    titleEquipStatus = "已设为头衔"
+                                    onTitleUpdated()
+                                } else {
+                                    titleEquipStatus = "设置失败，请稍后重试"
                                 }
-                                .padding(horizontal = 10.dp, vertical = 4.5.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = when {
-                                    isEquippingTitle -> "设置中..."
-                                    equippedNow -> "✓ 当前佩戴头衔"
-                                    else -> "佩戴为我的头衔"
-                                },
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (equippedNow) palette.inkSecondary else palette.brandGold
-                            )
+                            }
                         }
+                    ) {
+                        Text(
+                            if (isEquippingTitle) "设置中…" else "设为头衔",
+                            color = if (isEquippingTitle) palette.inkSecondary else palette.accent
+                        )
                     }
                 }
             }
@@ -9260,7 +8828,7 @@ private fun BadgeDetailBottomSheet(
                                             text = "×${grantee.count}",
                                             fontSize = 10.8.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = tierColor
+                                            color = palette.inkSecondary
                                         )
                                     }
                                 }
@@ -9302,8 +8870,9 @@ private fun CommunityBadgesSheet(
     onInspectBadge: (GrantedBadge) -> Unit
 ) {
     val palette = LocalPalette.current
+    val focusManager = LocalFocusManager.current
 
-    var selectedTab by remember { mutableIntStateOf(0) } // 0 = 已获徽章, 1 = 全站徽章墙
+    var selectedTab by remember(targetUsername) { mutableIntStateOf(if (targetUsername.isBlank()) 1 else 0) }
     var tierFilter by remember { mutableIntStateOf(0) } // 0=全部, 1=金徽章, 2=银徽章, 3=铜徽章, 4=可设头衔
     var searchQuery by remember { mutableStateOf("") }
 
@@ -9378,87 +8947,48 @@ private fun CommunityBadgesSheet(
         containerColor = palette.cardSurface
     ) {
         LinDoPageTopBar(
-            title = if (targetUsername.isNotBlank()) "社区徽章与头衔 (@$targetUsername)" else "LINUX DO 全站徽章墙",
+            title = "徽章",
+            subtitle = targetUsername.takeIf { it.isNotBlank() }?.let { "@$it" },
             onBack = onDismiss
         )
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 10.dp)
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)
         ) {
-            // 2. 主模式切换：已获徽章 vs 全站徽章墙
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(palette.subtleSurface)
-                    .padding(3.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                val tabs = listOf(
-                    "已获徽章 (${earnedBadges.size})" to 0,
-                    "全站徽章墙 (${allSiteBadges.size})" to 1
-                )
-                tabs.forEach { (label, idx) ->
-                    val active = selectedTab == idx
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(34.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (active) palette.cardSurface else Color.Transparent)
-                            .clickable { selectedTab = idx },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = label,
-                            fontSize = 12.8.sp,
-                            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                            color = if (active) palette.inkPrimary else palette.inkSecondary
-                        )
-                    }
+            if (targetUsername.isNotBlank()) {
+                LinDoSectionTabs(
+                    labels = listOf("已获徽章 ${earnedBadges.size}", "全站徽章 ${allSiteBadges.size}"),
+                    selectedIndex = selectedTab
+                ) { index ->
+                    focusManager.clearFocus()
+                    selectedTab = index
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 3. 搜索框（支持搜索种子用户、全年不落、不二之选、Only Apple Can Do 等）
+            Spacer(Modifier.height(12.dp))
             WorkbenchCompactInputBox(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = "搜索徽章名称或解锁条件（如：种子用户、全年不落、Apple...）",
+                placeholder = "搜索徽章",
                 leadingIcon = LinDoIcons.Search,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                onSearch = { focusManager.clearFocus() }
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // 4. 金/银/铜等级与头衔快筛胶囊
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).selectableGroup(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val filters = listOf(
-                    Triple(0, "全部", null),
-                    Triple(1, "金徽章", Color(0xFFEAB308)),
-                    Triple(2, "银徽章", Color(0xFF94A3B8)),
-                    Triple(3, "铜徽章", Color(0xFFD97706)),
-                    Triple(4, "可设头衔", palette.brandGold)
-                )
-                filters.forEach { (code, label, dotCol) ->
+                listOf("全部", "金", "银", "铜", "可设头衔").forEachIndexed { code, label ->
                     GoogleM3FilterPill(
                         label = label,
-                        dotColor = dotCol,
+                        dotColor = null,
                         selected = tierFilter == code,
                         onClick = { tierFilter = code }
                     )
                 }
             }
-
-            Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
             // 5. 徽章列表
             if ((if (selectedTab == 0) loadingOwned else isLoading) && sourceList.isEmpty()) {
@@ -9471,9 +9001,9 @@ private fun CommunityBadgesSheet(
                     LinDoLoadingIndicator(label = "正在同步社区徽章目录")
                 }
             } else if (selectedTab == 0 && ownedError && sourceList.isEmpty()) {
-                LinDoLoadFailure("暂时没能加载已获徽章") { retryOwned++ }
+                LinDoLoadFailure("已获徽章加载失败") { retryOwned++ }
             } else if (selectedTab == 1 && catalogError) {
-                LinDoLoadFailure("暂时没能加载徽章目录") { retryCatalog++ }
+                LinDoLoadFailure("徽章目录加载失败") { retryCatalog++ }
             } else if (filteredBadges.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -9483,169 +9013,99 @@ private fun CommunityBadgesSheet(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         LinDoEmptyState(
-                            message = if (selectedTab == 0 && searchQuery.isBlank()) {
-                                "暂未在该分类下找到已获徽章，点击「全站徽章墙」可浏览所有官方徽章"
+                            message = if (selectedTab == 0 && searchQuery.isBlank() && tierFilter == 0) {
+                                "还没有获得徽章"
                             } else {
-                                "没有找到匹配的徽章"
+                                "没有匹配的徽章"
                             }
                         )
                         if (selectedTab == 0) {
                             Spacer(modifier = Modifier.height(10.dp))
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(palette.tonalPill)
-                                    .clickable { selectedTab = 1 }
-                                    .padding(horizontal = 14.dp, vertical = 7.dp)
-                            ) {
-                                Text(
-                                    text = "浏览全站徽章墙",
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = palette.brandGold
-                                )
+                            TextButton(onClick = {
+                                focusManager.clearFocus()
+                                selectedTab = 1
+                            }) {
+                                Text("浏览全站徽章", color = palette.accent)
                             }
                         }
                     }
                 }
             } else {
                 LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(top = 2.dp, bottom = 24.dp)
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(bottom = 20.dp)
                 ) {
                     itemsIndexed(filteredBadges, key = { _, badge -> badge.id }, contentType = { _, _ -> "badge" }) { index, badge ->
-                        if (badge.badgeGroupingName.isNotBlank() &&
+                        val startsGroup = badge.badgeGroupingName.isNotBlank() &&
                             filteredBadges.getOrNull(index - 1)?.badgeGroupingId != badge.badgeGroupingId
-                        ) {
+                        if (startsGroup) {
                             Text(
-                                badge.badgeGroupingName, fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold, color = palette.inkSecondary,
-                                modifier = Modifier.padding(top = 10.dp, bottom = 8.dp)
+                                text = when (badge.badgeGroupingName) {
+                                    "Getting Started" -> "入门"
+                                    "Community" -> "社区"
+                                    "Posting" -> "发帖"
+                                    "Trust Level" -> "信任等级"
+                                    "Other" -> "其他"
+                                    else -> badge.badgeGroupingName
+                                },
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.inkSecondary,
+                                modifier = Modifier.padding(top = 15.dp, bottom = 4.dp)
                             )
                         }
-                        val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType)
+
                         val isCurrentTitle = badge.isEarned && badge.allowTitle && currentUserTitle.isNotBlank() &&
                             currentUserTitle.trim().equals(badge.name.trim(), ignoreCase = true)
+                        val description = remember(badge.name, badge.description, badge.longDescription) {
+                            badge.plainDescription.takeUnless { it == badge.name }
+                                ?: badge.plainLongDescription
+                        }
+                        val status = when {
+                            isCurrentTitle -> "当前头衔"
+                            selectedTab == 1 && badge.isEarned && badge.grantedAtText.isNotBlank() ->
+                                "获授于 ${badge.grantedAtText}"
+                            else -> ""
+                        }
 
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(13.dp))
-                                .background(palette.canvas)
-                                .border(
-                                    width = 0.6.dp,
-                                    color = if (badge.isEarned) tierColor.copy(alpha = 0.35f) else palette.hairline,
-                                    shape = RoundedCornerShape(13.dp)
-                                )
-                                .clickable { onInspectBadge(badge) }
-                                .padding(horizontal = 13.dp, vertical = 11.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            PostGrantedBadgeIcon(badge, size = 28.dp)
-
-                            Spacer(modifier = Modifier.width(12.dp))
-
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                ) {
-                                    Text(
-                                        text = badge.name,
-                                        fontSize = 14.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.inkPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (badge.count > 1) {
-                                        Text(
-                                            text = "×${badge.count}",
-                                            fontSize = 11.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = tierColor
-                                        )
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(5.dp))
-                                            .background(tierColor.copy(alpha = 0.14f))
-                                            .padding(horizontal = 5.5.dp, vertical = 1.5.dp)
-                                    ) {
-                                        Text(
-                                            text = badge.badgeType.labelZh,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = tierColor
-                                        )
-                                    }
-                                    if (badge.allowTitle) {
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(5.dp))
-                                                .background(palette.subtleSurface)
-                                                .padding(horizontal = 5.5.dp, vertical = 1.5.dp)
-                                        ) {
-                                            Text(
-                                                text = if (isCurrentTitle) "当前头衔" else "可设头衔",
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = if (isCurrentTitle) palette.brandGold else palette.inkSecondary
-                                            )
-                                        }
-                                    }
-                                    if (badge.isEarned) {
-                                        Text(
-                                            text = "✓ 已获",
-                                            fontSize = 10.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = palette.brandGold
-                                        )
-                                    }
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp)
+                                .clickable {
+                                    focusManager.clearFocus()
+                                    onInspectBadge(badge)
                                 }
-
-                                Spacer(modifier = Modifier.height(3.dp))
-
+                                .padding(vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(Modifier.width(30.dp), contentAlignment = Alignment.Center) {
+                                PostGrantedBadgeIcon(badge, size = 24.dp)
+                            }
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 Text(
-                                    text = badge.plainDescription.ifBlank { badge.plainLongDescription },
-                                    fontSize = 12.2.sp,
-                                    lineHeight = 17.5.sp,
-                                    color = palette.inkSecondary,
-                                    maxLines = 2,
+                                    badge.name, color = palette.inkPrimary, fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold, maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
-
-                                if (badge.grantCount > 0 || !badge.grantedAtText.isNullOrBlank()) {
-                                    Spacer(modifier = Modifier.height(3.dp))
+                                if (description.isNotBlank()) {
                                     Text(
-                                        text = buildString {
-                                            if (badge.grantCount > 0) {
-                                                append("全站共授予 ")
-                                                append(formatCompactNumber(badge.grantCount))
-                                                append(" 次")
-                                            }
-                                            badge.grantedAtText?.takeIf { it.isNotBlank() }?.let {
-                                                if (isNotEmpty()) append(" · ")
-                                                append("获授于 ")
-                                                append(it)
-                                            }
-                                        },
-                                        fontSize = 10.8.sp,
-                                        color = palette.inkTertiary
+                                        description, color = palette.inkSecondary, fontSize = 12.5.sp,
+                                        lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
                                     )
                                 }
+                                if (status.isNotEmpty()) {
+                                    Text(status, fontSize = 11.sp, color = palette.inkTertiary)
+                                }
                             }
-
-                            Spacer(modifier = Modifier.width(6.dp))
-
                             Icon(
-                                imageVector = LinDoIcons.ChevronRight,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp),
-                                tint = palette.inkTertiary
+                                LinDoIcons.ChevronRight, contentDescription = null,
+                                modifier = Modifier.size(14.dp), tint = palette.inkTertiary
+                            )
+                        }
+                        if (index < filteredBadges.lastIndex) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 42.dp),
+                                thickness = 0.5.dp, color = palette.hairline
                             )
                         }
                     }
@@ -11267,7 +10727,8 @@ private fun WorkbenchCompactInputBox(
     onValueChange: (String) -> Unit,
     placeholder: String,
     leadingIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onSearch: (() -> Unit)? = null
 ) {
     val palette = LocalPalette.current
     val inputStyle = TextStyle(
@@ -11298,6 +10759,8 @@ private fun WorkbenchCompactInputBox(
             value = value,
             onValueChange = onValueChange,
             singleLine = true,
+            keyboardOptions = if (onSearch == null) KeyboardOptions.Default else KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = if (onSearch == null) KeyboardActions.Default else KeyboardActions(onSearch = { onSearch() }),
             textStyle = inputStyle,
             cursorBrush = SolidColor(palette.brandGold),
             modifier = Modifier
@@ -11624,14 +11087,6 @@ private fun GlobalSearchModalSheet(
                             }
                         }
                     }
-                    item {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState("输入关键词或点击上方热词，探索全站讨论")
-                        }
-                    }
                 } else if (isSearching && results.isEmpty()) {
                     item {
                         Box(
@@ -11660,7 +11115,7 @@ private fun GlobalSearchModalSheet(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 36.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            LinDoEmptyState("没有找到与「$submittedQuery」匹配的结果，换个关键词试试吧")
+                            LinDoEmptyState("未找到结果，试试其他关键词")
                         }
                     }
                 } else {
@@ -11841,7 +11296,7 @@ private fun UserNotificationsSheet(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            loadError = error.message ?: "加载失败，请重试"
+            loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
         }
@@ -11861,54 +11316,37 @@ private fun UserNotificationsSheet(
         containerColor = palette.cardSurface
     ) {
         LinDoPageTopBar(
-            title = "通知消息中心",
+            title = "通知",
             onBack = onDismiss,
             trailingContent = {
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable {
-                            showMarkAllConfirm = true
-                        }
-                        .padding(horizontal = 8.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Check,
-                        contentDescription = "全部已读",
-                        modifier = Modifier.size(14.dp),
-                        tint = palette.inkSecondary
-                    )
-                    Text(
-                        text = "全部已读",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.inkSecondary
-                    )
-                }
+                LinDoNotificationActions(
+                    canMarkAll = notifications.isNotEmpty(),
+                    enabled = !isLoading && !markingAll,
+                    onMarkAll = { showMarkAllConfirm = true },
+                    onRefresh = { reloadToken++ }
+                )
             }
         )
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 10.dp)
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                val tabs = listOf("全部", "未读", "回复与提及", "获赞")
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp).selectableGroup(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                val tabs = listOf("全部", "未读", "回复与提及", "表态")
                 tabs.forEachIndexed { idx, label ->
                     GoogleM3FilterPill(
                         label = label,
                         dotColor = null,
                         selected = filterTab == idx,
+                        modifier = Modifier.widthIn(min = 48.dp),
                         onClick = { filterTab = idx }
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
-            if (isLoading) {
+            if (isLoading && notifications.isEmpty()) {
                 Box(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     contentAlignment = Alignment.Center
@@ -11922,8 +11360,7 @@ private fun UserNotificationsSheet(
 
                 LazyColumn(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(7.dp),
-                    contentPadding = PaddingValues(vertical = 6.dp)
+                    contentPadding = PaddingValues(bottom = 16.dp)
                 ) {
                     if (filtered.isEmpty() && loadError == null) {
                         item {
@@ -11931,85 +11368,29 @@ private fun UserNotificationsSheet(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                LinDoEmptyState(message = "暂无相关通知消息")
+                                LinDoEmptyState(message = if (filterTab == 1) "暂无未读通知" else "暂无通知")
                             }
                         }
                     } else {
-                        itemsIndexed(filtered, key = { _, item -> item.id }, contentType = { _, _ -> "bookmark" }) { _, item ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(if (!item.read) palette.subtleSurface else palette.canvas)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                    .clickable {
-                                        if (item.topicId > 0) {
-                                            onSelectNotification(item.topicId, item.title, item.postNumber)
-                                        } else {
-                                            val primaryActor = item.actingUsername.substringBefore("、").trim()
-                                            if (primaryActor.isNotBlank() && primaryActor != "系统") {
-                                                onInspectUser(primaryActor)
-                                            }
-                                        }
+                        items(filtered, key = { it.id }, contentType = { "notification" }) { item ->
+                            val actor = item.actorUsername
+                            LinDoNotificationRow(
+                                item = item,
+                                onClick = when {
+                                    item.topicId > 0 -> {
+                                        { onSelectNotification(item.topicId, item.title, item.postNumber) }
                                     }
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                if (!item.read) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(7.dp)
-                                            .clip(CircleShape)
-                                            .background(palette.brandGold)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                    actor != null -> { { onInspectUser(actor) } }
+                                    else -> null
                                 }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = "@${item.actingUsername}",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = palette.inkPrimary
-                                        )
-                                        Text(
-                                            text = " " + listOf(item.typeLabel, item.createdAtText)
-                                                .filter { it.isNotBlank() }.joinToString(" · "),
-                                            fontSize = 11.5.sp,
-                                            color = palette.inkTertiary
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        Text(
-                                            text = item.title,
-                                            fontSize = 13.5.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = palette.inkPrimary,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f, fill = false)
-                                        )
-                                        if (item.topicId > 0 && item.postNumber > 1) {
-                                            Text("${item.postNumber} 楼", fontSize = 11.2.sp,
-                                                color = palette.inkTertiary, maxLines = 1, softWrap = false)
-                                        }
-                                    }
-                                }
-                                Icon(
-                                    imageVector = LinDoIcons.ChevronRight,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(15.dp),
-                                    tint = palette.inkTertiary
-                                )
-                            }
+                            )
                         }
                     }
                 }
             }
         }
     }
-    if (showMarkAllConfirm) LinDoConfirmDialog("全部标为已读？", "当前账号的所有未读通知将标记为已读。", "确认标记", busy = markingAll, error = markAllError, destructive = false,
+    if (showMarkAllConfirm) LinDoConfirmDialog(title = "全部标为已读？", confirmLabel = "标为已读", busy = markingAll, error = markAllError,
         onDismiss = { showMarkAllConfirm = false; markAllError = null }, onConfirm = {
             if (!markingAll) {
                 markingAll = true
@@ -12021,10 +11402,10 @@ private fun UserNotificationsSheet(
                             showMarkAllConfirm = false
                             notifications = notifications.map { it.copy(read = true) }
                         } else {
-                            markAllError = "操作失败，请重试"
+                            markAllError = "标记失败"
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                    catch (error: Exception) { markAllError = error.message ?: "操作失败，请重试" }
+                    catch (error: Exception) { markAllError = error.message ?: "标记失败" }
                     finally { markingAll = false }
                 }
             }
@@ -12057,7 +11438,7 @@ private fun UserActivitiesSheet(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            loadError = error.message ?: "加载失败，请重试"
+            loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
         }
@@ -12113,7 +11494,7 @@ private fun UserActivitiesSheet(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                LinDoEmptyState(message = "暂无相关社区动态记录")
+                                LinDoEmptyState(message = "暂无动态")
                             }
                         }
                     } else {
@@ -12193,7 +11574,7 @@ private fun UserBookmarksSheet(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            loadError = error.message ?: "加载失败，请重试"
+            loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
         }
@@ -12235,7 +11616,7 @@ private fun UserBookmarksSheet(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                LinDoEmptyState(message = "暂未收藏任何书签，阅读话题时点击右上角书签即可收藏")
+                                LinDoEmptyState(message = "暂无书签")
                             }
                         }
                     } else {
@@ -12324,7 +11705,7 @@ internal fun UserPrivateMessagesSheet(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            loadError = error.message ?: "加载失败，请重试"
+            loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
         }
@@ -12419,7 +11800,7 @@ internal fun UserPrivateMessagesSheet(
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    LinDoEmptyState(message = if (tab == 3) "暂无归档会话" else "暂无站内私信会话")
+                                    LinDoEmptyState(message = if (tab == 3) "暂无归档会话" else "暂无私信")
                                 }
                             }
                         } else {
@@ -12445,10 +11826,9 @@ internal fun UserPrivateMessagesSheet(
     pendingArchive?.let { message ->
         val movingToInbox = tab == 3
         LinDoConfirmDialog(
-            title = if (movingToInbox) "移回收件箱？" else "归档这段会话？",
-            message = if (movingToInbox) "「${message.title}」会重新出现在收件箱。" else "「${message.title}」将移出收件箱，可在归档中找回。",
-            confirmLabel = if (movingToInbox) "移回收件箱" else "确认归档",
-            busy = archiving, error = archiveError, destructive = false,
+            title = if (movingToInbox) "移回收件箱？" else "归档会话？",
+            confirmLabel = if (movingToInbox) "移回" else "归档",
+            busy = archiving, error = archiveError,
             onDismiss = { pendingArchive = null },
             onConfirm = {
                 if (!archiving) {
@@ -12462,7 +11842,7 @@ internal fun UserPrivateMessagesSheet(
                         } catch (cancelled: kotlinx.coroutines.CancellationException) {
                             throw cancelled
                         } catch (error: Exception) {
-                            archiveError = error.message ?: "操作失败，请重试"
+                            archiveError = error.message ?: if (movingToInbox) "移回失败" else "归档失败"
                         } finally {
                             archiving = false
                         }
@@ -12510,7 +11890,7 @@ private fun PublicUserCardSheet(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            loadError = error.message ?: "加载失败，请重试"
+            loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
         }
@@ -12880,7 +12260,7 @@ private fun PublicUserCardSheet(
                     if (activeTab == 3) {
                         val ownedBadges = profileBadges
                         if (profileBadgeError) {
-                            item(key = "error_badges") { LinDoLoadFailure("暂时没能加载徽章") { retryProfileBadges++ } }
+                            item(key = "error_badges") { LinDoLoadFailure("徽章加载失败") { retryProfileBadges++ } }
                         } else if (ownedBadges == null) {
                             item(key = "loading_badges") { LinDoLoadingIndicator(label = "加载徽章") }
                         } else if (ownedBadges.isEmpty()) {
@@ -13191,7 +12571,7 @@ private fun UserReadHistorySheet(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            loadError = error.message ?: "加载失败，请重试"
+            loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
         }
@@ -13234,7 +12614,7 @@ private fun UserReadHistorySheet(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                LinDoEmptyState(message = "暂无阅读历史记录")
+                                LinDoEmptyState(message = "暂无阅读记录")
                             }
                         }
                     } else {

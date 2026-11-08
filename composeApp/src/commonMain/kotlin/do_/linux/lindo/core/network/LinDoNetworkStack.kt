@@ -2336,7 +2336,8 @@ kZC8lQg1
                 val postNumber = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
                 val slug = obj["slug"]?.jsonPrimitive?.contentOrNull ?: ""
                 val dataObj = obj["data"] as? JsonObject
-                val count = dataObj?.get("count")?.jsonPrimitive?.intOrNull
+                val consolidatedReplies = if (nType == 2) dataObj?.get("consolidated_count")?.jsonPrimitive?.intOrNull else null
+                val count = consolidatedReplies ?: dataObj?.get("count")?.jsonPrimitive?.intOrNull
                     ?: dataObj?.get("inbox_count")?.jsonPrimitive?.intOrNull
                     ?: 0
                 val badgeId = dataObj?.get("badge_id")?.jsonPrimitive?.intOrNull ?: 0
@@ -2375,20 +2376,13 @@ kZC8lQg1
                 val slugTitle = slug.takeIf { it.isNotBlank() && it != "topic" }?.replace('-', ' ')
                 val title = when {
                     rawTopicTitle != null -> rawTopicTitle
-                    badgeName.isNotBlank() -> "获得社区徽章「$badgeName」"
-                    chatChannelTitle != null -> "聊天频道：$chatChannelTitle"
+                    badgeName.isNotBlank() -> badgeName
+                    chatChannelTitle != null -> chatChannelTitle
                     groupName != null -> if (count > 0) "群组「$groupName」有 $count 条消息" else "群组：$groupName"
                     customMessage != null -> customMessage
-                    nType == 19 || (nType == 25 && topicId <= 0) ->
-                        if (count > 1) "累计赞了你的 $count 条帖子 · 点击查看 @$primaryActor 的主页"
-                        else "赞了你的多条社区内容 · 点击查看 @$primaryActor 的主页"
-                    nType == 36 || nType == 800 -> "成为了你的关注者 · 点击查看 @$primaryActor 的主页"
-                    nType == 8 -> "已接受你的社区邀请 · 点击查看 @$primaryActor 的主页"
-                    nType in 29..33 -> "收到一条实时聊天消息 · 点击打开聊天"
                     slugTitle != null -> slugTitle
                     topicId > 0 -> "话题 #$topicId"
-                    primaryActor != "系统" -> "来自 @$primaryActor 的社区动态 · 点击查看 @$primaryActor 的主页"
-                    else -> "系统消息通知"
+                    else -> ""
                 }
                 val actingAvatarTemplate = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull
                     ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull

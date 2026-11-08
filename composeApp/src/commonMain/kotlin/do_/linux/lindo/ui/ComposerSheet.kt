@@ -20,6 +20,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -39,22 +42,62 @@ internal data class ComposerPublished(val post: PostItemModel? = null, val topic
 internal val LocalCurrentAccountUsername = staticCompositionLocalOf<String?> { null }
 
 @Composable
+internal fun LinDoDialogTitle(title: String) {
+    Text(title, color = LocalPalette.current.inkPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+}
+
+@Composable
 internal fun LinDoConfirmDialog(
-    title: String, message: String, confirmLabel: String, busy: Boolean = false,
-    error: String? = null, destructive: Boolean = true, onDismiss: () -> Unit, onConfirm: () -> Unit
+    title: String,
+    confirmLabel: String,
+    detail: String? = null,
+    busy: Boolean = false,
+    error: String? = null,
+    destructive: Boolean = false,
+    dismissLabel: String = "取消",
+    alternateAction: (@Composable () -> Unit)? = null,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
 ) {
     val palette = LocalPalette.current
+    val errorColor = MaterialTheme.colorScheme.error
+    val visibleError = error?.takeIf { !busy && it.isNotBlank() }
+    val body: (@Composable () -> Unit)? = if (detail == null && visibleError == null) null else {
+        {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                detail?.let { Text(it, color = palette.inkSecondary, fontSize = 14.sp, lineHeight = 20.sp) }
+                visibleError?.let {
+                    Text(it, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = errorColor, fontSize = 13.sp, lineHeight = 18.sp)
+                }
+            }
+        }
+    }
     AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() }, containerColor = palette.cardSurface,
-        title = { Text(title, color = palette.inkPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold) },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(message, color = palette.inkSecondary, fontSize = 14.sp, lineHeight = 21.sp)
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
-        } },
-        confirmButton = { TextButton(enabled = !busy, onClick = onConfirm) {
-            LinDoBusyButtonLabel(busy, "处理中", confirmLabel, if (destructive) MaterialTheme.colorScheme.error else palette.inkPrimary)
-        } },
-        dismissButton = { TextButton(enabled = !busy, onClick = onDismiss) { Text("取消", color = palette.inkSecondary) } }
+        onDismissRequest = { if (!busy) onDismiss() },
+        containerColor = palette.cardSurface,
+        title = { LinDoDialogTitle(title) },
+        text = body,
+        confirmButton = {
+            TextButton(
+                enabled = !busy,
+                onClick = onConfirm,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = if (destructive) errorColor else palette.inkPrimary,
+                    disabledContentColor = palette.inkSecondary
+                )
+            ) {
+                if (busy) LinDoBusyButtonLabel(true, "处理中", confirmLabel, LocalContentColor.current)
+                else Text(confirmLabel, fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            if (!busy) alternateAction?.invoke()
+            TextButton(
+                enabled = !busy,
+                onClick = onDismiss,
+                colors = ButtonDefaults.textButtonColors(contentColor = palette.inkSecondary)
+            ) { Text(dismissLabel) }
+        }
     )
 }
 
@@ -107,6 +150,7 @@ internal fun ComposerSheet(
     var submitError by remember(key) { mutableStateOf<String?>(null) }
     var showExit by remember(key) { mutableStateOf(false) }
     var showDiscard by remember(key) { mutableStateOf(false) }
+    var discardError by remember(key) { mutableStateOf<String?>(null) }
     var showCost by remember(key) { mutableStateOf(false) }
     var syncRetry by remember(key) { mutableIntStateOf(0) }
     var availableTags by remember(draft.categoryId) { mutableStateOf(emptyList<String>()) }
@@ -356,7 +400,7 @@ internal fun ComposerSheet(
                     if (action == ComposerAction.REPLY) {
                         val floor = draft.replyToPostNumber
                         val name = replyToDisplayName?.takeIf { it.isNotBlank() }
-                            ?: draft.replyToUsername?.takeIf { it.isNotBlank() } ?: "楼主"
+                            ?: draft.replyToUsername?.takeIf { it.isNotBlank() }
                         val snippet = if (floor == null) topicTitle else replyToContentSnippet.orEmpty()
                         if (floor != null || snippet.isNotBlank()) {
                             Row(
@@ -366,7 +410,7 @@ internal fun ComposerSheet(
                                 verticalAlignment = Alignment.Top,
                                 horizontalArrangement = Arrangement.spacedBy(9.dp)
                             ) {
-                                if (floor != null) {
+                                if (floor != null && name != null) {
                                     GoogleAccountRingAvatar(
                                         letter = name, avatarUrl = replyToAvatarUrl,
                                         animatedAvatar = replyToAnimatedAvatar, avatarSize = 25.dp, strokeWidth = 0.dp
@@ -375,7 +419,11 @@ internal fun ComposerSheet(
                                 Column(Modifier.weight(1f)) {
                                     if (floor != null) {
                                         Text(
-                                            "回复给 $name · ${floor} 楼",
+                                            when {
+                                                name != null -> "回复 $name · $floor 楼"
+                                                floor == 1 -> "回复楼主"
+                                                else -> "回复第 $floor 楼"
+                                            },
                                             color = palette.inkPrimary, fontWeight = FontWeight.Medium,
                                             fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                                         )
@@ -645,7 +693,7 @@ internal fun ComposerSheet(
     if (showTagPicker) AlertDialog(
         onDismissRequest = { showTagPicker = false },
         containerColor = palette.cardSurface,
-        title = { Text("选择标签", fontSize = 18.sp, fontWeight = FontWeight.SemiBold) },
+        title = { LinDoDialogTitle("选择标签") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ComposerTextInput(tagQuery, { tagQuery = it }, "搜索标签", enabled = !busy, autofocus = true)
@@ -653,7 +701,7 @@ internal fun ComposerSheet(
                 val tagError = tagsError
                 when {
                     tagsLoading -> LinDoLoadingIndicator(label = "加载标签", compactInline = true)
-                    tagError != null -> LinDoLoadFailure("标签暂时加载失败", { tagRetry++ })
+                    tagError != null -> LinDoLoadFailure("标签加载失败", { tagRetry++ })
                     availableTags.isEmpty() -> Text(
                         if (tagQuery.isBlank()) "这个版块暂无可用标签" else "没有匹配的标签",
                         fontSize = 13.sp, color = palette.inkSecondary
@@ -683,42 +731,35 @@ internal fun ComposerSheet(
         confirmButton = { TextButton(onClick = { showTagPicker = false }) { Text("完成") } }
     )
 
-    if (showExit) AlertDialog(
-        onDismissRequest = { showExit = false },
-        containerColor = palette.cardSurface,
-        title = { Text("保留草稿？", color = palette.inkPrimary, fontSize = 18.sp) },
-        text = { Text("内容已保存在本机，你可以稍后继续编辑。", color = palette.inkSecondary) },
-        confirmButton = {
-            Column(horizontalAlignment = Alignment.End) {
-                TextButton(onClick = { session?.update(draft); onDismiss() }) {
-                    Text("保留草稿并退出", color = palette.inkPrimary)
-                }
-                TextButton(onClick = { showExit = false; showDiscard = true }) {
-                    Text("丢弃草稿", color = MaterialTheme.colorScheme.error)
-                }
+    if (showExit) LinDoConfirmDialog(
+        title = "退出编辑？",
+        confirmLabel = "保存并退出",
+        dismissLabel = "继续编辑",
+        alternateAction = {
+            TextButton(onClick = { showExit = false; discardError = null; showDiscard = true }) {
+                Text("丢弃草稿", color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = {
-            TextButton(onClick = { showExit = false }) {
-                Text("继续编辑", color = palette.inkSecondary)
-            }
-        }
+        onDismiss = { showExit = false },
+        onConfirm = { session?.update(draft); onDismiss() }
     )
     if (showDiscard) LinDoConfirmDialog(
-        "丢弃草稿？",
-        "当前草稿将被删除，已发布的内容不会受影响。",
-        "确认丢弃",
+        title = "丢弃草稿？",
+        confirmLabel = "丢弃",
         busy = submitting,
-        error = submitError,
+        error = discardError,
+        destructive = true,
         onDismiss = { showDiscard = false },
         onConfirm = {
             if (submitting) return@LinDoConfirmDialog
             submitting = true
             scope.launch {
                 try {
-                    if (session?.discard() == true) onDismiss() else submitError = "草稿版本已更新，请重新核对后删除"
+                    if (session?.discard() == true) onDismiss() else discardError = "草稿已更新，请重新打开后核对"
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (error: Exception) {
-                    submitError = error.message ?: "删除失败，请重试"
+                    discardError = error.message ?: "丢弃失败"
                 } finally {
                     submitting = false
                 }
@@ -726,10 +767,9 @@ internal fun ComposerSheet(
         }
     )
     if (showCost) LinDoConfirmDialog(
-        "确认发布抽奖话题？",
-        "发布将扣除 ${LinuxDoSiteRules.LOTTERY_TOPIC_COST_POINTS} 社区积分。",
-        "确认发布",
-        destructive = false,
+        title = "发布抽奖话题？",
+        confirmLabel = "发布",
+        detail = "将扣除 ${LinuxDoSiteRules.LOTTERY_TOPIC_COST_POINTS} 社区积分",
         onDismiss = { showCost = false },
         onConfirm = { showCost = false; submit() }
     )

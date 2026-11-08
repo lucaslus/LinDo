@@ -17,7 +17,6 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -37,7 +36,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import do_.linux.lindo.ui.components.LinDoIcons
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_brand_mark
 import lindo.composeapp.generated.resources.lindo_expression_happy
@@ -175,32 +173,38 @@ internal fun LinDoAppIconPage(
             Text("底色", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
             Row(
                 Modifier.fillMaxWidth().selectableGroup(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 pending.artwork.backgrounds.forEach { background ->
                     val selected = pending.background == background
                     Row(
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
+                        modifier = Modifier.weight(1f, fill = false).heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
                             .selectable(selected, role = Role.RadioButton, onClick = {
                                 pending = pending.copy(background = background)
                                 applyFailed = false
-                            }).padding(horizontal = 6.dp),
+                            }).padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Box(Modifier.size(16.dp).clip(CircleShape).background(background.color)
-                            .border(0.8.dp, palette.hairline, CircleShape))
-                        Text(background.label, fontSize = 13.sp, color = palette.inkPrimary)
-                        if (selected) Icon(LinDoIcons.Check, null, Modifier.size(13.dp), tint = palette.accent)
+                        Box(
+                            Modifier.size(32.dp)
+                                .border(2.dp, if (selected) palette.accent else Color.Transparent, CircleShape)
+                                .padding(4.dp)
+                                .background(background.color, CircleShape)
+                                .border(1.dp, palette.inkSecondary.copy(alpha = 0.4f), CircleShape)
+                        )
+                        Text(
+                            background.label,
+                            fontSize = 13.sp,
+                            color = if (selected) palette.inkPrimary else palette.inkSecondary,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                        )
                     }
                 }
             }
-            Text(
-                if (applyFailed) "切换图标失败，请重试" else "应用后会自动重启，首页图案也会一起更新。",
-                fontSize = 12.sp,
-                lineHeight = 18.sp,
-                color = if (applyFailed) MaterialTheme.colorScheme.error else palette.inkSecondary
-            )
+            if (applyFailed) {
+                Text("切换图标失败", fontSize = 12.sp, lineHeight = 18.sp, color = MaterialTheme.colorScheme.error)
+            }
         }
     }
 }

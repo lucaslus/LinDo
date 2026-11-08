@@ -260,6 +260,29 @@ class ComposerAndSafetyTest {
         assertEquals(12, reply.postNumber)
     }
 
+    @Test fun notificationListDistinguishesGroupedRepliesFromEmojiReactions() = runTest {
+        withTransport({ url, method, _ ->
+            assertEquals("GET", method)
+            assertTrue(url.contains("/notifications.json"))
+            200 to """
+                {"notifications":[
+                  {"id":1,"notification_type":2,"read":false,"topic_id":42,"post_number":12,
+                   "data":{"display_username":"2 个回复","consolidated_count":2,"topic_title":"社区讨论"}},
+                  {"id":2,"notification_type":25,"read":true,
+                   "data":{"display_username":"reader","username2":"writer","count":2}}
+                ]}
+            """.trimIndent()
+        }) {
+            val (reply, reaction) = LinuxDoRepository.fetchUserNotifications()
+            assertEquals("收到 2 条回复", reply.typeLabel)
+            assertNull(reply.actorUsername)
+            assertEquals(12, reply.postNumber)
+            assertEquals("给你的发言加了表情", reaction.typeLabel)
+            assertEquals("reader", reaction.actorUsername)
+            assertEquals("", reaction.title)
+        }
+    }
+
     @Test fun reactionToggleParsesServerSnapshotAndSurfacesErrors() = runTest {
         LinuxDoRepository.clearPollVoteState()
         withTransport({ url, method, _ ->
