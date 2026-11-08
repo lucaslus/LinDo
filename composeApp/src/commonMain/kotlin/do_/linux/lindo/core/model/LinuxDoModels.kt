@@ -49,8 +49,7 @@ data class GrantedBadge(
     val isEarned: Boolean = false,
     val topicId: Int = 0,
     val topicTitle: String = "",
-    val postNumber: Int = 0,
-    val holderUsername: String? = null
+    val postNumber: Int = 0
 ) {
     val badgeType: BadgeType get() = BadgeType.fromId(badgeTypeId)
 
@@ -75,27 +74,6 @@ data class GrantedBadge(
             .replace("&amp;", "&")
             .trim()
 }
-
-/**
- * 徽章获得者明细项（来自 `/user_badges.json?badge_id={id}`）
- */
-@Serializable
-data class BadgeGranteeItem(
-    val id: Int,
-    val userId: Int,
-    val username: String,
-    val displayName: String = "",
-    val avatarTemplate: String = "",
-    val animatedAvatar: String? = null,
-    val trustLevel: Int = 1,
-    val admin: Boolean = false,
-    val moderator: Boolean = false,
-    val grantedAtText: String = "",
-    val topicId: Int = 0,
-    val topicTitle: String = "",
-    val postNumber: Int = 1,
-    val count: Int = 1
-)
 
 /**
  * 用户身份角标 (Flair)

@@ -1,6 +1,5 @@
 package do_.linux.lindo.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,7 +9,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -38,6 +36,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 internal data class ComposerPublished(val post: PostItemModel? = null, val topicId: Int = 0, val title: String = "")
+
+private const val COMPOSER_TAG_LIMIT = 5
 
 internal val LocalCurrentAccountUsername = staticCompositionLocalOf<String?> { null }
 
@@ -144,24 +144,25 @@ internal fun ComposerSheet(
     var prepareRetry by remember(key) { mutableIntStateOf(0) }
     var submitting by remember(key) { mutableStateOf(false) }
     var uploading by remember(key) { mutableStateOf(false) }
-    var syncing by remember(key) { mutableStateOf(false) }
-    var synced by remember(key) { mutableStateOf(false) }
-    var syncError by remember(key) { mutableStateOf<String?>(null) }
+    var draftSyncFailed by remember(key) { mutableStateOf(false) }
     var submitError by remember(key) { mutableStateOf<String?>(null) }
     var showExit by remember(key) { mutableStateOf(false) }
     var showDiscard by remember(key) { mutableStateOf(false) }
     var discardError by remember(key) { mutableStateOf<String?>(null) }
     var showCost by remember(key) { mutableStateOf(false) }
     var syncRetry by remember(key) { mutableIntStateOf(0) }
-    var availableTags by remember(draft.categoryId) { mutableStateOf(emptyList<String>()) }
-    var tagQuery by remember { mutableStateOf("") }
-    var tagsLoading by remember { mutableStateOf(false) }
+    var tagChoices by remember(key, draft.categoryId) { mutableStateOf(ComposerTagChoices(emptyList())) }
+    var tagIds by remember(key, draft.categoryId) { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    var tagQuery by remember(key, draft.categoryId) { mutableStateOf("") }
+    var tagsLoading by remember(key, draft.categoryId) { mutableStateOf(false) }
     var tagsError by remember { mutableStateOf<String?>(null) }
     var tagRetry by remember { mutableIntStateOf(0) }
     var appliedTemplate by remember(key) { mutableStateOf<String?>(null) }
 
     var replyContextExpanded by remember(key) { mutableStateOf(false) }
     var viewMode by remember(key) { mutableStateOf(WorkbenchViewMode.SOURCE) }
+    var keyboardBeforePreview by remember(key) { mutableStateOf(false) }
+    val imeVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
     var showCategoryPicker by remember(key) { mutableStateOf(false) }
     var showTagPicker by remember(key) { mutableStateOf(false) }
 
@@ -178,12 +179,20 @@ internal fun ComposerSheet(
         if (submitting || !prepared) return
         draft = next.copy(updatedAt = System.currentTimeMillis())
         session?.update(draft)
-        synced = false
-        syncError = null
+        draftSyncFailed = false
         submitError = null
     }
     fun requestClose() {
         if (busy) return
+        if (showCategoryPicker || showTagPicker) {
+            showCategoryPicker = false
+            showTagPicker = false
+            return
+        }
+        if (viewMode == WorkbenchViewMode.PREVIEW) {
+            viewMode = WorkbenchViewMode.SOURCE
+            return
+        }
         if (hasChanges) showExit = true else onDismiss()
     }
 
@@ -230,24 +239,23 @@ internal fun ComposerSheet(
 
     LaunchedEffect(draft, prepared, syncRetry) {
         if (!prepared || !hasChanges) return@LaunchedEffect
-        synced = false
         delay(1200)
-        syncing = true
-        try { synced = session?.sync() == true; if (synced) syncError = null }
-        catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { syncError = error.message ?: "云端同步失败，内容已保存在本机" }
-        finally { syncing = false }
+        try {
+            draftSyncFailed = session?.sync() != true
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { draftSyncFailed = true }
     }
 
-    LaunchedEffect(draft.categoryId, tagQuery, tagRetry, prepared, showTagPicker) {
+    LaunchedEffect(draft.categoryId, draft.tags, tagQuery, tagRetry, prepared, showTagPicker) {
         if (!prepared || !showTagPicker || action != ComposerAction.NEW_TOPIC) return@LaunchedEffect
         tagsLoading = true
         tagsError = null
         try {
             if (tagQuery.isNotBlank()) delay(300)
-            availableTags = LinuxDoRepository.fetchCategoryAllowedTags(draft.categoryId ?: initialCategoryId, tagQuery)
+            val selected = draft.tags.associateWith { tagIds[it] }
+            tagChoices = LinuxDoRepository.fetchCategoryAllowedTags(draft.categoryId ?: initialCategoryId, tagQuery, selected)
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { availableTags = emptyList(); tagsError = error.message ?: "标签加载失败" }
+        catch (error: Exception) { tagsError = error.message ?: "标签加载失败" }
         finally { tagsLoading = false }
     }
 
@@ -263,12 +271,14 @@ internal fun ComposerSheet(
         }
     }
 
-    val titleValidation = if (prepared && action == ComposerAction.NEW_TOPIC &&
-        draft.title.trim().length < LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH
-    ) "标题至少 ${LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH} 个字" else null
+    val titleRemaining = LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH - draft.title.trim().length
+    val titleValidation = if (prepared && action == ComposerAction.NEW_TOPIC && titleRemaining > 0) {
+        "标题还差 $titleRemaining 个字"
+    } else null
+    val bodyRemaining = LinuxDoSiteRules.MIN_POST_RAW_LENGTH - draft.raw.trim().length
     val bodyValidation = when {
         !prepared -> null
-        draft.raw.trim().length < LinuxDoSiteRules.MIN_POST_RAW_LENGTH -> "正文至少 ${LinuxDoSiteRules.MIN_POST_RAW_LENGTH} 个字"
+        bodyRemaining > 0 -> "还差 $bodyRemaining 个字"
         action == ComposerAction.EDIT && !hasChanges -> "内容尚未修改"
         else -> null
     }
@@ -299,15 +309,6 @@ internal fun ComposerSheet(
         }
     }
 
-    val draftStatusLabel = when {
-        uploading -> "上传附件中…"
-        syncing -> "正在同步云端…"
-        syncError != null -> "已存本机 · 点击重试同步"
-        synced -> "云端草稿已同步"
-        hasChanges -> "草稿已存本机"
-        else -> null
-    }
-
     LinDoFullScreenPage(
         onBack = ::requestClose,
         containerColor = palette.cardSurface
@@ -317,7 +318,8 @@ internal fun ComposerSheet(
         ) {
             val headerTitle = when (action) {
                 ComposerAction.NEW_TOPIC -> "新话题"
-                ComposerAction.EDIT -> if ((draft.postNumber ?: 1) > 1) "编辑回复" else "编辑帖子"
+                ComposerAction.EDIT -> draft.postNumber?.takeIf { it > 1 }
+                    ?.let { "编辑回复 · $it 楼" } ?: "编辑帖子"
                 ComposerAction.REPLY -> if (draft.replyToPostNumber == null) "回复话题" else "回复"
             }
             Row(
@@ -327,35 +329,26 @@ internal fun ComposerSheet(
                 IconButton(enabled = !busy, onClick = ::requestClose) {
                     Icon(LinDoIcons.ArrowLeft, "返回", tint = palette.inkPrimary, modifier = Modifier.size(20.dp))
                 }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        headerTitle, color = palette.inkPrimary, fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
-                    val floorLabel = draft.postNumber
-                        ?.takeIf { action == ComposerAction.EDIT && it > 1 }
-                        ?.let { "${it} 楼" }
-                    val status = listOfNotNull(floorLabel, draftStatusLabel).joinToString(" · ")
-                    if (status.isNotBlank()) {
-                        Text(
-                            status,
-                            modifier = if (syncError != null && !busy) Modifier.clickable { syncRetry++ } else Modifier,
-                            color = if (syncError != null) MaterialTheme.colorScheme.error else palette.inkSecondary,
-                            fontSize = 10.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
+                Text(
+                    headerTitle, color = palette.inkPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                )
                 if (prepared && prepareError == null) {
                     val isPreview = viewMode == WorkbenchViewMode.PREVIEW
                     TextButton(
                         enabled = !busy,
                         contentPadding = PaddingValues(horizontal = 10.dp),
                         onClick = {
-                            viewMode = if (isPreview) WorkbenchViewMode.SOURCE else WorkbenchViewMode.PREVIEW
-                            if (!isPreview) keyboard?.hide()
+                            if (isPreview) {
+                                viewMode = WorkbenchViewMode.SOURCE
+                            } else {
+                                keyboardBeforePreview = imeVisible
+                                keyboard?.hide()
+                                viewMode = WorkbenchViewMode.PREVIEW
+                            }
                         }
                     ) {
-                        Text(if (isPreview) "继续编辑" else "预览", color = palette.inkSecondary, maxLines = 1)
+                        Text(if (isPreview) "继续编辑" else "预览", color = palette.inkPrimary, maxLines = 1)
                     }
                 }
                 val actionLabel = when (action) {
@@ -377,7 +370,7 @@ internal fun ComposerSheet(
                     } else {
                         Text(
                             actionLabel, fontWeight = FontWeight.Bold, maxLines = 1,
-                            color = if (canSubmit) palette.accent else palette.inkTertiary.copy(alpha = 0.6f)
+                            color = if (canSubmit) palette.activeChipText else palette.inkTertiary
                         )
                     }
                 }
@@ -420,7 +413,7 @@ internal fun ComposerSheet(
                                     if (floor != null) {
                                         Text(
                                             when {
-                                                name != null -> "回复 $name · $floor 楼"
+                                                name != null -> "$name · $floor 楼"
                                                 floor == 1 -> "回复楼主"
                                                 else -> "回复第 $floor 楼"
                                             },
@@ -464,7 +457,10 @@ internal fun ComposerSheet(
                                     .heightIn(min = 48.dp)
                                     .clickable(enabled = !busy) {
                                         showCategoryPicker = !showCategoryPicker
-                                        if (showCategoryPicker) showTagPicker = false
+                                        if (showCategoryPicker) {
+                                            keyboard?.hide()
+                                            showTagPicker = false
+                                        }
                                     }
                                     .padding(horizontal = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -518,7 +514,7 @@ internal fun ComposerSheet(
                                 }
                             }
 
-                            if (draft.tags.size < 5) {
+                            if (draft.tags.size < COMPOSER_TAG_LIMIT) {
                                 Row(
                                     modifier = Modifier
                                         .heightIn(min = 48.dp)
@@ -546,94 +542,46 @@ internal fun ComposerSheet(
                             }
                         }
 
-                        // 按需展开：版块选择面板
-                        AnimatedVisibility(visible = showCategoryPicker) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 4.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.6.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                    .padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "版块",
-                                        fontSize = 11.8.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.inkSecondary
-                                    )
-                                    Box(
-                                        modifier = Modifier
-                                            .size(22.dp)
-                                            .clip(CircleShape)
-                                            .clickable { showCategoryPicker = false },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = LinDoIcons.Close,
-                                            contentDescription = "关闭",
-                                            modifier = Modifier.size(13.dp),
-                                            tint = palette.inkTertiary
-                                        )
+                        if (showCategoryPicker) {
+                            ComposerCategoryPicker(
+                                categories = LinuxDoRepository.categories,
+                                selectedId = activeCat?.id,
+                                enabled = !busy,
+                                onSelect = { category ->
+                                    if (draft.categoryId != category.id) {
+                                        val next = draft.copy(categoryId = category.id, tags = emptyList())
+                                        if (isUntouchedTemplate) draft = next.copy(updatedAt = System.currentTimeMillis())
+                                        else update(next)
                                     }
-                                }
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(7.dp),
-                                    verticalArrangement = Arrangement.spacedBy(7.dp)
-                                ) {
-                                    LinuxDoRepository.categories.forEach { cat ->
-                                        val isCurrent = draft.categoryId == cat.id
-                                        Row(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .background(if (isCurrent) palette.activeChipBg else palette.cardSurface)
-                                                .border(
-                                                    width = 0.6.dp,
-                                                    color = if (isCurrent) palette.brandGold else palette.hairline,
-                                                    shape = RoundedCornerShape(10.dp)
-                                                )
-                                                .clickable(enabled = !busy) {
-                                                    if (draft.categoryId != cat.id) {
-                                                        tagQuery = ""
-                                                        if (isUntouchedTemplate) {
-                                                            draft = draft.copy(
-                                                                categoryId = cat.id,
-                                                                tags = emptyList(),
-                                                                updatedAt = System.currentTimeMillis()
-                                                            )
-                                                        } else {
-                                                            update(draft.copy(categoryId = cat.id, tags = emptyList()))
-                                                        }
-                                                    }
-                                                    showCategoryPicker = false
-                                                }
-                                                .padding(horizontal = 10.dp, vertical = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(7.dp)
-                                                    .background(LinuxDoSiteRules.parseHexColor(cat.colorHex), CircleShape)
-                                            )
-                                            Text(
-                                                text = cat.name,
-                                                fontSize = 12.2.sp,
-                                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
-                                                color = if (isCurrent) palette.brandGold else palette.inkPrimary
-                                            )
-                                        }
+                                    showCategoryPicker = false
+                                },
+                                onDismiss = { showCategoryPicker = false }
+                            )
+                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        } else if (showTagPicker) {
+                            ComposerTagPicker(
+                                query = tagQuery,
+                                onQueryChange = { tagQuery = it },
+                                selected = draft.tags,
+                                choices = tagChoices,
+                                limit = COMPOSER_TAG_LIMIT,
+                                loading = tagsLoading,
+                                error = tagsError,
+                                enabled = !busy,
+                                imeVisible = imeVisible,
+                                onToggle = { option ->
+                                    if (option.name in draft.tags) {
+                                        update(draft.copy(tags = draft.tags - option.name))
+                                    } else if (draft.tags.size < COMPOSER_TAG_LIMIT && !option.disabled) {
+                                        option.id?.let { tagIds = tagIds + (option.name to it) }
+                                        update(draft.copy(tags = draft.tags + option.name))
+                                        tagQuery = ""
                                     }
-                                }
-                            }
+                                },
+                                onRetry = { tagRetry++ },
+                                onDismiss = { keyboard?.hide(); showTagPicker = false }
+                            )
+                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                         }
 
                         // 无边框大字号话题标题输入栏
@@ -661,7 +609,9 @@ internal fun ComposerSheet(
                         )
                     }
 
-                    // ==================== 3. 错误与校验提示条（按需展示） ====================
+                    if (draftSyncFailed && submitError == null && !busy) {
+                        LinDoLoadFailure("草稿已存本机 · 云端同步失败") { syncRetry++ }
+                    }
                     if (submitError != null) {
                         Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
                             LinDoFeedbackRow(submitError!!, LinDoMascotState.NetworkError)
@@ -681,6 +631,7 @@ internal fun ComposerSheet(
                         autofocus = focusBodyInitially,
                         onUploadingChange = { uploading = it },
                         externalViewMode = viewMode,
+                        restoreKeyboardFromPreview = keyboardBeforePreview,
                         validationHint = bodyValidation,
                         fillAvailableHeight = true,
                         modifier = Modifier.weight(1f)
@@ -690,49 +641,8 @@ internal fun ComposerSheet(
         }
     }
 
-    if (showTagPicker) AlertDialog(
-        onDismissRequest = { showTagPicker = false },
-        containerColor = palette.cardSurface,
-        title = { LinDoDialogTitle("选择标签") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                ComposerTextInput(tagQuery, { tagQuery = it }, "搜索标签", enabled = !busy, autofocus = true)
-                Text("已选 ${draft.tags.size} / 5", fontSize = 12.sp, color = palette.inkSecondary)
-                val tagError = tagsError
-                when {
-                    tagsLoading -> LinDoLoadingIndicator(label = "加载标签", compactInline = true)
-                    tagError != null -> LinDoLoadFailure("标签加载失败", { tagRetry++ })
-                    availableTags.isEmpty() -> Text(
-                        if (tagQuery.isBlank()) "这个版块暂无可用标签" else "没有匹配的标签",
-                        fontSize = 13.sp, color = palette.inkSecondary
-                    )
-                    else -> Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-                        (draft.tags + availableTags).distinct().forEach { tag ->
-                            val selected = tag in draft.tags
-                            val toggle = {
-                                val next = if (selected) draft.tags - tag else draft.tags + tag
-                                update(draft.copy(tags = next))
-                            }
-                            Row(
-                                Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                                    .clickable(enabled = !busy && (selected || draft.tags.size < 5), onClick = toggle),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("#$tag", color = palette.inkPrimary, modifier = Modifier.weight(1f))
-                                if (selected) Icon(
-                                    LinDoIcons.Check, "已选", tint = palette.accent, modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = { showTagPicker = false }) { Text("完成") } }
-    )
-
     if (showExit) LinDoConfirmDialog(
-        title = "退出编辑？",
+        title = "要退出编辑吗？",
         confirmLabel = "保存并退出",
         dismissLabel = "继续编辑",
         alternateAction = {
@@ -744,7 +654,7 @@ internal fun ComposerSheet(
         onConfirm = { session?.update(draft); onDismiss() }
     )
     if (showDiscard) LinDoConfirmDialog(
-        title = "丢弃草稿？",
+        title = "要丢弃这份草稿吗？",
         confirmLabel = "丢弃",
         busy = submitting,
         error = discardError,
@@ -767,7 +677,7 @@ internal fun ComposerSheet(
         }
     )
     if (showCost) LinDoConfirmDialog(
-        title = "发布抽奖话题？",
+        title = "要发布这个抽奖话题吗？",
         confirmLabel = "发布",
         detail = "将扣除 ${LinuxDoSiteRules.LOTTERY_TOPIC_COST_POINTS} 社区积分",
         onDismiss = { showCost = false },
@@ -811,22 +721,15 @@ internal fun ComposerTextInput(
             .heightIn(min = if (title) 44.dp else 36.dp)
             .then(Modifier.focusRequester(focus)),
         decorationBox = { inner ->
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = if (title) 8.dp else 6.dp),
-                contentAlignment = Alignment.CenterStart
-            ) {
-                if (value.isEmpty()) {
-                    Text(
-                        text = placeholder,
-                        style = style.copy(color = palette.inkTertiary, fontWeight = FontWeight.Normal),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                inner()
-            }
+            LinDoInputDecoration(
+                empty = value.isEmpty(),
+                placeholder = placeholder,
+                textStyle = style,
+                placeholderColor = palette.inkSecondary,
+                modifier = Modifier.fillMaxWidth().padding(vertical = if (title) 8.dp else 6.dp),
+                alignment = Alignment.TopStart,
+                innerTextField = inner
+            )
         }
     )
 }

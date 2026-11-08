@@ -5,7 +5,6 @@ import do_.linux.lindo.core.connect.ConnectTrustLevelReport
 import do_.linux.lindo.core.connect.ConsolidatedTimingBatch
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
-import do_.linux.lindo.core.model.BadgeGranteeItem
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.BoostInputStats
 import do_.linux.lindo.core.model.CommunitySearchResult
@@ -989,6 +988,19 @@ data class LinuxDoCategoryMeta(
     val slug: String,
     val colorHex: String,
     val description: String
+)
+
+internal data class ComposerTagOption(
+    val name: String,
+    val id: Int? = null,
+    val disabled: Boolean = false,
+    val reason: String? = null
+)
+
+internal data class ComposerTagChoices(
+    val options: List<ComposerTagOption>,
+    val forbiddenMessage: String? = null,
+    val requiredGroup: String? = null
 )
 
 /**
@@ -2539,17 +2551,44 @@ kZC8lQg1
         cachedCategoryTemplates?.get(categoryId)?.takeIf { it.isNotBlank() }
     }
 
-    /**
-     * 调用 Discourse 官方发帖标签过滤接口 (`/tags/filter/search.json?filterForInput=true&categoryId=...`)
-     * 获取当前版块允许使用的真实社区标签（Linux.do 普通用户不允许创建不存在的自定义标签）
-     */
-    suspend fun fetchCategoryAllowedTags(categoryId: Int, query: String = ""): List<String> = withContext(Dispatchers.IO) {
+    internal suspend fun fetchCategoryAllowedTags(
+        categoryId: Int,
+        query: String = "",
+        selected: Map<String, Int?> = emptyMap()
+    ): ComposerTagChoices = withContext(Dispatchers.IO) {
         val q = java.net.URLEncoder.encode(query.trim(), "UTF-8")
-        val root = readApiObject(executeHttp("https://linux.do/tags/filter/search.json?q=$q&filterForInput=true&categoryId=$categoryId&limit=50", preserveFailure = true))
-        root.requireArray("results").mapNotNull { element ->
+        val url = buildString {
+            append("https://linux.do/tags/filter/search.json?q=$q&filterForInput=true&categoryId=$categoryId")
+            if (query.isBlank()) append("&prioritizeRecentTags=true")
+            if (selected.values.all { it != null }) {
+                selected.values.forEach { append("&selected_tag_ids%5B%5D=$it") }
+            } else {
+                selected.keys.forEach { name ->
+                    append("&selected_tags%5B%5D=").append(java.net.URLEncoder.encode(name, "UTF-8"))
+                }
+            }
+        }
+        val limited = executeHttp("$url&limit=5", preserveFailure = true)
+        // A site may configure a smaller limit. The endpoint also accepts a request without it.
+        val root = readApiObject(if (limited?.first == 400) executeHttp(url, preserveFailure = true) else limited)
+        val options = root.requireArray("results").mapNotNull { element ->
             val tag = element as? JsonObject ?: return@mapNotNull null
-            (tag["name"] ?: tag["id"] ?: tag["text"])?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-        }.distinct()
+            val rawId = tag["id"] as? JsonPrimitive
+            val name = (tag["name"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: (tag["text"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: rawId?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            ComposerTagOption(
+                name = name,
+                id = rawId?.intOrNull,
+                disabled = (tag["disabled"] as? JsonPrimitive)?.booleanOrNull == true,
+                reason = (tag["title"] as? JsonPrimitive)?.contentOrNull
+            )
+        }.distinctBy { it.name }.take(30)
+        ComposerTagChoices(
+            options,
+            forbiddenMessage = (root["forbidden_message"] as? JsonPrimitive)?.contentOrNull,
+            requiredGroup = ((root["required_tag_group"] as? JsonObject)?.get("name") as? JsonPrimitive)?.contentOrNull
+        )
     }
 
     /**
@@ -3432,8 +3471,7 @@ kZC8lQg1
                 isEarned = true,
                 topicId = topicId,
                 topicTitle = grant["topic_title"]?.jsonPrimitive?.contentOrNull ?: topicTitles[topicId].orEmpty(),
-                postNumber = grant["post_number"]?.jsonPrimitive?.intOrNull ?: 0,
-                holderUsername = clean
+                postNumber = grant["post_number"]?.jsonPrimitive?.intOrNull ?: 0
             ) to (grant["grouping_position"]?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE)
         }.distinctBy { it.first.id }
             .sortedWith(compareBy({ it.second }, { it.first.badgeTypeId }, { it.first.id }))
@@ -3471,95 +3509,6 @@ kZC8lQg1
             )
         }.distinctBy { it.id }.sortedBy { badge ->
             groups[badge.badgeGroupingId]?.get("position")?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE
-        }
-    }
-
-    /**
-     * 获取某枚徽章的最近获得者记录 (`GET /user_badges.json?badge_id={id}`)
-     */
-    suspend fun fetchBadgeGrantees(
-        badgeId: Int,
-        username: String? = null
-    ): List<BadgeGranteeItem> = withContext(Dispatchers.IO) {
-        if (badgeId <= 0) return@withContext emptyList()
-        val queryUser = username?.trim()?.removePrefix("@")?.takeIf { it.isNotBlank() }
-        val url = buildString {
-            append("https://linux.do/user_badges.json?badge_id=$badgeId")
-            if (queryUser != null) {
-                append("&username=").append(java.net.URLEncoder.encode(queryUser, "UTF-8"))
-            }
-        }
-        val res = executeHttp(url, method = "GET") ?: return@withContext emptyList()
-        if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withContext emptyList()
-        try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            data class GranteeUserMeta(
-                val id: Int,
-                val username: String,
-                val displayName: String,
-                val avatarTemplate: String,
-                val admin: Boolean,
-                val moderator: Boolean,
-                val trustLevel: Int
-            )
-            val usersMap = mutableMapOf<Int, GranteeUserMeta>()
-            (root["users"] as? JsonArray)?.forEach { uElem ->
-                val uObj = uElem as? JsonObject ?: return@forEach
-                val uid = uObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                val uname = uObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$uid"
-                usersMap[uid] = GranteeUserMeta(
-                    id = uid,
-                    username = uname,
-                    displayName = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: uname,
-                    avatarTemplate = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: "",
-                    admin = uObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false,
-                    moderator = uObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false,
-                    trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1
-                )
-            }
-            val topicsMap = mutableMapOf<Int, String>()
-            (root["topics"] as? JsonArray)?.forEach { tElem ->
-                val tObj = tElem as? JsonObject ?: return@forEach
-                val tid = tObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                val tTitle = tObj["title"]?.jsonPrimitive?.contentOrNull ?: ""
-                topicsMap[tid] = tTitle
-            }
-            val records = (root["user_badge_info"] as? JsonObject)?.get("user_badges") ?: root["user_badges"]
-            val grantees = mutableListOf<BadgeGranteeItem>()
-            (records as? JsonArray)?.forEach { ubElem ->
-                val grant = ubElem as? JsonObject ?: return@forEach
-                val embeddedUser = grant["user"] as? JsonObject
-                val uid = embeddedUser?.get("id")?.jsonPrimitive?.intOrNull
-                    ?: grant["user_id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                val user = usersMap[uid]
-                val username = embeddedUser?.get("username")?.jsonPrimitive?.contentOrNull
-                    ?: user?.username ?: return@forEach
-                val topic = grant["topic"] as? JsonObject
-                val topicId = topic?.get("id")?.jsonPrimitive?.intOrNull
-                    ?: grant["topic_id"]?.jsonPrimitive?.intOrNull ?: 0
-                grantees.add(
-                    BadgeGranteeItem(
-                        id = grant["id"]?.jsonPrimitive?.intOrNull ?: 0,
-                        userId = uid,
-                        username = username,
-                        displayName = embeddedUser?.get("name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                            ?: user?.displayName ?: username,
-                        avatarTemplate = embeddedUser?.get("avatar_template")?.jsonPrimitive?.contentOrNull
-                            ?: user?.avatarTemplate.orEmpty(),
-                        admin = embeddedUser?.get("admin")?.jsonPrimitive?.booleanOrNull ?: user?.admin ?: false,
-                        moderator = embeddedUser?.get("moderator")?.jsonPrimitive?.booleanOrNull ?: user?.moderator ?: false,
-                        trustLevel = embeddedUser?.get("trust_level")?.jsonPrimitive?.intOrNull ?: user?.trustLevel ?: 1,
-                        grantedAtText = formatRelativeTime(grant["granted_at"]?.jsonPrimitive?.contentOrNull),
-                        count = grant["count"]?.jsonPrimitive?.intOrNull ?: 1,
-                        topicId = topicId,
-                        topicTitle = topic?.get("title")?.jsonPrimitive?.contentOrNull ?: topicsMap[topicId].orEmpty(),
-                        postNumber = grant["post_number"]?.jsonPrimitive?.intOrNull ?: 1
-                    )
-                )
-            }
-            grantees
-        } catch (_: Throwable) {
-            emptyList()
         }
     }
 

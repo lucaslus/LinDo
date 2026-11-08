@@ -48,20 +48,26 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.LinuxDoRepository
@@ -79,6 +85,9 @@ import do_.linux.lindo.ui.LinDoBrandWordmark
 import do_.linux.lindo.ui.LinDoMascotLoginTransitionView
 import do_.linux.lindo.ui.LinDoLoadingIndicator
 import do_.linux.lindo.ui.LinDoMascotGallery
+import do_.linux.lindo.ui.LinDoMascotState
+import do_.linux.lindo.ui.LinDoStatePanel
+import do_.linux.lindo.ui.LocalLinDoDarkTheme
 import do_.linux.lindo.ui.LinDoWelcomeScreen
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.ui.PlatformWebLoginHost
@@ -1812,6 +1821,8 @@ private val EXTRACT_PRELOADED_USER_JS = """
     })();
 """.trimIndent()
 
+private const val WEB_PAGE_VISUAL_TIMEOUT_MS = 35_000L
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun AndroidWebLoginModal(
@@ -1828,18 +1839,59 @@ private fun AndroidWebLoginModal(
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember { mutableStateOf(false) }
-    var pageLoadError by remember(initialUrl) { mutableStateOf<String?>(null) }
+    var pageLoadError by remember { mutableStateOf<String?>(null) }
     var rendererGone by remember { mutableStateOf(false) }
-    fun retryPage() {
+    var pageLoading by remember { mutableStateOf(true) }
+    var navigation by remember { mutableLongStateOf(0L) }
+    var pendingUrl by remember { mutableStateOf<String?>(null) }
+    var visualRequest by remember { mutableLongStateOf(-1L) }
+    val isDark = remember { UserApiKeyAuthManager.uiDarkTheme }
+
+    fun beginLoading(url: String?) {
+        navigation++
+        pendingUrl = url
         pageLoadError = null
-        rendererGone = false
-        webViewRef?.reload()
+        pageLoading = true
     }
+
+    fun failLoading(message: String) {
+        pageLoadError = message
+        pageLoading = false
+    }
+
+    fun revealDocument(view: WebView?, url: String?, allowRedirect: Boolean = false) {
+        if (view == null || view !== webViewRef || !pageLoading || url == null || url != view.url) return
+        if (!allowRedirect && pendingUrl != null && pendingUrl != url) return
+        if (visualRequest == navigation) return
+        visualRequest = navigation
+        view.postVisualStateCallback(navigation, object : WebView.VisualStateCallback() {
+            override fun onComplete(requestId: Long) {
+                if (webViewRef === view && requestId == navigation && pageLoadError == null) {
+                    pageLoading = false
+                }
+            }
+        })
+    }
+
+    fun retryPage() {
+        val view = webViewRef
+        val url = (if (pageLoading || pageLoadError != null) pendingUrl else view?.url) ?: initialUrl
+        beginLoading(url)
+        rendererGone = false
+        if (view?.url == url) view.reload() else view?.loadUrl(url)
+    }
+
     BackHandler {
         if (pageLoadError == null && webViewRef?.canGoBack() == true) webViewRef?.goBack() else onDismiss()
     }
-    val isDark = remember { UserApiKeyAuthManager.uiDarkTheme }
 
+    LaunchedEffect(pageLoading, navigation) {
+        if (pageLoading) {
+            delay(WEB_PAGE_VISUAL_TIMEOUT_MS)
+            failLoading("网页加载超时")
+            webViewRef?.stopLoading()
+        }
+    }
 
     fun completeWithUserObject(u: JSONObject) {
         if (completed) return
@@ -1952,6 +2004,7 @@ private fun AndroidWebLoginModal(
     LaunchedEffect(initialUrl, webViewRef) {
         val wv = webViewRef ?: return@LaunchedEffect
         if (initialUrl.isNotBlank() && wv.url != initialUrl) {
+            beginLoading(initialUrl)
             wv.loadUrl(initialUrl)
         }
     }
@@ -1996,6 +2049,7 @@ private fun AndroidWebLoginModal(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 48.dp)
+                        .zIndex(1f)
                         .background(barBg)
                         .padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -2030,146 +2084,189 @@ private fun AndroidWebLoginModal(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(0.5.dp)
+                        .zIndex(1f)
                         .background(barBorder)
                 )
             }
 
-            // Full-screen browser content; system Back returns to LinDo.
-            if (!rendererGone) AndroidView(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                factory = { ctx ->
-                    WebView(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                        val cleanUa = settings.userAgentString
-                        UserApiKeyAuthManager.customUserAgent = cleanUa
+            Box(Modifier.weight(1f).fillMaxWidth().clipToBounds(), contentAlignment = Alignment.Center) {
+                if (!rendererGone) AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            setBackgroundColor(barBg.toArgb())
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            val cleanUa = settings.userAgentString
+                            UserApiKeyAuthManager.customUserAgent = cleanUa
 
-                        settings.apply {
-                            javaScriptEnabled = true
-                            domStorageEnabled = true
-                            databaseEnabled = true
-                            // 保持 WebView 原生 User-Agent 与 Sec-CH-UA Client Hints 完全一致，不暴露任何 window.LinDoJsBridge 全局变量
-                            useWideViewPort = true
-                            loadWithOverviewMode = true
-                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                        }
-
-                        val cookieManager = CookieManager.getInstance()
-                        cookieManager.setAcceptCookie(true)
-                        cookieManager.setAcceptThirdPartyCookies(this, true)
-                        // CookieManager already owns the browser session, including domain and path scope.
-                        // Rebuilding these as Domain=.linux.do would widen host-only session cookies.
-                        cookieManager.flush()
-
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onShowFileChooser(
-                                webView: WebView?,
-                                filePathCallback: ValueCallback<Array<Uri>>?,
-                                fileChooserParams: FileChooserParams?
-                            ): Boolean {
-                                val handler = onLaunchFileChooser ?: return false
-                                return handler(filePathCallback, fileChooserParams)
+                            settings.apply {
+                                javaScriptEnabled = true
+                                domStorageEnabled = true
+                                databaseEnabled = true
+                                // 保持 WebView 原生 User-Agent 与 Sec-CH-UA Client Hints 完全一致，不暴露任何 window.LinDoJsBridge 全局变量
+                                useWideViewPort = true
+                                loadWithOverviewMode = true
+                                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                             }
-                        }
 
-                        setDownloadListener { url, _, _, _, _ ->
-                            if (!url.isNullOrBlank()) {
-                                UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
-                            }
-                        }
+                            val cookieManager = CookieManager.getInstance()
+                            cookieManager.setAcceptCookie(true)
+                            cookieManager.setAcceptThirdPartyCookies(this, true)
+                            // CookieManager already owns the browser session, including domain and path scope.
+                            // Rebuilding these as Domain=.linux.do would widen host-only session cookies.
+                            cookieManager.flush()
 
-                        webViewClient = object : WebViewClient() {
-                            @SuppressLint("WebViewClientOnReceivedSslError")
-                            override fun onReceivedSslError(
-                                view: WebView?,
-                                handler: android.webkit.SslErrorHandler?,
-                                error: android.net.http.SslError?
-                            ) {
-                                val errHost = runCatching { Uri.parse(error?.url.orEmpty()).host }.getOrNull()
-                                    ?: runCatching { Uri.parse(view?.url.orEmpty()).host }.getOrNull()
-                                if (LocalDirectConnectTunnel.localEchHttpsPort > 0 &&
-                                    LocalDirectConnectTunnel.isEchManagedHost(errHost)
-                                ) {
-                                    handler?.proceed()
-                                } else {
-                                    super.onReceivedSslError(view, handler, error)
-                                }
-                            }
-                            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
-                                webViewRef = null
-                                rendererGone = true
-                                pageLoadError = "网页已停止运行"
-                                releaseNativeWebView(view, rendererGone = true)
-                                return true
-                            }
-                            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                                super.onReceivedError(view, request, error)
-                                if (request?.isForMainFrame == true) {
-                                    pageLoadError = "网络连接失败"
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onShowFileChooser(
+                                    webView: WebView?,
+                                    filePathCallback: ValueCallback<Array<Uri>>?,
+                                    fileChooserParams: FileChooserParams?
+                                ): Boolean {
+                                    val handler = onLaunchFileChooser ?: return false
+                                    return handler(filePathCallback, fileChooserParams)
                                 }
                             }
 
-                            override fun shouldOverrideUrlLoading(
-                                view: WebView?,
-                                request: WebResourceRequest?
-                            ): Boolean {
-                                val target = request?.url?.toString() ?: return false
-                                if (target.startsWith("discourse://auth_redirect") ||
-                                    target.startsWith("lindo://auth_redirect")
+                            setDownloadListener { url, _, _, _, _ ->
+                                if (!url.isNullOrBlank()) {
+                                    if (pageLoading && url == pendingUrl && copyBackForwardList().size > 0) {
+                                        pageLoading = false
+                                    }
+                                    UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
+                                }
+                            }
+
+                            webViewClient = object : WebViewClient() {
+                                @SuppressLint("WebViewClientOnReceivedSslError")
+                                override fun onReceivedSslError(
+                                    view: WebView?,
+                                    handler: android.webkit.SslErrorHandler?,
+                                    error: android.net.http.SslError?
                                 ) {
-                                    val ok = UserApiKeyAuthManager.handleAuthRedirectUri(target)
-                                    if (ok) {
-                                        val otp = UserApiKeyAuthManager.consumePendingOtpToken()
-                                        if (!otp.isNullOrBlank()) {
-                                            view?.loadUrl("https://linux.do/session/otp/$otp")
-                                        } else {
-                                            tryExtractSessionAndComplete(view)
+                                    val errHost = runCatching { Uri.parse(error?.url.orEmpty()).host }.getOrNull()
+                                        ?: runCatching { Uri.parse(view?.url.orEmpty()).host }.getOrNull()
+                                    if (LocalDirectConnectTunnel.localEchHttpsPort > 0 &&
+                                        LocalDirectConnectTunnel.isEchManagedHost(errHost)
+                                    ) {
+                                        handler?.proceed()
+                                    } else {
+                                        super.onReceivedSslError(view, handler, error)
+                                    }
+                                }
+                                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                                    if (webViewRef === view) {
+                                        webViewRef = null
+                                        rendererGone = true
+                                        failLoading("网页已停止运行")
+                                    }
+                                    releaseNativeWebView(view, rendererGone = true)
+                                    return true
+                                }
+                                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                                    super.onReceivedError(view, request, error)
+                                    if (view === webViewRef && pageLoading && request?.isForMainFrame == true) {
+                                        val failedUrl = request.url.toString()
+                                        if (failedUrl == pendingUrl || failedUrl == view?.url || request.isRedirect) {
+                                            pendingUrl = failedUrl
+                                            failLoading("网络连接失败")
                                         }
                                     }
-                                    return true
                                 }
-                                val scheme = request.url?.scheme?.lowercase().orEmpty()
-                                if (scheme.isNotBlank() && scheme != "http" && scheme != "https" && scheme != "about" && scheme != "javascript") {
-                                    UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(target)
-                                    return true
+
+                                override fun shouldOverrideUrlLoading(
+                                    view: WebView?,
+                                    request: WebResourceRequest?
+                                ): Boolean {
+                                    val target = request?.url?.toString() ?: return false
+                                    if (target.startsWith("discourse://auth_redirect") ||
+                                        target.startsWith("lindo://auth_redirect")
+                                    ) {
+                                        val ok = UserApiKeyAuthManager.handleAuthRedirectUri(target)
+                                        if (ok) {
+                                            val otp = UserApiKeyAuthManager.consumePendingOtpToken()
+                                            if (!otp.isNullOrBlank()) {
+                                                view?.loadUrl("https://linux.do/session/otp/$otp")
+                                            } else {
+                                                tryExtractSessionAndComplete(view)
+                                            }
+                                        }
+                                        return true
+                                    }
+                                    val scheme = request.url?.scheme?.lowercase().orEmpty()
+                                    if (scheme.isNotBlank() && scheme != "http" && scheme != "https" && scheme != "about" && scheme != "javascript") {
+                                        UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(target)
+                                        return true
+                                    }
+                                    if (view === webViewRef && request.isForMainFrame && !request.isRedirect &&
+                                        (scheme == "http" || scheme == "https")
+                                    ) {
+                                        val currentUrl = view?.url
+                                        // Fragment links stay in the current document and have no frame commit.
+                                        val fragmentOnly = currentUrl != target &&
+                                            currentUrl?.substringBefore('#') == target.substringBefore('#')
+                                        if (!fragmentOnly) beginLoading(target)
+                                    }
+                                    return false
                                 }
-                                return false
+
+                                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                    super.onPageStarted(view, url, favicon)
+                                    if (view === webViewRef && (!pageLoading || url != pendingUrl)) beginLoading(url)
+                                    tryExtractSessionAndComplete(view)
+                                }
+
+                                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                                    revealDocument(view, url, allowRedirect = true)
+                                }
+
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    super.onPageFinished(view, url)
+                                    revealDocument(view, url)
+                                    tryExtractSessionAndComplete(view)
+                                }
                             }
 
-                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                super.onPageStarted(view, url, favicon)
-                                tryExtractSessionAndComplete(view)
+                            webViewRef = this
+                        }
+                    },
+                    update = { view ->
+                        view.importantForAccessibility = if (pageLoading || pageLoadError != null) {
+                            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                        } else {
+                            View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+                        }
+                    },
+                    onRelease = { view ->
+                        if (webViewRef === view) webViewRef = null
+                        if (!rendererGone) releaseNativeWebView(view)
+                    }
+                )
+                val loadError = pageLoadError
+                if (pageLoading || loadError != null) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Box(Modifier.matchParentSize().background(barBg).pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) awaitPointerEvent().changes.forEach { it.consume() }
                             }
-
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                super.onPageFinished(view, url)
-                                tryExtractSessionAndComplete(view)
+                        })
+                        CompositionLocalProvider(LocalLinDoDarkTheme provides isDark) {
+                            when {
+                                loadError == null -> LinDoLoadingIndicator(color = barSubFg, label = "加载网页")
+                                isLoginFlow -> LinDoMascotLoginTransitionView(
+                                    isDark = isDark, progress = Float.NaN, statusTitle = loadError,
+                                    onCancel = onDismiss, onRetry = ::retryPage
+                                )
+                                else -> LinDoStatePanel(
+                                    state = LinDoMascotState.NetworkError, detail = loadError, onRetry = ::retryPage
+                                )
                             }
                         }
-
-                        webViewRef = this
                     }
-                },
-                onRelease = { view ->
-                    webViewRef = null
-                    if (!rendererGone) releaseNativeWebView(view)
                 }
-            )
-        }
-
-        // 登录加载与核验身份过渡层：零度娘「我要验牌」全屏过渡页
-        if (pageLoadError != null) {
-            LinDoMascotLoginTransitionView(
-                isDark = isDark,
-                progress = Float.NaN,
-                statusTitle = pageLoadError.orEmpty(),
-                onCancel = onDismiss,
-                onRetry = ::retryPage
-            )
+            }
         }
     }
 }

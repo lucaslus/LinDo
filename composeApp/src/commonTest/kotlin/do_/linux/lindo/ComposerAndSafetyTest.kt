@@ -36,6 +36,29 @@ class ComposerAndSafetyTest {
         }
     }
 
+    @Test fun composerTagChoicesUseWebFiltersAndHandleASmallerSiteLimit() = runTest {
+        val requests = mutableListOf<String>()
+        withTransport({ url, method, _ ->
+            assertEquals("GET", method)
+            requests.add(URLDecoder.decode(url, "UTF-8"))
+            if (url.endsWith("&limit=5")) 400 to """{"errors":["limit is invalid"]}"""
+            else 200 to """
+                {"results":[{"id":42,"name":"快问快答"},
+                {"id":43,"name":"仅限其他版块","disabled":true,"title":"这个版块不能使用此标签"}],
+                "required_tag_group":{"name":"讨论类型"}}
+            """.trimIndent()
+        }) {
+            val choices = LinuxDoRepository.fetchCategoryAllowedTags(4, "问答", mapOf("已经选中" to 7))
+            assertEquals(2, requests.size)
+            assertTrue(requests.all { it.contains("categoryId=4") && it.contains("filterForInput=true") })
+            assertTrue(requests.all { it.contains("selected_tag_ids[]=7") })
+            assertFalse(requests.last().contains("limit="))
+            assertEquals("快问快答", choices.options.first().name)
+            assertTrue(choices.options.last().disabled)
+            assertEquals("讨论类型", choices.requiredGroup)
+        }
+    }
+
     @Test fun rawEditingRequiresTheActualSourceAndKeepsItsTopic() = runTest {
         withTransport({ _, _, _ -> 200 to """{"id":88,"topic_id":11,"post_number":3,"username":"writer","raw":"**source**","cooked":"<p><strong>source</strong></p>"}""" }) {
             val post = LinuxDoRepository.fetchPostForEditing(88)

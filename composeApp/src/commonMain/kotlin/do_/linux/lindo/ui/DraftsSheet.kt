@@ -73,7 +73,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
     }
     deleting?.let { draft ->
         LinDoConfirmDialog(
-            title = "删除草稿？",
+            title = "要删除这份草稿吗？",
             confirmLabel = "删除",
             busy = busy,
             error = deleteError,

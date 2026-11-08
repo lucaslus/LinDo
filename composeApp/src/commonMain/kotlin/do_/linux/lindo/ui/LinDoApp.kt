@@ -71,8 +71,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -138,7 +136,6 @@ import coil3.compose.AsyncImage
 import do_.linux.lindo.core.connect.ConnectTrustLevelReport
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
-import do_.linux.lindo.core.model.BadgeGranteeItem
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.BadgeType
 import do_.linux.lindo.core.model.BoostInputStats
@@ -2035,20 +2032,7 @@ internal fun LinDoApp(
                         currentUserTitle = fullUserProfile?.title ?: currentUser?.userTitle.orEmpty(),
                         isAuthorized = isAuthorized,
                         onDismiss = { inspectedBadge = null },
-                        onTitleUpdated = {
-                            syncUserProfile()
-                        },
-                        onInspectUser = { uname ->
-                            inspectedBadge = null
-                            showBadgesCenterSheet = false
-                            inspectedUsername = uname
-                        },
-                        onSelectTopicId = { tid, title, postNum ->
-                            inspectedBadge = null
-                            showBadgesCenterSheet = false
-                            inspectedUsername = null
-                            openTopicById(tid, title, postNum)
-                        }
+                        onTitleUpdated = { syncUserProfile() }
                     )
                 }
 
@@ -2079,7 +2063,7 @@ internal fun LinDoApp(
                         })
                 }
 
-                if (showLogoutConfirm) LinDoConfirmDialog(title = "退出登录？", confirmLabel = "退出",
+                if (showLogoutConfirm) LinDoConfirmDialog(title = "要退出当前账号吗？", confirmLabel = "退出",
                     onDismiss = { showLogoutConfirm = false }, onConfirm = {
                         showLogoutConfirm = false
                         UserApiKeyAuthManager.logout()
@@ -2871,17 +2855,23 @@ private fun CommunityHomeFeedPane(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (selectedTag != null) {
-                            Text(
-                                text = "#$selectedTag ×",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.activeChipText,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier
-                                    .clickable { onSelectTag(null) }
-                                    .padding(vertical = 2.dp)
-                            )
+                            Row(
+                                modifier = Modifier.widthIn(max = 220.dp).heightIn(min = 44.dp)
+                                    .clickable(role = Role.Button, onClickLabel = "清除标签筛选") { onSelectTag(null) }
+                                    .padding(end = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "标签 · $selectedTag",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.activeChipText,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Icon(LinDoIcons.Close, null, Modifier.size(13.dp), tint = palette.inkSecondary)
+                            }
                         }
 
                         if (currentSort == FeedSortFilter.TOP) {
@@ -3100,7 +3090,6 @@ private fun CommunityHomeFeedPane(
                                 isSelected = topic.id == selectedTopicId,
                                 isCompact = isCompact,
                                 enableAnimations = enableAnimations,
-                                onSelectTag = { tag -> onSelectTag(tag) },
                                 onClick = { onSelectTopic(topic) }
                             )
                             if (isCompact && idx < regularTopics.lastIndex) {
@@ -3301,7 +3290,6 @@ private fun CommunityTopicItem(
     isSelected: Boolean,
     isCompact: Boolean = false,
     enableAnimations: Boolean,
-    onSelectTag: (String) -> Unit = {},
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -3447,8 +3435,7 @@ private fun CommunityTopicItem(
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.clickable { onSelectTag(tag) }
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -3686,7 +3673,7 @@ private fun CommunityTopicItem(
                                 color = palette.inkSecondary,
                                 maxLines = 1,
                                 softWrap = false,
-                                modifier = Modifier.clickable { onSelectTag(tag) }
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                         if (remainingCount > 0) {
@@ -3861,7 +3848,7 @@ internal fun CommunityTopicReaderPane(
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
     var loadMorePostsError by remember(summary.id) { mutableStateOf(false) }
     var copiedShareLink by remember(summary.id) { mutableStateOf(false) }
-    var showFloorJumpDialog by remember(summary.id) { mutableStateOf(false) }
+    var showFloorNavigator by remember(summary.id) { mutableStateOf(false) }
 
     // 回复编辑器状态
     var showReplySheet by remember(summary.id) { mutableStateOf(false) }
@@ -3899,9 +3886,15 @@ internal fun CommunityTopicReaderPane(
     var fetchingJumpWindow by remember(summary.id) { mutableStateOf(false) }
     var navigationError by remember(summary.id) { mutableStateOf<String?>(null) }
     var filterError by remember(summary.id) { mutableStateOf<String?>(null) }
-    fun jumpToFloor(number: Int) {
+    var pendingReturnFloor by remember(summary.id) { mutableStateOf<Int?>(null) }
+    var replyReturnFloor by remember(summary.id) { mutableStateOf<Int?>(null) }
+    var highlightedFloor by remember(summary.id) { mutableStateOf<Int?>(null) }
+    var pendingJumpRequiresExact by remember(summary.id) { mutableStateOf(false) }
+    fun jumpToFloor(number: Int, returnTo: Int? = null, exact: Boolean = false) {
         if (changingReaderFilter || fetchingJumpWindow) return
         pendingJumpFloor = number
+        pendingReturnFloor = returnTo
+        pendingJumpRequiresExact = exact
         jumpFetchedWindow = false
         navigationError = null
         if (posts.any { it.postNumber == number }) return
@@ -3915,6 +3908,8 @@ internal fun CommunityTopicReaderPane(
                 )
                 if (window.loadError != null) {
                     navigationError = window.loadError
+                } else if ((exact || returnTo != null) && window.posts.none { it.postNumber == number }) {
+                    navigationError = if (onlyOpFilter) "此楼层不在只看楼主范围内" else "该楼层暂不可见"
                 } else {
                     jumpFetchedWindow = true
                     latestDetail?.let { onDetailUpdated(it.copy(posts = mergeTopicPosts(it.posts, window.posts))) }
@@ -3925,19 +3920,40 @@ internal fun CommunityTopicReaderPane(
         }
     }
     val postCount = detail?.postsCount ?: summary.postsCount
-    val totalFloorCount = maxOf(detail?.highestPostNumber ?: postCount, posts.maxOfOrNull { it.postNumber } ?: 1)
+    val totalFloorCount = maxOf(1, detail?.highestPostNumber ?: postCount, posts.maxOfOrNull { it.postNumber } ?: 1)
 
     val readerListState = rememberLazyListState()
+    val floorByPostId = remember(posts) { posts.associate { it.id to it.postNumber } }
+    val visibleFloor by remember(readerListState, floorByPostId) {
+        derivedStateOf {
+            readerListState.layoutInfo.visibleItemsInfo.asReversed().firstNotNullOfOrNull {
+                floorByPostId[it.key as? Int]
+            } ?: 1
+        }
+    }
     LaunchedEffect(pendingJumpFloor, jumpFetchedWindow, posts) {
         val number = pendingJumpFloor ?: return@LaunchedEffect
         val index = resolveJumpPostIndex(posts, number, allowNearestFallback = jumpFetchedWindow)
         if (index != null) {
-            readerListState.animateScrollToItem(index + 1)
+            val itemIndex = index + 1
+            if (kotlin.math.abs(itemIndex - readerListState.firstVisibleItemIndex) <= 4) {
+                readerListState.animateScrollToItem(itemIndex)
+            } else {
+                readerListState.scrollToItem(itemIndex)
+            }
+            replyReturnFloor = pendingReturnFloor
+            highlightedFloor = posts[index].postNumber
             pendingJumpFloor = null
+            pendingReturnFloor = null
             jumpFetchedWindow = false
         }
     }
-
+    LaunchedEffect(highlightedFloor) {
+        if (highlightedFloor != null) {
+            delay(1600)
+            highlightedFloor = null
+        }
+    }
 
     // 若从云端草稿恢复话题回复，自动填充并展开回复抽屉
     LaunchedEffect(initialReplyDraft, summary.id) {
@@ -4143,6 +4159,8 @@ internal fun CommunityTopicReaderPane(
                 if (error == null) {
                     navigationError = null
                     pendingJumpFloor = null
+                    pendingReturnFloor = null
+                    replyReturnFloor = null
                     jumpFetchedWindow = false
                     loadMorePostsError = false
                     onlyOpFilter = nextState
@@ -4198,7 +4216,7 @@ internal fun CommunityTopicReaderPane(
                         lineHeight = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = palette.inkPrimary,
-                        maxLines = if (expandTopBarTitle) 6 else 2,
+                        maxLines = if (expandTopBarTitle) 6 else 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -4380,7 +4398,11 @@ internal fun CommunityTopicReaderPane(
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
         if (!showRemoveBookmark) bookmarkError?.let { LinDoFeedbackRow(it, LinDoMascotState.NetworkError) }
-        navigationError?.let { message -> LinDoLoadFailure(message, { pendingJumpFloor?.let(::jumpToFloor) }) }
+        navigationError?.let { message ->
+            LinDoLoadFailure(message) {
+                pendingJumpFloor?.let { jumpToFloor(it, pendingReturnFloor, pendingJumpRequiresExact) }
+            }
+        }
         filterError?.let { message -> LinDoLoadFailure(message, ::toggleOnlyOpMode) }
         LazyColumn(
             state = readerListState,
@@ -4457,11 +4479,92 @@ internal fun CommunityTopicReaderPane(
                             )
                         }
                     }
+
+                    if (detail?.posts?.isNotEmpty() == true) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "${formatCompactNumber(detail.views)} 次浏览 · ${formatCompactNumber((postCount - 1).coerceAtLeast(0))} 条回复",
+                                modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                fontSize = 12.sp,
+                                color = palette.inkSecondary
+                            )
+                            TextButton(
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                onClick = {
+                                    showAiSummaryPanel = !showAiSummaryPanel
+                                    if (showAiSummaryPanel && remoteAiSummary == null && !isLoadingAiSummary) {
+                                        isLoadingAiSummary = true
+                                        scope.launch {
+                                            try {
+                                                remoteAiSummary = LinuxDoRepository.fetchTopicAiSummary(summary.id)
+                                            } finally {
+                                                isLoadingAiSummary = false
+                                            }
+                                        }
+                                    }
+                                }
+                            ) {
+                                val tint = if (showAiSummaryPanel) palette.activeChipText else palette.inkSecondary
+                                Icon(LinDoIcons.Sparkles, null, Modifier.size(15.dp), tint = tint)
+                                Spacer(Modifier.width(5.dp))
+                                Text(if (showAiSummaryPanel) "收起总结" else "总结", fontSize = 12.sp, color = tint)
+                            }
+                        }
+                        AnimatedVisibility(visible = showAiSummaryPanel) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.cardSurface)
+                                    .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .padding(12.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = LinDoIcons.Sparkles,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                        tint = palette.brandGold
+                                    )
+                                    Text(
+                                        text = if (!remoteAiSummary.isNullOrBlank()) "AI 总结" else "话题摘要",
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.inkPrimary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (isLoadingAiSummary) {
+                                        Text(
+                                            text = "生成中",
+                                            fontSize = 11.sp,
+                                            color = palette.inkTertiary
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                val summaryBody = remoteAiSummary?.takeIf { it.isNotBlank() } ?: localSmartDigest
+                                Text(
+                                    text = summaryBody.ifBlank { "暂无可提炼的话题摘要内容。" },
+                                    fontSize = 13.sp,
+                                    lineHeight = 19.5.sp,
+                                    color = palette.inkSecondary
+                                )
+                            }
+                        }
+                    }
                 }
                 HorizontalDivider(thickness = 0.6.dp, color = palette.hairline)
             }
 
-            // 楼层卡片列表（#1 楼主 + 话题概览/AI总结栏 + #2..#N 全部评论楼层）
+            // 主帖之后直接进入回复区。
             if (isLoading && posts.isEmpty()) {
                 item(key = "topic_loading_center") {
                     Box(
@@ -4505,6 +4608,8 @@ internal fun CommunityTopicReaderPane(
                     repliedPost = repliedPost,
                     childReplies = childReplies,
                     isUnread = isFloorUnread,
+                    isJumpTarget = post.postNumber == highlightedFloor,
+                    loadingReplyTarget = fetchingJumpWindow && pendingReturnFloor == post.postNumber,
                     onOpenWebUrl = onOpenWebUrl,
                     originalUrl = "https://linux.do/t/topic/${summary.id}/${post.postNumber}",
                     opUsername = effectiveOpUsername,
@@ -4512,7 +4617,7 @@ internal fun CommunityTopicReaderPane(
                     enableAnimations = enableAnimations,
                     onInspectBadge = onInspectBadge,
                     onInspectUser = onInspectUser,
-                    onJumpToFloorNumber = ::jumpToFloor,
+                    onJumpToFloorNumber = { floor -> jumpToFloor(floor, returnTo = post.postNumber) },
                     onEditPost = { editingPost = it },
                     onDeletePost = { targetPost -> pendingDeletePost = targetPost; deletePostError = null },
                     onReplyFloor = { targetPost ->
@@ -4545,95 +4650,30 @@ internal fun CommunityTopicReaderPane(
                     onRequestLogin = onRequestLogin
                 )
 
-                if (post.postNumber == 1) {
-                    val repliesCount = (postCount - 1).coerceAtLeast(0)
-                    val views = formatCompactNumber(detail?.views ?: summary.views)
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                if (post.postNumber == 1 && (postCount > 1 || onlyOpFilter)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            "$views 次浏览 · ${formatCompactNumber(repliesCount)} 条回复",
-                            fontSize = 12.sp, color = palette.inkSecondary, modifier = Modifier.padding(top = 10.dp)
+                            if (onlyOpFilter) "楼主回复" else "回复",
+                            modifier = Modifier.weight(1f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.inkPrimary
                         )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            TextButton(enabled = !changingReaderFilter && !fetchingJumpWindow && !isLoadingMorePosts, onClick = ::toggleOnlyOpMode) {
-                                Text(
-                                    if (changingReaderFilter) "切换中" else if (onlyOpFilter) "全部回复" else "只看楼主",
-                                    color = if (onlyOpFilter) palette.accent else palette.inkSecondary
-                                )
-                            }
-                            if (totalFloorCount > 1) {
-                                TextButton(enabled = !changingReaderFilter && !fetchingJumpWindow, onClick = { jumpToFloor(totalFloorCount) }) {
-                                    Text(if (fetchingJumpWindow) "跳转中" else "跳到末楼", color = palette.inkSecondary)
-                                }
-                            }
-                            TextButton(onClick = {
-                                showAiSummaryPanel = !showAiSummaryPanel
-                                if (showAiSummaryPanel && remoteAiSummary == null && !isLoadingAiSummary) {
-                                    isLoadingAiSummary = true
-                                    scope.launch {
-                                        try {
-                                            remoteAiSummary = LinuxDoRepository.fetchTopicAiSummary(summary.id)
-                                        } finally {
-                                            isLoadingAiSummary = false
-                                        }
-                                    }
-                                }
-                            }) {
-                                Icon(LinDoIcons.Sparkles, null, Modifier.size(15.dp), tint = palette.inkSecondary)
-                                Spacer(Modifier.width(5.dp))
-                                Text(if (showAiSummaryPanel) "收起总结" else "总结", color = palette.inkSecondary)
-                            }
+                        TextButton(
+                            enabled = !changingReaderFilter && !fetchingJumpWindow && !isLoadingMorePosts,
+                            onClick = ::toggleOnlyOpMode
+                        ) {
+                            Text(
+                                if (changingReaderFilter) "切换中" else if (onlyOpFilter) "查看全部" else "只看楼主",
+                                fontSize = 12.sp,
+                                color = if (onlyOpFilter) palette.activeChipText else palette.inkSecondary
+                            )
                         }
-
-                        // 展开的 `✦ 话题智能总结` 面板
-                        AnimatedVisibility(visible = showAiSummaryPanel) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(palette.cardSurface)
-                                    .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
-                                    .padding(12.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = LinDoIcons.Sparkles,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
-                                        tint = palette.brandGold
-                                    )
-                                    Text(
-                                        text = if (!remoteAiSummary.isNullOrBlank()) "Discourse AI 话题总结" else "话题核心脉络速览",
-                                        fontSize = 12.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.inkPrimary,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    if (isLoadingAiSummary) {
-                                        Text(
-                                            text = "AI 同步中...",
-                                            fontSize = 11.sp,
-                                            color = palette.inkTertiary
-                                        )
-                                    }
-                                }
-                                Spacer(modifier = Modifier.height(6.dp))
-                                val summaryBody = remoteAiSummary?.takeIf { it.isNotBlank() } ?: localSmartDigest
-                                Text(
-                                    text = summaryBody.ifBlank { "暂无可提炼的话题摘要内容。" },
-                                    fontSize = 13.sp,
-                                    lineHeight = 19.5.sp,
-                                    color = palette.inkSecondary
-                                )
-                            }
-                        }
-
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     }
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
             }
 
@@ -4662,6 +4702,13 @@ internal fun CommunityTopicReaderPane(
                 .background(palette.cardSurface)
                 .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
+            replyReturnFloor?.let { floor ->
+                TextButton(
+                    enabled = !fetchingJumpWindow && !changingReaderFilter,
+                    onClick = { jumpToFloor(floor) },
+                    modifier = Modifier.align(Alignment.End).padding(end = 10.dp)
+                ) { Text("返回 $floor 楼", color = palette.activeChipText) }
+            }
             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
             Row(
                 modifier = Modifier
@@ -4695,20 +4742,15 @@ internal fun CommunityTopicReaderPane(
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))
-                val floorByPostId = remember(posts) { posts.associate { it.id to it.postNumber } }
-                val visibleFloor by remember(floorByPostId) {
-                    derivedStateOf {
-                        readerListState.layoutInfo.visibleItemsInfo.asReversed().firstNotNullOfOrNull {
-                            floorByPostId[it.key as? Int]
-                        } ?: 1
-                    }
-                }
                 TextButton(
                     enabled = posts.isNotEmpty() && !changingReaderFilter && !fetchingJumpWindow,
                     contentPadding = PaddingValues(horizontal = 8.dp),
-                    onClick = { showFloorJumpDialog = true }
+                    onClick = { showFloorNavigator = true }
                 ) {
-                    Text("$visibleFloor / $totalFloorCount 楼", fontSize = 12.sp, color = palette.inkSecondary, maxLines = 1)
+                    Text(
+                        if (fetchingJumpWindow) "跳转中…" else "$visibleFloor / $totalFloorCount 楼",
+                        fontSize = 12.sp, color = palette.inkSecondary, maxLines = 1
+                    )
                     Icon(
                         LinDoIcons.ChevronUp, null, Modifier.size(15.dp), tint = palette.inkSecondary
                     )
@@ -4717,49 +4759,20 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
-    if (showFloorJumpDialog) {
-        var floorInput by remember { mutableStateOf("") }
-        val selectedFloor = floorInput.toIntOrNull()?.takeIf { it in 1..totalFloorCount }
-        val jump: (Int) -> Unit = { number ->
-            showFloorJumpDialog = false
-            jumpToFloor(number)
-        }
-        AlertDialog(
-            onDismissRequest = { showFloorJumpDialog = false },
-            containerColor = palette.cardSurface,
-            title = { LinDoDialogTitle("跳转到楼层") },
-            text = {
-                Column {
-                    OutlinedTextField(
-                        value = floorInput,
-                        onValueChange = { floorInput = it.filter(Char::isDigit).take(10) },
-                        label = { Text("楼层编号") },
-                        placeholder = { Text("1–$totalFloorCount") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number, imeAction = ImeAction.Go),
-                        keyboardActions = KeyboardActions(onGo = { selectedFloor?.let(jump) })
-                    )
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { jump(1) }) { Text("首楼") }
-                        TextButton(onClick = { jump(totalFloorCount) }) { Text("末楼") }
-                        if (remainingPostIds.isNotEmpty()) {
-                            TextButton(enabled = !isLoadingMorePosts, onClick = {
-                                showFloorJumpDialog = false
-                                loadMoreFloorBatch(20)
-                            }) { Text("加载后续楼层") }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(enabled = selectedFloor != null, onClick = { selectedFloor?.let(jump) }) { Text("跳转") }
-            },
-            dismissButton = { TextButton(onClick = { showFloorJumpDialog = false }) { Text("取消") } }
+    if (showFloorNavigator) {
+        TopicFloorNavigator(
+            currentFloor = visibleFloor,
+            lastFloor = totalFloorCount,
+            onDismiss = { showFloorNavigator = false },
+            onJump = { number, exact ->
+                showFloorNavigator = false
+                jumpToFloor(number, exact = exact)
+            }
         )
     }
 
     if (showRemoveBookmark) LinDoConfirmDialog(
-        title = "移除此话题的全部书签？",
+        title = "要移除这个话题的全部书签吗？",
         confirmLabel = "移除",
         busy = bookmarkBusy,
         error = bookmarkError,
@@ -4768,7 +4781,7 @@ internal fun CommunityTopicReaderPane(
     )
     pendingDeletePost?.let { target ->
         LinDoConfirmDialog(
-            title = "删除 ${target.postNumber} 楼的回复？",
+            title = "要删除第 ${target.postNumber} 楼的回复吗？",
             confirmLabel = "删除",
             busy = deletingPost,
             error = deletePostError,
@@ -4915,7 +4928,7 @@ private const val OfficialModeratorIcon = "https://cdn.ldstatic.com/svg-sprite/l
 
 /**
  * Linux.do Web 帖子/评论楼层 (`article.onscreen-post`)：
- * - 头部：左侧 40dp 原生圆形头像 (`SmartAvatar`) + 中间用户名/楼主/Web 行内徽章 + 右侧 `↰ #N` 回复跳转、相对时间与 `#楼号`
+ * - 头部：作者、身份信息、相对时间与当前楼层。
  * - 正文：干净通透的 AST 渲染（引用块、代码高亮与一键复制、配图、折叠块）
  * - 底部操作栏 (`nav.post-controls`)：
  *   - 左侧：**仅展示该楼层真实收到的表情回应 (`post.reactions`)**，绝不默认塞入未发生的假表情按钮！
@@ -4928,6 +4941,8 @@ private fun CommunityPostFloor(
     repliedPost: PostItemModel? = null,
     childReplies: List<PostItemModel> = emptyList(),
     isUnread: Boolean = false,
+    isJumpTarget: Boolean = false,
+    loadingReplyTarget: Boolean = false,
     opUsername: String,
     fontScale: Float,
     enableAnimations: Boolean,
@@ -5284,10 +5299,10 @@ private fun CommunityPostFloor(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(palette.cardSurface)
+            .background(if (isJumpTarget) palette.accent.copy(alpha = 0.09f) else palette.cardSurface)
             .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
-        // 1. 楼层头部（严格顶部对齐：左侧 38dp 头像，右侧首行昵称+佩戴徽章+时间楼号同行对齐，次行 @username + 头衔 + Apple 设备尾巴）
+        // 昵称和楼层信息在首行，账号、头衔及设备合并为次行。
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.Top
@@ -5353,7 +5368,7 @@ private fun CommunityPostFloor(
                                 inlineBadges.forEach { badge ->
                                     PostGrantedBadgeIcon(
                                         badge = badge, size = 13.dp,
-                                        onClick = { onInspectBadge(it.copy(holderUsername = post.username)) }
+                                        onClick = onInspectBadge
                                     )
                                 }
                             }
@@ -5398,59 +5413,18 @@ private fun CommunityPostFloor(
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // 右上角：与第一行昵称严格同行对齐的 `↩ [被回复人头像] #N` + 相对时间 + `#楼号` + 未读小蓝点
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        if (targetReplyFloorNum != null) {
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable { onJumpToFloorNumber(targetReplyFloorNum) }
-                                    .padding(horizontal = 4.dp, vertical = 1.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = LinDoIcons.Reply,
-                                    contentDescription = "跳转被回复楼层",
-                                    modifier = Modifier.size(12.5.dp),
-                                    tint = palette.inkSecondary
-                                )
-                                if (repliedPost != null) {
-                                    SmartAvatar(
-                                        username = repliedPost.username,
-                                        avatarTemplate = repliedPost.avatarTemplate,
-                                        animatedAvatar = repliedPost.animatedAvatar,
-                                        size = 15.dp,
-                                        enableAnimations = enableAnimations
-                                    )
-                                }
-                                Text(
-                                    text = "$targetReplyFloorNum 楼",
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.inkSecondary,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                            }
-                        }
-
-                        Text(
-                            text = post.createdAtText,
-                            fontSize = 11.2.sp,
-                            color = palette.inkTertiary,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-
-                        if (post.postNumber > 1) {
+                        val floorMeta = listOfNotNull(
+                            post.postNumber.takeIf { it > 1 }?.let { "$it 楼" },
+                            post.createdAtText.takeIf { it.isNotBlank() }
+                        ).joinToString(" · ")
+                        if (floorMeta.isNotEmpty()) {
                             Text(
-                                text = "${post.postNumber} 楼",
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Medium,
+                                text = floorMeta,
+                                fontSize = 11.2.sp,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false
@@ -5481,52 +5455,38 @@ private fun CommunityPostFloor(
                     }
                 }
 
-                if (hasDistinctHandle || hasUserTitle || floorAwards.isNotEmpty()) {
-                    Column(
+                if (hasDistinctHandle || hasUserTitle || hasIosDevice || floorAwards.isNotEmpty() ||
+                    post.isTodayBirthday || post.isTodayCakeday
+                ) {
+                    Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         if (hasDistinctHandle) {
                             Text(
-                                text = post.username,
-                                fontSize = 11.8.sp,
+                                text = "@${post.username}",
+                                modifier = Modifier.weight(1f, fill = false),
+                                fontSize = 11.5.sp,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                         if (hasUserTitle) {
+                            if (hasDistinctHandle) Text("·", color = palette.inkTertiary, fontSize = 11.sp)
                             UserTitleTag(
                                 title = post.userTitle.orEmpty(),
                                 animatePostTitle = enableAnimations,
                                 merchantGroupTitle = post.titleIsGroup &&
-                                    (post.primaryGroupName == "g-merchant" || post.primaryGroupName == "g-merchant2")
+                                    (post.primaryGroupName == "g-merchant" || post.primaryGroupName == "g-merchant2"),
+                                modifier = Modifier.weight(1f, fill = false)
                             )
                         }
-                        if (floorAwards.isNotEmpty()) {
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                floorAwards.forEach { badge ->
-                                    PostGrantedBadgeIcon(
-                                        badge = badge,
-                                        onClick = { onInspectBadge(it.copy(holderUsername = post.username)) },
-                                        description = "${post.username} 因此楼获授 ${badge.name}"
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (hasIosDevice || post.isTodayBirthday || post.isTodayCakeday ||
-                    (showStatusDescription && statusDescText != null)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
                         if (hasIosDevice) {
+                            if (hasDistinctHandle || hasUserTitle) Text("·", color = palette.inkTertiary, fontSize = 11.sp)
                             Row(
+                                modifier = Modifier.weight(1.25f, fill = false),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(3.dp)
                             ) {
@@ -5538,43 +5498,33 @@ private fun CommunityPostFloor(
                                 )
                                 Text(
                                     text = post.iosDeviceName.orEmpty(),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Medium,
+                                    fontSize = 11.sp,
                                     color = palette.inkSecondary,
                                     maxLines = 1,
-                                    softWrap = false
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
-
-                        if (post.isTodayBirthday) {
-                            Text(
-                                text = "🎂",
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                softWrap = false
+                        floorAwards.forEach { badge ->
+                            PostGrantedBadgeIcon(
+                                badge = badge,
+                                onClick = onInspectBadge,
+                                description = "${post.username} 因此楼获授 ${badge.name}"
                             )
                         }
-
-                        if (post.isTodayCakeday) {
-                            Text(
-                                text = "🍰",
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-
-                        if (showStatusDescription && statusDescText != null) {
-                            Text(
-                                text = "· $statusDescText",
-                                fontSize = 11.sp,
-                                color = palette.inkSecondary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+                        if (post.isTodayBirthday) Text("🎂", fontSize = 11.sp, maxLines = 1)
+                        if (post.isTodayCakeday) Text("🍰", fontSize = 11.sp, maxLines = 1)
                     }
+                }
+                if (showStatusDescription && statusDescText != null) {
+                    Text(
+                        text = statusDescText,
+                        modifier = Modifier.padding(top = 3.dp),
+                        fontSize = 11.sp,
+                        color = palette.inkSecondary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
@@ -5583,6 +5533,7 @@ private fun CommunityPostFloor(
             postId = post.id, cookedHtml = post.cookedHtml, originalUrl = originalUrl,
             targetReplyFloorNum = targetReplyFloorNum, targetReplyDisplayName = targetReplyDisplayName,
             repliedHtml = repliedPost?.cookedHtml, onJumpToFloorNumber = onJumpToFloorNumber,
+            loadingReplyTarget = loadingReplyTarget,
             onOpenWebUrl = onOpenWebUrl
         )
 
@@ -5819,42 +5770,26 @@ private fun CommunityPostFloor(
                         )
                     }
 
-                    // 中间：无边框单行输入框
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(horizontal = 4.dp),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        if (boostInputText.isEmpty()) {
-                            Text(
-                                text = "写一句助力",
-                                fontSize = 12.5.sp,
-                                color = palette.inkTertiary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                    val boostInputStyle = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, color = palette.inkPrimary)
+                    BasicTextField(
+                        value = boostInputText,
+                        onValueChange = { next -> boostInputText = next.replace("\n", " ") },
+                        singleLine = true,
+                        textStyle = boostInputStyle,
+                        cursorBrush = SolidColor(palette.brandGold),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = {
+                            if (canSendNow) submitBoost(boostInputText)
+                        }),
+                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                        decorationBox = { inner ->
+                            LinDoInputDecoration(
+                                boostInputText.isEmpty(), "写一句助力", boostInputStyle, palette.inkSecondary,
+                                modifier = Modifier.fillMaxWidth(),
+                                innerTextField = inner
                             )
                         }
-                        BasicTextField(
-                            value = boostInputText,
-                            onValueChange = { next ->
-                                boostInputText = next.replace("\n", " ")
-                            },
-                            singleLine = true,
-                            textStyle = TextStyle(
-                                fontSize = 13.sp,
-                                color = palette.inkPrimary
-                            ),
-                            cursorBrush = SolidColor(palette.brandGold),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                            keyboardActions = KeyboardActions(onSend = {
-                                if (canSendNow) {
-                                    submitBoost(boostInputText)
-                                }
-                            }),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
+                    )
 
                     // 右侧：精简字数提示 + 纯图标发送按钮 + 关闭按钮
                     Text(
@@ -6028,14 +5963,14 @@ private fun CommunityPostFloor(
                         horizontalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
                         Text(
-                            text = "${childReplies.size}",
+                            text = if (showInlineReplies) "收起回复" else "${childReplies.size} 条回复",
                             fontSize = 13.5.sp,
                             fontWeight = FontWeight.Medium,
                             color = if (showInlineReplies) palette.inkPrimary else palette.inkSecondary
                         )
                         Icon(
                             imageVector = if (showInlineReplies) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
-                            contentDescription = "展开本楼回复",
+                            contentDescription = null,
                             modifier = Modifier.size(15.dp),
                             tint = if (showInlineReplies) palette.inkPrimary else palette.inkSecondary
                         )
@@ -6344,7 +6279,7 @@ private fun CommunityPostFloor(
     }
     pendingBoostDelete?.let { boostId ->
         LinDoConfirmDialog(
-            title = "删除助力？",
+            title = "要删除这条助力吗？",
             confirmLabel = "删除",
             busy = isDeletingBoostId != null,
             error = floorActionError,
@@ -6461,6 +6396,7 @@ private fun CommunityPostContent(
     targetReplyDisplayName: String?,
     repliedHtml: String?,
     onJumpToFloorNumber: (Int) -> Unit,
+    loadingReplyTarget: Boolean,
     onOpenWebUrl: (String) -> Unit
 ) {
     val palette = LocalPalette.current
@@ -6471,58 +6407,41 @@ private fun CommunityPostContent(
                 DiscourseAstParser.parseOrGetCached(postId, cookedHtml)
             }
         }
-        if (targetReplyFloorNum != null && astNodes.firstOrNull() !is PostBlockNode.QuoteBlock) {
-            val repliedSnippetText = remember(repliedHtml) {
-                repliedHtml?.replace(readerReplyQuotePattern, "")
-                    ?.replace(readerReplyTagPattern, " ")
+        if (targetReplyFloorNum != null) {
+            val repliedSnippet = remember(repliedHtml, astNodes.firstOrNull()) {
+                if (astNodes.firstOrNull() is PostBlockNode.QuoteBlock) "" else repliedHtml
+                    ?.replace(readerReplyQuotePattern, "")
+                    ?.replace(readerReplyTagPattern, "")
                     ?.replace("&nbsp;", " ")?.replace("&quot;", "\"")?.replace("&amp;", "&")
                     ?.replace(readerReplyWhitespacePattern, " ")?.trim()?.take(200).orEmpty()
             }
-            Spacer(modifier = Modifier.height(9.dp))
+            val target = if (targetReplyDisplayName.isNullOrBlank()) "$targetReplyFloorNum 楼"
+            else "$targetReplyDisplayName · $targetReplyFloorNum 楼"
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(palette.subtleSurface)
-                    .clickable { onJumpToFloorNumber(targetReplyFloorNum) }
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
+                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                    .clickable(
+                        enabled = !loadingReplyTarget,
+                        onClickLabel = "跳转到 $targetReplyFloorNum 楼",
+                        onClick = { onJumpToFloorNumber(targetReplyFloorNum) }
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .width(2.5.dp)
-                        .height(14.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(palette.brandGold)
-                )
-                Spacer(modifier = Modifier.width(7.dp))
-                Text(
-                    text = buildString {
-                        append("回复 #")
-                        append(targetReplyFloorNum)
-                        if (!targetReplyDisplayName.isNullOrBlank()) {
-                            append(" @")
-                            append(targetReplyDisplayName)
-                        }
-                    },
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.inkPrimary,
-                    maxLines = 1,
-                    softWrap = false
-                )
-                if (repliedSnippetText.isNotBlank()) {
+                Icon(LinDoIcons.Reply, null, Modifier.size(14.dp), tint = palette.inkSecondary)
+                Column(Modifier.weight(1f)) {
                     Text(
-                        text = "：$repliedSnippetText",
-                        fontSize = 12.sp,
-                        color = palette.inkSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        if (loadingReplyTarget) "加载 $targetReplyFloorNum 楼…" else target,
+                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
                     )
-                } else {
-                    Spacer(modifier = Modifier.weight(1f))
+                    if (repliedSnippet.isNotBlank() && !loadingReplyTarget) {
+                        Text(
+                            repliedSnippet, fontSize = 11.5.sp, color = palette.inkTertiary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
+                Icon(LinDoIcons.ChevronRight, null, Modifier.size(13.dp), tint = palette.inkTertiary)
             }
         }
 
@@ -7406,7 +7325,7 @@ private fun CommunityMessagesScreen(
             }
         }
     }
-    if (showMarkAllConfirm) LinDoConfirmDialog(title = "全部标为已读？", confirmLabel = "标为已读", busy = markingAll, error = markAllError,
+    if (showMarkAllConfirm) LinDoConfirmDialog(title = "要将通知全部标为已读吗？", confirmLabel = "标为已读", busy = markingAll, error = markAllError,
         onDismiss = { showMarkAllConfirm = false; markAllError = null }, onConfirm = {
             if (!markingAll) {
                 markingAll = true
@@ -7654,7 +7573,7 @@ private fun CommunityProfileScreen(
                                 UniversalBadgeChip(
                                     badge = badge,
                                     compact = true,
-                                    onClick = { onInspectBadge(it.copy(holderUsername = fullProfile.username)) }
+                                    onClick = onInspectBadge
                                 )
                             }
                             Row(
@@ -7917,7 +7836,7 @@ private fun CommunityProfileScreen(
                                 Text("应用图标", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
                                 Text("${icon.artwork.label} · ${icon.background.label}", fontSize = 11.8.sp, color = palette.inkSecondary)
                             }
-                            LinDoLauncherIconTile(icon, Modifier.size(30.dp))
+                            LinDoLauncherIconTile(icon, Modifier.size(42.dp))
                             Spacer(Modifier.width(8.dp))
                             Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
                         }
@@ -8398,38 +8317,6 @@ private fun ProfileQuickEntryTile(
 }
 
 @Composable
-private fun GoogleBentoMetricTile(
-    value: String,
-    label: String,
-    modifier: Modifier = Modifier
-) {
-    val palette = LocalPalette.current
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(palette.canvas)
-            .padding(vertical = 12.dp, horizontal = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = value,
-            fontSize = 15.5.sp,
-            fontWeight = FontWeight.Bold,
-            color = palette.inkPrimary,
-            maxLines = 1
-        )
-        Spacer(modifier = Modifier.height(3.dp))
-        Text(
-            text = label,
-            fontSize = 11.5.sp,
-            fontWeight = FontWeight.Medium,
-            color = palette.inkSecondary,
-            maxLines = 1
-        )
-    }
-}
-
-@Composable
 private fun GoogleSegmentedSwitchTile(
     icon: ImageVector,
     title: String,
@@ -8546,13 +8433,7 @@ private fun GoogleSegmentedActionTile(
     }
 }
 
-/**
- * 徽章详情抽屉（对齐 Linux.do Web `/badges/{id}/{slug}` 与 CFluxDo `BadgeDetailSheet`）：
- * 1. 金/银/铜等级勋章视觉头、解锁条件 (`description` + `longDescription`)、全站授予次数与获授时间
- * 2. 若 `allowTitle == true`，提供一键「佩戴为我的头衔」按钮（直调 `PUT /u/{username}.json`）
- * 3. 实时拉取并展示该徽章的最近获得者列表 (`GET /user_badges.json?badge_id={id}`)
- */
-@OptIn(ExperimentalMaterial3Api::class)
+/** 徽章定义、获授信息和可用的头衔操作。 */
 @Composable
 private fun BadgeDetailBottomSheet(
     badge: GrantedBadge,
@@ -8560,9 +8441,7 @@ private fun BadgeDetailBottomSheet(
     currentUserTitle: String = "",
     isAuthorized: Boolean = false,
     onDismiss: () -> Unit,
-    onTitleUpdated: () -> Unit = {},
-    onInspectUser: (String) -> Unit = {},
-    onSelectTopicId: (Int, String, Int?) -> Unit = { _, _, _ -> }
+    onTitleUpdated: () -> Unit = {}
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -8573,32 +8452,18 @@ private fun BadgeDetailBottomSheet(
     val canSetTitle = isAuthorized && currentUsername.isNotBlank() &&
         officialBadge?.let { it.allowTitle && it.isEarned } == true
 
-    var grantees by remember(effectiveBadge.id) { mutableStateOf<List<BadgeGranteeItem>>(emptyList()) }
-    var isLoadingGrantees by remember(effectiveBadge.id) { mutableStateOf(false) }
     var isEquippingTitle by remember(effectiveBadge.id) { mutableStateOf(false) }
     var titleEquipStatus by remember(effectiveBadge.id) { mutableStateOf<String?>(null) }
     var equippedNow by remember(effectiveBadge.name, currentUserTitle) {
         mutableStateOf(currentUserTitle.isNotBlank() && currentUserTitle.trim().equals(effectiveBadge.name.trim(), ignoreCase = true))
     }
 
-    LaunchedEffect(badge.id, badge.holderUsername) {
-        if (badge.id > 0) {
-            isLoadingGrantees = true
-            try {
-                kotlinx.coroutines.coroutineScope {
-                    launch {
-                        officialBadge = LinuxDoRepository.fetchBadgeDefinition(badge.id)?.copy(
-                            isFirstTimeGrant = badge.isFirstTimeGrant,
-                            count = badge.count, grantedAtText = badge.grantedAtText,
-                            topicId = badge.topicId, topicTitle = badge.topicTitle, postNumber = badge.postNumber
-                        )
-                    }
-                    grantees = LinuxDoRepository.fetchBadgeGrantees(badge.id, badge.holderUsername)
-                }
-            } finally {
-                isLoadingGrantees = false
-            }
-        }
+    LaunchedEffect(badge.id, badge.grantedAtText, badge.topicId) {
+        officialBadge = LinuxDoRepository.fetchBadgeDefinition(badge.id.takeIf { it > 0 } ?: return@LaunchedEffect)?.copy(
+            isFirstTimeGrant = badge.isFirstTimeGrant,
+            count = badge.count, grantedAtText = badge.grantedAtText,
+            topicId = badge.topicId, topicTitle = badge.topicTitle, postNumber = badge.postNumber
+        )
     }
 
     LinDoFullScreenPage(
@@ -8612,6 +8477,7 @@ private fun BadgeDetailBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 14.dp)
         ) {
             Row(
@@ -8629,8 +8495,8 @@ private fun BadgeDetailBottomSheet(
                     )
                     val metadata = listOfNotNull(
                         effectiveBadge.badgeType.labelZh,
-                        "获授 ${effectiveBadge.count} 次".takeIf { effectiveBadge.count > 1 },
-                        "本楼获授".takeIf { effectiveBadge.isFirstTimeGrant },
+                        "已获得 ${effectiveBadge.count} 次".takeIf { effectiveBadge.count > 1 },
+                        "从这条回复获得".takeIf { effectiveBadge.isFirstTimeGrant },
                         when {
                             equippedNow -> "当前头衔"
                             effectiveBadge.allowTitle && !canSetTitle -> "可设头衔"
@@ -8669,7 +8535,7 @@ private fun BadgeDetailBottomSheet(
                 val grantDate = effectiveBadge.grantedAtText.takeIf { it.isNotBlank() }
                 val grantMetadata = listOfNotNull(
                     "全站授予 ${formatCompactNumber(effectiveBadge.grantCount)} 次".takeIf { effectiveBadge.grantCount > 0 },
-                    grantDate?.let { "获授于 $it" },
+                    grantDate?.let { "$it 获得" },
                     "已获得".takeIf { grantDate == null && officialBadge?.isEarned == true && !effectiveBadge.isFirstTimeGrant }
                 )
                 if (grantMetadata.isNotEmpty()) {
@@ -8717,141 +8583,6 @@ private fun BadgeDetailBottomSheet(
                     fontWeight = FontWeight.Medium,
                     color = if (equippedNow) palette.brandGold else palette.inkSecondary
                 )
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 3. 最近获得者列表 (`GET /user_badges.json?badge_id={id}`)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "最近获得该徽章的姥友",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.inkSecondary,
-                    modifier = Modifier.weight(1f)
-                )
-                if (grantees.isNotEmpty()) {
-                    Text(
-                        text = "最新 ${grantees.size} 位",
-                        fontSize = 11.5.sp,
-                        color = palette.inkTertiary
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            if (isLoadingGrantees) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(120.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LinDoLoadingIndicator(label = "正在查询最近获得者")
-                }
-            } else if (grantees.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 18.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "满足对应社区贡献或活动条件即可自动获授该徽章",
-                        fontSize = 12.2.sp,
-                        color = palette.inkTertiary
-                    )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    contentPadding = PaddingValues(bottom = 16.dp)
-                ) {
-                    itemsIndexed(grantees, key = { idx, g -> "${g.id}_${g.userId}_$idx" }) { _, grantee ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(palette.canvas)
-                                .clickable {
-                                    if (grantee.topicId > 0) {
-                                        onSelectTopicId(
-                                            grantee.topicId,
-                                            grantee.topicTitle.ifBlank { "话题 #${grantee.topicId}" },
-                                            grantee.postNumber.takeIf { it > 0 }
-                                        )
-                                    } else {
-                                        onInspectUser(grantee.username)
-                                    }
-                                }
-                                .padding(horizontal = 11.dp, vertical = 8.5.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(modifier = Modifier.clickable { onInspectUser(grantee.username) }) {
-                                SmartAvatar(
-                                    username = grantee.username,
-                                    avatarTemplate = grantee.avatarTemplate,
-                                    animatedAvatar = grantee.animatedAvatar,
-                                    size = 30.dp,
-                                    enableAnimations = false
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(9.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                ) {
-                                    Text(
-                                        text = grantee.displayName,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = if (grantee.admin || grantee.moderator) palette.brandGold else palette.inkPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "@${grantee.username}",
-                                        fontSize = 11.2.sp,
-                                        color = palette.inkTertiary,
-                                        maxLines = 1
-                                    )
-                                    if (grantee.count > 1) {
-                                        Text(
-                                            text = "×${grantee.count}",
-                                            fontSize = 10.8.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = palette.inkSecondary
-                                        )
-                                    }
-                                }
-                                if (!grantee.topicTitle.isNullOrBlank()) {
-                                    Text(
-                                        text = "获授于：${grantee.topicTitle}",
-                                        fontSize = 11.2.sp,
-                                        color = palette.inkSecondary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = grantee.grantedAtText,
-                                fontSize = 11.sp,
-                                color = palette.inkTertiary,
-                                maxLines = 1
-                            )
-                        }
-                    }
-                }
             }
         }
     }
@@ -9064,7 +8795,7 @@ private fun CommunityBadgesSheet(
                         val status = when {
                             isCurrentTitle -> "当前头衔"
                             selectedTab == 1 && badge.isEarned && badge.grantedAtText.isNotBlank() ->
-                                "获授于 ${badge.grantedAtText}"
+                                "${badge.grantedAtText} 获得"
                             else -> ""
                         }
 
@@ -9519,6 +9250,7 @@ internal fun LinDoMarkdownWorkbench(
     onUploadingChange: (Boolean) -> Unit = {},
     defaultEditorHeight: Dp = 260.dp,
     externalViewMode: WorkbenchViewMode? = null,
+    restoreKeyboardFromPreview: Boolean = false,
     validationHint: String? = null,
     fillAvailableHeight: Boolean = false,
     modifier: Modifier = Modifier
@@ -9622,21 +9354,64 @@ internal fun LinDoMarkdownWorkbench(
     var internalViewMode by remember { mutableStateOf(WorkbenchViewMode.SOURCE) }
     val activeViewMode = externalViewMode ?: internalViewMode
     var activeSubPanel by remember { mutableStateOf(WorkbenchSubPanel.NONE) }
-    var showMoreTools by remember { mutableStateOf(false) }
+    var showToolShelf by remember { mutableStateOf(false) }
+    var restoreEditorKeyboard by remember { mutableStateOf(false) }
     val editorFocus = remember { FocusRequester() }
+    var keyboardBeforePreview by remember { mutableStateOf(false) }
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
-    fun returnToEditor() {
-        activeSubPanel = WorkbenchSubPanel.NONE
+    fun restoreEditorFocus() {
+        if (!restoreEditorKeyboard) return
+        restoreEditorKeyboard = false
         editorFocus.requestFocus()
         keyboard?.show()
     }
 
+    fun closeTools(keepShelf: Boolean = false) {
+        if (!keepShelf) showToolShelf = false
+        activeSubPanel = WorkbenchSubPanel.NONE
+        restoreEditorFocus()
+    }
+
     fun toggleSubPanel(target: WorkbenchSubPanel, hideKeyboardOnOpen: Boolean = false) {
         if (activeSubPanel == target) {
-            activeSubPanel = WorkbenchSubPanel.NONE
+            closeTools(keepShelf = showToolShelf)
+            return
+        }
+        if (hideKeyboardOnOpen) {
+            restoreEditorKeyboard = restoreEditorKeyboard || imeVisible
+            keyboard?.hide()
         } else {
-            if (hideKeyboardOnOpen) keyboard?.hide()
-            activeSubPanel = target
+            restoreEditorFocus()
+        }
+        activeSubPanel = target
+    }
+
+    LaunchedEffect(Unit) {
+        if (autofocus && activeViewMode == WorkbenchViewMode.SOURCE) {
+            delay(120)
+            editorFocus.requestFocus()
+        }
+    }
+
+    val toolsOpen = activeViewMode == WorkbenchViewMode.SOURCE &&
+        (showToolShelf || activeSubPanel != WorkbenchSubPanel.NONE)
+    val dismissTools by androidx.compose.runtime.rememberUpdatedState { closeTools() }
+    if (toolsOpen) {
+        DisposableEffect(Unit) {
+            val remove = BackNavigationBridge.pushInterceptor { dismissTools() }
+            onDispose { remove() }
+        }
+    }
+    LaunchedEffect(activeViewMode) {
+        if (activeViewMode == WorkbenchViewMode.PREVIEW) {
+            showToolShelf = false
+            activeSubPanel = WorkbenchSubPanel.NONE
+            restoreEditorKeyboard = false
+        } else if (keyboardBeforePreview || restoreKeyboardFromPreview) {
+            keyboardBeforePreview = false
+            editorFocus.requestFocus()
+            keyboard?.show()
         }
     }
 
@@ -9784,7 +9559,6 @@ internal fun LinDoMarkdownWorkbench(
                     },
                     placeholder = placeholder,
                     enabled = enabled,
-                    autofocus = autofocus,
                     immersiveCanvas = fillAvailableHeight,
                     focus = editorFocus,
                     modifier = canvasModifier
@@ -9799,14 +9573,49 @@ internal fun LinDoMarkdownWorkbench(
             }
         }
 
-        if (!validationHint.isNullOrBlank() && tfv.text.isNotBlank()) {
-            Text(
-                validationHint, fontSize = 11.5.sp, color = palette.inkSecondary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-            )
-        }
-
+        val visibleHint = validationHint?.takeIf { tfv.text.isNotBlank() }
         if (activeViewMode == WorkbenchViewMode.SOURCE) {
+            if (showToolShelf) {
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    WorkbenchDockIconButton(LinDoIcons.Undo, "撤销", enabled = enabled && undoStack.isNotEmpty()) {
+                        val previous = undoStack.removeAt(undoStack.lastIndex)
+                        redoStack.add(tfv)
+                        updateTfv(previous, false)
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Redo, "重做", enabled = enabled && redoStack.isNotEmpty()) {
+                        val next = redoStack.removeAt(redoStack.lastIndex)
+                        undoStack.add(tfv)
+                        updateTfv(next, false)
+                    }
+                    listOf(
+                        "排版" to WorkbenchSubPanel.FORMAT,
+                        "列表与引用" to WorkbenchSubPanel.QUOTE_LIST,
+                        "代码块" to WorkbenchSubPanel.CODE_LANG,
+                        "折叠与剧透" to WorkbenchSubPanel.DETAILS_SPOILER,
+                        "投票与表格" to WorkbenchSubPanel.POLL
+                    ).forEach { (label, panel) ->
+                        TextButton(
+                            enabled = enabled,
+                            onClick = { toggleSubPanel(panel, hideKeyboardOnOpen = panel == WorkbenchSubPanel.POLL) },
+                            contentPadding = PaddingValues(horizontal = 9.dp)
+                        ) {
+                            Text(
+                                label, maxLines = 1,
+                                color = if (activeSubPanel == panel) palette.activeChipText else palette.inkPrimary
+                            )
+                        }
+                    }
+                    TextButton(
+                        enabled = enabled && !isUploadingMedia,
+                        onClick = { pickMedia("*/*") },
+                        contentPadding = PaddingValues(horizontal = 9.dp)
+                    ) { Text("附件", color = palette.inkPrimary) }
+                }
+            }
             AnimatedVisibility(
                 visible = activeSubPanel != WorkbenchSubPanel.NONE,
                 enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandVertically(),
@@ -9822,22 +9631,22 @@ internal fun LinDoMarkdownWorkbench(
                     onRetryMention = { mentionReloadToken++ },
                     onToggleLinePrefix = { prefix ->
                         toggleLinePrefix(prefix)
-                        returnToEditor()
+                        closeTools()
                     },
                     onWrapSelection = { prefix, suffix ->
                         wrapSelection(prefix, suffix)
-                        returnToEditor()
+                        closeTools()
                     },
                     onInsertSnippet = { snippet ->
                         insertAtCursor(snippet, replaceMention = activeSubPanel == WorkbenchSubPanel.MENTION && snippet.startsWith("@"))
-                        if (activeSubPanel != WorkbenchSubPanel.EMOJI) returnToEditor()
+                        if (activeSubPanel != WorkbenchSubPanel.EMOJI) closeTools()
                     },
                     onOptimizePangu = {
                         val changed = optimizePanguSpacing()
-                        returnToEditor()
+                        closeTools()
                         uploadStatusText = if (changed) "已优化中英混排空格" else "当前已符合空格规范"
                     },
-                    onDismiss = { activeSubPanel = WorkbenchSubPanel.NONE },
+                    onDismiss = { closeTools(keepShelf = showToolShelf) },
                     modifier = Modifier.padding(
                         horizontal = if (fillAvailableHeight) 10.dp else 0.dp,
                         vertical = 4.dp
@@ -9849,67 +9658,50 @@ internal fun LinDoMarkdownWorkbench(
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                WorkbenchDockIconButton(LinDoIcons.Image, "图片", isUploadingMedia, enabled && !isUploadingMedia) {
-                    pickMedia("image/*")
+                Row(
+                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    WorkbenchDockIconButton(LinDoIcons.Image, "图片", isUploadingMedia, enabled && !isUploadingMedia) {
+                        pickMedia("image/*")
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Smile, "表情", activeSubPanel == WorkbenchSubPanel.EMOJI, enabled) {
+                        showToolShelf = false
+                        toggleSubPanel(WorkbenchSubPanel.EMOJI, hideKeyboardOnOpen = true)
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.AtSign, "提及", activeSubPanel == WorkbenchSubPanel.MENTION, enabled) {
+                        showToolShelf = false
+                        toggleSubPanel(WorkbenchSubPanel.MENTION)
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Link, "链接", activeSubPanel == WorkbenchSubPanel.LINK, enabled) {
+                        showToolShelf = false
+                        toggleSubPanel(WorkbenchSubPanel.LINK, hideKeyboardOnOpen = true)
+                    }
+                    TextButton(
+                        enabled = enabled,
+                        onClick = {
+                            if (showToolShelf) closeTools() else {
+                                closeTools()
+                                showToolShelf = true
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text(
+                            "工具", maxLines = 1,
+                            color = if (showToolShelf) palette.activeChipText else palette.inkSecondary
+                        )
+                    }
                 }
-                WorkbenchDockIconButton(LinDoIcons.Smile, "表情", activeSubPanel == WorkbenchSubPanel.EMOJI, enabled) {
-                    toggleSubPanel(WorkbenchSubPanel.EMOJI, hideKeyboardOnOpen = true)
-                }
-                WorkbenchDockIconButton(LinDoIcons.AtSign, "提及", activeSubPanel == WorkbenchSubPanel.MENTION, enabled) {
-                    toggleSubPanel(WorkbenchSubPanel.MENTION)
-                }
-                WorkbenchDockIconButton(LinDoIcons.Link, "链接", activeSubPanel == WorkbenchSubPanel.LINK, enabled) {
-                    toggleSubPanel(WorkbenchSubPanel.LINK, hideKeyboardOnOpen = true)
-                }
-                Box {
-                    val primaryPanels = setOf(
-                        WorkbenchSubPanel.NONE, WorkbenchSubPanel.EMOJI,
-                        WorkbenchSubPanel.MENTION, WorkbenchSubPanel.LINK
+                if (visibleHint != null) {
+                    Text(
+                        visibleHint, fontSize = 11.5.sp, color = palette.inkSecondary,
+                        modifier = Modifier.widthIn(max = 105.dp).padding(end = 6.dp)
                     )
-                    WorkbenchDockIconButton(LinDoIcons.MoreHoriz, "更多编辑工具", activeSubPanel !in primaryPanels, enabled) {
-                        showMoreTools = true
-                    }
-                    DropdownMenu(expanded = showMoreTools, onDismissRequest = { showMoreTools = false }) {
-                        DropdownMenuItem(text = { Text("撤销") }, enabled = undoStack.isNotEmpty(), onClick = {
-                            showMoreTools = false
-                            val previous = undoStack.removeAt(undoStack.lastIndex)
-                            redoStack.add(tfv)
-                            updateTfv(previous, false)
-                        })
-                        DropdownMenuItem(text = { Text("重做") }, enabled = redoStack.isNotEmpty(), onClick = {
-                            showMoreTools = false
-                            val next = redoStack.removeAt(redoStack.lastIndex)
-                            undoStack.add(tfv)
-                            updateTfv(next, false)
-                        })
-                        HorizontalDivider()
-                        listOf(
-                            "排版" to WorkbenchSubPanel.FORMAT,
-                            "列表与引用" to WorkbenchSubPanel.QUOTE_LIST,
-                            "代码语言" to WorkbenchSubPanel.CODE_LANG,
-                            "折叠与剧透" to WorkbenchSubPanel.DETAILS_SPOILER,
-                            "投票与表格" to WorkbenchSubPanel.POLL
-                        ).forEach { (label, panel) ->
-                            DropdownMenuItem(text = { Text(label) }, onClick = {
-                                showMoreTools = false
-                                toggleSubPanel(panel, hideKeyboardOnOpen = panel == WorkbenchSubPanel.POLL)
-                            })
-                        }
-                        DropdownMenuItem(text = { Text("插入代码块") }, onClick = {
-                            showMoreTools = false
-                            wrapSelection("\n```\n", "\n```\n")
-                            returnToEditor()
-                        })
-                        DropdownMenuItem(text = { Text("上传附件") }, enabled = !isUploadingMedia, onClick = {
-                            showMoreTools = false
-                            pickMedia("*/*")
-                        })
-                    }
                 }
-                Spacer(Modifier.weight(1f))
                 if (externalViewMode == null) {
                     WorkbenchDockIconButton(LinDoIcons.Eye, "预览", enabled = enabled) {
-                        activeSubPanel = WorkbenchSubPanel.NONE
+                        keyboardBeforePreview = imeVisible
                         internalViewMode = WorkbenchViewMode.PREVIEW
                         keyboard?.hide()
                     }
@@ -9957,18 +9749,11 @@ private fun WorkbenchSourceEditorBox(
     onValueChange: (TextFieldValue) -> Unit,
     placeholder: String,
     enabled: Boolean = true,
-    autofocus: Boolean = false,
     immersiveCanvas: Boolean = false,
     focus: FocusRequester,
     modifier: Modifier = Modifier
 ) {
     val palette = LocalPalette.current
-    LaunchedEffect(autofocus) {
-        if (autofocus) {
-            delay(120)
-            runCatching { focus.requestFocus() }
-        }
-    }
     val editorTextStyle = TextStyle(
         fontSize = 15.8.sp,
         lineHeight = 24.sp,
@@ -9993,20 +9778,11 @@ private fun WorkbenchSourceEditorBox(
                     .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
                     .padding(horizontal = 14.dp, vertical = 12.dp)
             }
-            Box(
-                modifier = boxMod,
-                contentAlignment = Alignment.TopStart
-            ) {
-                if (tfv.text.isEmpty()) {
-                    Text(
-                        text = placeholder,
-                        style = editorTextStyle.copy(color = palette.inkTertiary),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                innerTextField()
-            }
+            LinDoInputDecoration(
+                tfv.text.isEmpty(), placeholder, editorTextStyle, palette.inkSecondary,
+                modifier = boxMod, alignment = Alignment.TopStart, placeholderLines = 2,
+                innerTextField = innerTextField
+            )
         },
         modifier = modifier.focusRequester(focus)
     )
@@ -10214,23 +9990,14 @@ private fun WorkbenchInteractiveSubPanel(
             }
 
             WorkbenchSubPanel.CODE_LANG -> {
-                var languageMenuOpen by remember { mutableStateOf(false) }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { onWrapSelection("\n```\n", "\n```\n") }) { Text("通用代码块") }
-                    Box {
-                        TextButton(onClick = { languageMenuOpen = true }) {
-                            Text("选择语言")
-                            Icon(LinDoIcons.ChevronDown, null, modifier = Modifier.size(16.dp))
-                        }
-                        DropdownMenu(expanded = languageMenuOpen, onDismissRequest = { languageMenuOpen = false }) {
-                            listOf("kotlin", "python", "bash", "javascript", "typescript", "json", "yaml",
-                                "rust", "go", "sql", "html", "dockerfile", "mermaid").forEach { language ->
-                                DropdownMenuItem(text = { Text(language) }, onClick = {
-                                    languageMenuOpen = false
-                                    onWrapSelection("\n```$language\n", "\n```\n")
-                                })
-                            }
-                        }
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    WorkbenchToolChip("通用代码块", onClick = { onWrapSelection("\n```\n", "\n```\n") })
+                    listOf("kotlin", "python", "bash", "javascript", "typescript", "json", "yaml",
+                        "rust", "go", "sql", "html", "dockerfile", "mermaid").forEach { language ->
+                        WorkbenchToolChip(language, onClick = { onWrapSelection("\n```$language\n", "\n```\n") })
                     }
                 }
             }
@@ -10476,7 +10243,7 @@ private fun WorkbenchInteractiveSubPanel(
                         OutlinedTextField(
                             value = pollOptionsText,
                             onValueChange = { pollOptionsText = it },
-                            placeholder = { Text("每行一个投票选项...", fontSize = 12.sp) },
+                            placeholder = { Text("每行一个投票选项") },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(72.dp),
@@ -10739,7 +10506,7 @@ private fun WorkbenchCompactInputBox(
     )
     Row(
         modifier = modifier
-            .height(35.dp)
+            .heightIn(min = 40.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(palette.subtleSurface.copy(alpha = 0.7f))
             .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
@@ -10764,26 +10531,13 @@ private fun WorkbenchCompactInputBox(
             textStyle = inputStyle,
             cursorBrush = SolidColor(palette.brandGold),
             modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
-            decorationBox = { innerTextField ->
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    if (value.isEmpty()) {
-                        Text(
-                            text = placeholder,
-                            style = inputStyle.copy(
-                                color = palette.inkTertiary,
-                                fontWeight = FontWeight.Normal
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    innerTextField()
-                }
+                .weight(1f),
+            decorationBox = { inner ->
+                LinDoInputDecoration(
+                    value.isEmpty(), placeholder, inputStyle, palette.inkSecondary,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    innerTextField = inner
+                )
             }
         )
         if (value.isNotEmpty()) {
@@ -10967,24 +10721,12 @@ private fun GlobalSearchModalSheet(
                             .weight(1f)
                             .padding(vertical = 10.dp)
                             .focusRequester(focusRequester),
-                        decorationBox = { innerTextField ->
-                            Box(
+                        decorationBox = { inner ->
+                            LinDoInputDecoration(
+                                query.isEmpty(), "搜索话题、标签或用户", searchInputStyle, palette.inkSecondary,
                                 modifier = Modifier.fillMaxWidth(),
-                                contentAlignment = Alignment.CenterStart
-                            ) {
-                                if (query.isEmpty()) {
-                                    Text(
-                                        text = "搜索话题、标签或用户",
-                                        style = searchInputStyle.copy(
-                                            color = palette.inkSecondary,
-                                            fontWeight = FontWeight.Normal
-                                        ),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                innerTextField()
-                            }
+                                innerTextField = inner
+                            )
                         }
                     )
                     if (query.isNotEmpty()) {
@@ -11390,7 +11132,7 @@ private fun UserNotificationsSheet(
             }
         }
     }
-    if (showMarkAllConfirm) LinDoConfirmDialog(title = "全部标为已读？", confirmLabel = "标为已读", busy = markingAll, error = markAllError,
+    if (showMarkAllConfirm) LinDoConfirmDialog(title = "要将通知全部标为已读吗？", confirmLabel = "标为已读", busy = markingAll, error = markAllError,
         onDismiss = { showMarkAllConfirm = false; markAllError = null }, onConfirm = {
             if (!markingAll) {
                 markingAll = true
@@ -11826,7 +11568,7 @@ internal fun UserPrivateMessagesSheet(
     pendingArchive?.let { message ->
         val movingToInbox = tab == 3
         LinDoConfirmDialog(
-            title = if (movingToInbox) "移回收件箱？" else "归档会话？",
+            title = if (movingToInbox) "要把会话移回收件箱吗？" else "要归档这段会话吗？",
             confirmLabel = if (movingToInbox) "移回" else "归档",
             busy = archiving, error = archiveError,
             onDismiss = { pendingArchive = null },
@@ -11856,7 +11598,7 @@ internal fun UserPrivateMessagesSheet(
 /**
  * 官方功能 8：社区用户公开名片抽屉（点击任意帖子楼层头像/昵称即可弹出查看对方等级、简介、统计与发私信）
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 private fun PublicUserCardSheet(
     username: String,
@@ -11879,6 +11621,7 @@ private fun PublicUserCardSheet(
     var loadError by remember(username) { mutableStateOf<String?>(null) }
     var reloadToken by remember(username) { mutableIntStateOf(0) }
     var isLoading by remember(username) { mutableStateOf(true) }
+    var showProfileStats by remember(username) { mutableStateOf(false) }
 
     LaunchedEffect(username, reloadToken) {
         isLoading = true
@@ -11928,13 +11671,11 @@ private fun PublicUserCardSheet(
     }
 
     fun formatReadTime(seconds: Int): String {
-        if (seconds <= 0) return "0m"
         val hours = seconds / 3600
-        val mins = (seconds % 3600) / 60
         return when {
-            hours >= 24 -> "${hours / 24}d ${hours % 24}h"
-            hours > 0 -> "${hours}h"
-            else -> "${mins.coerceAtLeast(1)}m"
+            hours > 0 -> "$hours 小时"
+            seconds > 0 -> "${(seconds / 60).coerceAtLeast(1)} 分钟"
+            else -> "0 分钟"
         }
     }
 
@@ -11945,493 +11686,368 @@ private fun PublicUserCardSheet(
         val p = cardProfile
         LinDoPageTopBar(
             title = "用户主页",
-            subtitle = "@$username",
             onBack = onDismiss,
             trailingContent = {
-                Box(
-                    modifier = Modifier
-                        .height(32.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(palette.tonalPill)
-                        .clickable { onSendPrivateMessage(username) }
-                        .padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "发私信",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.brandGold
-                    )
+                TextButton(onClick = { onSendPrivateMessage(username) }) {
+                    Text("私信", color = palette.inkPrimary)
                 }
             }
         )
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            // 顶部固定头部：头像 + 昵称/等级/头衔
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 20.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                GoogleAccountRingAvatar(
-                    letter = p?.displayName ?: username,
-                    avatarUrl = p?.avatarTemplate,
-                    animatedAvatar = p?.animatedAvatar,
-                    flair = p?.flair,
-                    avatarSize = 60.dp,
-                    strokeWidth = 2.2.dp
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = p?.displayName ?: username,
-                            fontSize = 17.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                        if (p?.moderator == true) {
-                            OfficialBadgeArtwork(
-                                url = OfficialModeratorIcon, description = "版主",
-                                colorFilter = ColorFilter.tint(palette.inkSecondary),
-                                modifier = Modifier.size(13.5.dp)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(3.dp))
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Text(
-                            text = "@$username",
-                            fontSize = 12.5.sp,
-                            color = palette.inkSecondary,
-                            maxLines = 1
-                        )
-                        if (!p?.title.isNullOrBlank()) {
+            item(key = "profile_identity") {
+                val displayName = p?.displayName?.ifBlank { username } ?: username
+                val distinctHandle = !displayName.equals(username, ignoreCase = true)
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    GoogleAccountRingAvatar(
+                        letter = displayName,
+                        avatarUrl = p?.avatarTemplate,
+                        animatedAvatar = p?.animatedAvatar,
+                        flair = p?.flair,
+                        avatarSize = 58.dp,
+                        strokeWidth = 2.2.dp
+                    )
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             Text(
-                                text = "·",
-                                fontSize = 12.sp,
-                                color = palette.inkTertiary
+                                displayName, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
                             )
-                            UserTitleTag(title = p?.title.orEmpty())
+                            if (p?.moderator == true) {
+                                OfficialBadgeArtwork(
+                                    url = OfficialModeratorIcon, description = "版主",
+                                    colorFilter = ColorFilter.tint(palette.inkSecondary), modifier = Modifier.size(13.5.dp)
+                                )
+                            }
                         }
+                        if (distinctHandle) {
+                            Text(
+                                "@$username", fontSize = 12.5.sp, color = palette.inkSecondary,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        p?.title?.takeIf { it.isNotBlank() }?.let { UserTitleTag(title = it) }
                     }
                 }
             }
-
-            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-
-            // 下方全量可滚动内容区：签名/元数据 + 徽章横栏 + 8维社区数据矩阵 + 动态/主帖/回复/徽章分栏列表
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                if (isLoading && cardProfile == null) {
-                    item(key = "loading") {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 36.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoLoadingIndicator(label = "加载中")
-                        }
-                    }
-                } else if (loadError != null && cardProfile == null) {
-                    item(key = "error") {
-                        LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+            if (isLoading && cardProfile == null) {
+                item(key = "loading") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 36.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        LinDoLoadingIndicator(label = "加载中")
                     }
                 }
+            } else if (loadError != null && cardProfile == null) {
+                item(key = "error") {
+                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                }
+            }
 
-                if (p != null) {
-                    // 1. 个人简介、自定义状态与加入/活跃时间等元数据
-                    val hasBioOrStatus = p.bioExcerpt.isNotBlank() || p.statusText.isNotBlank()
-                    val hasMetaTags = p.createdAtText.isNotBlank() || p.lastSeenText.isNotBlank() ||
-                        !p.primaryGroupName.isNullOrBlank() || p.location.isNotBlank() ||
-                        p.websiteName.isNotBlank() || p.solvedCount > 0
+            if (p != null) {
+                // 1. 个人简介、自定义状态与加入/活跃时间等元数据
+                val hasBioOrStatus = p.bioExcerpt.isNotBlank() || p.statusText.isNotBlank()
+                val hasMetaTags = p.createdAtText.isNotBlank() || p.lastSeenText.isNotBlank() ||
+                    !p.primaryGroupName.isNullOrBlank() || p.location.isNotBlank() ||
+                    p.websiteName.isNotBlank() || p.solvedCount > 0
 
-                    if (hasBioOrStatus || hasMetaTags) {
-                        item(key = "bio_and_meta") {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (p.statusText.isNotBlank()) {
-                                    Text(
-                                        text = "状态：${p.statusText}",
-                                        fontSize = 12.2.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = palette.brandGold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                if (p.bioExcerpt.isNotBlank()) {
-                                    Text(
-                                        text = p.bioExcerpt,
-                                        fontSize = 13.sp,
-                                        lineHeight = 19.sp,
-                                        color = palette.inkSecondary,
-                                        maxLines = 4,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                if (hasMetaTags) {
-                                    FlowRow(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        verticalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
-                                        if (p.createdAtText.isNotBlank()) {
-                                            Text(
-                                                text = "加入于 ${p.createdAtText}",
-                                                fontSize = 11.5.sp,
-                                                color = palette.inkTertiary
-                                            )
-                                        }
-                                        if (p.lastSeenText.isNotBlank()) {
-                                            Text(
-                                                text = "近期活跃 ${p.lastSeenText}",
-                                                fontSize = 11.5.sp,
-                                                color = palette.inkTertiary
-                                            )
-                                        }
-                                        if (!p.primaryGroupName.isNullOrBlank()) {
-                                            Text(
-                                                text = "群组 ${p.primaryGroupName}",
-                                                fontSize = 11.5.sp,
-                                                color = palette.inkTertiary
-                                            )
-                                        }
-                                        if (p.location.isNotBlank()) {
-                                            Text(
-                                                text = "地区 ${p.location}",
-                                                fontSize = 11.5.sp,
-                                                color = palette.inkTertiary
-                                            )
-                                        }
-                                        if (p.websiteName.isNotBlank()) {
-                                            Text(
-                                                text = p.websiteName,
-                                                fontSize = 11.5.sp,
-                                                color = palette.inkTertiary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                        if (p.solvedCount > 0) {
-                                            Text(
-                                                text = "已解决 ${p.solvedCount} 个问题",
-                                                fontSize = 11.5.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = palette.brandGold
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 2. 精选徽章横滑条 + 查看全部徽章入口
-                    if (p.badges.isNotEmpty()) {
-                        item(key = "badges_strip") {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                p.badges.forEach { badge ->
-                                    UniversalBadgeChip(
-                                        badge = badge,
-                                        compact = true,
-                                        onClick = { onInspectBadge(it.copy(holderUsername = p.username)) }
-                                    )
-                                }
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(palette.subtleSurface)
-                                        .clickable { onOpenUserBadges(username) }
-                                        .padding(horizontal = 8.dp, vertical = 3.5.dp)
-                                ) {
-                                    Text(
-                                        text = "全部 ${p.badgeCount.coerceAtLeast(p.badges.size)} 枚",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = palette.inkSecondary
-                                    )
-                                    Spacer(modifier = Modifier.width(2.dp))
-                                    Icon(
-                                        imageVector = LinDoIcons.ChevronRight,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(12.dp),
-                                        tint = palette.inkTertiary
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // 3. 完整 8 维社区核心统计矩阵（2行 × 4列 Bento Grid）
-                    item(key = "stats_matrix") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                GoogleBentoMetricTile("${p.daysVisited}", "访问天数", Modifier.weight(1f))
-                                GoogleBentoMetricTile(formatReadTime(p.timeReadSeconds), "阅读时长", Modifier.weight(1f))
-                                GoogleBentoMetricTile(formatCompactNumber(p.topicsEntered), "浏览话题", Modifier.weight(1f))
-                                GoogleBentoMetricTile(formatCompactNumber(p.postsReadCount), "阅读帖子", Modifier.weight(1f))
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                GoogleBentoMetricTile(formatCompactNumber(p.likesReceived), "收到赞", Modifier.weight(1f))
-                                GoogleBentoMetricTile(formatCompactNumber(p.likesGiven), "送出赞", Modifier.weight(1f))
-                                GoogleBentoMetricTile(formatCompactNumber(p.topicCount), "主帖", Modifier.weight(1f))
-                                GoogleBentoMetricTile(formatCompactNumber(p.postCount), "回复", Modifier.weight(1f))
-                            }
-                        }
-                    }
-
-                    // 4. 社区轨迹切换栏（全部动态 / 主帖 / 回复 / 徽章）
-                    item(key = "activity_tabs") {
-                        val tabs = listOf(
-                            "全部动态",
-                            "主帖 (${p.topicCount})",
-                            "回复 (${p.postCount})",
-                            "徽章 (${p.badgeCount.coerceAtLeast(p.badges.size)})"
-                        )
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            tabs.forEachIndexed { idx, label ->
-                                val selected = activeTab == idx
-                                Box(
-                                    modifier = Modifier
-                                        .height(30.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (selected) palette.activeChipBg else palette.subtleSurface)
-                                        .then(
-                                            if (selected) Modifier.border(0.6.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
-                                            else Modifier
-                                        )
-                                        .clickable { activeTab = idx }
-                                        .padding(horizontal = 11.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = label,
-                                        fontSize = 12.sp,
-                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (selected) palette.brandGold else palette.inkSecondary
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // 5. 当前选中分栏的内容列表
-                    if (activeTab == 3) {
-                        val ownedBadges = profileBadges
-                        if (profileBadgeError) {
-                            item(key = "error_badges") { LinDoLoadFailure("徽章加载失败") { retryProfileBadges++ } }
-                        } else if (ownedBadges == null) {
-                            item(key = "loading_badges") { LinDoLoadingIndicator(label = "加载徽章") }
-                        } else if (ownedBadges.isEmpty()) {
-                            item(key = "empty_badges") {
+                if (hasBioOrStatus || hasMetaTags) {
+                    item(key = "bio_and_meta") {
+                        Column(Modifier.padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            if (p.statusText.isNotBlank()) {
                                 Text(
-                                    text = "暂无公开展示的徽章",
-                                    fontSize = 12.5.sp,
-                                    color = palette.inkTertiary,
-                                    modifier = Modifier.padding(vertical = 12.dp)
+                                    text = p.statusText,
+                                    fontSize = 12.2.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
-                        } else {
-                            items(ownedBadges, key = { "badge_${it.id}" }, contentType = { "badge" }) { badge ->
-                                val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType)
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(11.dp))
-                                        .background(palette.canvas)
-                                        .clickable { onInspectBadge(badge) }
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                            if (p.bioExcerpt.isNotBlank()) {
+                                Text(
+                                    text = p.bioExcerpt,
+                                    fontSize = 13.sp,
+                                    lineHeight = 19.sp,
+                                    color = palette.inkSecondary,
+                                    maxLines = 4,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (hasMetaTags) {
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
-                                    PostGrantedBadgeIcon(badge, size = 24.dp)
-
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            Text(
-                                                text = badge.name,
-                                                fontSize = 13.5.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = palette.inkPrimary
-                                            )
-                                            if (badge.count > 1) {
-                                                Text(
-                                                    text = "×${badge.count}",
-                                                    fontSize = 11.2.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = tierColor
-                                                )
-                                            }
-                                        }
-                                        if (badge.description.isNotBlank()) {
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = badge.description,
-                                                fontSize = 12.sp,
-                                                lineHeight = 17.sp,
-                                                color = palette.inkSecondary,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                    }
-                                    if (badge.grantedAtText.isNotBlank()) {
-                                        Spacer(modifier = Modifier.width(8.dp))
+                                    if (p.createdAtText.isNotBlank()) {
                                         Text(
-                                            text = badge.grantedAtText,
-                                            fontSize = 11.sp,
+                                            text = "加入于 ${p.createdAtText}",
+                                            fontSize = 11.5.sp,
                                             color = palette.inkTertiary
                                         )
                                     }
+                                    if (p.lastSeenText.isNotBlank()) {
+                                        Text(
+                                            text = "近期活跃 ${p.lastSeenText}",
+                                            fontSize = 11.5.sp,
+                                            color = palette.inkTertiary
+                                        )
+                                    }
+                                    if (!p.primaryGroupName.isNullOrBlank()) {
+                                        Text(
+                                            text = "群组 ${p.primaryGroupName}",
+                                            fontSize = 11.5.sp,
+                                            color = palette.inkTertiary
+                                        )
+                                    }
+                                    if (p.location.isNotBlank()) {
+                                        Text(
+                                            text = "地区 ${p.location}",
+                                            fontSize = 11.5.sp,
+                                            color = palette.inkTertiary
+                                        )
+                                    }
+                                    if (p.websiteName.isNotBlank()) {
+                                        Text(
+                                            text = p.websiteName,
+                                            fontSize = 11.5.sp,
+                                            color = palette.inkTertiary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (p.solvedCount > 0) {
+                                        Text(
+                                            text = "已解决 ${p.solvedCount} 个问题",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = palette.brandGold
+                                        )
+                                    }
                                 }
                             }
-                            item(key = "open_all_badges_btn") {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(38.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(palette.subtleSurface)
-                                        .clickable { onOpenUserBadges(username) },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "打开完整社区徽章墙 (${p.badgeCount.coerceAtLeast(p.badges.size)} 枚)",
-                                        fontSize = 12.5.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = palette.brandGold
-                                    )
+                        }
+                    }
+                }
+
+                if (p.badges.isNotEmpty()) {
+                    item(key = "badges_strip") {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            p.badges.forEach { badge ->
+                                IconButton(onClick = { onInspectBadge(badge) }) {
+                                    PostGrantedBadgeIcon(badge, size = 23.dp)
                                 }
                             }
+                        }
+                    }
+                }
+
+                item(key = "profile_stats") {
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                        ProfileMetric(formatCompactNumber(p.likesReceived), "收到赞", Modifier.weight(1f))
+                        ProfileMetric("${p.daysVisited}", "访问天数", Modifier.weight(1f))
+                        ProfileMetric(formatReadTime(p.timeReadSeconds), "阅读时长", Modifier.weight(1f))
+                    }
+                    TextButton(onClick = { showProfileStats = !showProfileStats }) {
+                        Text(if (showProfileStats) "收起社区数据" else "社区数据", color = palette.inkSecondary)
+                        Icon(
+                            if (showProfileStats) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
+                            null, Modifier.size(15.dp), tint = palette.inkSecondary
+                        )
+                    }
+                    if (showProfileStats) {
+                        Column(Modifier.padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Row(Modifier.fillMaxWidth()) {
+                                ProfileMetric(formatCompactNumber(p.topicsEntered), "浏览话题", Modifier.weight(1f))
+                                ProfileMetric(formatCompactNumber(p.postsReadCount), "阅读帖子", Modifier.weight(1f))
+                                ProfileMetric(formatCompactNumber(p.likesGiven), "送出赞", Modifier.weight(1f))
+                            }
+                            Row(Modifier.fillMaxWidth()) {
+                                ProfileMetric(formatCompactNumber(p.topicCount), "发布主帖", Modifier.weight(1f))
+                                ProfileMetric(formatCompactNumber(p.postCount), "发表回复", Modifier.weight(1f))
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+
+                stickyHeader(key = "activity_tabs") {
+                    Column(Modifier.fillMaxWidth().background(palette.cardSurface)) {
+                        LinDoSectionTabs(
+                            listOf("动态", "主帖 ${p.topicCount}", "回复 ${p.postCount}",
+                                "徽章 ${p.badgeCount.coerceAtLeast(p.badges.size)}"),
+                            activeTab, fontSize = 13.sp
+                        ) { activeTab = it }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                    }
+                }
+
+                // 5. 当前选中分栏的内容列表
+                if (activeTab == 3) {
+                    val ownedBadges = profileBadges
+                    if (profileBadgeError) {
+                        item(key = "error_badges") { LinDoLoadFailure("徽章加载失败") { retryProfileBadges++ } }
+                    } else if (ownedBadges == null) {
+                        item(key = "loading_badges") { LinDoLoadingIndicator(label = "加载徽章") }
+                    } else if (ownedBadges.isEmpty()) {
+                        item(key = "empty_badges") {
+                            Text(
+                                text = "暂无公开展示的徽章",
+                                fontSize = 12.5.sp,
+                                color = palette.inkTertiary,
+                                modifier = Modifier.padding(vertical = 12.dp)
+                            )
                         }
                     } else {
-                        val activeList = when (activeTab) {
-                            1 -> topicActions ?: allActions.filter { it.actionType == 4 }
-                            2 -> replyActions ?: allActions.filter { it.actionType == 5 }
-                            else -> allActions
-                        }
-                        if (tabLoading && activeList.isEmpty()) {
-                            item(key = "tab_loading") {
-                                LinDoFeedbackRow("正在加载动态…", LinDoMascotState.Loading)
-                            }
-                        } else if (activeList.isEmpty()) {
-                            item(key = "empty_actions") {
-                                Text(
-                                    text = "暂无相关公开社区动态",
-                                    fontSize = 12.5.sp,
-                                    color = palette.inkTertiary,
-                                    modifier = Modifier.padding(vertical = 12.dp)
-                                )
-                            }
-                        } else {
-                            itemsIndexed(activeList, key = { idx, act -> "act_${act.id}_${act.actionType}_$idx" }) { _, act ->
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(11.dp))
-                                        .background(palette.canvas)
-                                        .clickable { onSelectTopicId(act.topicId, act.title, act.postNumber) }
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
+                        items(ownedBadges, key = { "badge_${it.id}" }, contentType = { "badge" }) { badge ->
+                            val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onInspectBadge(badge) }
+                                    .padding(vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                PostGrantedBadgeIcon(badge, size = 24.dp)
+
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
                                     Row(
-                                        modifier = Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Text(
-                                            text = if (act.postNumber > 1 && act.actionType == 5) "${act.actionLabel} · ${act.postNumber} 楼" else act.actionLabel,
-                                            fontSize = 11.2.sp,
+                                            text = badge.name,
+                                            fontSize = 13.5.sp,
                                             fontWeight = FontWeight.SemiBold,
-                                            color = if (act.actionType == 4) palette.brandGold else palette.inkSecondary
+                                            color = palette.inkPrimary
                                         )
-                                        if (act.categoryName.isNotBlank()) {
+                                        if (badge.count > 1) {
                                             Text(
-                                                text = "· ${act.categoryName}",
+                                                text = "×${badge.count}",
                                                 fontSize = 11.2.sp,
-                                                color = palette.inkTertiary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f, fill = false)
+                                                fontWeight = FontWeight.Bold,
+                                                color = tierColor
                                             )
                                         }
-                                        Spacer(modifier = Modifier.weight(1f))
-                                        Text(
-                                            text = act.createdAtText,
-                                            fontSize = 11.sp,
-                                            color = palette.inkTertiary
-                                        )
                                     }
-                                    Text(
-                                        text = act.title,
-                                        fontSize = 13.8.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = palette.inkPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (act.excerpt.isNotBlank()) {
+                                    if (badge.description.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            text = act.excerpt,
-                                            fontSize = 12.5.sp,
-                                            lineHeight = 18.sp,
+                                            text = badge.description,
+                                            fontSize = 12.sp,
+                                            lineHeight = 17.sp,
                                             color = palette.inkSecondary,
                                             maxLines = 2,
                                             overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                 }
+                                if (badge.grantedAtText.isNotBlank()) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = badge.grantedAtText,
+                                        fontSize = 11.sp,
+                                        color = palette.inkTertiary
+                                    )
+                                }
                             }
+                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        }
+                        item(key = "open_all_badges_btn") {
+                            TextButton(onClick = { onOpenUserBadges(username) }) {
+                                Text("查看徽章墙", color = palette.inkPrimary)
+                            }
+                        }
+                    }
+                } else {
+                    val activeList = when (activeTab) {
+                        1 -> topicActions ?: allActions.filter { it.actionType == 4 }
+                        2 -> replyActions ?: allActions.filter { it.actionType == 5 }
+                        else -> allActions
+                    }
+                    if (tabLoading && activeList.isEmpty()) {
+                        item(key = "tab_loading") {
+                            LinDoFeedbackRow("正在加载动态…", LinDoMascotState.Loading)
+                        }
+                    } else if (activeList.isEmpty()) {
+                        item(key = "empty_actions") {
+                            Text(
+                                text = "暂无相关公开社区动态",
+                                fontSize = 12.5.sp,
+                                color = palette.inkTertiary,
+                                modifier = Modifier.padding(vertical = 12.dp)
+                            )
+                        }
+                    } else {
+                        itemsIndexed(activeList, key = { idx, act -> "act_${act.id}_${act.actionType}_$idx" }) { _, act ->
+                            ProfileActivityRow(act) { onSelectTopicId(act.topicId, act.title, act.postNumber) }
                         }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun ProfileMetric(value: String, label: String, modifier: Modifier) {
+    val palette = LocalPalette.current
+    Column(modifier.padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(value, color = palette.inkPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text(label, color = palette.inkSecondary, fontSize = 11.5.sp)
+    }
+}
+
+private val profileImagePlaceholder = Regex("\\[(?:IMG|PXL|DSC|Screenshot)[-_ ][^\\]\\r\\n]+\\]", RegexOption.IGNORE_CASE)
+
+@Composable
+private fun ProfileActivityRow(activity: UserActivityItem, onClick: () -> Unit) {
+    val palette = LocalPalette.current
+    val excerpt = remember(activity.excerpt) { activity.excerpt.replace(profileImagePlaceholder, "图片").trim() }
+    val meta = listOfNotNull(
+        activity.actionLabel.takeIf { it.isNotBlank() },
+        activity.categoryName.takeIf { it.isNotBlank() }
+    ).joinToString(" · ")
+    Column(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            activity.title, color = palette.inkPrimary, fontSize = 15.sp, lineHeight = 21.sp,
+            fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis
+        )
+        if (excerpt.isNotBlank() && excerpt != activity.title) {
+            Text(
+                excerpt, color = palette.inkSecondary, fontSize = 12.5.sp, lineHeight = 18.sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                meta, color = palette.inkSecondary, fontSize = 11.5.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+            )
+            Text(activity.createdAtText, color = palette.inkSecondary, fontSize = 11.5.sp, maxLines = 1)
+        }
+    }
+    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 }
 
 /**
