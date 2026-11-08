@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -12,6 +13,9 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -81,12 +85,30 @@ internal fun TopicFloorNavigator(
             }
 
             if (lastFloor > 1) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    TextButton(onClick = { onJump(1, false) }) {
-                        Text("回到首楼", color = palette.activeChipText)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { onJump(1, false) }) {
+                        Icon(Icons.Default.ArrowUpward, "回到首楼", Modifier.size(20.dp), tint = palette.activeChipText)
                     }
-                    TextButton(onClick = { onJump(lastFloor, false) }) {
-                        Text("直达末楼", color = palette.activeChipText)
+                    TextButton(
+                        modifier = Modifier.weight(1f),
+                        onClick = { enteringFloor = !enteringFloor }
+                    ) {
+                        Text(
+                            if (enteringFloor) "返回进度条" else "第 $target 楼",
+                            color = palette.inkPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold
+                        )
+                        if (!enteringFloor) {
+                            Icon(
+                                LinDoIcons.Edit, "输入楼号",
+                                Modifier.padding(start = 6.dp).size(14.dp), tint = palette.inkSecondary
+                            )
+                        }
+                    }
+                    IconButton(onClick = { onJump(lastFloor, false) }) {
+                        Icon(Icons.Default.ArrowDownward, "直达末楼", Modifier.size(20.dp), tint = palette.activeChipText)
                     }
                 }
                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -94,28 +116,23 @@ internal fun TopicFloorNavigator(
                 if (enteringFloor) {
                     ExactFloorInput(target, lastFloor, onJump = { onJump(it, true) })
                 } else {
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "第 $target 楼", Modifier.weight(1f),
-                            color = palette.inkPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold
-                        )
-                        TextButton(onClick = { enteringFloor = true }) {
-                            Text("输入楼号", color = palette.inkSecondary)
-                        }
-                    }
+                    val sliderColors = SliderDefaults.colors(
+                        thumbColor = palette.brandGold,
+                        activeTrackColor = palette.brandGold,
+                        inactiveTrackColor = palette.inkTertiary.copy(alpha = 0.35f)
+                    )
                     Slider(
                         value = target.toFloat(),
                         onValueChange = { targetFloor = it.roundToInt() },
                         valueRange = 1f..lastFloor.toFloat(),
                         modifier = Modifier.fillMaxWidth().semantics { contentDescription = "目标楼层" },
-                        colors = SliderDefaults.colors(
-                            thumbColor = palette.brandGold,
-                            activeTrackColor = palette.brandGold,
-                            inactiveTrackColor = palette.hairline
-                        )
+                        colors = sliderColors,
+                        track = {
+                            SliderDefaults.Track(
+                                sliderState = it, modifier = Modifier.height(4.dp),
+                                colors = sliderColors, drawStopIndicator = null
+                            )
+                        }
                     )
                     TextButton(
                         onClick = { onJump(target, true) },

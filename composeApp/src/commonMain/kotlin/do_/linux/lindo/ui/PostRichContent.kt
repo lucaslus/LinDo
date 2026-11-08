@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.ui.unit.em
@@ -32,12 +33,12 @@ import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 
 @Composable
 internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
-    onOpenLink: (String) -> Unit, heading: Boolean = false) {
+    onOpenLink: (String) -> Unit, heading: Boolean = false, onSelectionChange: ((String?) -> Unit)? = null) {
     val plain = rich.runs.singleOrNull()
     if (plain != null && plain.href == null && plain.imageUrl == null && !plain.bold &&
         !plain.italic && !plain.code && !plain.strike && !plain.underline
     ) {
-        SelectionContainer {
+        SelectablePostText(plain.text, onSelectionChange) {
             Text(
                 plain.text, color = palette.inkPrimary,
                 fontSize = if (heading) 17.sp else 15.sp, lineHeight = 24.sp,
@@ -80,12 +81,12 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
             val width = if (failed && fallbackGlyph == null) run.text.length.coerceIn(2, 10).toFloat() else baseEm
             "emoji-$index" to InlineTextContent(Placeholder(width.em, baseEm.em, PlaceholderVerticalAlign.TextCenter)) {
                 if (failed) {
-                    Text(
+                    DisableSelection { Text(
                         text = fallbackGlyph ?: run.text,
                         fontSize = if (run.largeEmoji) 20.sp else 14.5.sp,
                         maxLines = 1,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                    )
+                    ) }
                 } else {
                     AsyncImage(
                         model = url,
@@ -98,7 +99,7 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
             }
         } }.toMap()
     }
-    SelectionContainer {
+    SelectablePostText(annotated.text, onSelectionChange) {
         Text(annotated, inlineContent = inlineImages, color = palette.inkPrimary, fontSize = if (heading) 17.sp else 15.sp, lineHeight = 24.sp)
     }
     unavailableMailLink?.let { mail ->
@@ -108,33 +109,70 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
     }
 }
 
+// Compose exposes selection offsets through its controlled container on the pinned runtime.
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
+@Composable
+private fun SelectablePostText(
+    text: String,
+    onSelectionChange: ((String?) -> Unit)?,
+    content: @Composable () -> Unit
+) {
+    if (onSelectionChange == null) {
+        SelectionContainer(content = content)
+        return
+    }
+    var selection by remember(text) {
+        mutableStateOf<androidx.compose.foundation.text.selection.Selection?>(null)
+    }
+    val latestCallback by rememberUpdatedState(onSelectionChange)
+    DisposableEffect(text) {
+        onDispose { if (selection != null) latestCallback(null) }
+    }
+    SelectionContainer(
+        selection = selection,
+        onSelectionChange = { next ->
+            val hadSelection = selection != null
+            selection = next
+            if (next != null) {
+                val start = minOf(next.start.offset, next.end.offset).coerceIn(0, text.length)
+                val end = maxOf(next.start.offset, next.end.offset).coerceIn(start, text.length)
+                latestCallback(text.substring(start, end).takeIf { it.isNotBlank() })
+            } else if (hadSelection) {
+                latestCallback(null)
+            }
+        },
+        children = content
+    )
+}
+
 @Composable
 internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePalette,
-    onOpenLink: (String) -> Unit, originalUrl: String? = null, postId: Int? = null) {
+    onOpenLink: (String) -> Unit, originalUrl: String? = null, postId: Int? = null,
+    onSelectionChange: ((String?) -> Unit)? = null) {
     val clipboard = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
         for (node in nodes) when (node) {
-            is PostBlockNode.Paragraph -> RichPostText(node.rich, palette, onOpenLink)
-            is PostBlockNode.Heading -> RichPostText(node.rich, palette, onOpenLink, heading = true)
+            is PostBlockNode.Paragraph -> RichPostText(node.rich, palette, onOpenLink, onSelectionChange = onSelectionChange)
+            is PostBlockNode.Heading -> RichPostText(node.rich, palette, onOpenLink, heading = true, onSelectionChange = onSelectionChange)
             is PostBlockNode.Spoiler -> {
                 var revealed by remember(node) { mutableStateOf(false) }
                 Column {
                     TextButton(onClick = { revealed = !revealed }) { Text(if (revealed) "收起隐藏内容" else "显示隐藏内容", color = palette.inkSecondary) }
-                    if (revealed) PostRichContent(node.children, palette, onOpenLink, originalUrl, postId)
+                    if (revealed) PostRichContent(node.children, palette, onOpenLink, originalUrl, postId, onSelectionChange)
                 }
             }
             is PostBlockNode.Poll -> NativePostPoll(node, palette, postId, originalUrl, onOpenLink)
 
             is PostBlockNode.QuoteBlock -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp)).padding(12.dp)) {
                 node.username?.let { Text("@$it", color = palette.inkSecondary, fontSize = 12.sp) }
-                PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.quotedText)) }, palette, onOpenLink, originalUrl, postId)
+                PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.quotedText)) }, palette, onOpenLink, originalUrl, postId, onSelectionChange)
             }
             is PostBlockNode.CodeBlock -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp))) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp)) {
                     Text(node.language.ifBlank { "text" }, Modifier.weight(1f).padding(top = 14.dp), color = palette.inkSecondary, fontSize = 12.sp)
                     TextButton(onClick = { clipboard.setText(AnnotatedString(node.code)) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("复制代码") }
                 }
-                SelectionContainer {
+                SelectablePostText(node.code, onSelectionChange) {
                     Text(node.code, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 20.sp,
                         color = palette.inkPrimary, modifier = Modifier.horizontalScroll(rememberScrollState()).padding(12.dp))
                 }
@@ -143,7 +181,7 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
                 node.items.forEachIndexed { index, text ->
                     Row {
                         Text(if (node.ordered) "${node.start + index}. " else "• ", color = palette.inkPrimary, modifier = Modifier.widthIn(min = 24.dp))
-                        Box(Modifier.weight(1f)) { PostRichContent(node.itemBlocks.getOrNull(index) ?: listOf(PostBlockNode.Paragraph(text)), palette, onOpenLink, originalUrl, postId) }
+                        Box(Modifier.weight(1f)) { PostRichContent(node.itemBlocks.getOrNull(index) ?: listOf(PostBlockNode.Paragraph(text)), palette, onOpenLink, originalUrl, postId, onSelectionChange) }
                     }
                 }
             }
@@ -153,7 +191,7 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
                     TextButton(onClick = { expanded = !expanded }, modifier = Modifier.heightIn(min = 48.dp)) {
                         Text("${if (expanded) "▾" else "▸"} ${node.title}", color = palette.inkPrimary)
                     }
-                    if (expanded) PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.innerText)) }, palette, onOpenLink, originalUrl, postId)
+                    if (expanded) PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.innerText)) }, palette, onOpenLink, originalUrl, postId, onSelectionChange)
                 }
             }
             is PostBlockNode.ImageGallery -> node.urls.forEachIndexed { index, url ->
@@ -168,7 +206,7 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
                 node.rows.forEachIndexed { index, cells -> Row {
                     cells.forEach { cell -> Column(Modifier.width(160.dp).border(.5.dp, palette.hairline)
                         .background(if (index in node.headerRows) palette.subtleSurface else palette.cardSurface).padding(10.dp)) {
-                        PostRichContent(cell, palette, onOpenLink, originalUrl, postId)
+                        PostRichContent(cell, palette, onOpenLink, originalUrl, postId, onSelectionChange)
                     } }
                 } }
             }
@@ -237,7 +275,7 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    PostRichContent(node.children, palette, onOpenLink, originalUrl, postId)
+                    PostRichContent(node.children, palette, onOpenLink, originalUrl, postId, onSelectionChange)
                 }
             }
             is PostBlockNode.Unsupported -> {

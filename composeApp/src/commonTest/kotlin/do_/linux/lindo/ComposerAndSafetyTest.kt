@@ -173,6 +173,49 @@ class ComposerAndSafetyTest {
         }
     }
 
+    @Test fun postingRecognizesNestedAndQueuedResponsesWithoutRetrying() = runTest {
+        var calls = 0
+        withTransport({ url, method, form ->
+            assertTrue(url.endsWith("/posts.json"))
+            assertEquals("POST", method)
+            assertEquals("true", form?.get("nested_post"))
+            when (++calls) {
+                1 -> {
+                    assertEquals("topic_11", form?.get("draft_key"))
+                    assertEquals("3", form?.get("reply_to_post_number"))
+                    200 to """{"success":true,"action":"create_post","post":{"id":77,"topic_id":11,"post_number":4,"cooked":"<p>reply</p>"}}"""
+                }
+                2 -> 200 to """{"id":78,"topic_id":11,"post_number":5}"""
+                3 -> 200 to """{"success":true,"action":"enqueued"}"""
+                else -> null
+            }
+        }) {
+            val nested = assertIs<PostSubmission.Published<PostItemModel>>(LinuxDoRepository.createPost(11, "reply", 3, "topic_11"))
+            assertEquals(4, nested.value.postNumber)
+            val legacy = assertIs<PostSubmission.Published<PostItemModel>>(LinuxDoRepository.createPost(11, "legacy"))
+            assertEquals(78, legacy.value.id)
+            assertEquals(PostSubmission.PendingReview, LinuxDoRepository.createTopic("A topic", "text", 4))
+            assertFailsWith<PostSubmissionUnconfirmed> { LinuxDoRepository.createPost(11, "uncertain") }
+            assertEquals(4, calls)
+        }
+    }
+
+    @Test fun unavailableTopicIsDistinctFromAnInterruptedRequest() = runTest {
+        withTransport({ _, _, _ -> 410 to """{"errors":["not found"]}""" }) {
+            assertTrue(LinuxDoRepository.fetchTopicDetail(42).unavailable)
+        }
+        withTransport({ _, _, _ -> null }) {
+            assertFalse(LinuxDoRepository.fetchTopicDetail(42).unavailable)
+        }
+    }
+
+    @Test fun replyPreviewUsesImageLabelAndQuotesUseOnlySelectedText() {
+        val html = """<div class="lightbox-wrapper"><a class="lightbox"><img src="test.png"><div class="meta">image541×426 27.6 KB</div></a></div><p>正文</p>"""
+        assertEquals("图片 正文", postPreviewText(html))
+        assertEquals("图片", postPreviewText("<p>[IMG_3312]</p>"))
+        assertEquals("[quote=\"author, post:3, topic:42\"]\n选中文字\n[/quote]\n\n", postQuoteMarkup("author", 3, 42, " 选中文字 "))
+    }
+
     @Test fun formArraysDoNotTurnIntoRailsHashesOrBreakTimingKeys() {
         val pairs = formEntries(mapOf("options[0]" to "a", "options[1]" to "b", "tags[0]" to "tag", "timings[42]" to "1000"))
         assertEquals(listOf("options[]", "options[]", "tags[]", "timings[42]"), pairs.map { it.first })

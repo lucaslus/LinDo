@@ -347,7 +347,8 @@ data class TopicDetailModel(
     val streamIds: List<Int> = emptyList(),
     val loadError: String? = null,
     val originalPosterUsername: String? = null,
-    val highestPostNumber: Int? = null
+    val highestPostNumber: Int? = null,
+    val unavailable: Boolean = false
 )
 
 /**

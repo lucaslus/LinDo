@@ -5,6 +5,13 @@ import java.io.IOException
 
 class ApiMutationException(message: String) : IOException(message)
 
+internal sealed interface PostSubmission<out T> {
+    data class Published<T>(val value: T) : PostSubmission<T>
+    data object PendingReview : PostSubmission<Nothing>
+}
+
+internal class PostSubmissionUnconfirmed : IOException("发布结果暂未确认。草稿已保留，请核对后再试。")
+
 internal fun requireMutationSuccess(response: Pair<Int, String>?) {
     if (response != null && response.first in 200..299 && response.second.isBlank()) return
     requireMutationObject(response)

@@ -146,6 +146,9 @@ internal fun ComposerSheet(
     var uploading by remember(key) { mutableStateOf(false) }
     var draftSyncFailed by remember(key) { mutableStateOf(false) }
     var submitError by remember(key) { mutableStateOf<String?>(null) }
+    var pendingReview by remember(key) { mutableStateOf(false) }
+    var unconfirmedDraft by remember(key) { mutableStateOf<ComposerDraft?>(null) }
+    var confirmResubmit by remember(key) { mutableStateOf(false) }
     var showExit by remember(key) { mutableStateOf(false) }
     var showDiscard by remember(key) { mutableStateOf(false) }
     var discardError by remember(key) { mutableStateOf<String?>(null) }
@@ -166,7 +169,7 @@ internal fun ComposerSheet(
     var showCategoryPicker by remember(key) { mutableStateOf(false) }
     var showTagPicker by remember(key) { mutableStateOf(false) }
 
-    val busy = submitting || uploading
+    val busy = submitting || uploading || pendingReview
     val isUntouchedTemplate = action == ComposerAction.NEW_TOPIC &&
         appliedTemplate != null &&
         draft.raw.trim() == appliedTemplate!!.trim() &&
@@ -220,9 +223,14 @@ internal fun ComposerSheet(
             val local = LocalComposerDrafts.get(owner, key)
             draft = (local ?: seed).let { base ->
                 if (action == ComposerAction.REPLY) {
-                    val mergedRaw = if (initialRaw.isNotBlank() && !base.raw.contains(initialRaw)) {
-                        (base.raw + "\n\n" + initialRaw).trim('\n')
-                    } else base.raw
+                    val quote = initialRaw.trimEnd()
+                    val mergedRaw = when {
+                        quote.isBlank() -> base.raw
+                        base.raw.trimEnd().endsWith(quote) -> base.raw.trimEnd() + "\n\n"
+                        quote in base.raw -> base.raw
+                        base.raw.isBlank() -> initialRaw
+                        else -> base.raw.trimEnd('\n') + "\n\n" + initialRaw
+                    }
                     val targetNum = if (initialDraft != null) base.replyToPostNumber else replyToPostNumber
                     val targetUser = if (initialDraft != null) base.replyToUsername else replyToUsername
                     base.copy(raw = mergedRaw, replyToPostNumber = targetNum, replyToUsername = targetUser)
@@ -246,14 +254,16 @@ internal fun ComposerSheet(
         catch (_: Exception) { draftSyncFailed = true }
     }
 
-    LaunchedEffect(draft.categoryId, draft.tags, tagQuery, tagRetry, prepared, showTagPicker) {
-        if (!prepared || !showTagPicker || action != ComposerAction.NEW_TOPIC) return@LaunchedEffect
+    LaunchedEffect(draft.categoryId, draft.tags, tagQuery, tagRetry, prepared) {
+        if (!prepared || action != ComposerAction.NEW_TOPIC) return@LaunchedEffect
         tagsLoading = true
         tagsError = null
         try {
             if (tagQuery.isNotBlank()) delay(300)
             val selected = draft.tags.associateWith { tagIds[it] }
-            tagChoices = LinuxDoRepository.fetchCategoryAllowedTags(draft.categoryId ?: initialCategoryId, tagQuery, selected)
+            tagChoices = kotlinx.coroutines.withTimeoutOrNull(6_500L) {
+                LinuxDoRepository.fetchCategoryAllowedTags(draft.categoryId ?: initialCategoryId, tagQuery, selected)
+            } ?: throw ApiMutationException("标签暂时无法加载")
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) { tagsError = error.message ?: "标签加载失败" }
         finally { tagsLoading = false }
@@ -285,8 +295,15 @@ internal fun ComposerSheet(
     val focusBodyInitially = remember(prepared) { action != ComposerAction.NEW_TOPIC || draft.title.isNotBlank() }
     val canSubmit = prepared && !busy && titleValidation == null && bodyValidation == null
 
-    fun submit() {
+    fun submit(allowResubmit: Boolean = false) {
         if (!canSubmit || submitting) return
+        val previous = unconfirmedDraft
+        if (!allowResubmit && previous != null && previous.raw == draft.raw && previous.title == draft.title &&
+            previous.categoryId == draft.categoryId && previous.tags == draft.tags
+        ) {
+            confirmResubmit = true
+            return
+        }
         submitting = true
         submitError = null
         val snapshot = draft
@@ -294,17 +311,39 @@ internal fun ComposerSheet(
             try {
                 val result = session?.publish {
                     when (action) {
-                        ComposerAction.NEW_TOPIC -> LinuxDoRepository.createTopic(snapshot.title, snapshot.raw, snapshot.categoryId ?: initialCategoryId, snapshot.tags)
-                            ?.let { ComposerPublished(topicId = it, title = snapshot.title.trim()) }
-                        ComposerAction.REPLY -> LinuxDoRepository.createPost(snapshot.topicId ?: throw ApiMutationException("话题信息不完整，请重新打开"), snapshot.raw, snapshot.replyToPostNumber)
-                            ?.let { ComposerPublished(post = it.copy(raw = snapshot.raw, topicId = snapshot.topicId ?: 0)) }
-                        ComposerAction.EDIT -> LinuxDoRepository.updatePost(snapshot.postId ?: throw ApiMutationException("帖子信息不完整，请重新打开"), snapshot.raw)
-                            ?.let { ComposerPublished(post = it.copy(raw = snapshot.raw, topicId = snapshot.topicId ?: 0)) }
+                        ComposerAction.NEW_TOPIC -> when (val submission = LinuxDoRepository.createTopic(
+                            snapshot.title, snapshot.raw, snapshot.categoryId ?: initialCategoryId, snapshot.tags, snapshot.key
+                        )) {
+                            is PostSubmission.Published -> PostSubmission.Published(
+                                ComposerPublished(topicId = submission.value, title = snapshot.title.trim())
+                            )
+                            PostSubmission.PendingReview -> PostSubmission.PendingReview
+                        }
+                        ComposerAction.REPLY -> when (val submission = LinuxDoRepository.createPost(
+                            snapshot.topicId ?: throw ApiMutationException("话题信息不完整，请重新打开"),
+                            snapshot.raw, snapshot.replyToPostNumber, snapshot.key
+                        )) {
+                            is PostSubmission.Published -> PostSubmission.Published(
+                                ComposerPublished(post = submission.value.copy(raw = snapshot.raw))
+                            )
+                            PostSubmission.PendingReview -> PostSubmission.PendingReview
+                        }
+                        ComposerAction.EDIT -> LinuxDoRepository.updatePost(
+                            snapshot.postId ?: throw ApiMutationException("帖子信息不完整，请重新打开"), snapshot.raw
+                        )?.let { PostSubmission.Published(ComposerPublished(post = it.copy(raw = snapshot.raw, topicId = snapshot.topicId ?: 0))) }
+                            ?: throw PostSubmissionUnconfirmed()
                     }
                 }
-                if (result != null) onPublished(result) else submitError = "未能确认提交结果，内容已保留，请稍后核对"
+                when (result) {
+                    is PostSubmission.Published -> onPublished(result.value)
+                    PostSubmission.PendingReview -> { keyboard?.hide(); pendingReview = true }
+                    null -> throw PostSubmissionUnconfirmed()
+                }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { submitError = error.message ?: "提交失败，内容已保留，请重试" }
+            catch (error: Exception) {
+                if (error is PostSubmissionUnconfirmed) unconfirmedDraft = snapshot
+                submitError = error.message ?: "提交失败，内容已保留"
+            }
             finally { submitting = false }
         }
     }
@@ -520,6 +559,7 @@ internal fun ComposerSheet(
                                         .heightIn(min = 48.dp)
                                         .clickable(enabled = !busy) {
                                             showTagPicker = !showTagPicker
+                                            if (showTagPicker && tagsError != null) tagRetry++
                                             if (showTagPicker) showCategoryPicker = false
                                         }
                                         .padding(horizontal = 5.dp),
@@ -641,6 +681,20 @@ internal fun ComposerSheet(
         }
     }
 
+    if (pendingReview) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { LinDoDialogTitle("已提交审核") },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+            containerColor = palette.cardSurface
+        )
+    }
+    if (confirmResubmit) LinDoConfirmDialog(
+        title = "已核对发布结果，要再次提交吗？",
+        confirmLabel = "再次提交",
+        onDismiss = { confirmResubmit = false },
+        onConfirm = { confirmResubmit = false; submit(allowResubmit = true) }
+    )
     if (showExit) LinDoConfirmDialog(
         title = "要退出编辑吗？",
         confirmLabel = "保存并退出",

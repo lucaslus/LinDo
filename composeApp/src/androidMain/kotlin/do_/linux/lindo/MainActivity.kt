@@ -71,12 +71,8 @@ import androidx.compose.ui.zIndex
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.LinuxDoRepository
-import do_.linux.lindo.core.network.LocalDirectConnectTunnel
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
-import androidx.webkit.ProxyConfig
-import androidx.webkit.ProxyController
-import androidx.webkit.WebViewFeature
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.LinDoReadRegressionPreview
@@ -122,18 +118,6 @@ private fun releaseNativeWebView(view: WebView, rendererGone: Boolean = false) {
 
 class MainActivity : ComponentActivity() {
     companion object {
-        private const val LOCAL_ECH_HTTP_PORT = 28080
-        private const val LOCAL_ECH_HTTPS_PORT = 28443
-        // The bundled daemon uses this exact marker to decide whether to replace its TOML.
-        private const val ECH_CONFIG_VERSION_MARKER = "99643bfd6837"
-        private const val ECH_DNS_BRIDGE_VERSION = "ech-dns-ttl-v2"
-
-        @Volatile
-        private var echDaemonStarted = false
-
-        @Volatile
-        private var echMonitorThreadStarted = false
-
         @Volatile
         private var activeInstance: MainActivity? = null
     }
@@ -151,6 +135,7 @@ class MainActivity : ComponentActivity() {
     private var apiWebView: WebView? = null
     private class ApiWebDocument(val view: WebView) {
         val ready = CompletableDeferred<Boolean>()
+        val originReady = CompletableDeferred<Boolean>()
         var committed = false
         var failed = false
         var challenged = false
@@ -298,8 +283,7 @@ class MainActivity : ComponentActivity() {
         do_.linux.lindo.core.compose.LocalComposerDrafts.restore(prefs.getString("composer_drafts", null))
         do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist = { encoded -> prefs.edit().putString("composer_drafts", encoded).apply() }
 
-        // 2. 启动进程内免梯直连回环隧道 (Clean Anycast DoH + RFC 8446 TLS Record SNI 分片) 并挂载至 WebView，再初始化常驻同源 WebView API 桥接引擎
-        installDirectConnectWebViewTunnel()
+        // Share the Android WebView session over the system network.
         initPersistentApiWebView()
 
         // 3. 注册系统浏览器跳转桥接器
@@ -489,9 +473,7 @@ class MainActivity : ComponentActivity() {
         if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
             intent.getBooleanExtra("lindo.self_test", false)) {
             activityScope.launch {
-                val reportFile = java.io.File(filesDir, "ech/runtime/self_test.log").apply {
-                    parentFile?.mkdirs()
-                }
+                val reportFile = java.io.File(filesDir, "network-self-test.log")
                 fun logLine(msg: String) {
                     runCatching {
                         reportFile.appendText("[${System.currentTimeMillis()}] $msg\n")
@@ -568,231 +550,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun isLocalEchPortListening(): Boolean {
-        return runCatching {
-            java.net.Socket().use { s ->
-                s.connect(java.net.InetSocketAddress("127.0.0.1", LOCAL_ECH_HTTPS_PORT), 120)
-                true
-            }
-        }.getOrDefault(false)
-    }
-
-    private fun ensureLocalRustEchDaemonStarted(localDohPort: Int) {
-        runCatching {
-            val binFile = java.io.File(applicationInfo.nativeLibraryDir, "liblinuxdo_ech.so")
-            if (!binFile.isFile) return
-            LocalDirectConnectTunnel.localEchHttpsPort = LOCAL_ECH_HTTPS_PORT
-            val effectiveDohPort = if (localDohPort > 0) localDohPort else 28081
-            val echRoot = java.io.File(filesDir, "ech").apply { mkdirs() }
-            val certDir = java.io.File(echRoot, "certs").apply { mkdirs() }
-            val runtimeDir = java.io.File(echRoot, "runtime").apply { mkdirs() }
-            val configFile = java.io.File(echRoot, "linuxdo-accelerator.toml")
-            val versionFile = java.io.File(echRoot, "linuxdo-accelerator.toml.version")
-            val lindoMarkerFile = java.io.File(echRoot, "lindo-ech-doh.marker")
-            val expectedMarker = "$ECH_DNS_BRIDGE_VERSION:$effectiveDohPort"
-
-            val configTomlContent = """
-                listen_host = "127.0.0.1"
-                hosts_ip = "127.0.0.1"
-                http_port = $LOCAL_ECH_HTTP_PORT
-                https_port = $LOCAL_ECH_HTTPS_PORT
-                upstream = "https://linux.do"
-                fake_sni = "www.cloudflare.com"
-
-                doh_endpoints = [
-                    "http://127.0.0.1:$effectiveDohPort/query-dns",
-                ]
-                managed_prefer_ipv6 = false
-                dns_hosts = {}
-                edge_node = ""
-
-                proxy_domains = [
-                    "linux.do",
-                    "*.linux.do",
-                    "idcflare.com",
-                    "*.idcflare.com",
-                ]
-
-                hosts_domains = [
-                    "linux.do",
-                    "connect.linux.do",
-                    "credit.linux.do",
-                    "www.linux.do",
-                    "idcflare.com",
-                    "www.idcflare.com",
-                ]
-
-                certificate_domains = [
-                    "linux.do",
-                    "www.linux.do",
-                    "*.linux.do",
-                    "connect.linux.do",
-                    "*.s3.linux.do",
-                    "idcflare.com",
-                    "www.idcflare.com",
-                    "*.idcflare.com",
-                ]
-
-                ca_common_name = "LinDo Local ECH Root CA"
-                server_common_name = "linux.do"
-            """.trimIndent() + "\n"
-
-            fun writeCertsAndConfig() {
-                runCatching {
-                    resources.openRawResource(R.raw.lindo_ech_root_ca).use { input ->
-                        java.io.File(certDir, "linuxdo-accelerator-root-ca.crt").outputStream().use { input.copyTo(it) }
-                    }
-                    resources.openRawResource(R.raw.lindo_ech_server_crt).use { input ->
-                        java.io.File(certDir, "linuxdo-accelerator-server.crt").outputStream().use { input.copyTo(it) }
-                    }
-                    resources.openRawResource(R.raw.lindo_ech_server_key).use { input ->
-                        java.io.File(certDir, "linuxdo-accelerator-server.key").outputStream().use { input.copyTo(it) }
-                    }
-                    configFile.writeText(configTomlContent)
-                    versionFile.writeText(ECH_CONFIG_VERSION_MARKER)
-                    lindoMarkerFile.writeText(expectedMarker)
-                }
-            }
-
-            synchronized(MainActivity::class.java) {
-                if (echMonitorThreadStarted) return
-                echMonitorThreadStarted = true
-            }
-
-            // 完全在后台守护线程完成证书写入、旧进程清理与 Rust ECH 守护进程拉起，0ms 阻塞主线程 UI
-            Thread({
-                runCatching {
-                    val currentMarker = runCatching { lindoMarkerFile.takeIf { it.isFile }?.readText()?.trim() }.getOrNull()
-                    if (currentMarker != expectedMarker || !isLocalEchPortListening()) {
-                        runCatching {
-                            val pidFile = java.io.File(runtimeDir, "linuxdo-accelerator.pid")
-                            if (pidFile.isFile) {
-                                val stalePid = pidFile.readText().trim().toIntOrNull()
-                                if (stalePid != null && stalePid > 0 && stalePid != android.os.Process.myPid()) {
-                                    android.os.Process.killProcess(stalePid)
-                                    Thread.sleep(60L)
-                                }
-                            }
-                        }
-                        writeCertsAndConfig()
-                    }
-                    echDaemonStarted = true
-                    while (true) {
-                        if (!isLocalEchPortListening()) {
-                            writeCertsAndConfig()
-                            runCatching {
-                                val proc = ProcessBuilder(
-                                    binFile.absolutePath,
-                                    "--config",
-                                    configFile.absolutePath,
-                                    "run"
-                                )
-                                    .directory(echRoot)
-                                    .redirectErrorStream(true)
-                                    .start()
-                                proc.inputStream.bufferedReader().useLines { lines ->
-                                    lines.forEach { _ -> }
-                                }
-                                proc.waitFor()
-                            }
-                        }
-                        Thread.sleep(1200L)
-                    }
-                }
-            }, "lindo-ech-daemon").apply {
-                isDaemon = true
-                start()
-            }
-        }
-    }
-
-    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
-    private val proxyOverrideReady = CompletableDeferred<Boolean>()
-
-    private fun waitForLocalEchPortReady(maxWaitMs: Long = 1000L): Boolean {
-        val deadline = System.currentTimeMillis() + maxWaitMs
-        while (System.currentTimeMillis() < deadline) {
-            if (isLocalEchPortListening()) return true
-            runCatching { Thread.sleep(25L) }
-        }
-        return isLocalEchPortListening()
-    }
-
-    private fun detectSystemVpnActive(): Boolean {
-        return runCatching {
-            val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-            val activeNet = cm?.activeNetwork ?: return@runCatching false
-            cm.getNetworkCapabilities(activeNet)?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
-        }.getOrDefault(false)
-    }
-
-    private fun handleVpnStateCheck() {
-        val nowVpn = detectSystemVpnActive()
-        val prevVpn = LocalDirectConnectTunnel.systemVpnActive
-        LocalDirectConnectTunnel.onNetworkEnvironmentChanged(nowVpn)
-        if (nowVpn != prevVpn && apiWebView != null) {
-            activityScope.launch {
-                refreshApiWebViewCloudflareClearance(forceReload = true)
-            }
-        }
-    }
-
-    private fun installDirectConnectWebViewTunnel() {
-        runCatching {
-            // 在任何 WebView 实例初始化前清理可能残留的 Discourse ServiceWorker 与 Shared Dictionary，
-            // 防止已注册的 ServiceWorker 劫持顶层 https://linux.do/ 导航或返回空壳页面导致无法进入内置 ECH 隧道
-            runCatching {
-                java.io.File(applicationInfo.dataDir, "app_webview/Default/Service Worker").deleteRecursively()
-                java.io.File(applicationInfo.dataDir, "app_webview/Default/Shared Dictionary").deleteRecursively()
-            }
-            val port = LocalDirectConnectTunnel.ensureStarted()
-            LocalDirectConnectTunnel.onNetworkEnvironmentChanged(detectSystemVpnActive())
-            ensureLocalRustEchDaemonStarted(port)
-            if (networkCallback == null) {
-                val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-                if (cm != null) {
-                    val req = android.net.NetworkRequest.Builder()
-                        .removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                        .build()
-                    val callback = object : android.net.ConnectivityManager.NetworkCallback() {
-                        override fun onAvailable(network: android.net.Network) {
-                            handleVpnStateCheck()
-                        }
-
-                        override fun onLost(network: android.net.Network) {
-                            handleVpnStateCheck()
-                        }
-                    }
-                    cm.registerNetworkCallback(req, callback)
-                    networkCallback = callback
-                }
-            }
-            if (port > 0 && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-                val proxyConfig = ProxyConfig.Builder()
-                    .addProxyRule("127.0.0.1:$port")
-                    .addDirect()
-                    .addBypassRule("<local>")
-                    .build()
-                ProxyController.getInstance().setProxyOverride(
-                    proxyConfig,
-                    { r -> r.run() },
-                    {
-                        if (!proxyOverrideReady.isCompleted) {
-                            proxyOverrideReady.complete(true)
-                        }
-                    }
-                )
-            } else {
-                if (!proxyOverrideReady.isCompleted) {
-                    proxyOverrideReady.complete(false)
-                }
-            }
-        }.onFailure {
-            proxyOverrideReady.complete(false)
-            android.util.Log.w("LinDoNetwork", "Could not set up WebView proxy", it)
-        }
-    }
-
     @SuppressLint("SetJavaScriptEnabled")
     private fun initPersistentApiWebView() {
         runCatching {
@@ -866,32 +623,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            runCatching {
-                val swController = android.webkit.ServiceWorkerController.getInstance()
-                swController.serviceWorkerWebSettings.apply {
-                    allowContentAccess = false
-                    allowFileAccess = false
-                    blockNetworkLoads = true
-                    cacheMode = WebSettings.LOAD_NO_CACHE
-                }
-                swController.setServiceWorkerClient(
-                    object : android.webkit.ServiceWorkerClient() {
-                        override fun shouldInterceptRequest(
-                            request: android.webkit.WebResourceRequest
-                        ): android.webkit.WebResourceResponse? {
-                            return android.webkit.WebResourceResponse(
-                                "text/plain",
-                                "UTF-8",
-                                404,
-                                "Not Found",
-                                emptyMap(),
-                                java.io.ByteArrayInputStream(ByteArray(0))
-                            )
-                        }
-                    }
-                )
-            }
-
             wv.addJavascriptInterface(LinDoJsBridge(), "LinDoJsBridge")
             wv.webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
@@ -902,22 +633,6 @@ class MainActivity : ComponentActivity() {
                     return super.shouldInterceptRequest(view, request)
                 }
 
-                @SuppressLint("WebViewClientOnReceivedSslError")
-                override fun onReceivedSslError(
-                    view: WebView?,
-                    handler: android.webkit.SslErrorHandler?,
-                    error: android.net.http.SslError?
-                ) {
-                    val errHost = runCatching { Uri.parse(error?.url.orEmpty()).host }.getOrNull()
-                        ?: runCatching { Uri.parse(view?.url.orEmpty()).host }.getOrNull()
-                    if (LocalDirectConnectTunnel.localEchHttpsPort > 0 &&
-                        LocalDirectConnectTunnel.isEchManagedHost(errHost)
-                    ) {
-                        handler?.proceed()
-                    } else {
-                        super.onReceivedSslError(view, handler, error)
-                    }
-                }
                 override fun onReceivedError(
                     view: WebView?,
                     request: android.webkit.WebResourceRequest?,
@@ -954,6 +669,7 @@ class MainActivity : ComponentActivity() {
                     apiWebView = null
                     apiWebNavigation?.cancel()
                     apiWebDocument?.ready?.complete(false)
+                    apiWebDocument?.originReady?.complete(false)
                     apiWebDocument = null
                     pendingHttpCallbacks.values.forEach { it.complete(null) }
                     pendingHttpCallbacks.clear()
@@ -1003,10 +719,6 @@ class MainActivity : ComponentActivity() {
         apiWebNavigation = activityScope.launch {
             try {
                 val ready = withTimeoutOrNull(11_000L) {
-                    proxyOverrideReady.await()
-                    if (LocalDirectConnectTunnel.localEchHttpsPort > 0) {
-                        withContext(Dispatchers.IO) { waitForLocalEchPortReady(maxWaitMs = 900L) }
-                    }
                     val cookies = CookieManager.getInstance()
                     if (clearClearance) {
                         for (name in listOf("cf_clearance", "__cf_bm", "_cfuvid")) {
@@ -1030,6 +742,7 @@ class MainActivity : ComponentActivity() {
                 android.util.Log.w("LinDoNetwork", "API WebView navigation failed", error)
             } finally {
                 document.ready.complete(false)
+                document.originReady.complete(false)
             }
         }
         return document
@@ -1060,18 +773,20 @@ class MainActivity : ComponentActivity() {
                         if (window._cf_chl_opt || document.title === 'Just a moment...') return 2;
                         if (document.readyState === 'loading') return 0;
                         window.__lindoPreloadTs = Date.now();
-                        if (navigator.serviceWorker) {
-                            navigator.serviceWorker.getRegistrations().then(function(registrations) {
-                                registrations.forEach(function(registration) { registration.unregister(); });
-                            }).catch(function() {});
-                        }
                         return 1;
                     })()
                     """.trimIndent()
                 ) { state -> result.complete(state) }
                 when (withTimeoutOrNull(500L) { result.await() }) {
-                    "1" -> if (!document.failed) return true
-                    "2" -> document.challenged = true
+                    "1" -> if (!document.failed) {
+                        document.challenged = false
+                        document.originReady.complete(true)
+                        return true
+                    }
+                    "2" -> if (!document.failed) {
+                        document.challenged = true
+                        document.originReady.complete(true)
+                    }
                 }
             }
             delay(150L)
@@ -1080,27 +795,23 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun awaitApiWebDocument(
         allowNavigation: Boolean = true,
-        allowChallengeDocument: Boolean = false,
         timeoutMs: Long = 11_500L
     ): ApiWebDocument? = withContext(Dispatchers.Main) {
         val view = apiWebView ?: return@withContext null
         val current = apiWebDocument ?: return@withContext null
-        val document = if (allowNavigation && current.ready.isCompleted && !current.ready.await()) {
+        val hasUsableOrigin = current.challenged && !current.failed
+        val document = if (allowNavigation && !hasUsableOrigin && current.ready.isCompleted && !current.ready.await()) {
             startApiWebNavigation(view)
         } else {
             current
         }
-        val ready = withTimeoutOrNull(timeoutMs) { document.ready.await() }
-        // A read can still succeed from a same-origin challenge page if its API route is allowed.
-        document.takeIf {
-            apiWebDocument === it && (ready == true ||
-                (ready == false && allowChallengeDocument && it.challenged && !it.failed))
-        }
+        // The document origin can be usable while the homepage is still waiting on verification.
+        val ready = withTimeoutOrNull(timeoutMs) { document.originReady.await() }
+        document.takeIf { apiWebDocument === it && ready == true && !it.failed }
     }
 
     private suspend fun refreshApiWebViewCloudflareClearance(
-        previous: ApiWebDocument? = null,
-        forceReload: Boolean = false
+        previous: ApiWebDocument? = null
     ): Boolean = withContext(Dispatchers.Main) {
         val current = apiWebDocument ?: return@withContext false
         val now = android.os.SystemClock.elapsedRealtime()
@@ -1108,7 +819,7 @@ class MainActivity : ComponentActivity() {
             current
         } else {
             val lastRefresh = lastClearanceRefreshMs
-            if (!forceReload && lastRefresh != null && now - lastRefresh < 15_000L) return@withContext false
+            if (lastRefresh != null && now - lastRefresh < 15_000L) return@withContext false
             lastClearanceRefreshMs = now
             startApiWebNavigation(current.view, clearClearance = true)
         }
@@ -1125,12 +836,10 @@ class MainActivity : ComponentActivity() {
         val path = Uri.parse(url).path.orEmpty()
         val isBackgroundRequest = headers["Discourse-Background"] == "true" ||
             path in setOf("/site.json", "/session/current.json", "/emojis.json", "/badges.json")
-        val isForegroundRead = method.equals("GET", ignoreCase = true) && !isBackgroundRequest
-        val document = awaitApiWebDocument(
-            allowNavigation = !isBackgroundRequest,
-            allowChallengeDocument = isForegroundRead
-        ) ?: return null
-        val usingChallengeDocument = !document.ready.await()
+        val isRead = method.equals("GET", true) || method.equals("HEAD", true)
+        val isForegroundRead = isRead && !isBackgroundRequest
+        val document = awaitApiWebDocument(allowNavigation = !isBackgroundRequest) ?: return null
+        val usingChallengeDocument = withContext(Dispatchers.Main) { document.challenged }
 
         val reqId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<BrowserHttpResult?>()
@@ -1160,11 +869,12 @@ class MainActivity : ComponentActivity() {
         val jsCode = """
             (async function() {
                 const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 8500);
+                const method = ${JSONObject.quote(method.uppercase())};
+                const isRead = method === 'GET' || method === 'HEAD';
+                const timer = setTimeout(() => controller.abort(), isRead ? 6500 : 14000);
                 try {
                     if (location.origin !== 'https://linux.do') throw new Error('API document changed');
                     const targetUrl = ${JSONObject.quote(url)};
-                    const method = ${JSONObject.quote(method.uppercase())};
                     const hdrs = $headersJson;
                     hdrs['Accept'] = 'application/json, text/javascript, */*; q=0.01';
                     hdrs['X-Requested-With'] = 'XMLHttpRequest';
@@ -1188,9 +898,15 @@ class MainActivity : ComponentActivity() {
                     }
                     if (method !== 'GET' && method !== 'HEAD') {
                         const metaCsrf = document.querySelector('meta[name="csrf-token"]');
-                        const cachedCsrf = (metaCsrf && metaCsrf.content) ? metaCsrf.content : window.__lindoCsrf;
+                        const cachedCsrf = window.__lindoCsrf || (metaCsrf && metaCsrf.content);
                         const token = cachedCsrf || (await refreshCsrfToken());
-                        if (token) hdrs['X-CSRF-Token'] = token;
+                        if (!token) {
+                            clearTimeout(timer);
+                            const body = JSON.stringify({errors: ['暂时无法验证会话，请打开官网检查登录状态']});
+                            window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 403, body, false);
+                            return;
+                        }
+                        hdrs['X-CSRF-Token'] = token;
                     }
                     const bodyStr = ${JSONObject.quote(formBodyEncoded)};
                     if (method !== 'GET' && method !== 'HEAD') {
@@ -1260,7 +976,7 @@ class MainActivity : ComponentActivity() {
                         }
                         await new Promise(r => setTimeout(r, 200));
                     }
-                    if (method !== 'GET' && method !== 'HEAD' && (resp.status === 403 || (resp.status === 422 && text.indexOf('CSRF') >= 0))) {
+                    if (!isRead && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token/i.test(text)) {
                         const freshToken = await refreshCsrfToken();
                         if (freshToken) {
                             hdrs['X-CSRF-Token'] = freshToken;
@@ -1298,7 +1014,7 @@ class MainActivity : ComponentActivity() {
                 document.view.evaluateJavascript(jsCode, null)
                 true
             }
-            val response = if (dispatched) withTimeoutOrNull(9_500L) { deferred.await() } else null
+            val response = if (dispatched) withTimeoutOrNull(if (isRead) 7_500L else 15_000L) { deferred.await() } else null
             val latestCookies = runCatching { CookieManager.getInstance().getCookie("https://linux.do") }.getOrNull().orEmpty()
             if (latestCookies.isNotBlank()) CookieSentinel.ingestRawCookieString(latestCookies)
             response
@@ -1306,14 +1022,16 @@ class MainActivity : ComponentActivity() {
             pendingHttpCallbacks.remove(reqId)
         }
 
-        if (allowChallengeRetry && isForegroundRead && !usingChallengeDocument) {
+        if (allowChallengeRetry && isForegroundRead) {
             val replaced = result == null && withContext(Dispatchers.Main) { apiWebDocument !== document }
-            if (replaced || (result?.challenged == true && refreshApiWebViewCloudflareClearance(previous = document))) {
+            if (replaced || (!usingChallengeDocument && result?.challenged == true &&
+                    refreshApiWebViewCloudflareClearance(previous = document))
+            ) {
                 return executeHttpViaWebViewBridge(url, method, formParams, headers, allowChallengeRetry = false)
             }
         }
 
-        if (usingChallengeDocument && (result == null || result.status == 0)) return 403 to ""
+        if (isRead && usingChallengeDocument && (result == null || result.status == 0)) return 403 to ""
         return result?.let { it.status to it.body }
     }
 
@@ -1338,8 +1056,9 @@ class MainActivity : ComponentActivity() {
                         'X-Requested-With': 'XMLHttpRequest'
                     };
                     const metaCsrf = document.querySelector('meta[name="csrf-token"]');
-                    if (metaCsrf && metaCsrf.content) {
-                        hdrs['X-CSRF-Token'] = metaCsrf.content;
+                    const cachedCsrf = window.__lindoCsrf || (metaCsrf && metaCsrf.content);
+                    if (cachedCsrf) {
+                        hdrs['X-CSRF-Token'] = cachedCsrf;
                     } else {
                         try {
                             const csrfResp = await fetch('https://linux.do/session/csrf.json', {
@@ -1352,6 +1071,11 @@ class MainActivity : ComponentActivity() {
                                 if (csrfData && csrfData.csrf) hdrs['X-CSRF-Token'] = csrfData.csrf;
                             }
                         } catch (_) {}
+                    }
+                    if (!hdrs['X-CSRF-Token']) {
+                        clearTimeout(timer);
+                        window.LinDoJsBridge.onHttpResult(${JSONObject.quote(reqId)}, 403, '', false);
+                        return;
                     }
                     const b64 = ${JSONObject.quote(base64Bytes)};
                     const binStr = atob(b64);
@@ -1709,12 +1433,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         activityScope.cancel()
-        networkCallback?.let { callback ->
-            runCatching {
-                getSystemService(android.net.ConnectivityManager::class.java)?.unregisterNetworkCallback(callback)
-            }
-        }
-        networkCallback = null
         pendingMediaPickCallback = null
         pendingWebFileChooserCallback?.onReceiveValue(null)
         pendingWebFileChooserCallback = null
@@ -2140,22 +1858,6 @@ private fun AndroidWebLoginModal(
                             }
 
                             webViewClient = object : WebViewClient() {
-                                @SuppressLint("WebViewClientOnReceivedSslError")
-                                override fun onReceivedSslError(
-                                    view: WebView?,
-                                    handler: android.webkit.SslErrorHandler?,
-                                    error: android.net.http.SslError?
-                                ) {
-                                    val errHost = runCatching { Uri.parse(error?.url.orEmpty()).host }.getOrNull()
-                                        ?: runCatching { Uri.parse(view?.url.orEmpty()).host }.getOrNull()
-                                    if (LocalDirectConnectTunnel.localEchHttpsPort > 0 &&
-                                        LocalDirectConnectTunnel.isEchManagedHost(errHost)
-                                    ) {
-                                        handler?.proceed()
-                                    } else {
-                                        super.onReceivedSslError(view, handler, error)
-                                    }
-                                }
                                 override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                                     if (webViewRef === view) {
                                         webViewRef = null
