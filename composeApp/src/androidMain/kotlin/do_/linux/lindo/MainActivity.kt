@@ -306,6 +306,11 @@ class MainActivity : ComponentActivity() {
                     .apply()
             }
         }
+        UserApiKeyAuthManager.onPersistReadTopics = { encoded ->
+            runCatching {
+                prefs.edit().putString("read_topic_posts", encoded).apply()
+            }
+        }
         UserApiKeyAuthManager.onSyncCookieToPlatform = { rawSetCookie ->
             runCatching {
                 val cm = CookieManager.getInstance()
@@ -332,6 +337,7 @@ class MainActivity : ComponentActivity() {
                     .remove("user_id")
                     .remove("user_title")
                     .remove("trust_level")
+                    .remove("read_topic_posts")
                     .putString("raw_cookies", CookieSentinel.buildCookieHeader(targetHost = "linux.do"))
                     .apply()
             }
@@ -1028,6 +1034,7 @@ class MainActivity : ComponentActivity() {
             UserApiKeyAuthManager.uiEnableAnimations = prefs.getBoolean("ui_enable_animations", true)
             UserApiKeyAuthManager.uiThemeAccent = prefs.getString("ui_theme_accent", "OFFICIAL_GOLD") ?: "OFFICIAL_GOLD"
             UserApiKeyAuthManager.uiCompactFeed = prefs.getBoolean("ui_compact_feed", false)
+            LinuxDoRepository.restoreReadTopics(prefs.getString("read_topic_posts", null))
 
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)

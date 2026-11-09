@@ -252,6 +252,14 @@ object ScreenTrackEngine {
 
     fun onTopicExited(topicId: Int, nowMs: Long = System.currentTimeMillis()) {
         if (currentTopicId != topicId) return
+        if (currentTimingsMs.isEmpty() && onscreenPosts.isNotEmpty() && lastTickEpochMs > 0L && nowMs > lastTickEpochMs) {
+            val remainderMs = (nowMs - lastTickEpochMs).coerceIn(150L, 3_000L).toInt()
+            currentTopicTimeMs += remainderMs
+            for (postNumber in onscreenPosts) {
+                currentTimingsMs[postNumber] = (currentTimingsMs[postNumber] ?: 0) + remainderMs
+            }
+            lastTickEpochMs = nowMs
+        }
         // Disposal must enqueue, never launch work into a scope that Compose is cancelling.
         val batch = flushCurrentTopic(nowMs)
         if (batch != null) consolidateBatch(batch.topicId, batch.topicTimeMs, batch.timingsMs)

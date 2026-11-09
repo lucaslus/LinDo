@@ -298,6 +298,7 @@ object UserApiKeyAuthManager {
     var onPersistPendingKey: ((String?, String?) -> Unit)? = null
     var onPersistUiPrefs: ((Float, Boolean, Boolean) -> Unit)? = null
     var onPersistThemeAndDensity: ((String, Boolean) -> Unit)? = null
+    var onPersistReadTopics: ((String) -> Unit)? = null
     var onSyncCookieToPlatform: ((String) -> Unit)? = null
 
     fun updateUiPrefs(fontScale: Float, darkTheme: Boolean, enableAnimations: Boolean) {
@@ -431,6 +432,7 @@ object UserApiKeyAuthManager {
         pendingNonce = null
         pendingAuthCreatedAt = 0L
         LinuxDoRepository.clearPollVoteState()
+        LinuxDoRepository.clearReadTopics()
         onPersistPendingKey?.invoke(null, null)
         CookieSentinel.clearAuthCookiesOnly()
         val platformClear = onLogoutPlatformClear
@@ -571,7 +573,12 @@ internal data class ComposerTagChoices(
  */
 internal fun isSuccessfulApiResponse(status: Int, body: String): Boolean {
     val trimmed = body.trimStart()
-    return status in 200..299 && (trimmed.isEmpty() || trimmed.startsWith("{") || trimmed.startsWith("["))
+    return status in 200..299 && (
+        trimmed.isEmpty() ||
+            trimmed.startsWith("{") ||
+            trimmed.startsWith("[") ||
+            trimmed.equals("ok", ignoreCase = true)
+    )
 }
 
 object LinuxDoRepository {
@@ -579,6 +586,50 @@ object LinuxDoRepository {
         ignoreUnknownKeys = true
         isLenient = true
         coerceInputValues = true
+    }
+
+    private val locallyReadTopicPosts = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    private val readTopicOrder = java.util.concurrent.ConcurrentLinkedQueue<Int>()
+
+    fun markTopicRead(topicId: Int, postsCount: Int = 1) {
+        if (topicId <= 0) return
+        val effective = maxOf(locallyReadTopicPosts[topicId] ?: 0, postsCount, 1)
+        val isNew = locallyReadTopicPosts.put(topicId, effective) == null
+        if (isNew) {
+            readTopicOrder.add(topicId)
+            while (readTopicOrder.size > 1500) {
+                val oldest = readTopicOrder.poll() ?: break
+                locallyReadTopicPosts.remove(oldest)
+            }
+        }
+        UserApiKeyAuthManager.onPersistReadTopics?.invoke(exportReadTopics())
+    }
+
+    fun isTopicRead(topicId: Int): Boolean = topicId > 0 && locallyReadTopicPosts.containsKey(topicId)
+
+    fun getReadTopicSnapshot(): Map<Int, Int> = HashMap(locallyReadTopicPosts)
+
+    fun restoreReadTopics(serialized: String?) {
+        if (serialized.isNullOrBlank()) return
+        serialized.split(',').forEach { entry ->
+            val parts = entry.split(':')
+            val id = parts.getOrNull(0)?.toIntOrNull() ?: return@forEach
+            val count = parts.getOrNull(1)?.toIntOrNull() ?: 1
+            if (id > 0) {
+                if (locallyReadTopicPosts.put(id, count.coerceAtLeast(1)) == null) {
+                    readTopicOrder.add(id)
+                }
+            }
+        }
+    }
+
+    fun clearReadTopics() {
+        locallyReadTopicPosts.clear()
+        readTopicOrder.clear()
+    }
+
+    private fun exportReadTopics(): String {
+        return locallyReadTopicPosts.entries.take(1500).joinToString(",") { "${it.key}:${it.value}" }
     }
 
     val defaultCategories: List<LinuxDoCategoryMeta> = listOf(
@@ -1028,6 +1079,10 @@ object LinuxDoRepository {
             emptyMap()
         }
 
+        if (trackVisit) {
+            markTopicRead(topicId, s?.postsCount ?: 1)
+        }
+
         val res = executeHttp(url = url, method = "GET", extraHeaders = extraHeaders, preserveFailure = true)
         val statusCode = res?.first ?: 0
         val text = res?.second
@@ -1036,6 +1091,17 @@ object LinuxDoRepository {
                 val root = json.parseToJsonElement(text).jsonObject
                 val detail = parseLiveTopicDetail(root, summaryFallback)
                 if (detail.posts.isNotEmpty()) {
+                    val highest = maxOf(detail.postsCount, detail.highestPostNumber ?: 0, s?.postsCount ?: 1)
+                    if (trackVisit) {
+                        markTopicRead(topicId, highest)
+                        val immediateTimings = LinkedHashMap<Int, Int>().apply {
+                            put(1, 1200)
+                            detail.posts.firstOrNull()?.postNumber?.let { put(it, 1200) }
+                            detail.posts.lastOrNull()?.postNumber?.let { put(it, 1200) }
+                            put(highest, 1200)
+                        }
+                        ScreenTrackEngine.consolidateBatch(topicId, 1200, immediateTimings)
+                    }
                     return@withContext detail
                 }
             } catch (_: Throwable) {
@@ -2921,10 +2987,15 @@ object LinuxDoRepository {
                 ?: tObj["last_posted_at"]?.jsonPrimitive?.contentOrNull
                 ?: tObj["created_at"]?.jsonPrimitive?.contentOrNull
 
+            val rawPostsCount = tObj["posts_count"]?.jsonPrimitive?.intOrNull ?: 1
+            val rawUnseen = tObj["unseen"]?.jsonPrimitive?.booleanOrNull ?: false
+            val rawUnreadPosts = tObj["unread_posts"]?.jsonPrimitive?.intOrNull ?: 0
+            val alreadyReadLocally = isTopicRead(id)
+
             TopicSummary(
                 id = id,
                 title = title,
-                postsCount = tObj["posts_count"]?.jsonPrimitive?.intOrNull ?: 1,
+                postsCount = rawPostsCount,
                 replyCount = tObj["reply_count"]?.jsonPrimitive?.intOrNull ?: 0,
                 views = tObj["views"]?.jsonPrimitive?.intOrNull ?: 0,
                 likeCount = tObj["like_count"]?.jsonPrimitive?.intOrNull ?: 0,
@@ -2935,8 +3006,8 @@ object LinuxDoRepository {
                 lastPostedAt = formatRelativeTime(lastPostedIso),
                 excerpt = tObj["excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")?.trim(),
                 pinned = tObj["pinned"]?.jsonPrimitive?.booleanOrNull ?: false,
-                unseen = tObj["unseen"]?.jsonPrimitive?.booleanOrNull ?: false,
-                unreadPosts = tObj["unread_posts"]?.jsonPrimitive?.intOrNull ?: 0,
+                unseen = if (alreadyReadLocally) false else rawUnseen,
+                unreadPosts = if (alreadyReadLocally) 0 else rawUnreadPosts,
                 hasAcceptedAnswer = tObj["has_accepted_answer"]?.jsonPrimitive?.booleanOrNull ?: false,
                 originalPoster = op,
                 participantAvatars = posters
@@ -3006,7 +3077,13 @@ object LinuxDoRepository {
             put("topic_time", batch.topicTimeMs.toString())
             batch.timingsMs.forEach { (number, milliseconds) -> put("timings[$number]", milliseconds.toString()) }
         }
-        executeHttp("https://linux.do/topics/timings", method = "POST", formParams = params, extraHeaders = headers)?.first
+        executeHttp(
+            url = "https://linux.do/topics/timings",
+            method = "POST",
+            formParams = params,
+            extraHeaders = headers,
+            preserveFailure = true
+        )?.first
     }
 
     /**

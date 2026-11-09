@@ -903,22 +903,35 @@ internal fun LinDoApp(
 
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val locallyReadTopicPosts = remember { androidx.compose.runtime.mutableStateMapOf<Int, Int>() }
+    val locallyReadTopicPosts = remember {
+        androidx.compose.runtime.mutableStateMapOf<Int, Int>().apply {
+            putAll(LinuxDoRepository.getReadTopicSnapshot())
+        }
+    }
 
     fun normalizeReadTopics(list: List<TopicSummary>): List<TopicSummary> =
         list.map { item ->
             val seenPosts = locallyReadTopicPosts[item.id]
-            if (seenPosts != null && item.postsCount <= seenPosts && (item.unseen || item.unreadPosts > 0)) {
+                ?: if (LinuxDoRepository.isTopicRead(item.id)) item.postsCount else null
+            if (seenPosts != null && (item.unseen || item.unreadPosts > 0)) {
                 item.copy(unseen = false, unreadPosts = 0)
             } else {
                 item
             }
         }
 
-    fun markTopicReadLocally(topicId: Int, seenPostsCount: Int) {
+    fun markTopicReadLocally(topicId: Int, seenPostsCount: Int, syncServer: Boolean = false) {
         if (topicId <= 0) return
         val effectiveCount = maxOf(locallyReadTopicPosts[topicId] ?: 0, seenPostsCount, 1)
+        LinuxDoRepository.markTopicRead(topicId, effectiveCount)
         locallyReadTopicPosts[topicId] = effectiveCount
+        if (syncServer) {
+            val timings = LinkedHashMap<Int, Int>().apply {
+                put(1, 1000)
+                put(effectiveCount, 1000)
+            }
+            ScreenTrackEngine.consolidateBatch(topicId, 1000, timings)
+        }
         topics = topics.map {
             if (it.id == topicId) it.copy(unseen = false, unreadPosts = 0, postsCount = maxOf(it.postsCount, seenPostsCount)) else it
         }
@@ -1134,7 +1147,7 @@ internal fun LinDoApp(
         if (topic.id <= 0) return
         detailLoadJob?.cancel()
         val clearedTopic = topic.copy(unseen = false, unreadPosts = 0)
-        markTopicReadLocally(topic.id, topic.postsCount)
+        markTopicReadLocally(topic.id, topic.postsCount, syncServer = true)
         activeTopicDetail = null
         activeTopicSummary = clearedTopic
         activeTargetPostNumber = targetPostNumber
@@ -1622,6 +1635,7 @@ internal fun LinDoApp(
                                             onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true) },
                                             onLoadMore = { loadNextPageTopics() },
                                             onSelectTopic = { openTopic(it) },
+                                            onMarkTopicRead = { markTopicReadLocally(it.id, it.postsCount, syncServer = true) },
                                             onAvatarClick = { currentTab = MainTab.PROFILE }
                                         )
                                     }
@@ -1851,6 +1865,7 @@ internal fun LinDoApp(
                                                 onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true) },
                                                 onLoadMore = { loadNextPageTopics() },
                                                 onSelectTopic = { openTopic(it) },
+                                                onMarkTopicRead = { markTopicReadLocally(it.id, it.postsCount, syncServer = true) },
                                                 onAvatarClick = { currentTab = MainTab.PROFILE }
                                             )
                                         }
@@ -2708,6 +2723,7 @@ private fun CommunityHomeFeedPane(
     onRefresh: () -> Unit,
     onLoadMore: () -> Unit,
     onSelectTopic: (TopicSummary) -> Unit,
+    onMarkTopicRead: (TopicSummary) -> Unit = {},
     onAvatarClick: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -2722,6 +2738,42 @@ private fun CommunityHomeFeedPane(
     }
     val regularTopics = remember(topics, pinnedTopics) {
         if (pinnedTopics.isEmpty()) topics else topics.filterNot { it.pinned }
+    }
+
+    val latestRegularTopics by androidx.compose.runtime.rememberUpdatedState(regularTopics)
+    val latestMarkTopicRead by androidx.compose.runtime.rememberUpdatedState(onMarkTopicRead)
+    val topicFirstSeenAtMs = remember { mutableMapOf<Int, Long>() }
+    LaunchedEffect(listState) {
+        while (true) {
+            delay(350L)
+            if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground || isLoading) continue
+            val nowMs = System.currentTimeMillis()
+            val layoutInfo = listState.layoutInfo
+            val viewportStart = layoutInfo.viewportStartOffset
+            val viewportEnd = layoutInfo.viewportEndOffset
+            if (viewportEnd <= viewportStart) continue
+            val visibleTopicIds = layoutInfo.visibleItemsInfo.mapNotNull { itemInfo ->
+                val topicId = itemInfo.key as? Int ?: return@mapNotNull null
+                val visibleTop = maxOf(itemInfo.offset, viewportStart)
+                val visibleBottom = minOf(itemInfo.offset + itemInfo.size, viewportEnd)
+                val visibleHeight = (visibleBottom - visibleTop).coerceAtLeast(0)
+                val minRequired = minOf(itemInfo.size / 2, 60)
+                if (visibleHeight >= minRequired) topicId else null
+            }.toSet()
+            topicFirstSeenAtMs.keys.retainAll(visibleTopicIds)
+            for (topicId in visibleTopicIds) {
+                val topic = latestRegularTopics.firstOrNull { it.id == topicId } ?: continue
+                if (!topic.unseen && topic.unreadPosts <= 0) {
+                    topicFirstSeenAtMs.remove(topicId)
+                    continue
+                }
+                val firstSeen = topicFirstSeenAtMs.getOrPut(topicId) { nowMs }
+                if (nowMs - firstSeen >= 1100L) {
+                    topicFirstSeenAtMs.remove(topicId)
+                    latestMarkTopicRead(topic)
+                }
+            }
+        }
     }
 
     // 顶部下拉刷新手势状态（按屏幕密度换算为 dp，并设置 28.dp 防误触死区 + 悬浮指示器避免挤推列表首帖）
@@ -3543,6 +3595,12 @@ private fun CommunityTopicItem(
     val pressBackground = Modifier.drawBehind {
         drawRect(if (isItemPressed) palette.subtleSurface else rowBgColor)
     }
+    val isTopicUnread = topic.unseen || topic.unreadPosts > 0
+    val unreadDotAlpha by animateFloatAsState(
+        targetValue = if (isTopicUnread) 1f else 0f,
+        animationSpec = tween(durationMillis = if (enableAnimations) 200 else 0),
+        label = "unreadTopicDotAlpha"
+    )
 
     if (isCompact) {
         // 模式 B：紧凑列表模式（高密度双行流式，首行分类色点+单行适度字重标题+无底块回复数，次行 18dp 头像+作者+分类+#Tag+点赞/浏览/时间）
@@ -3582,15 +3640,19 @@ private fun CommunityTopicItem(
                     modifier = Modifier.weight(1f)
                 )
 
-                if (topic.unseen || topic.unreadPosts > 0) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
-                    )
-                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .graphicsLayer {
+                            alpha = unreadDotAlpha
+                            val scale = 0.65f + 0.35f * unreadDotAlpha
+                            scaleX = scale
+                            scaleY = scale
+                        }
+                        .clip(CircleShape)
+                        .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
+                )
 
                 Spacer(modifier = Modifier.width(8.dp))
 
@@ -3846,16 +3908,20 @@ private fun CommunityTopicItem(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                if (topic.unseen || topic.unreadPosts > 0) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .padding(top = 6.dp)
-                            .size(6.5.dp)
-                            .clip(CircleShape)
-                            .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
-                    )
-                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .padding(top = 6.dp)
+                        .size(6.5.dp)
+                        .graphicsLayer {
+                            alpha = unreadDotAlpha
+                            val scale = 0.65f + 0.35f * unreadDotAlpha
+                            scaleX = scale
+                            scaleY = scale
+                        }
+                        .clip(CircleShape)
+                        .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
+                )
             }
 
             // 摘要预览（最多 2 行，提升宽松卡片阅读呼吸感）
