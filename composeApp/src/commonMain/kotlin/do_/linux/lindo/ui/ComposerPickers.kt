@@ -60,25 +60,31 @@ internal fun ComposerCategoryPicker(
                 .padding(bottom = 20.dp)
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "选择发布版块",
-                        color = palette.inkPrimary,
-                        fontSize = 16.5.sp,
-                        fontWeight = FontWeight.Bold
+                Text(
+                    text = "选择发布版块",
+                    color = palette.inkPrimary,
+                    fontSize = 16.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "关闭版块抽屉",
+                        modifier = Modifier.size(18.dp),
+                        tint = palette.inkSecondary
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "全站版块一览，点击即可切换话题所属分类",
-                        color = palette.inkSecondary,
-                        fontSize = 12.sp
-                    )
-                }
-                IconButton(onClick = onDismiss) {
-                    Icon(LinDoIcons.Close, "关闭版块抽屉", Modifier.size(18.dp), tint = palette.inkSecondary)
                 }
             }
 
@@ -201,69 +207,47 @@ internal fun ComposerTagPicker(
                 .padding(bottom = 20.dp)
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     Text(
                         text = "选择话题标签",
                         color = palette.inkPrimary,
                         fontSize = 16.5.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "最多可添加 $limit 个标签，已选 ${selected.size}/$limit",
+                        text = "已选 ${selected.size}/$limit",
                         color = palette.inkSecondary,
-                        fontSize = 12.sp
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Medium
                     )
                 }
-                TextButton(onClick = onDismiss) {
-                    Text("完成", color = palette.brandGold, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "完成",
+                        color = palette.brandGold,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.5.sp
+                    )
                 }
             }
 
-            // 搜索过滤输入框
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(palette.subtleSurface)
-                    .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = LinDoIcons.Search,
-                    contentDescription = null,
-                    modifier = Modifier.size(15.dp),
-                    tint = palette.inkSecondary
-                )
-                Box(modifier = Modifier.weight(1f)) {
-                    ComposerTextInput(
-                        value = query,
-                        onChange = onQueryChange,
-                        placeholder = "搜索或过滤标签...",
-                        enabled = enabled
-                    )
-                }
-                if (query.isNotEmpty()) {
-                    IconButton(
-                        onClick = { onQueryChange("") },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.Close,
-                            contentDescription = "清空搜索",
-                            modifier = Modifier.size(14.dp),
-                            tint = palette.inkSecondary
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+            Spacer(modifier = Modifier.height(10.dp))
 
             // 已选标签置顶一览
             if (selected.isNotEmpty()) {

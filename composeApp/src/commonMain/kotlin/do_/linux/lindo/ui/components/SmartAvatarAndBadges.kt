@@ -105,6 +105,7 @@ fun SmartAvatar(
             label = "glow_alpha")
     } else rememberUpdatedState(0.25f)
 
+    val hasAnimated = !animatedUrl.isNullOrBlank()
     val fallbackColor = remember(username) { avatarFallbackColor(username) }
     androidx.compose.runtime.key(username, staticUrl, animatedUrl) {
         var animatedReady by remember { mutableStateOf(false) }
@@ -112,7 +113,7 @@ fun SmartAvatar(
 
         Box(
             modifier = modifier.size(size).then(
-                if (glowColor == null) Modifier else Modifier.drawWithCache {
+                if (glowColor == null || !motionEnabled) Modifier else Modifier.drawWithCache {
                     val radius = this.size.minDimension * 0.8f
                     val brush = Brush.radialGradient(listOf(glowColor, glowColor.copy(alpha = 0f)), radius = radius)
                     onDrawBehind { drawCircle(brush, radius = radius, alpha = glowAlpha.value) }
@@ -124,7 +125,7 @@ fun SmartAvatar(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(shape)
-                    .background(fallbackColor)
+                    .background(if (staticLoaded || animatedReady) Color.Transparent else fallbackColor)
                     .border(
                         width = 0.5.dp,
                         color = Color(0x14000000),
@@ -132,7 +133,7 @@ fun SmartAvatar(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                if (!staticLoaded && !animatedReady) {
+                if (staticUrl.isEmpty() || (!staticLoaded && !animatedReady && size >= 28.dp)) {
                     Text(
                         text = username.firstOrNull()?.uppercase() ?: "L",
                         color = Color.White,
@@ -146,12 +147,14 @@ fun SmartAvatar(
                         model = staticUrl,
                         contentDescription = username,
                         contentScale = ContentScale.Crop,
-                        onSuccess = { staticLoaded = true },
+                        onSuccess = if (hasAnimated || size >= 28.dp) {
+                            { if (!staticLoaded) staticLoaded = true }
+                        } else null,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
 
-                if (!animatedUrl.isNullOrBlank()) {
+                if (hasAnimated) {
                     AsyncImage(
                         model = animatedUrl,
                         contentDescription = "$username animated avatar",

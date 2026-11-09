@@ -263,6 +263,7 @@ class MainActivity : ComponentActivity() {
             )
         )
         super.onCreate(savedInstanceState)
+        requestHighRefreshRateDisplay()
         var appIcon by mutableStateOf(iconManager.initialIcon())
         activityScope.launch { iconManager.finishRestart()?.let { appIcon = it } }
 
@@ -532,24 +533,63 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Attach transparent apiWebView with realistic mobile viewport dimensions so Chromium keeps timers & fetch active
-        // without ever exposing a 1x1 headless viewport dimension to scripts.
+        // 保持后台同源 apiWebView 拥有真实屏幕视口尺寸但不挂载至主窗口 ViewTree，
+        // 避免国产 ROM（HyperOS / ColorOS / OriginOS / MagicOS）检测到全屏可见 WebView 后将窗口强制降频锁死在 60Hz，同时消除 RenderThread 每帧遍历 WebView 图层的开销。
         window.decorView.post {
+            requestHighRefreshRateDisplay()
             runCatching {
-                val root = window.decorView.findViewById<ViewGroup>(android.R.id.content)
                 val wv = apiWebView
-                if (root != null && wv != null && wv.parent == null) {
+                if (wv != null) {
                     val dm = resources.displayMetrics
-                    val lp = FrameLayout.LayoutParams(
-                        dm.widthPixels.coerceAtLeast(360),
-                        dm.heightPixels.coerceAtLeast(640)
+                    val w = dm.widthPixels.coerceAtLeast(360)
+                    val h = dm.heightPixels.coerceAtLeast(640)
+                    wv.measure(
+                        View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
                     )
-                    wv.alpha = 0f
-                    wv.isClickable = false
-                    wv.isFocusable = false
-                    wv.visibility = View.VISIBLE
-                    root.addView(wv, 0, lp)
+                    wv.layout(0, 0, w, h)
                 }
+            }
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            requestHighRefreshRateDisplay()
+        }
+    }
+
+    /**
+     * 主动向系统 WindowManager 申请当前物理分辨率下的最高刷新率档位（自适应 60 / 90 / 120 / 144 / 165Hz 高刷屏）
+     */
+    private fun requestHighRefreshRateDisplay() {
+        runCatching {
+            @Suppress("DEPRECATION")
+            val activeDisplay = if (android.os.Build.VERSION.SDK_INT >= 30) {
+                display ?: windowManager.defaultDisplay
+            } else {
+                windowManager.defaultDisplay
+            } ?: return
+            val modes = activeDisplay.supportedModes
+            if (modes.isNullOrEmpty()) return
+            val currentMode = activeDisplay.mode
+            val sameResModes = modes.filter {
+                it.physicalWidth == currentMode.physicalWidth &&
+                    it.physicalHeight == currentMode.physicalHeight
+            }
+            val bestMode = (sameResModes.ifEmpty { modes.toList() })
+                .maxByOrNull { it.refreshRate } ?: return
+            val lp = window.attributes
+            if (lp.preferredDisplayModeId != bestMode.modeId ||
+                lp.preferredRefreshRate != bestMode.refreshRate
+            ) {
+                lp.preferredDisplayModeId = bestMode.modeId
+                lp.preferredRefreshRate = bestMode.refreshRate
+                window.attributes = lp
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 35) {
+                window.frameRateBoostOnTouchEnabled = true
             }
         }
     }
@@ -588,21 +628,15 @@ class MainActivity : ComponentActivity() {
                         if (!isFinishing && !isDestroyed) {
                             initPersistentApiWebView()
                             val fresh = apiWebView
-                            val parent = window.decorView.findViewById<ViewGroup>(android.R.id.content)
-                            if (fresh != null && fresh.parent == null && parent != null) {
+                            if (fresh != null) {
                                 val dm = resources.displayMetrics
-                                fresh.alpha = 0f
-                                fresh.isClickable = false
-                                fresh.isFocusable = false
-                                fresh.visibility = View.VISIBLE
-                                parent.addView(
-                                    fresh,
-                                    0,
-                                    FrameLayout.LayoutParams(
-                                        dm.widthPixels.coerceAtLeast(360),
-                                        dm.heightPixels.coerceAtLeast(640)
-                                    )
+                                val w = dm.widthPixels.coerceAtLeast(360)
+                                val h = dm.heightPixels.coerceAtLeast(640)
+                                fresh.measure(
+                                    View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                                    View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
                                 )
+                                fresh.layout(0, 0, w, h)
                             }
                         }
                     }
@@ -1314,8 +1348,10 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         UserPresenceService.setAppForeground(true)
-        if (android.os.Build.VERSION.SDK_INT >= 35) {
-            window.decorView.requestedFrameRate = View.REQUESTED_FRAME_RATE_CATEGORY_HIGH
+        requestHighRefreshRateDisplay()
+        runCatching {
+            apiWebView?.onResume()
+            apiWebView?.resumeTimers()
         }
     }
 

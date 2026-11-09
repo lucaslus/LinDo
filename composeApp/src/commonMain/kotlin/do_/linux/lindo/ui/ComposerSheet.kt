@@ -155,6 +155,7 @@ internal fun ComposerSheet(
     var showCost by remember(key) { mutableStateOf(false) }
     var syncRetry by remember(key) { mutableIntStateOf(0) }
     var tagChoices by remember(key, draft.categoryId) { mutableStateOf(ComposerTagChoices(emptyList())) }
+    var accumulatedTagOptions by remember(key, draft.categoryId) { mutableStateOf<List<do_.linux.lindo.core.network.ComposerTagOption>>(emptyList()) }
     var tagIds by remember(key, draft.categoryId) { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var tagQuery by remember(key, draft.categoryId) { mutableStateOf("") }
     var tagsLoading by remember(key, draft.categoryId) { mutableStateOf(false) }
@@ -256,16 +257,29 @@ internal fun ComposerSheet(
 
     LaunchedEffect(draft.categoryId, draft.tags, tagQuery, tagRetry, prepared) {
         if (!prepared || action != ComposerAction.NEW_TOPIC) return@LaunchedEffect
-        tagsLoading = true
+        val hadExistingOptions = accumulatedTagOptions.isNotEmpty()
+        if (!hadExistingOptions) {
+            tagsLoading = true
+        }
         tagsError = null
         try {
             if (tagQuery.isNotBlank()) delay(300)
             val selected = draft.tags.associateWith { tagIds[it] }
-            tagChoices = kotlinx.coroutines.withTimeoutOrNull(6_500L) {
+            val fetched = kotlinx.coroutines.withTimeoutOrNull(6_500L) {
                 LinuxDoRepository.fetchCategoryAllowedTags(draft.categoryId ?: initialCategoryId, tagQuery, selected)
             } ?: throw ApiMutationException("标签暂时无法加载")
+            val mergedMap = linkedMapOf<String, do_.linux.lindo.core.network.ComposerTagOption>()
+            accumulatedTagOptions.forEach { mergedMap[it.name] = it }
+            fetched.options.forEach { mergedMap[it.name] = it }
+            val mergedOptions = mergedMap.values.toList()
+            accumulatedTagOptions = mergedOptions
+            tagChoices = fetched.copy(options = mergedOptions)
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { tagsError = error.message ?: "标签加载失败" }
+        catch (error: Exception) {
+            if (!hadExistingOptions) {
+                tagsError = error.message ?: "标签加载失败"
+            }
+        }
         finally { tagsLoading = false }
     }
 

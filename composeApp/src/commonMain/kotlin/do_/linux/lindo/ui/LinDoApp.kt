@@ -2904,16 +2904,16 @@ internal fun CommunityHomeFeedPane(
 
                 Spacer(modifier = Modifier.height(11.dp))
 
-                // 2. 统一 10.dp 圆角搜索入口（图标、占位符与卡片圆角体系严格统一，点击直接唤起全站实时搜索抽屉）
+                // 2. 统一大圆角胶囊搜索入口（与新动态胶囊、底栏胶囊圆角体系严格统一，点击唤起全站实时搜索）
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(38.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .clip(CircleShape)
                         .background(palette.subtleSurface)
-                        .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
+                        .border(0.6.dp, palette.hairline, CircleShape)
                         .clickable { onOpenGlobalSearch() }
-                        .padding(horizontal = 13.dp),
+                        .padding(horizontal = 15.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -2964,10 +2964,14 @@ internal fun CommunityHomeFeedPane(
                 val activeCategoryMeta = remember(selectedCategoryId, LinuxDoRepository.categories.size) {
                     LinuxDoRepository.categories.firstOrNull { it.id == selectedCategoryId }
                 }
-                LaunchedEffect(listState.firstVisibleItemIndex) {
-                    if (listState.firstVisibleItemIndex > 0 && isCategoryBarExpanded) {
-                        isCategoryBarExpanded = false
-                    }
+                LaunchedEffect(isCategoryBarExpanded, listState) {
+                    if (!isCategoryBarExpanded) return@LaunchedEffect
+                    androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex > 0 }
+                        .collect { scrolledDown ->
+                            if (scrolledDown) {
+                                isCategoryBarExpanded = false
+                            }
+                        }
                 }
 
                 // 3. 大小字阶频道 Tab（选中 18.5sp ExtraBold，未选中 14.8sp Medium，底部 12x3dp 胶囊横条）+ 右侧「分类 ⌄」与布局切换严格底部对齐
@@ -3601,11 +3605,10 @@ private fun CommunityTopicItem(
         drawRect(if (isItemPressed) palette.subtleSurface else rowBgColor)
     }
     val isTopicUnread = (topic.unseen || topic.unreadPosts > 0) && !LinuxDoRepository.isTopicRead(topic.id)
-    val unreadDotAlpha by animateFloatAsState(
-        targetValue = if (isTopicUnread) 1f else 0f,
-        animationSpec = tween(durationMillis = if (enableAnimations) 200 else 0),
-        label = "unreadTopicDotAlpha"
-    )
+    val unreadDotAlpha = if (isTopicUnread) 1f else 0f
+    val formattedViews = remember(topic.views) {
+        if (topic.views > 0) formatCompactNumber(topic.views) else ""
+    }
 
     if (isCompact) {
         // 模式 B：紧凑列表模式（全宽平铺轻分割线风格，首行分类色点+单行适度字重标题+未读蓝点+回复数，次行 18dp 头像+作者+分类+#Tag+点赞/浏览/时间）
@@ -3783,7 +3786,7 @@ private fun CommunityTopicItem(
                                 tint = palette.inkTertiary
                             )
                             Text(
-                                text = formatCompactNumber(topic.views),
+                                text = formattedViews,
                                 fontSize = 10.8.sp,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
@@ -3832,7 +3835,7 @@ private fun CommunityTopicItem(
                         primaryGroupName = op.primaryGroupName,
                         flair = null,
                         size = 22.dp,
-                        enableAnimations = enableAnimations
+                        enableAnimations = false
                     )
 
                     Spacer(modifier = Modifier.width(8.dp))
@@ -3917,7 +3920,9 @@ private fun CommunityTopicItem(
             }
 
             // 第三行（可选）：摘要预览（最多 2 行，与紧凑模式拉开信息密度差异）
-            val cleanExcerpt = topic.excerpt?.trim()?.takeIf { it.isNotEmpty() && it != topic.title }
+            val cleanExcerpt = remember(topic.excerpt, topic.title) {
+                topic.excerpt?.trim()?.takeIf { it.isNotEmpty() && it != topic.title }
+            }
             if (cleanExcerpt != null) {
                 Spacer(modifier = Modifier.height(4.5.dp))
                 Text(
@@ -4043,7 +4048,7 @@ private fun CommunityTopicItem(
                                 tint = palette.inkTertiary
                             )
                             Text(
-                                text = formatCompactNumber(topic.views),
+                                text = formattedViews,
                                 fontSize = 11.5.sp,
                                 fontWeight = FontWeight.Normal,
                                 color = palette.inkTertiary,
@@ -4221,7 +4226,7 @@ internal fun CommunityTopicReaderPane(
 
     val readerListState = rememberLazyListState()
     val floorByPostId = remember(posts) { posts.associate { it.id to it.postNumber } }
-    val visibleFloor by remember(readerListState, floorByPostId) {
+    val visibleFloorState = remember(readerListState, floorByPostId) {
         derivedStateOf {
             readerListState.layoutInfo.visibleItemsInfo.asReversed().firstNotNullOfOrNull {
                 floorByPostId[it.key as? Int]
@@ -5041,26 +5046,20 @@ internal fun CommunityTopicReaderPane(
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))
-                TextButton(
+                TopicFloorCounterButton(
                     enabled = posts.isNotEmpty() && !changingReaderFilter && !fetchingJumpWindow,
-                    contentPadding = PaddingValues(horizontal = 8.dp),
+                    fetchingJumpWindow = fetchingJumpWindow,
+                    visibleFloorProvider = { visibleFloorState.value },
+                    totalFloorCount = totalFloorCount,
                     onClick = { showFloorNavigator = true }
-                ) {
-                    Text(
-                        if (fetchingJumpWindow) "跳转中…" else "$visibleFloor / $totalFloorCount 楼",
-                        fontSize = 12.sp, color = palette.inkSecondary, maxLines = 1
-                    )
-                    Icon(
-                        LinDoIcons.ChevronUp, null, Modifier.size(15.dp), tint = palette.inkSecondary
-                    )
-                }
+                )
             }
         }
     }
 
     if (showFloorNavigator) {
         TopicFloorNavigator(
-            currentFloor = visibleFloor,
+            currentFloor = visibleFloorState.value,
             lastFloor = totalFloorCount,
             onDismiss = { showFloorNavigator = false },
             onJump = { number, exact ->
@@ -5186,6 +5185,36 @@ internal fun CommunityTopicReaderPane(
             }
         )
     }
+    }
+}
+
+@Composable
+private fun TopicFloorCounterButton(
+    enabled: Boolean,
+    fetchingJumpWindow: Boolean,
+    visibleFloorProvider: () -> Int,
+    totalFloorCount: Int,
+    onClick: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val currentFloor = visibleFloorProvider()
+    TextButton(
+        enabled = enabled,
+        contentPadding = PaddingValues(horizontal = 8.dp),
+        onClick = onClick
+    ) {
+        Text(
+            text = if (fetchingJumpWindow) "跳转中…" else "$currentFloor / $totalFloorCount 楼",
+            fontSize = 12.sp,
+            color = palette.inkSecondary,
+            maxLines = 1
+        )
+        Icon(
+            imageVector = LinDoIcons.ChevronUp,
+            contentDescription = null,
+            modifier = Modifier.size(15.dp),
+            tint = palette.inkSecondary
+        )
     }
 }
 
@@ -10626,10 +10655,10 @@ internal fun GlobalSearchModalSheet(
                         modifier = Modifier
                             .weight(1f)
                             .heightIn(min = 42.dp)
-                            .clip(RoundedCornerShape(10.dp))
+                            .clip(CircleShape)
                             .background(palette.subtleSurface)
-                            .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
-                            .padding(start = 12.dp, end = if (query.isEmpty()) 12.dp else 0.dp),
+                            .border(0.6.dp, palette.hairline, CircleShape)
+                            .padding(start = 15.dp, end = if (query.isEmpty()) 15.dp else 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(

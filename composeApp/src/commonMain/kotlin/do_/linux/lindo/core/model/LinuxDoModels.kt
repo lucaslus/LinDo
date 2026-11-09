@@ -1,5 +1,6 @@
 package do_.linux.lindo.core.model
 
+import androidx.compose.runtime.Immutable
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -29,6 +30,7 @@ enum class BadgeType(val id: Int, val labelZh: String) {
 /**
  * 帖子头部或个人中心展示的徽章定义
  */
+@Immutable
 @Serializable
 data class GrantedBadge(
     val id: Int,
@@ -78,6 +80,7 @@ data class GrantedBadge(
 /**
  * 用户身份角标 (Flair)
  */
+@Immutable
 @Serializable
 data class FlairInfo(
     val url: String? = null,
@@ -92,6 +95,7 @@ data class FlairInfo(
 /**
  * 用户自定义状态
  */
+@Immutable
 @Serializable
 data class UserStatus(
     val description: String? = null,
@@ -101,6 +105,7 @@ data class UserStatus(
 /**
  * 话题列表中的用户信息（含静态头像模板 + 动画头像原件 + Flair）
  */
+@Immutable
 @Serializable
 data class TopicUser(
     val id: Int,
@@ -131,6 +136,7 @@ data class TopicUser(
 /**
  * 话题摘要卡片数据
  */
+@Immutable
 @Serializable
 data class TopicSummary(
     val id: Int,
@@ -160,6 +166,7 @@ data class TopicSummary(
 /**
  * Discourse Reactions 插件单个表情统计项（如 `heart` ❤️, `+1` 👍, `confetti_ball` 🎉, `fire` 🔥, `laughing` 😂, `clap` 👏, `hugs` 🤗）
  */
+@Immutable
 @Serializable
 data class PostReactionItem(
     val id: String,
@@ -171,6 +178,7 @@ data class PostReactionItem(
  * Discourse Boosts (`discourse-boosts` / 小火箭助力弹幕) 单条助力气泡
  * 对应 `POST /discourse-boosts/posts/{postId}/boosts` 与 `post.boosts` 数组
  */
+@Immutable
 @Serializable
 data class PostBoostItem(
     val id: Long,
@@ -281,6 +289,7 @@ data class BoostInputStats(
 /**
  * 话题详情中的单层楼 (Post)
  */
+@Immutable
 @Serializable
 data class PostItemModel(
     val id: Int,
@@ -330,6 +339,7 @@ data class PostItemModel(
 /**
  * 完整话题详情模型
  */
+@Immutable
 @Serializable
 data class TopicDetailModel(
     val id: Int,

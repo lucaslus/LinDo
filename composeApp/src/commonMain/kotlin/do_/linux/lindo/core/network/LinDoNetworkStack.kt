@@ -1744,9 +1744,15 @@ object LinuxDoRepository {
                 }
             }
         }
-        val limited = executeHttp("$url&limit=5", preserveFailure = true)
-        // A site may configure a smaller limit. The endpoint also accepts a request without it.
-        val root = readApiObject(if (limited?.first == 400) executeHttp(url, preserveFailure = true) else limited)
+        // 优先不传 limit=5 以拉取站点允许的完整可选标签列表，避免选中必选组标签后候选数量骤降
+        val fullResponse = executeHttp(url, preserveFailure = true)
+        val root = readApiObject(
+            if (fullResponse == null || fullResponse.first !in 200..299) {
+                executeHttp("$url&limit=5", preserveFailure = true)
+            } else {
+                fullResponse
+            }
+        )
         val options = root.requireArray("results").mapNotNull { element ->
             val tag = element as? JsonObject ?: return@mapNotNull null
             val rawId = tag["id"] as? JsonPrimitive
@@ -1759,7 +1765,7 @@ object LinuxDoRepository {
                 disabled = (tag["disabled"] as? JsonPrimitive)?.booleanOrNull == true,
                 reason = (tag["title"] as? JsonPrimitive)?.contentOrNull
             )
-        }.distinctBy { it.name }.take(30)
+        }.distinctBy { it.name }.take(100)
         ComposerTagChoices(
             options,
             forbiddenMessage = (root["forbidden_message"] as? JsonPrimitive)?.contentOrNull,

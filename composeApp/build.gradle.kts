@@ -83,8 +83,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.2.11"
+        versionCode = 14
+        versionName = "0.2.12"
     }
 
     packaging {
@@ -96,6 +96,8 @@ android {
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
+            // 复用 debug 签名以便直接覆盖升级现有安装，同时获得 Release 模式下的 ART AOT 编译与 Compose 高帧率跳过优化（消除 Debug 模式 3~5 倍的列表重组开销）
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
