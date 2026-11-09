@@ -433,6 +433,7 @@ object UserApiKeyAuthManager {
         pendingAuthCreatedAt = 0L
         LinuxDoRepository.clearPollVoteState()
         LinuxDoRepository.clearReadTopics()
+        LinuxDoRepository.updateCsrfToken(null)
         onPersistPendingKey?.invoke(null, null)
         CookieSentinel.clearAuthCookiesOnly()
         val platformClear = onLogoutPlatformClear
@@ -725,7 +726,10 @@ object LinuxDoRepository {
     }
 
     /**
-     * Coil 图片客户端，复用论坛会话并使用系统网络。
+     * Coil 图片客户端：
+     * 仅加载公开静态图片资源（头像/表情/上传图片），严禁在已挂载 Chromium WebView 的平台上通过 OkHttp (Java TLS)
+     * 携带 `cf_clearance` / `__cf_bm` / `_cfuvid` / `_t` / `_forum_session` 等指纹或会话绑定 Cookie，
+     * 防止 Cloudflare Bot Management 检测到同一 `cf_clearance` 在 BoringSSL 与 Java TLS 双栈混用而吊销通行证！
      */
     val imageHttpClient: HttpClient by lazy {
         HttpClient(OkHttp) {
@@ -737,15 +741,14 @@ object LinuxDoRepository {
                         val orig = chain.request()
                         val host = orig.url.host.lowercase()
                         val builder = orig.newBuilder()
-                        UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
-                            builder.header("User-Agent", it)
+                        if (UserApiKeyAuthManager.webViewHttpExecutor == null) {
+                            UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
+                                builder.header("User-Agent", it)
+                            }
                         }
                         if (host == "linux.do" || host.endsWith(".linux.do")) {
-                            val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
-                            if (cookieHeader.isNotEmpty()) {
-                                builder.header("Cookie", cookieHeader)
-                            }
                             builder.header("Referer", "https://linux.do/")
+                            builder.header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
                         }
                         chain.proceed(builder.build())
                     }
@@ -756,6 +759,12 @@ object LinuxDoRepository {
 
     @Volatile
     private var cachedCsrfToken: String? = null
+
+    fun getCachedCsrfToken(): String? = cachedCsrfToken?.takeIf { it.isNotBlank() }
+
+    fun updateCsrfToken(token: String?) {
+        cachedCsrfToken = token?.trim()?.takeIf { it.isNotBlank() }
+    }
 
     private suspend fun fetchCsrfTokenViaSharedClient(forceRefresh: Boolean = false): String? {
         if (!forceRefresh) {
@@ -1887,27 +1896,29 @@ object LinuxDoRepository {
     }
 
     /**
-     * 全局社区搜索（双通道：优先联动 `/search/query.json?term=...` 与 `/search.json?q=...`，
-     * 若未登录或站点搜索限流，自动回退检索最新与热门话题池，确保全站搜索在任何状态下可用）
+     * 全局社区搜索（优先调用全量分页接口 `/search.json?q=...&page=...` 每页返回最多 50 条结果，
+     * 首页失败时自动回退 `/search/query.json?term=...` 或公开话题流兜底）
      */
     suspend fun searchCommunity(
         query: String,
-        order: String? = null
+        order: String? = null,
+        page: Int = 1
     ): List<CommunitySearchResult> = withContext(Dispatchers.IO) {
         val cleanQ = query.trim()
         if (cleanQ.isBlank()) return@withContext emptyList()
+        val safePage = page.coerceAtLeast(1)
         val fullQuery = if (!order.isNullOrBlank()) "$cleanQ order:$order" else cleanQ
         val encoded = java.net.URLEncoder.encode(fullQuery, "UTF-8")
 
-        val endpoints = if (order.isNullOrBlank()) {
+        // 始终优先请求全站搜索分页接口 /search.json（单页返回 50 条），避免默认命中仅返回 5 条预览的 /search/query.json
+        val endpoints = if (safePage == 1) {
             listOf(
-                "https://linux.do/search/query.json?term=$encoded",
-                "https://linux.do/search.json?q=$encoded"
+                "https://linux.do/search.json?q=$encoded&page=1",
+                "https://linux.do/search/query.json?term=$encoded"
             )
         } else {
             listOf(
-                "https://linux.do/search.json?q=$encoded",
-                "https://linux.do/search/query.json?term=$encoded"
+                "https://linux.do/search.json?q=$encoded&page=$safePage"
             )
         }
 
@@ -2603,6 +2614,11 @@ object LinuxDoRepository {
         url: String,
         extraHeaders: Map<String, String> = emptyMap()
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
+        // 若当前平台已挂载同源 Chromium WebView 执行器（Android），严禁使用 OkHttp 发起直连回退，
+        // 避免 Java TLS 指纹暴露及响应 Set-Cookie (_forum_session) 覆盖 WebView 会话状态
+        if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
+            return@withContext null
+        }
         try {
             val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
             val cookieHeader = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")

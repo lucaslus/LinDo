@@ -83,51 +83,45 @@ internal fun ComposerCategoryPicker(
             }
 
             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val minimumCellWidth = 148 * LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val columns = (maxWidth.value / minimumCellWidth).toInt().coerceIn(2, 3)
+                val categoryRows = categories.chunked(columns)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 460.dp)
                         .verticalScroll(rememberScrollState())
-                        .selectableGroup(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .selectableGroup()
                 ) {
-                    categories.chunked(columns).forEach { group ->
+                    categoryRows.forEachIndexed { rowIdx, group ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            group.forEach { category ->
+                            group.forEachIndexed { colIdx, category ->
                                 val selected = selectedId == category.id
                                 val dotColor = LinuxDoSiteRules.parseHexColor(category.colorHex)
                                 Row(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .heightIn(min = 48.dp)
-                                        .clip(RoundedCornerShape(10.dp))
+                                        .heightIn(min = 46.dp)
                                         .background(
-                                            if (selected) palette.brandGold.copy(alpha = 0.12f)
-                                            else palette.subtleSurface
-                                        )
-                                        .border(
-                                            width = if (selected) 1.2.dp else 0.6.dp,
-                                            color = if (selected) palette.brandGold else palette.hairline,
-                                            shape = RoundedCornerShape(10.dp)
+                                            if (selected) palette.brandGold.copy(alpha = 0.10f)
+                                            else palette.cardSurface
                                         )
                                         .selectable(selected, enabled = enabled, role = Role.RadioButton) {
                                             onSelect(category)
                                         }
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        .padding(horizontal = 10.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     Box(
                                         modifier = Modifier
-                                            .size(8.dp)
+                                            .size(7.5.dp)
                                             .background(dotColor, CircleShape)
                                     )
                                     Text(
@@ -148,10 +142,24 @@ internal fun ComposerCategoryPicker(
                                         )
                                     }
                                 }
+                                if (colIdx < columns - 1) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(0.5.dp)
+                                            .height(22.dp)
+                                            .background(palette.hairline)
+                                    )
+                                }
                             }
-                            repeat(columns - group.size) {
+                            repeat(columns - group.size) { emptyIdx ->
                                 Spacer(Modifier.weight(1f))
+                                if (group.size + emptyIdx < columns - 1) {
+                                    Spacer(Modifier.width(0.5.dp))
+                                }
                             }
+                        }
+                        if (rowIdx < categoryRows.lastIndex) {
+                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                         }
                     }
                 }

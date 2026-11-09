@@ -206,6 +206,15 @@ class MainActivity : ComponentActivity() {
         }
 
         @JavascriptInterface
+        fun onCsrfTokenUpdated(token: String) {
+            val clean = token.trim()
+            if (clean.isNotEmpty()) {
+                LinuxDoRepository.updateCsrfToken(clean)
+                runCatching { CookieManager.getInstance().flush() }
+            }
+        }
+
+        @JavascriptInterface
         fun onPreloadedUserDetected(userJson: String) {
             if (userJson.isBlank()) return
             runCatching {
@@ -608,6 +617,40 @@ class MainActivity : ComponentActivity() {
                     if (!apiWebViewReady.isCompleted) {
                         apiWebViewReady.complete(true)
                     }
+                    // 若当前已存在 `_t` 登录会话，在同源 WebView 就绪后静默预热单飞 CSRF Token，
+                    // 避免进入帖子时高频 timings POST 与点赞 PUT 并发争抢首次 /session/csrf.json
+                    if (cookies.contains("_t=") && !cookies.contains("_t=demo_session_token")) {
+                        val seeded = LinuxDoRepository.getCachedCsrfToken().orEmpty()
+                        view?.evaluateJavascript(
+                            """
+                            (function() {
+                                var seeded = ${JSONObject.quote(seeded)};
+                                if (seeded && !window.__lindoCsrf) {
+                                    window.__lindoCsrf = seeded;
+                                }
+                                if (!window.__lindoCsrf && !window.__lindoCsrfPromise) {
+                                    window.__lindoCsrfPromise = fetch('https://linux.do/session/csrf.json', {
+                                        headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
+                                        credentials: 'include',
+                                        cache: 'no-store'
+                                    }).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
+                                        if (d && d.csrf) {
+                                            window.__lindoCsrf = d.csrf;
+                                            if (window.LinDoJsBridge && window.LinDoJsBridge.onCsrfTokenUpdated) {
+                                                window.LinDoJsBridge.onCsrfTokenUpdated(d.csrf);
+                                            }
+                                            return d.csrf;
+                                        }
+                                        return null;
+                                    }).catch(function() { return null; }).finally(function() {
+                                        window.__lindoCsrfPromise = null;
+                                    });
+                                }
+                            })();
+                            """.trimIndent(),
+                            null
+                        )
+                    }
                 }
             }
             apiWebView = wv
@@ -631,10 +674,16 @@ class MainActivity : ComponentActivity() {
         headers: Map<String, String>
     ): Pair<Int, String>? {
         val isRead = method.equals("GET", true) || method.equals("HEAD", true)
-        val wv = apiWebView
-        if (wv == null) {
-            return if (isRead) LinuxDoRepository.executeDirectReadFallback(url, headers) else null
+        var wv = apiWebView
+        if (wv == null && !isFinishing && !isDestroyed) {
+            withContext(Dispatchers.Main) {
+                if (apiWebView == null && !isFinishing && !isDestroyed) {
+                    initPersistentApiWebView()
+                }
+                wv = apiWebView
+            }
         }
+        val activeWv = wv ?: return null
         withTimeoutOrNull(3500L) { apiWebViewReady.await() }
 
         val reqId = UUID.randomUUID().toString()
@@ -662,6 +711,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }.toString()
+        val initialCachedCsrf = LinuxDoRepository.getCachedCsrfToken().orEmpty()
 
         val jsCode = """
             (async function() {
@@ -674,28 +724,59 @@ class MainActivity : ComponentActivity() {
                     const hdrs = $headersJson;
                     hdrs['Accept'] = 'application/json, text/javascript, */*; q=0.01';
                     hdrs['X-Requested-With'] = 'XMLHttpRequest';
-                    async function refreshCsrfToken() {
-                        try {
-                            const csrfResp = await fetch('https://linux.do/session/csrf.json', {
-                                headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                                credentials: 'include',
-                                cache: 'no-store',
-                                signal: controller.signal
-                            });
-                            if (csrfResp.ok) {
-                                const csrfData = await csrfResp.json();
-                                if (csrfData && csrfData.csrf) {
-                                    window.__lindoCsrf = csrfData.csrf;
-                                    return csrfData.csrf;
+                    const kotlinCsrf = ${JSONObject.quote(initialCachedCsrf)};
+                    if (kotlinCsrf && !window.__lindoCsrf) {
+                        window.__lindoCsrf = kotlinCsrf;
+                    }
+                    async function refreshCsrfToken(force) {
+                        if (!force && window.__lindoCsrf) {
+                            return window.__lindoCsrf;
+                        }
+                        if (window.__lindoCsrfPromise) {
+                            try {
+                                const shared = await window.__lindoCsrfPromise;
+                                if (shared) return shared;
+                            } catch (_) {}
+                        }
+                        window.__lindoCsrfPromise = (async () => {
+                            for (let attempt = 0; attempt < 2; attempt++) {
+                                try {
+                                    const csrfResp = await fetch('https://linux.do/session/csrf.json', {
+                                        headers: {
+                                            'Accept': 'application/json, text/javascript, */*; q=0.01',
+                                            'X-Requested-With': 'XMLHttpRequest'
+                                        },
+                                        credentials: 'include',
+                                        cache: 'no-store',
+                                        signal: controller.signal
+                                    });
+                                    if (csrfResp.ok) {
+                                        const csrfData = await csrfResp.json();
+                                        if (csrfData && csrfData.csrf) {
+                                            window.__lindoCsrf = csrfData.csrf;
+                                            if (window.LinDoJsBridge && window.LinDoJsBridge.onCsrfTokenUpdated) {
+                                                window.LinDoJsBridge.onCsrfTokenUpdated(csrfData.csrf);
+                                            }
+                                            return csrfData.csrf;
+                                        }
+                                    }
+                                } catch (_) {}
+                                if (attempt === 0) {
+                                    await new Promise(r => setTimeout(r, 220));
                                 }
                             }
-                        } catch (_) {}
-                        return null;
+                            return null;
+                        })();
+                        try {
+                            return await window.__lindoCsrfPromise;
+                        } finally {
+                            window.__lindoCsrfPromise = null;
+                        }
                     }
-                    if (method !== 'GET' && method !== 'HEAD') {
+                    if (!isRead) {
                         const metaCsrf = document.querySelector('meta[name="csrf-token"]');
                         const cachedCsrf = window.__lindoCsrf || (metaCsrf && metaCsrf.content);
-                        const token = cachedCsrf || (await refreshCsrfToken());
+                        const token = cachedCsrf || (await refreshCsrfToken(false));
                         if (!token) {
                             clearTimeout(timer);
                             const body = JSON.stringify({errors: ['暂时无法验证会话，请打开官网检查登录状态']});
@@ -705,7 +786,7 @@ class MainActivity : ComponentActivity() {
                         hdrs['X-CSRF-Token'] = token;
                     }
                     const bodyStr = ${JSONObject.quote(formBodyEncoded)};
-                    if (method !== 'GET' && method !== 'HEAD') {
+                    if (!isRead) {
                         hdrs['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
                     }
                     function buildOpts() {
@@ -716,12 +797,12 @@ class MainActivity : ComponentActivity() {
                             cache: 'no-store',
                             signal: controller.signal
                         };
-                        if (method !== 'GET' && method !== 'HEAD') {
+                        if (!isRead) {
                             o.body = bodyStr;
                         }
                         return o;
                     }
-                    const maxFetchAttempts = (method === 'GET' || method === 'HEAD') ? 2 : 1;
+                    const maxFetchAttempts = isRead ? 2 : 1;
                     let resp = null;
                     let text = '';
                     for (let attempt = 0; attempt < maxFetchAttempts; attempt++) {
@@ -739,8 +820,9 @@ class MainActivity : ComponentActivity() {
                         }
                         await new Promise(r => setTimeout(r, 200));
                     }
-                    if (!isRead && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token/i.test(text)) {
-                        const freshToken = await refreshCsrfToken();
+                    if (!isRead && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token|bad csrf/i.test(text)) {
+                        window.__lindoCsrf = null;
+                        const freshToken = await refreshCsrfToken(true);
                         if (freshToken) {
                             hdrs['X-CSRF-Token'] = freshToken;
                             resp = await fetch(targetUrl, buildOpts());
@@ -770,14 +852,18 @@ class MainActivity : ComponentActivity() {
             } else if (cookieStr.isNotBlank()) {
                 CookieSentinel.ingestRawCookieString(cookieStr)
             }
-            wv.evaluateJavascript(jsCode, null)
+            activeWv.evaluateJavascript(jsCode, null)
         }
 
         val res = try {
-            val response = withTimeoutOrNull(11000L) {
+            val response = withTimeoutOrNull(if (isRead) 11_500L else 16_000L) {
                 deferred.await()
             }
-            val latestCookies = runCatching { CookieManager.getInstance().getCookie("https://linux.do") }.getOrNull().orEmpty()
+            val cm = runCatching { CookieManager.getInstance() }.getOrNull()
+            if (!isRead) {
+                runCatching { cm?.flush() }
+            }
+            val latestCookies = runCatching { cm?.getCookie("https://linux.do") }.getOrNull().orEmpty()
             if (latestCookies.isNotBlank()) {
                 CookieSentinel.ingestRawCookieString(latestCookies)
             }
@@ -786,9 +872,6 @@ class MainActivity : ComponentActivity() {
             pendingHttpCallbacks.remove(reqId)
         }
 
-        if (isRead && (res == null || res.first == 0 || (res.first == 403 && !res.second.trimStart().let { it.startsWith("{") || it.startsWith("[") }))) {
-            LinuxDoRepository.executeDirectReadFallback(url, headers)?.let { return it }
-        }
         return res
     }
 
@@ -803,6 +886,7 @@ class MainActivity : ComponentActivity() {
         val reqId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Pair<Int, String>>()
         pendingHttpCallbacks[reqId] = deferred
+        val initialCachedCsrf = LinuxDoRepository.getCachedCsrfToken().orEmpty()
 
         val jsCode = """
             (async function() {
@@ -813,6 +897,10 @@ class MainActivity : ComponentActivity() {
                         'Accept': 'application/json, text/javascript, */*; q=0.01',
                         'X-Requested-With': 'XMLHttpRequest'
                     };
+                    const kotlinCsrf = ${JSONObject.quote(initialCachedCsrf)};
+                    if (kotlinCsrf && !window.__lindoCsrf) {
+                        window.__lindoCsrf = kotlinCsrf;
+                    }
                     const metaCsrf = document.querySelector('meta[name="csrf-token"]');
                     const cachedCsrf = window.__lindoCsrf || (metaCsrf && metaCsrf.content);
                     if (cachedCsrf) {
@@ -822,6 +910,7 @@ class MainActivity : ComponentActivity() {
                             const csrfResp = await fetch('https://linux.do/session/csrf.json', {
                                 headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
                                 credentials: 'include',
+                                cache: 'no-store',
                                 signal: controller.signal
                             });
                             if (csrfResp.ok) {
@@ -829,6 +918,9 @@ class MainActivity : ComponentActivity() {
                                 if (csrfData && csrfData.csrf) {
                                     window.__lindoCsrf = csrfData.csrf;
                                     hdrs['X-CSRF-Token'] = csrfData.csrf;
+                                    if (window.LinDoJsBridge && window.LinDoJsBridge.onCsrfTokenUpdated) {
+                                        window.LinDoJsBridge.onCsrfTokenUpdated(csrfData.csrf);
+                                    }
                                 }
                             }
                         } catch (_) {}
@@ -1012,9 +1104,10 @@ class MainActivity : ComponentActivity() {
 
     private fun restoreSessionFromDisk() {
         runCatching {
-            val defaultUa = WebSettings.getDefaultUserAgent(this)
-                .replace("; wv", "")
-            UserApiKeyAuthManager.customUserAgent = prefs.getString("user_agent", defaultUa) ?: defaultUa
+            // 始终使用与系统 WebView 100% 原生一致的 User-Agent（不删改 "; wv"），
+            // 确保与底层 Sec-CH-UA Client Hints 及 cf_clearance 签名完全吻合
+            val nativeUa = WebSettings.getDefaultUserAgent(this)
+            UserApiKeyAuthManager.customUserAgent = nativeUa
 
             val savedClientId = prefs.getString("client_id", null)
             if (!savedClientId.isNullOrBlank()) {
@@ -1228,6 +1321,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         UserPresenceService.setAppForeground(false)
+        runCatching {
+            CookieManager.getInstance().flush()
+            persistSessionToDisk()
+        }
         super.onPause()
     }
 
@@ -1387,16 +1484,19 @@ private fun AndroidWebLoginModal(
             return
         }
 
-        // 已检测到 `_t=` 会话 Cookie：通过单次无副作用 evaluateJavascript 提取当前用户资料
+        // 已检测到 `_t=` 会话 Cookie：通过单次无副作用 evaluateJavascript 提取当前用户资料与页面 CSRF Token
         val probeJs = """
             (function() {
                 try {
+                    var metaCsrf = document.querySelector('meta[name="csrf-token"]');
+                    var csrfVal = (metaCsrf && metaCsrf.content) ? metaCsrf.content : '';
                     var el = document.getElementById('data-preloaded');
                     if (el && el.dataset && el.dataset.preloaded) {
                         var p = JSON.parse(el.dataset.preloaded);
                         if (p && p.currentUser) {
                             var u = JSON.parse(p.currentUser);
                             if (u && u.username) {
+                                if (csrfVal) u.__csrf = csrfVal;
                                 return JSON.stringify(u);
                             }
                         }
@@ -1410,7 +1510,8 @@ private fun AndroidWebLoginModal(
                                 name: du.name || du.username || '',
                                 avatar_template: du.avatar_template || '',
                                 title: du.title || '',
-                                trust_level: typeof du.trust_level === 'number' ? du.trust_level : 1
+                                trust_level: typeof du.trust_level === 'number' ? du.trust_level : 1,
+                                __csrf: csrfVal
                             });
                         }
                     }
@@ -1424,7 +1525,12 @@ private fun AndroidWebLoginModal(
             val decoded = decodeJsStringResult(rawJson)?.takeIf { it.isNotBlank() }
             if (decoded != null) {
                 runCatching {
-                    completeWithUserObject(JSONObject(decoded))
+                    val obj = JSONObject(decoded)
+                    val csrf = obj.optString("__csrf").trim()
+                    if (csrf.isNotEmpty()) {
+                        LinuxDoRepository.updateCsrfToken(csrf)
+                    }
+                    completeWithUserObject(obj)
                 }
             } else if (!completed && rawCookies.contains("_t=")) {
                 // `_t` Cookie 已落盘但 DOM 尚在跳转中：直接关闭登录弹窗并由后台拉取完整 `/session/current.json`
