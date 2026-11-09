@@ -487,100 +487,108 @@ internal fun ComposerSheet(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 12.dp),
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
+                            // 1. 版块类别抽屉触发器胶囊
                             Row(
                                 modifier = Modifier
-                                    .heightIn(min = 48.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(palette.subtleSurface)
+                                    .border(0.6.dp, palette.hairline, RoundedCornerShape(8.dp))
                                     .clickable(enabled = !busy) {
-                                        showCategoryPicker = !showCategoryPicker
-                                        if (showCategoryPicker) {
-                                            keyboard?.hide()
-                                            showTagPicker = false
-                                        }
+                                        keyboard?.hide()
+                                        showTagPicker = false
+                                        showCategoryPicker = true
                                     }
-                                    .padding(horizontal = 4.dp),
+                                    .padding(horizontal = 10.dp, vertical = 6.5.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(7.dp)
+                                        .size(7.5.dp)
                                         .background(
                                             LinuxDoSiteRules.parseHexColor(activeCat?.colorHex ?: "0E76BD"),
                                             CircleShape
                                         )
                                 )
                                 Text(
-                                    text = activeCat?.name ?: "版块",
-                                    fontSize = 12.sp,
+                                    text = activeCat?.name ?: "选择版块",
+                                    fontSize = 12.8.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = palette.inkPrimary
                                 )
                                 Icon(
-                                    imageVector = if (showCategoryPicker) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(12.5.dp),
+                                    imageVector = LinDoIcons.ChevronDown,
+                                    contentDescription = "打开版块抽屉",
+                                    modifier = Modifier.size(13.dp),
                                     tint = palette.inkSecondary
                                 )
                             }
 
+                            // 2. 已选标签胶囊（点击可快速移除）
                             draft.tags.forEach { tag ->
                                 Row(
                                     modifier = Modifier
-                                        .heightIn(min = 48.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(palette.brandGold.copy(alpha = 0.12f))
+                                        .border(0.7.dp, palette.brandGold, RoundedCornerShape(8.dp))
                                         .clickable(enabled = !busy) {
                                             update(draft.copy(tags = draft.tags - tag))
                                         }
-                                        .padding(horizontal = 5.dp),
+                                        .padding(horizontal = 9.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     Text(
                                         text = "#$tag",
-                                        fontSize = 11.8.sp,
-                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 12.2.sp,
+                                        fontWeight = FontWeight.SemiBold,
                                         color = palette.brandGold
                                     )
                                     Icon(
                                         imageVector = LinDoIcons.Close,
                                         contentDescription = "移除标签",
                                         modifier = Modifier.size(11.dp),
-                                        tint = palette.inkSecondary
+                                        tint = palette.brandGold
                                     )
                                 }
                             }
 
-                            if (draft.tags.size < COMPOSER_TAG_LIMIT) {
-                                Row(
-                                    modifier = Modifier
-                                        .heightIn(min = 48.dp)
-                                        .clickable(enabled = !busy) {
-                                            showTagPicker = !showTagPicker
-                                            if (showTagPicker && tagsError != null) tagRetry++
-                                            if (showTagPicker) showCategoryPicker = false
-                                        }
-                                        .padding(horizontal = 5.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = LinDoIcons.Plus,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(12.dp),
-                                        tint = if (showTagPicker) palette.brandGold else palette.inkSecondary
-                                    )
-                                    Text(
-                                        text = "添加标签",
-                                        fontSize = 11.8.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = if (showTagPicker) palette.brandGold else palette.inkSecondary
-                                    )
-                                }
+                            // 3. 标签抽屉触发器胶囊
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(palette.subtleSurface)
+                                    .border(0.6.dp, palette.hairline, RoundedCornerShape(8.dp))
+                                    .clickable(enabled = !busy) {
+                                        keyboard?.hide()
+                                        showCategoryPicker = false
+                                        if (tagsError != null) tagRetry++
+                                        showTagPicker = true
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.Plus,
+                                    contentDescription = "打开标签抽屉",
+                                    modifier = Modifier.size(12.5.dp),
+                                    tint = palette.inkSecondary
+                                )
+                                Text(
+                                    text = if (draft.tags.isEmpty()) "选择标签" else "管理标签 (${draft.tags.size}/$COMPOSER_TAG_LIMIT)",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkSecondary
+                                )
                             }
                         }
+
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
                         if (showCategoryPicker) {
                             ComposerCategoryPicker(
@@ -597,7 +605,6 @@ internal fun ComposerSheet(
                                 },
                                 onDismiss = { showCategoryPicker = false }
                             )
-                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                         } else if (showTagPicker) {
                             ComposerTagPicker(
                                 query = tagQuery,
@@ -615,13 +622,11 @@ internal fun ComposerSheet(
                                     } else if (draft.tags.size < COMPOSER_TAG_LIMIT && !option.disabled) {
                                         option.id?.let { tagIds = tagIds + (option.name to it) }
                                         update(draft.copy(tags = draft.tags + option.name))
-                                        tagQuery = ""
                                     }
                                 },
                                 onRetry = { tagRetry++ },
                                 onDismiss = { keyboard?.hide(); showTagPicker = false }
                             )
-                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                         }
 
                         // 无边框大字号话题标题输入栏

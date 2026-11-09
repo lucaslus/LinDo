@@ -1,20 +1,27 @@
 package do_.linux.lindo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -27,6 +34,7 @@ import do_.linux.lindo.core.network.LinuxDoCategoryMeta
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ComposerCategoryPicker(
     categories: List<LinuxDoCategoryMeta>,
@@ -36,48 +44,123 @@ internal fun ComposerCategoryPicker(
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("选择版块", Modifier.weight(1f), color = palette.inkPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            IconButton(onClick = onDismiss) {
-                Icon(LinDoIcons.Close, "收起版块", Modifier.size(16.dp), tint = palette.inkSecondary)
-            }
-        }
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val minimumCellWidth = 126 * LocalDensity.current.fontScale.coerceAtLeast(1f)
-            val columns = (maxWidth.value / minimumCellWidth).toInt().coerceIn(1, 3)
-            Column(
-                Modifier.heightIn(max = 218.dp).verticalScroll(rememberScrollState()).selectableGroup()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = palette.cardSurface,
+        contentColor = palette.inkPrimary
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 20.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                categories.chunked(columns).forEach { group ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        group.forEach { category ->
-                            val selected = selectedId == category.id
-                            Row(
-                                Modifier.weight(1f).heightIn(min = 46.dp)
-                                    .selectable(selected, enabled = enabled, role = Role.RadioButton) { onSelect(category) }
-                                    .padding(horizontal = 4.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(7.dp)
-                            ) {
-                                Box(Modifier.size(7.dp).background(LinuxDoSiteRules.parseHexColor(category.colorHex), CircleShape))
-                                Text(
-                                    category.name,
-                                    color = if (selected) palette.activeChipText else palette.inkPrimary,
-                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                    fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
-                                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "选择发布版块",
+                        color = palette.inkPrimary,
+                        fontSize = 16.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "全站版块一览，点击即可切换话题所属分类",
+                        color = palette.inkSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(LinDoIcons.Close, "关闭版块抽屉", Modifier.size(18.dp), tint = palette.inkSecondary)
+                }
+            }
+
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+            Spacer(modifier = Modifier.height(12.dp))
+
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val minimumCellWidth = 148 * LocalDensity.current.fontScale.coerceAtLeast(1f)
+                val columns = (maxWidth.value / minimumCellWidth).toInt().coerceIn(2, 3)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState())
+                        .selectableGroup(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    categories.chunked(columns).forEach { group ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            group.forEach { category ->
+                                val selected = selectedId == category.id
+                                val dotColor = LinuxDoSiteRules.parseHexColor(category.colorHex)
+                                Row(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 48.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(
+                                            if (selected) palette.brandGold.copy(alpha = 0.12f)
+                                            else palette.subtleSurface
+                                        )
+                                        .border(
+                                            width = if (selected) 1.2.dp else 0.6.dp,
+                                            color = if (selected) palette.brandGold else palette.hairline,
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
+                                        .selectable(selected, enabled = enabled, role = Role.RadioButton) {
+                                            onSelect(category)
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .background(dotColor, CircleShape)
+                                    )
+                                    Text(
+                                        text = category.name,
+                                        color = if (selected) palette.brandGold else palette.inkPrimary,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        fontSize = 13.5.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (selected) {
+                                        Icon(
+                                            imageVector = LinDoIcons.Check,
+                                            contentDescription = "已选中",
+                                            modifier = Modifier.size(15.dp),
+                                            tint = palette.brandGold
+                                        )
+                                    }
+                                }
+                            }
+                            repeat(columns - group.size) {
+                                Spacer(Modifier.weight(1f))
                             }
                         }
-                        repeat(columns - group.size) { Spacer(Modifier.weight(1f)) }
                     }
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun ComposerTagPicker(
     query: String,
@@ -94,52 +177,237 @@ internal fun ComposerTagPicker(
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("选择标签", Modifier.weight(1f), color = palette.inkPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            if (selected.isNotEmpty()) Text("${selected.size}/$limit", fontSize = 12.sp, color = palette.inkSecondary)
-            TextButton(onClick = onDismiss) { Text("完成", color = palette.activeChipText) }
-        }
-        ComposerTextInput(query, onQueryChange, "搜索标签", enabled = enabled)
-        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-        when {
-            loading -> LinDoLoadingIndicator(label = "加载标签", compactInline = true)
-            error != null -> LinDoLoadFailure(error, onRetry)
-            else -> Column(Modifier.heightIn(max = if (imeVisible) 120.dp else 180.dp).verticalScroll(rememberScrollState())) {
-                val message = choices.forbiddenMessage
-                    ?: choices.requiredGroup?.let { "请先选择「$it」中的标签" }
-                if (message != null) {
-                    Text(message, color = palette.inkSecondary, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
-                }
-                val options = (selected.map { ComposerTagOption(it) } + choices.options).distinctBy { it.name }
-                if (options.isEmpty() && message == null) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = palette.cardSurface,
+        contentColor = palette.inkPrimary
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 20.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        if (query.isBlank()) "这个版块暂无可用标签" else "没有匹配的标签",
-                        color = palette.inkSecondary, fontSize = 13.sp, modifier = Modifier.padding(vertical = 12.dp)
+                        text = "选择话题标签",
+                        color = palette.inkPrimary,
+                        fontSize = 16.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "最多可添加 $limit 个标签，已选 ${selected.size}/$limit",
+                        color = palette.inkSecondary,
+                        fontSize = 12.sp
                     )
                 }
-                options.forEach { option ->
-                    val checked = option.name in selected
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = 44.dp)
-                            .selectable(
-                                selected = checked,
-                                enabled = enabled && (checked || !option.disabled && selected.size < limit),
-                                role = Role.Checkbox
-                            ) { onToggle(option) }
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                TextButton(onClick = onDismiss) {
+                    Text("完成", color = palette.brandGold, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+
+            // 搜索过滤输入框
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(palette.subtleSurface)
+                    .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.Search,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                    tint = palette.inkSecondary
+                )
+                Box(modifier = Modifier.weight(1f)) {
+                    ComposerTextInput(
+                        value = query,
+                        onChange = onQueryChange,
+                        placeholder = "搜索或过滤标签...",
+                        enabled = enabled
+                    )
+                }
+                if (query.isNotEmpty()) {
+                    IconButton(
+                        onClick = { onQueryChange("") },
+                        modifier = Modifier.size(28.dp)
                     ) {
-                        Column(Modifier.weight(1f)) {
+                        Icon(
+                            imageVector = LinDoIcons.Close,
+                            contentDescription = "清空搜索",
+                            modifier = Modifier.size(14.dp),
+                            tint = palette.inkSecondary
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 已选标签置顶一览
+            if (selected.isNotEmpty()) {
+                Text(
+                    text = "已选标签（点击移除）",
+                    color = palette.inkSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    selected.forEach { tagName ->
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(palette.brandGold.copy(alpha = 0.14f))
+                                .border(1.dp, palette.brandGold, RoundedCornerShape(8.dp))
+                                .clickable(enabled = enabled) {
+                                    onToggle(ComposerTagOption(tagName))
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
                             Text(
-                                option.name, fontSize = 13.sp,
-                                color = if (option.disabled) palette.inkTertiary else palette.inkPrimary
+                                text = "#$tagName",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.brandGold
                             )
-                            if (option.disabled && !option.reason.isNullOrBlank()) {
-                                Text(option.reason, color = palette.inkSecondary, fontSize = 11.5.sp)
+                            Icon(
+                                imageVector = LinDoIcons.Close,
+                                contentDescription = "移除 $tagName",
+                                modifier = Modifier.size(12.dp),
+                                tint = palette.brandGold
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
+            when {
+                loading -> {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        LinDoLoadingIndicator(label = "加载可用标签", compactInline = true)
+                    }
+                }
+                error != null -> {
+                    LinDoLoadFailure(error, onRetry)
+                }
+                else -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 180.dp, max = if (imeVisible) 260.dp else 400.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        val message = choices.forbiddenMessage
+                            ?: choices.requiredGroup?.let { "请先选择「$it」中的标签" }
+                        if (message != null) {
+                            Text(
+                                text = message,
+                                color = palette.brandGold,
+                                fontSize = 12.2.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                        }
+
+                        val options = (selected.map { ComposerTagOption(it) } + choices.options).distinctBy { it.name }
+                        if (options.isEmpty() && message == null) {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (query.isBlank()) "当前版块暂无可用标签" else "没有匹配的标签",
+                                    color = palette.inkSecondary,
+                                    fontSize = 13.5.sp
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "全部可选标签",
+                                color = palette.inkSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                options.forEach { option ->
+                                    val checked = option.name in selected
+                                    val canClick = enabled && (checked || (!option.disabled && selected.size < limit))
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(9.dp))
+                                            .background(
+                                                when {
+                                                    checked -> palette.brandGold.copy(alpha = 0.14f)
+                                                    option.disabled -> palette.subtleSurface.copy(alpha = 0.45f)
+                                                    else -> palette.subtleSurface
+                                                }
+                                            )
+                                            .border(
+                                                width = if (checked) 1.2.dp else 0.6.dp,
+                                                color = if (checked) palette.brandGold else palette.hairline,
+                                                shape = RoundedCornerShape(9.dp)
+                                            )
+                                            .selectable(
+                                                selected = checked,
+                                                enabled = canClick,
+                                                role = Role.Checkbox
+                                            ) { onToggle(option) }
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Text(
+                                            text = "#${option.name}",
+                                            fontSize = 13.2.sp,
+                                            fontWeight = if (checked) FontWeight.Bold else FontWeight.Medium,
+                                            color = when {
+                                                checked -> palette.brandGold
+                                                option.disabled -> palette.inkTertiary
+                                                else -> palette.inkPrimary
+                                            }
+                                        )
+                                        if (checked) {
+                                            Icon(
+                                                imageVector = LinDoIcons.Check,
+                                                contentDescription = "已选",
+                                                modifier = Modifier.size(14.dp),
+                                                tint = palette.brandGold
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
-                        if (checked) Icon(LinDoIcons.Check, "已选", Modifier.size(17.dp), tint = palette.accent)
                     }
                 }
             }

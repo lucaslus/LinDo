@@ -1434,6 +1434,19 @@ private fun AndroidWebLoginModal(
     LaunchedEffect(initialUrl, webViewRef) {
         val wv = webViewRef ?: return@LaunchedEffect
         if (initialUrl.isNotBlank() && wv.url != initialUrl) {
+            runCatching {
+                val cm = CookieManager.getInstance()
+                val cookieStr = cm.getCookie("https://linux.do").orEmpty()
+                val sentinelWinners = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+                val sentinelT = sentinelWinners["_t"]?.value
+                if (!sentinelT.isNullOrBlank() && sentinelT != "demo_session_token" && !cookieStr.contains("_t=")) {
+                    cm.setCookie("https://linux.do", "_t=$sentinelT; Path=/; Secure; HttpOnly; SameSite=Lax")
+                    sentinelWinners["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
+                        cm.setCookie("https://linux.do", "_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
+                    }
+                    cm.flush()
+                }
+            }
             pendingUrl = initialUrl
             pageLoadError = null
             wv.loadUrl(initialUrl)

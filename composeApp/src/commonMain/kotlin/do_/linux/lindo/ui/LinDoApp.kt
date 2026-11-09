@@ -898,6 +898,32 @@ internal fun LinDoApp(
 
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val locallyReadTopicPosts = remember { androidx.compose.runtime.mutableStateMapOf<Int, Int>() }
+
+    fun normalizeReadTopics(list: List<TopicSummary>): List<TopicSummary> =
+        list.map { item ->
+            val seenPosts = locallyReadTopicPosts[item.id]
+            if (seenPosts != null && item.postsCount <= seenPosts && (item.unseen || item.unreadPosts > 0)) {
+                item.copy(unseen = false, unreadPosts = 0)
+            } else {
+                item
+            }
+        }
+
+    fun markTopicReadLocally(topicId: Int, seenPostsCount: Int) {
+        if (topicId <= 0) return
+        val effectiveCount = maxOf(locallyReadTopicPosts[topicId] ?: 0, seenPostsCount, 1)
+        locallyReadTopicPosts[topicId] = effectiveCount
+        topics = topics.map {
+            if (it.id == topicId) it.copy(unseen = false, unreadPosts = 0, postsCount = maxOf(it.postsCount, seenPostsCount)) else it
+        }
+        discoverHotTopics = discoverHotTopics.map {
+            if (it.id == topicId) it.copy(unseen = false, unreadPosts = 0, postsCount = maxOf(it.postsCount, seenPostsCount)) else it
+        }
+        pendingNewTopics = pendingNewTopics.map {
+            if (it.id == topicId) it.copy(unseen = false, unreadPosts = 0, postsCount = maxOf(it.postsCount, seenPostsCount)) else it
+        }
+    }
 
     fun syncUserProfile(background: Boolean = false) {
         scope.launch {
@@ -913,7 +939,7 @@ internal fun LinDoApp(
 
     fun applyPendingNewTopics() {
         if (pendingNewTopics.isNotEmpty()) {
-            topics = pendingNewTopics
+            topics = normalizeReadTopics(pendingNewTopics)
             pendingNewTopics = emptyList()
             pendingNewCount = 0
             currentPage = 0
@@ -963,7 +989,8 @@ internal fun LinDoApp(
                         previousTopId != null &&
                         fetched.first().id == previousTopId &&
                         fetched.first().postsCount == previousTopPostsCount
-                    topics = if (excludedTopicId == null) fetched else fetched.filterNot { it.id == excludedTopicId }
+                    val filtered = if (excludedTopicId == null) fetched else fetched.filterNot { it.id == excludedTopicId }
+                    topics = normalizeReadTopics(filtered)
                     hasMoreTopics = fetched.size >= 15
                     if (isUnchanged) {
                         refreshUpToDateNotice = true
@@ -1006,7 +1033,7 @@ internal fun LinDoApp(
                 )
                 if (more.isNotEmpty()) {
                     val existingIds = topics.map { it.id }.toSet()
-                    val uniqueNew = more.filterNot { it.id in existingIds }
+                    val uniqueNew = normalizeReadTopics(more.filterNot { it.id in existingIds })
                     if (uniqueNew.isNotEmpty()) {
                         currentPage = nextPage
                         topics = topics + uniqueNew
@@ -1068,7 +1095,7 @@ internal fun LinDoApp(
             try {
                 val hot = LinuxDoRepository.fetchDiscoverHotTopics(limit = 5)
                 if (hot.isNotEmpty()) {
-                    discoverHotTopics = hot
+                    discoverHotTopics = normalizeReadTopics(hot)
                 }
             } finally {
                 isLoadingDiscoverHot = false
@@ -1100,8 +1127,10 @@ internal fun LinDoApp(
     fun openTopic(topic: TopicSummary, targetPostNumber: Int? = null) {
         if (topic.id <= 0) return
         detailLoadJob?.cancel()
+        val clearedTopic = topic.copy(unseen = false, unreadPosts = 0)
+        markTopicReadLocally(topic.id, topic.postsCount)
         activeTopicDetail = null
-        activeTopicSummary = topic
+        activeTopicSummary = clearedTopic
         activeTargetPostNumber = targetPostNumber
         mobileShowingDetail = true
         detailLoadJob = scope.launch {
@@ -1109,12 +1138,15 @@ internal fun LinDoApp(
             try {
                 val result = LinuxDoRepository.fetchTopicDetail(
                     topicId = topic.id,
-                    summaryFallback = topic,
+                    summaryFallback = clearedTopic,
                     targetPostNumber = targetPostNumber
                 )
                 val loaded = if (result.unavailable && targetPostNumber != null && targetPostNumber > 1) {
-                    LinuxDoRepository.fetchTopicDetail(topic.id, topic)
+                    LinuxDoRepository.fetchTopicDetail(topic.id, clearedTopic)
                 } else result
+                if (!loaded.unavailable) {
+                    markTopicReadLocally(topic.id, maxOf(topic.postsCount, loaded.postsCount))
+                }
                 if (activeTopicSummary?.id == topic.id) activeTopicDetail = loaded
             } finally {
                 if (activeTopicSummary?.id == topic.id) isLoadingDetail = false
@@ -1248,7 +1280,7 @@ internal fun LinDoApp(
             }
         }
         if (Regex("""^https?://connect\.linux\.do(?:/.*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            showConnectSheet = true
+            activeWebLoginUrl = trimmed
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/about(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
@@ -1318,7 +1350,7 @@ internal fun LinDoApp(
                     }
                     if (changedCount > 0) {
                         val freshIds = fresh.map { it.id }.toSet()
-                        val merged = fresh + topics.filterNot { it.id in freshIds }
+                        val merged = normalizeReadTopics(fresh + topics.filterNot { it.id in freshIds })
                         pendingNewTopics = merged
                         pendingNewCount = changedCount
                     }
@@ -1708,7 +1740,7 @@ internal fun LinDoApp(
                                             badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
                                             showBadgesCenterSheet = true
                                         },
-                                        onOpenConnectSheet = { showConnectSheet = true },
+                                        onOpenConnectSheet = { activeWebLoginUrl = "https://connect.linux.do/" },
                                         onOpenAuthSheet = { showAuthSheet = true },
                                         onOpenWebUrl = { openSmartUrl(it) },
                                         onPrimaryWebLogin = {
@@ -1900,7 +1932,7 @@ internal fun LinDoApp(
                                                     badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
                                                     showBadgesCenterSheet = true
                                                 },
-                                                onOpenConnectSheet = { showConnectSheet = true },
+                                                onOpenConnectSheet = { activeWebLoginUrl = "https://connect.linux.do/" },
                                                 onOpenAuthSheet = { showAuthSheet = true },
                                                 onOpenWebUrl = { openSmartUrl(it) },
                                                 onPrimaryWebLogin = {
@@ -5601,6 +5633,26 @@ private fun CommunityPostFloor(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        val unreadDotAlpha by animateFloatAsState(
+                            targetValue = if (isUnread) 1f else 0f,
+                            animationSpec = tween(durationMillis = if (enableAnimations) 200 else 0),
+                            label = "unreadFloorDotAlpha"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(6.5.dp)
+                                .graphicsLayer {
+                                    alpha = unreadDotAlpha
+                                    val scale = 0.65f + 0.35f * unreadDotAlpha
+                                    scaleX = scale
+                                    scaleY = scale
+                                }
+                                .clip(CircleShape)
+                                .background(
+                                    if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
+                                )
+                        )
+
                         val floorMeta = listOfNotNull(
                             post.postNumber.takeIf { it > 1 }?.let { "$it 楼" },
                             post.createdAtText.takeIf { it.isNotBlank() }
@@ -5612,28 +5664,6 @@ private fun CommunityPostFloor(
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false
-                            )
-                        }
-
-                        val unreadDotAlpha by animateFloatAsState(
-                            targetValue = if (isUnread) 1f else 0f,
-                            animationSpec = tween(durationMillis = if (enableAnimations) 200 else 0),
-                            label = "unreadFloorDotAlpha"
-                        )
-                        if (unreadDotAlpha > 0.01f) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.5.dp)
-                                    .graphicsLayer {
-                                        alpha = unreadDotAlpha
-                                        val scale = 0.65f + 0.35f * unreadDotAlpha
-                                        scaleX = scale
-                                        scaleY = scale
-                                    }
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
-                                    )
                             )
                         }
                     }
@@ -12165,6 +12195,7 @@ private fun EditProfileModalSheet(
             fullProfile?.badges.orEmpty().filter { it.allowTitle }.map { it.name }.distinct()
         )
     }
+    var titleDropdownExpanded by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
     var isSaving by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -12186,6 +12217,19 @@ private fun EditProfileModalSheet(
         } finally {
             isLoading = false
         }
+    }
+
+    val titleOptions = remember(availableTitles, userTitle) {
+        val merged = buildList {
+            add("不佩戴头衔" to "")
+            if (userTitle.isNotBlank() && userTitle !in availableTitles) {
+                add(userTitle to userTitle)
+            }
+            availableTitles.forEach { t ->
+                if (t.isNotBlank()) add(t to t)
+            }
+        }
+        merged.distinctBy { it.second }
     }
 
     LinDoFullScreenPage(
@@ -12239,10 +12283,11 @@ private fun EditProfileModalSheet(
                     .weight(1f)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
+                // 顶部原生用户身份栏（与 PublicUserCardSheet 保持一致）
                 Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -12251,111 +12296,249 @@ private fun EditProfileModalSheet(
                         avatarUrl = fullProfile?.avatarTemplate,
                         animatedAvatar = fullProfile?.animatedAvatar,
                         flair = fullProfile?.flair,
-                        avatarSize = 56.dp
+                        avatarSize = 56.dp,
+                        strokeWidth = 2.dp
                     )
-                    Column {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(
-                            text = "@$username",
-                            fontSize = 15.sp,
+                            text = displayName.ifBlank { username },
+                            fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary
+                            color = palette.inkPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = fullProfile?.trustLevelName ?: "Linux.do 社区成员",
-                            fontSize = 12.sp,
-                            color = palette.brandGold
+                            text = "@$username · ${fullProfile?.trustLevelName ?: "Linux.do 社区成员"}",
+                            fontSize = 12.5.sp,
+                            color = palette.inkSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                    }
-                }
-
-                OutlinedTextField(
-                    value = displayName,
-                    onValueChange = { displayName = it },
-                    label = { Text("昵称 / 显示名称") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = userTitle,
-                    onValueChange = { userTitle = it },
-                    label = { Text("个人头衔") },
-                    placeholder = { Text("从下方已解锁徽章头衔中选择或留空") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                if (availableTitles.isNotEmpty()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "快速佩戴已解锁徽章头衔",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.inkSecondary
-                        )
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            listOf("不佩戴" to "").plus(availableTitles.map { it to it }).forEach { (label, value) ->
-                                val selected = userTitle == value
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (selected) palette.brandGold.copy(alpha = 0.16f)
-                                            else palette.subtleSurface
-                                        )
-                                        .border(
-                                            width = 0.7.dp,
-                                            color = if (selected) palette.brandGold else palette.hairline,
-                                            shape = RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { userTitle = value }
-                                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                                ) {
-                                    Text(
-                                        text = label,
-                                        fontSize = 12.sp,
-                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (selected) palette.brandGold else palette.inkPrimary
-                                    )
-                                }
-                            }
+                        if (userTitle.isNotBlank()) {
+                            UserTitleTag(title = userTitle)
                         }
                     }
                 }
 
-                OutlinedTextField(
+                Spacer(modifier = Modifier.height(6.dp))
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+                // 1. 昵称 / 显示名称（原生无框单行输入行）
+                NativeProfileInputRow(
+                    label = "显示昵称",
+                    value = displayName,
+                    onValueChange = { displayName = it },
+                    placeholder = "设置对外展示的昵称",
+                    enabled = !isSaving
+                )
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+                // 2. 个人头衔（原生下拉选择框 DropdownMenu）
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 52.dp)
+                            .clickable(enabled = !isSaving) { titleDropdownExpanded = true }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "个人头衔",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkSecondary,
+                            modifier = Modifier.width(88.dp)
+                        )
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(palette.subtleSurface)
+                                .border(0.6.dp, palette.hairline, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = userTitle.ifBlank { "不佩戴头衔" },
+                                fontSize = 13.8.sp,
+                                fontWeight = if (userTitle.isNotBlank()) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (userTitle.isNotBlank()) palette.inkPrimary else palette.inkSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Icon(
+                                imageVector = if (titleDropdownExpanded) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
+                                contentDescription = "选择个人头衔",
+                                modifier = Modifier.size(15.dp),
+                                tint = palette.inkSecondary
+                            )
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = titleDropdownExpanded,
+                        onDismissRequest = { titleDropdownExpanded = false },
+                        modifier = Modifier
+                            .background(palette.cardSurface)
+                            .widthIn(min = 220.dp, max = 320.dp)
+                    ) {
+                        titleOptions.forEach { (label, value) ->
+                            val selected = userTitle == value
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = label,
+                                        fontSize = 13.8.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (selected) palette.brandGold else palette.inkPrimary
+                                    )
+                                },
+                                trailingIcon = if (selected) {
+                                    {
+                                        Icon(
+                                            imageVector = LinDoIcons.Check,
+                                            contentDescription = "已选中",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = palette.brandGold
+                                        )
+                                    }
+                                } else null,
+                                onClick = {
+                                    userTitle = value
+                                    titleDropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+                // 3. 所在地
+                NativeProfileInputRow(
+                    label = "所在地",
                     value = location,
                     onValueChange = { location = it },
-                    label = { Text("所在地") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    placeholder = "填写城市或地区（选填）",
+                    enabled = !isSaving
                 )
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
-                OutlinedTextField(
+                // 4. 个人网站
+                NativeProfileInputRow(
+                    label = "个人网站",
                     value = website,
                     onValueChange = { website = it },
-                    label = { Text("个人网站 / 主页链接") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    placeholder = "https://example.com（选填）",
+                    enabled = !isSaving
                 )
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
-                OutlinedTextField(
-                    value = bioRaw,
-                    onValueChange = { bioRaw = it },
-                    label = { Text("个人简介（支持 Markdown）") },
-                    minLines = 4,
-                    maxLines = 8,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                // 5. 个人简介（多行无框原生文本区）
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "个人简介",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkSecondary
+                    )
+                    val bioStyle = TextStyle(
+                        color = palette.inkPrimary,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp
+                    )
+                    BasicTextField(
+                        value = bioRaw,
+                        onValueChange = { bioRaw = it },
+                        enabled = !isSaving,
+                        minLines = 4,
+                        maxLines = 8,
+                        textStyle = bioStyle,
+                        cursorBrush = SolidColor(palette.brandGold),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 96.dp),
+                        decorationBox = { inner ->
+                            LinDoInputDecoration(
+                                empty = bioRaw.isEmpty(),
+                                placeholder = "介绍一下你自己（支持 Markdown）",
+                                textStyle = bioStyle,
+                                placeholderColor = palette.inkTertiary,
+                                modifier = Modifier.fillMaxWidth(),
+                                alignment = Alignment.TopStart,
+                                innerTextField = inner
+                            )
+                        }
+                    )
+                }
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
                 statusMessage?.let { msg ->
+                    Spacer(modifier = Modifier.height(12.dp))
                     LinDoFeedbackRow(message = msg, state = LinDoMascotState.NetworkError)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NativeProfileInputRow(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    enabled: Boolean
+) {
+    val palette = LocalPalette.current
+    val textStyle = TextStyle(
+        color = palette.inkPrimary,
+        fontSize = 14.2.sp,
+        lineHeight = 20.sp,
+        fontWeight = FontWeight.Normal
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            color = palette.inkSecondary,
+            modifier = Modifier.width(88.dp)
+        )
+        BasicTextField(
+            value = value,
+            onValueChange = { next -> onValueChange(next.replace(Regex("[\\r\\n]+"), " ")) },
+            enabled = enabled,
+            singleLine = true,
+            maxLines = 1,
+            textStyle = textStyle,
+            cursorBrush = SolidColor(palette.brandGold),
+            modifier = Modifier.weight(1f),
+            decorationBox = { inner ->
+                LinDoInputDecoration(
+                    empty = value.isEmpty(),
+                    placeholder = placeholder,
+                    textStyle = textStyle,
+                    placeholderColor = palette.inkTertiary,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    alignment = Alignment.CenterStart,
+                    innerTextField = inner
+                )
+            }
+        )
     }
 }
 
@@ -12492,19 +12675,20 @@ private fun UserFollowNetworkSheet(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
-                                    Text(
-                                        text = "Lv.${user.trustLevel}",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.brandGold
-                                    )
+                                    if (user.title.isNotBlank()) {
+                                        UserTitleTag(title = user.title)
+                                    } else {
+                                        Text(
+                                            text = "Lv.${user.trustLevel}",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.brandGold
+                                        )
+                                    }
                                 }
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = buildString {
-                                        append("@${user.username}")
-                                        if (user.title.isNotBlank()) append(" · ${user.title}")
-                                    },
+                                    text = "@${user.username} · Lv.${user.trustLevel}",
                                     fontSize = 12.sp,
                                     color = palette.inkSecondary,
                                     maxLines = 1,
@@ -12757,88 +12941,116 @@ private fun UserAccountPreferencesSheet(
             val s = snapshot
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
             ) {
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(palette.subtleSurface)
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text("账号基础信息", fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
-                        PreferenceInfoRow("用户名", "@${s?.username ?: username}")
-                        PreferenceInfoRow("显示昵称", s?.displayName?.ifBlank { "未设置" } ?: "未设置")
-                        if (!s?.email.isNullOrBlank()) {
-                            PreferenceInfoRow("绑定邮箱", s?.email.orEmpty())
-                        }
-                        PreferenceInfoRow("当前头衔", s?.title?.ifBlank { "未佩戴" } ?: "未佩戴")
-                        PreferenceInfoRow("两步验证 (2FA)", if (s?.twoFactorEnabled == true) "已开启保护" else "标准登录保护")
-                        PreferenceInfoRow("已授权在线设备", "${s?.activeDeviceCount ?: 1} 台设备")
+                item(key = "section_account") {
+                    Text(
+                        text = "账号信息",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.inkSecondary,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                    )
+                }
+                item(key = "row_username") {
+                    PreferenceInfoRow("用户名", "@${s?.username ?: username}")
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                }
+                item(key = "row_display_name") {
+                    PreferenceInfoRow("显示昵称", s?.displayName?.ifBlank { "未设置" } ?: "未设置", onClick = onOpenEditProfile)
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                }
+                if (!s?.email.isNullOrBlank()) {
+                    item(key = "row_email") {
+                        PreferenceInfoRow("绑定邮箱", s?.email.orEmpty())
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     }
+                }
+                item(key = "row_title") {
+                    PreferenceInfoRow("个人头衔", s?.title?.ifBlank { "未佩戴" } ?: "未佩戴", onClick = onOpenEditProfile)
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                }
+                item(key = "row_2fa") {
+                    PreferenceInfoRow("两步验证 (2FA)", if (s?.twoFactorEnabled == true) "已开启保护" else "标准登录保护")
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                }
+                item(key = "row_devices") {
+                    PreferenceInfoRow("已授权在线设备", "${s?.activeDeviceCount ?: 1} 台设备")
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
 
                 if (!s?.associatedAccounts.isNullOrEmpty()) {
-                    item {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(palette.subtleSurface)
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text("已关联第三方账号", fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
-                            s?.associatedAccounts.orEmpty().forEach { acc ->
-                                Text(acc, fontSize = 13.sp, color = palette.inkSecondary)
-                            }
-                        }
+                    item(key = "section_assoc") {
+                        Text(
+                            text = "已关联第三方账号",
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.inkSecondary,
+                            modifier = Modifier.padding(top = 18.dp, bottom = 4.dp)
+                        )
+                    }
+                    itemsIndexed(s?.associatedAccounts.orEmpty(), key = { idx, acc -> "assoc_$idx$acc" }) { _, acc ->
+                        PreferenceInfoRow("互联绑定", acc)
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     }
                 }
 
-                item {
-                    Column(
+                item(key = "section_privacy") {
+                    Text(
+                        text = "隐私与互动偏好",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.inkSecondary,
+                        modifier = Modifier.padding(top = 18.dp, bottom = 4.dp)
+                    )
+                }
+                item(key = "toggle_presence") {
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(palette.subtleSurface)
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                            .clickable(enabled = !isSavingToggle && s != null) {
+                                persistPrivacyPrefs(!hidePresence, allowPm)
+                            }
+                            .padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("隐私与互动偏好", fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("隐藏我的公开资料与在线状态", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
-                                Text("开启后其他用户无法查看你的在线状态", fontSize = 11.8.sp, color = palette.inkSecondary)
-                            }
-                            Switch(
-                                checked = hidePresence,
-                                enabled = !isSavingToggle && s != null,
-                                onCheckedChange = { persistPrivacyPrefs(it, allowPm) }
-                            )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("隐藏我的公开资料与在线状态", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text("开启后其他用户无法查看你的在线状态", fontSize = 12.sp, color = palette.inkSecondary)
                         }
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("允许其他成员向我发送站内私信", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
-                                Text("关闭后仅管理员可向你发起私信", fontSize = 11.8.sp, color = palette.inkSecondary)
-                            }
-                            Switch(
-                                checked = allowPm,
-                                enabled = !isSavingToggle && s != null,
-                                onCheckedChange = { persistPrivacyPrefs(hidePresence, it) }
-                            )
-                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Switch(
+                            checked = hidePresence,
+                            enabled = !isSavingToggle && s != null,
+                            onCheckedChange = { persistPrivacyPrefs(it, allowPm) }
+                        )
                     }
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                }
+                item(key = "toggle_pm") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !isSavingToggle && s != null) {
+                                persistPrivacyPrefs(hidePresence, !allowPm)
+                            }
+                            .padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("允许其他成员向我发送站内私信", fontSize = 14.5.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text("关闭后仅管理员可向你发起私信", fontSize = 12.sp, color = palette.inkSecondary)
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Switch(
+                            checked = allowPm,
+                            enabled = !isSavingToggle && s != null,
+                            onCheckedChange = { persistPrivacyPrefs(hidePresence, it) }
+                        )
+                    }
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
             }
         }
@@ -12846,22 +13058,31 @@ private fun UserAccountPreferencesSheet(
 }
 
 @Composable
-private fun PreferenceInfoRow(label: String, value: String) {
+private fun PreferenceInfoRow(label: String, value: String, onClick: (() -> Unit)? = null) {
     val palette = LocalPalette.current
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+            .padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, fontSize = 13.2.sp, color = palette.inkSecondary)
-        Text(value, fontSize = 13.2.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+        Text(label, fontSize = 14.sp, color = palette.inkSecondary)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(value, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+            if (onClick != null) {
+                Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
+            }
+        }
     }
 }
 
 /**
  * 官方功能 16：原生关于社区与管理团队页面 (`GET /about.json`)
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun CommunityAboutSheet(
     onDismiss: () -> Unit,
@@ -12870,6 +13091,7 @@ private fun CommunityAboutSheet(
     val palette = LocalPalette.current
     var aboutData by remember { mutableStateOf<CommunityAboutData?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+    var activeTeamTab by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(Unit) {
         isLoading = true
@@ -12898,16 +13120,11 @@ private fun CommunityAboutSheet(
             val info = aboutData
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
             ) {
-                item {
+                item(key = "about_intro") {
                     Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(palette.subtleSurface)
-                            .padding(16.dp),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
@@ -12923,19 +13140,16 @@ private fun CommunityAboutSheet(
                             color = palette.inkSecondary
                         )
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
 
                 if (info != null) {
-                    item {
+                    item(key = "about_stats") {
                         Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(palette.subtleSurface)
-                                .padding(16.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Text("全站实时统计", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
                             Row(Modifier.fillMaxWidth()) {
                                 ProfileMetric(formatCompactNumber(info.topicCount), "累计话题", Modifier.weight(1f))
                                 ProfileMetric(formatCompactNumber(info.postCount), "累计帖子", Modifier.weight(1f))
@@ -12947,65 +13161,65 @@ private fun CommunityAboutSheet(
                                 ProfileMetric(formatCompactNumber(info.likeCount), "全站获赞", Modifier.weight(1f))
                             }
                         }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     }
 
-                    if (info.admins.isNotEmpty()) {
-                        item {
-                            Text("社区管理员", fontSize = 15.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
-                        }
-                        itemsIndexed(info.admins, key = { _, u -> "admin_${u.username}" }) { _, admin ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onInspectUser(admin.username) }
-                                    .padding(vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                GoogleAccountRingAvatar(
-                                    letter = admin.displayName,
-                                    avatarUrl = admin.avatarUrl,
-                                    animatedAvatar = admin.animatedAvatar,
-                                    avatarSize = 38.dp
-                                )
-                                Spacer(Modifier.width(12.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(admin.displayName, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
-                                    Text("@${admin.username}${if (admin.title.isNotBlank()) " · ${admin.title}" else ""}", fontSize = 12.sp, color = palette.inkSecondary)
-                                }
-                                Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
-                            }
+                    stickyHeader(key = "team_tabs") {
+                        Column(Modifier.fillMaxWidth().background(palette.cardSurface)) {
+                            LinDoSectionTabs(
+                                labels = listOf("管理员 ${info.admins.size}", "版主团队 ${info.moderators.size}"),
+                                selectedIndex = activeTeamTab,
+                                fontSize = 13.8.sp
+                            ) { activeTeamTab = it }
                             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                         }
                     }
 
-                    if (info.moderators.isNotEmpty()) {
-                        item {
-                            Spacer(Modifier.height(4.dp))
-                            Text("社区版主团队", fontSize = 15.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
-                        }
-                        itemsIndexed(info.moderators, key = { _, u -> "mod_${u.username}" }) { _, mod ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onInspectUser(mod.username) }
-                                    .padding(vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                GoogleAccountRingAvatar(
-                                    letter = mod.displayName,
-                                    avatarUrl = mod.avatarUrl,
-                                    animatedAvatar = mod.animatedAvatar,
-                                    avatarSize = 38.dp
-                                )
-                                Spacer(Modifier.width(12.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(mod.displayName, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
-                                    Text("@${mod.username}${if (mod.title.isNotBlank()) " · ${mod.title}" else ""}", fontSize = 12.sp, color = palette.inkSecondary)
+                    val activeMembers = if (activeTeamTab == 0) info.admins else info.moderators
+                    itemsIndexed(activeMembers, key = { _, u -> "${activeTeamTab}_${u.username}" }) { _, member ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onInspectUser(member.username) }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            GoogleAccountRingAvatar(
+                                letter = member.displayName,
+                                avatarUrl = member.avatarUrl,
+                                animatedAvatar = member.animatedAvatar,
+                                avatarSize = 40.dp
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = member.displayName,
+                                        fontSize = 14.8.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (member.title.isNotBlank()) {
+                                        UserTitleTag(title = member.title)
+                                    }
                                 }
-                                Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "@${member.username}",
+                                    fontSize = 12.sp,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
-                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                            Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
                         }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     }
                 }
             }
