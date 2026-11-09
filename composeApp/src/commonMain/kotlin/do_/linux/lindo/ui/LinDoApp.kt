@@ -930,10 +930,11 @@ internal fun LinDoApp(
             val profile = LinuxDoRepository.fetchCurrentUserProfile(background = background)
             if (profile != null) {
                 fullUserProfile = profile
+                launch { runCatching { LinuxDoRepository.fetchUserBadges(profile.username) } }
             }
+            launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
             delay(1800L)
             launch { runCatching { LinuxDoRepository.syncSiteEmojis() } }
-            launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
         }
     }
 
@@ -2190,10 +2191,12 @@ internal fun LinDoApp(
                 }
 
                 if (showBadgesCenterSheet) {
+                    val isSelfBadges = badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)
                     CommunityBadgesSheet(
                         targetUsername = badgesCenterUsername ?: fullUserProfile?.username ?: currentUser?.username.orEmpty(),
-                        currentUserTitle = if (badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)) fullUserProfile?.title ?: currentUser?.userTitle.orEmpty() else "",
-                        initialEarnedBadges = if (badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)) fullUserProfile?.badges.orEmpty() else emptyList(),
+                        currentUserTitle = if (isSelfBadges) fullUserProfile?.title ?: currentUser?.userTitle.orEmpty() else "",
+                        initialEarnedBadges = if (isSelfBadges) fullUserProfile?.badges.orEmpty() else emptyList(),
+                        initialEarnedCount = if (isSelfBadges) (fullUserProfile?.badgeCount?.coerceAtLeast(fullUserProfile?.badges?.size ?: 0) ?: 0) else 0,
                         onDismiss = { showBadgesCenterSheet = false },
                         onInspectBadge = { badge ->
                             inspectedBadge = badge
@@ -7835,7 +7838,7 @@ private fun CommunityProfileScreen(
                         .background(palette.cardSurface)
                         .padding(vertical = 6.dp)
                 ) {
-                    menuRows.forEachIndexed { idx, (meta, action) ->
+                    menuRows.forEach { (meta, action) ->
                         val (title, subtitle, iconVec) = meta
                         Row(
                             modifier = Modifier
@@ -7847,8 +7850,8 @@ private fun CommunityProfileScreen(
                             Icon(
                                 imageVector = iconVec,
                                 contentDescription = title,
-                                modifier = Modifier.size(20.dp),
-                                tint = if (idx == 0) palette.brandGold else palette.inkSecondary
+                                modifier = Modifier.size(24.dp),
+                                tint = palette.inkSecondary
                             )
 
                             Spacer(modifier = Modifier.width(14.dp))
@@ -7907,7 +7910,7 @@ private fun CommunityProfileScreen(
                         Icon(
                             imageVector = LinDoIcons.Palette,
                             contentDescription = "主题配色",
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(24.dp),
                             tint = palette.inkSecondary
                         )
                         Spacer(modifier = Modifier.width(14.dp))
@@ -7963,7 +7966,7 @@ private fun CommunityProfileScreen(
                                 .padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(LinDoIcons.Image, null, Modifier.size(20.dp), tint = palette.inkSecondary)
+                            Icon(LinDoIcons.Image, null, Modifier.size(24.dp), tint = palette.inkSecondary)
                             Spacer(Modifier.width(14.dp))
                             Column(Modifier.weight(1f)) {
                                 Text("应用图标", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
@@ -7989,7 +7992,7 @@ private fun CommunityProfileScreen(
                             Icon(
                                 imageVector = if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
                                 contentDescription = "列表布局",
-                                modifier = Modifier.size(20.dp),
+                                modifier = Modifier.size(24.dp),
                                 tint = palette.inkSecondary
                             )
                             Spacer(modifier = Modifier.width(14.dp))
@@ -8295,7 +8298,7 @@ private fun CommunityProfileScreen(
                         Icon(
                             imageVector = LinDoIcons.Sliders,
                             contentDescription = "阅读字号",
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(24.dp),
                             tint = palette.inkSecondary
                         )
                         Spacer(modifier = Modifier.width(14.dp))
@@ -8332,7 +8335,7 @@ private fun CommunityProfileScreen(
                         Icon(
                             imageVector = LinDoIcons.InfoCircle,
                             contentDescription = "关于社区",
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(24.dp),
                             tint = palette.inkSecondary
                         )
                         Spacer(modifier = Modifier.width(14.dp))
@@ -8730,6 +8733,7 @@ private fun CommunityBadgesSheet(
     targetUsername: String,
     currentUserTitle: String = "",
     initialEarnedBadges: List<GrantedBadge> = emptyList(),
+    initialEarnedCount: Int = 0,
     onDismiss: () -> Unit,
     onInspectBadge: (GrantedBadge) -> Unit
 ) {
@@ -8740,10 +8744,22 @@ private fun CommunityBadgesSheet(
     var tierFilter by remember { mutableIntStateOf(0) } // 0=全部, 1=金徽章, 2=银徽章, 3=铜徽章, 4=可设头衔
     var searchQuery by remember { mutableStateOf("") }
 
-    var earnedBadges by remember(targetUsername) { mutableStateOf(initialEarnedBadges.distinctBy { it.id }) }
-    var allSiteBadges by remember { mutableStateOf<List<GrantedBadge>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    var loadingOwned by remember(targetUsername) { mutableStateOf(targetUsername.isNotBlank()) }
+    var earnedBadges by remember(targetUsername) {
+        val cached = LinuxDoRepository.getCachedUserBadges(targetUsername).orEmpty()
+        val initialFull = if (cached.isNotEmpty()) {
+            cached
+        } else if (initialEarnedCount <= 0 || initialEarnedBadges.size >= initialEarnedCount) {
+            initialEarnedBadges.distinctBy { it.id }
+        } else {
+            emptyList()
+        }
+        mutableStateOf(initialFull)
+    }
+    var allSiteBadges by remember { mutableStateOf(LinuxDoRepository.cachedSiteBadges) }
+    var isLoading by remember { mutableStateOf(LinuxDoRepository.cachedSiteBadges.isEmpty()) }
+    var loadingOwned by remember(targetUsername) {
+        mutableStateOf(targetUsername.isNotBlank() && LinuxDoRepository.getCachedUserBadges(targetUsername).isNullOrEmpty())
+    }
     var ownedError by remember(targetUsername) { mutableStateOf(false) }
     var catalogError by remember { mutableStateOf(false) }
     var retryCatalog by remember { mutableIntStateOf(0) }
@@ -8759,7 +8775,11 @@ private fun CommunityBadgesSheet(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            ownedError = true
+            if (earnedBadges.isEmpty() && initialEarnedBadges.isNotEmpty()) {
+                earnedBadges = initialEarnedBadges.distinctBy { it.id }
+            } else {
+                ownedError = true
+            }
         } finally {
             loadingOwned = false
         }
@@ -8772,7 +8792,7 @@ private fun CommunityBadgesSheet(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            catalogError = true
+            catalogError = allSiteBadges.isEmpty()
         } finally {
             isLoading = false
         }
@@ -8806,6 +8826,10 @@ private fun CommunityBadgesSheet(
         }
     }
 
+    val earnedCountDisplay = if (earnedBadges.isNotEmpty()) earnedBadges.size else initialEarnedCount
+    val earnedTabLabel = if (earnedCountDisplay > 0 || !loadingOwned) "已获徽章 $earnedCountDisplay" else "已获徽章"
+    val siteTabLabel = if (allSiteBadges.isNotEmpty() || !isLoading) "全站徽章 ${allSiteBadges.size}" else "全站徽章"
+
     LinDoFullScreenPage(
         onBack = onDismiss,
         containerColor = palette.cardSurface
@@ -8820,7 +8844,7 @@ private fun CommunityBadgesSheet(
         ) {
             if (targetUsername.isNotBlank()) {
                 LinDoSectionTabs(
-                    labels = listOf("已获徽章 ${earnedBadges.size}", "全站徽章 ${allSiteBadges.size}"),
+                    labels = listOf(earnedTabLabel, siteTabLabel),
                     selectedIndex = selectedTab
                 ) { index ->
                     focusManager.clearFocus()

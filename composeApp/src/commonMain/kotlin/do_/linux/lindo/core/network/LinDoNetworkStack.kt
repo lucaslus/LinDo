@@ -2573,6 +2573,19 @@ object LinuxDoRepository {
         }
     }
 
+    @Volatile
+    var cachedSiteBadges: List<GrantedBadge> = emptyList()
+        private set
+
+    @Volatile
+    private var cachedUserBadgesByUsername: Map<String, List<GrantedBadge>> = emptyMap()
+
+    fun getCachedUserBadges(username: String): List<GrantedBadge>? {
+        val clean = username.trim().removePrefix("@").lowercase()
+        if (clean.isBlank()) return null
+        return cachedUserBadgesByUsername[clean]
+    }
+
     /**
      * 获取指定用户的完整已获徽章列表 (`GET /user-badges/{username}.json?grouped=true`)
      */
@@ -2590,10 +2603,15 @@ object LinuxDoRepository {
         try {
             val root = readApiObject(effectiveRes)
             root.requireArray("user_badges")
-            parseUserBadgesFromRoot(root)
+            val parsed = parseUserBadgesFromRoot(root)
+            if (parsed.isNotEmpty()) {
+                cachedUserBadgesByUsername = cachedUserBadgesByUsername + (clean.lowercase() to parsed)
+            }
+            parsed
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (apiErr: Exception) {
+            getCachedUserBadges(clean)?.takeIf { it.isNotEmpty() }?.let { return@withContext it }
             val cached = UserApiKeyAuthManager.fullProfileCache
                 ?.takeIf { it.username.equals(clean, ignoreCase = true) && it.badges.isNotEmpty() }
                 ?.badges
@@ -2624,7 +2642,7 @@ object LinuxDoRepository {
         val groups = (root["badge_groupings"] as? JsonArray).orEmpty()
             .mapNotNull { it as? JsonObject }
             .associateBy { it["id"]?.jsonPrimitive?.intOrNull }
-        root.requireArray("badges").mapNotNull { element ->
+        val result = root.requireArray("badges").mapNotNull { element ->
             val badge = element as? JsonObject ?: return@mapNotNull null
             if (badge["listable"]?.jsonPrimitive?.booleanOrNull == false ||
                 badge["enabled"]?.jsonPrimitive?.booleanOrNull == false) return@mapNotNull null
@@ -2636,6 +2654,10 @@ object LinuxDoRepository {
         }.distinctBy { it.id }.sortedBy { badge ->
             groups[badge.badgeGroupingId]?.get("position")?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE
         }
+        if (result.isNotEmpty()) {
+            cachedSiteBadges = result
+        }
+        result
     }
 
     private fun isTodayDateMonthDay(dateStr: String?, requirePreviousYear: Boolean): Boolean {
