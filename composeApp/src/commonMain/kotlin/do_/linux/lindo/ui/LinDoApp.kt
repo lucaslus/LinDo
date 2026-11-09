@@ -159,11 +159,15 @@ import do_.linux.lindo.core.network.ApiFailureKind
 import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CloudDraftItem
+import do_.linux.lindo.core.network.CommunityAboutData
+import do_.linux.lindo.core.network.FollowUserEntry
+import do_.linux.lindo.core.network.LeaderboardUserEntry
 import do_.linux.lindo.core.network.LinuxDoCategoryMeta
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.MentionCandidate
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UploadedMediaResult
+import do_.linux.lindo.core.network.UserAccountPreferencesSnapshot
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.compose.*
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
@@ -874,6 +878,13 @@ internal fun LinDoApp(
     var showCloudDraftsSheet by remember { mutableStateOf(false) }
     var showPrivateMessagesSheet by remember { mutableStateOf(false) }
     var pmInitialRecipient by remember { mutableStateOf<String?>(null) }
+    var showEditProfileSheet by remember { mutableStateOf(false) }
+    var showFollowSheet by remember { mutableStateOf(false) }
+    var showLeaderboardSheet by remember { mutableStateOf(false) }
+    var showAccountPreferencesSheet by remember { mutableStateOf(false) }
+    var showAboutSheet by remember { mutableStateOf(false) }
+    var discoverHotTopics by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
+    var isLoadingDiscoverHot by remember { mutableStateOf(false) }
     var showLogoutConfirm by remember { mutableStateOf(false) }
 
     // 认证状态与真实个人资料状态
@@ -1050,11 +1061,33 @@ internal fun LinDoApp(
         }
     }
 
+    fun refreshDiscoverHotTopics() {
+        if (isLoadingDiscoverHot) return
+        scope.launch {
+            isLoadingDiscoverHot = true
+            try {
+                val hot = LinuxDoRepository.fetchDiscoverHotTopics(limit = 5)
+                if (hot.isNotEmpty()) {
+                    discoverHotTopics = hot
+                }
+            } finally {
+                isLoadingDiscoverHot = false
+            }
+        }
+    }
+
+    LaunchedEffect(currentTab) {
+        if (currentTab == MainTab.DISCOVER && discoverHotTopics.isEmpty()) {
+            refreshDiscoverHotTopics()
+        }
+    }
+
     fun openOfficialProfileEditor() {
-        val username = currentUser?.username ?: fullUserProfile?.username
-        val accountPath = if (username.isNullOrBlank()) "my"
-            else "u/" + java.net.URLEncoder.encode(username, "UTF-8").replace("+", "%20")
-        activeWebLoginUrl = "https://linux.do/$accountPath/preferences/profile"
+        if (isAuthorized) {
+            showEditProfileSheet = true
+        } else {
+            activeWebLoginUrl = "https://linux.do/login"
+        }
     }
 
     fun closeWebPage() {
@@ -1214,11 +1247,36 @@ internal fun LinDoApp(
                 return
             }
         }
+        if (Regex("""^https?://connect\.linux\.do(?:/.*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
+            showConnectSheet = true
+            return
+        }
+        if (Regex("""^https?://(?:www\.)?linux\.do/about(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
+            showAboutSheet = true
+            return
+        }
+        if (Regex("""^https?://(?:www\.)?linux\.do/(?:leaderboard|u\?period=.*)(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
+            showLeaderboardSheet = true
+            return
+        }
+        if (Regex("""^https?://(?:www\.)?linux\.do/u/[^/?#]+/follow(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
+            if (isAuthorized) showFollowSheet = true else activeWebLoginUrl = "https://linux.do/login"
+            return
+        }
+        if (Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences/profile(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
+            if (isAuthorized) showEditProfileSheet = true else activeWebLoginUrl = "https://linux.do/login"
+            return
+        }
+        if (Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences(?:/.*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
+            if (isAuthorized) showAccountPreferencesSheet = true else activeWebLoginUrl = "https://linux.do/login"
+            return
+        }
         activeWebLoginUrl = trimmed
     }
 
     LaunchedEffect(Unit) {
         launch { LinuxDoRepository.syncSiteCategories() }
+        launch { refreshDiscoverHotTopics() }
         loadTopics(FeedSortFilter.LATEST, null)
         syncUserProfile(background = true)
     }
@@ -1282,6 +1340,11 @@ internal fun LinDoApp(
             showReadHistorySheet ||
             showCloudDraftsSheet ||
             showPrivateMessagesSheet ||
+            showEditProfileSheet ||
+            showFollowSheet ||
+            showLeaderboardSheet ||
+            showAccountPreferencesSheet ||
+            showAboutSheet ||
             showConnectSheet ||
             showAuthSheet ||
             mobileShowingDetail ||
@@ -1335,6 +1398,26 @@ internal fun LinDoApp(
                 }
                 showPrivateMessagesSheet -> {
                     showPrivateMessagesSheet = false
+                    true
+                }
+                showEditProfileSheet -> {
+                    showEditProfileSheet = false
+                    true
+                }
+                showFollowSheet -> {
+                    showFollowSheet = false
+                    true
+                }
+                showLeaderboardSheet -> {
+                    showLeaderboardSheet = false
+                    true
+                }
+                showAccountPreferencesSheet -> {
+                    showAccountPreferencesSheet = false
+                    true
+                }
+                showAboutSheet -> {
+                    showAboutSheet = false
                     true
                 }
                 showConnectSheet -> {
@@ -1537,7 +1620,9 @@ internal fun LinDoApp(
 
                                 MainTab.DISCOVER -> {
                                     CommunityDiscoverScreen(
-                                        hotTopics = topics.filterNot { it.pinned }.take(5),
+                                        hotTopics = discoverHotTopics.ifEmpty { topics.filterNot { it.pinned }.take(5) },
+                                        isLoadingHot = isLoadingDiscoverHot,
+                                        onRefreshHot = ::refreshDiscoverHotTopics,
                                         onSelectCategory = { catId ->
                                             selectedCategoryId = catId
                                             currentTab = MainTab.HOME
@@ -1614,6 +1699,10 @@ internal fun LinDoApp(
                                             showPrivateMessagesSheet = true
                                         },
                                         onOpenEditProfile = ::openOfficialProfileEditor,
+                                        onOpenFollowSheet = { showFollowSheet = true },
+                                        onOpenLeaderboardSheet = { showLeaderboardSheet = true },
+                                        onOpenAccountPreferences = { showAccountPreferencesSheet = true },
+                                        onOpenAboutSheet = { showAboutSheet = true },
                                         onInspectBadge = { inspectedBadge = it },
                                         onOpenBadgesCenter = {
                                             badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
@@ -1730,7 +1819,9 @@ internal fun LinDoApp(
 
                                         MainTab.DISCOVER -> {
                                             CommunityDiscoverScreen(
-                                                hotTopics = topics.filterNot { it.pinned }.take(5),
+                                                hotTopics = discoverHotTopics.ifEmpty { topics.filterNot { it.pinned }.take(5) },
+                                                isLoadingHot = isLoadingDiscoverHot,
+                                                onRefreshHot = ::refreshDiscoverHotTopics,
                                                 onSelectCategory = { catId ->
                                                     selectedCategoryId = catId
                                                     currentTab = MainTab.HOME
@@ -1800,12 +1891,16 @@ internal fun LinDoApp(
                                                     showPrivateMessagesSheet = true
                                                 },
                                                 onOpenEditProfile = ::openOfficialProfileEditor,
+                                                onOpenFollowSheet = { showFollowSheet = true },
+                                                onOpenLeaderboardSheet = { showLeaderboardSheet = true },
+                                                onOpenAccountPreferences = { showAccountPreferencesSheet = true },
+                                                onOpenAboutSheet = { showAboutSheet = true },
                                                 onInspectBadge = { inspectedBadge = it },
                                                 onOpenBadgesCenter = {
                                                     badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
                                                     showBadgesCenterSheet = true
                                                 },
-                                                onOpenConnectSheet = { openSmartUrl("https://connect.linux.do") },
+                                                onOpenConnectSheet = { showConnectSheet = true },
                                                 onOpenAuthSheet = { showAuthSheet = true },
                                                 onOpenWebUrl = { openSmartUrl(it) },
                                                 onPrimaryWebLogin = {
@@ -1944,6 +2039,59 @@ internal fun LinDoApp(
                 if (showConnectSheet) {
                     ConnectTrustLevelSheet(
                         onDismiss = { showConnectSheet = false }
+                    )
+                }
+
+                if (showEditProfileSheet) {
+                    val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
+                    EditProfileModalSheet(
+                        username = uname,
+                        fullProfile = fullUserProfile,
+                        onDismiss = { showEditProfileSheet = false },
+                        onSaved = {
+                            showEditProfileSheet = false
+                            syncUserProfile()
+                        }
+                    )
+                }
+
+                if (showFollowSheet) {
+                    val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
+                    UserFollowNetworkSheet(
+                        username = uname,
+                        onDismiss = { showFollowSheet = false },
+                        onInspectUser = { targetUser -> inspectedUsername = targetUser },
+                        onSelectActivity = { tid, title, postNum ->
+                            showFollowSheet = false
+                            openTopicById(tid, title, postNum)
+                        }
+                    )
+                }
+
+                if (showLeaderboardSheet) {
+                    CommunityLeaderboardSheet(
+                        onDismiss = { showLeaderboardSheet = false },
+                        onInspectUser = { targetUser -> inspectedUsername = targetUser }
+                    )
+                }
+
+                if (showAccountPreferencesSheet) {
+                    val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
+                    UserAccountPreferencesSheet(
+                        username = uname,
+                        onDismiss = { showAccountPreferencesSheet = false },
+                        onOpenEditProfile = {
+                            showAccountPreferencesSheet = false
+                            showEditProfileSheet = true
+                        },
+                        onUpdated = { syncUserProfile() }
+                    )
+                }
+
+                if (showAboutSheet) {
+                    CommunityAboutSheet(
+                        onDismiss = { showAboutSheet = false },
+                        onInspectUser = { targetUser -> inspectedUsername = targetUser }
                     )
                 }
 
@@ -2745,7 +2893,17 @@ private fun CommunityHomeFeedPane(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // 3. 大小字阶频道 Tab（选中 18.5sp ExtraBold，未选中 14.8sp Medium，底部 12x3dp 胶囊横条）
+                var isCategoryBarExpanded by remember { mutableStateOf(false) }
+                val activeCategoryMeta = remember(selectedCategoryId, LinuxDoRepository.categories.size) {
+                    LinuxDoRepository.categories.firstOrNull { it.id == selectedCategoryId }
+                }
+                LaunchedEffect(listState.firstVisibleItemIndex) {
+                    if (listState.firstVisibleItemIndex > 0 && isCategoryBarExpanded) {
+                        isCategoryBarExpanded = false
+                    }
+                }
+
+                // 3. 大小字阶频道 Tab（选中 18.5sp ExtraBold，未选中 14.8sp Medium，底部 12x3dp 胶囊横条）+ 右侧可折叠分类筛选开关与布局切换
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -2789,7 +2947,63 @@ private fun CommunityHomeFeedPane(
                         }
                     }
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // 可折叠「分类」筛选胶囊按钮（选中分类时高亮展示当前分类名称与一键清除按钮）
+                    val activeCatTextColor = activeCategoryMeta?.let {
+                        resolveMorandiCategoryColors(it.name, palette.isDark).second
+                    } ?: palette.activeChipText
+                    Row(
+                        modifier = Modifier
+                            .height(28.dp)
+                            .clip(RoundedCornerShape(99.dp))
+                            .background(
+                                if (activeCategoryMeta != null || isCategoryBarExpanded)
+                                    palette.subtleSurface
+                                else Color.Transparent
+                            )
+                            .clickable { isCategoryBarExpanded = !isCategoryBarExpanded }
+                            .padding(horizontal = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (activeCategoryMeta != null) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(activeCatTextColor)
+                            )
+                        }
+                        Text(
+                            text = activeCategoryMeta?.name ?: "分类",
+                            fontSize = 12.2.sp,
+                            fontWeight = if (activeCategoryMeta != null || isCategoryBarExpanded) FontWeight.Bold else FontWeight.Medium,
+                            color = if (activeCategoryMeta != null) activeCatTextColor else palette.inkSecondary,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        if (activeCategoryMeta != null && !isCategoryBarExpanded) {
+                            Icon(
+                                imageVector = LinDoIcons.Close,
+                                contentDescription = "清除分类筛选",
+                                modifier = Modifier
+                                    .size(13.dp)
+                                    .clip(CircleShape)
+                                    .clickable { onSelectCategory(null) },
+                                tint = palette.inkSecondary
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (isCategoryBarExpanded) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
+                                contentDescription = if (isCategoryBarExpanded) "收起分类筛选" else "展开分类筛选",
+                                modifier = Modifier.size(13.5.dp),
+                                tint = if (activeCategoryMeta != null || isCategoryBarExpanded) activeCatTextColor else palette.inkSecondary
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
 
                     // 右侧「卡片 / 紧凑」展示形式切换
                     Box(
@@ -2808,35 +3022,42 @@ private fun CommunityHomeFeedPane(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // 4. 纯文字分类筛选条（无底色块，直接通过字重与主题文字色区分）
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    GoogleM3FilterPill(
-                        label = "全部",
-                        dotColor = null,
-                        selected = selectedCategoryId == null,
-                        onClick = { onSelectCategory(null) }
-                    )
-
-                    LinuxDoRepository.categories.forEach { category ->
-                        val (_, catTextColor) = resolveMorandiCategoryColors(category.name, palette.isDark)
+                // 4. 可折叠纯文字分类筛选条（点击「分类」展开，选择版块或下滑列表时自动平滑收起）
+                AnimatedVisibility(visible = isCategoryBarExpanded) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         GoogleM3FilterPill(
-                            label = category.name,
-                            dotColor = catTextColor,
-                            selected = selectedCategoryId == category.id,
+                            label = "全部",
+                            dotColor = null,
+                            selected = selectedCategoryId == null,
+                            modifier = Modifier.heightIn(min = 36.dp),
                             onClick = {
-                                onSelectCategory(
-                                    if (selectedCategoryId == category.id) null else category.id
-                                )
+                                onSelectCategory(null)
+                                isCategoryBarExpanded = false
                             }
                         )
+
+                        LinuxDoRepository.categories.forEach { category ->
+                            val (_, catTextColor) = resolveMorandiCategoryColors(category.name, palette.isDark)
+                            GoogleM3FilterPill(
+                                label = category.name,
+                                dotColor = catTextColor,
+                                selected = selectedCategoryId == category.id,
+                                modifier = Modifier.heightIn(min = 36.dp),
+                                onClick = {
+                                    onSelectCategory(
+                                        if (selectedCategoryId == category.id) null else category.id
+                                    )
+                                    isCategoryBarExpanded = false
+                                }
+                            )
+                        }
                     }
                 }
 
@@ -6467,14 +6688,17 @@ private fun BoostInlineContent(
 
 /**
  * 理想型社区（Warm Minimalist Editorial）「发现」页：
- * - 顶栏：左侧「发现」大标题 + 右侧线性搜索图标
- * - 二级 Tab：`版块` | `标签` | `生态`（带 2.5dp 主题色短下划线）
- * - 「找到你的同好」：双列莫兰迪低饱和度版块卡片（浅蓝/浅绿/暖米圆角图标盒 + 标题 + 副标题）
- * - 「不止于讨论」：4×2 浅灰圆角方块（`#F4F5F7`）线性图标矩阵
+ * - 顶栏：左侧「发现」大标题 + 右侧线性搜索图标（无二级 Tab，版块/标签/生态一页流式完整呈现）
+ * - 「正在热议」：拉取官方 `/top.json?period=daily` 真实今日热榜数据，支持手动刷新
+ * - 「社区版块」：3 列莫兰迪低饱和度版块卡片
+ * - 「热门社区标签」：双列热门 #Tag 快捷筛选入口
+ * - 「LINUX DO 官方生态矩阵」：双列生态与社区服务入口（已移除「不止于讨论」板块）
  */
 @Composable
 private fun CommunityDiscoverScreen(
     hotTopics: List<TopicSummary>,
+    isLoadingHot: Boolean = false,
+    onRefreshHot: () -> Unit = {},
     onSelectCategory: (Int) -> Unit,
     onSelectTag: (String) -> Unit = {},
     onSelectTopic: (TopicSummary) -> Unit,
@@ -6482,22 +6706,8 @@ private fun CommunityDiscoverScreen(
     onOpenWebUrl: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
-    var subTab by remember { mutableStateOf(0) } // 0=版块, 1=标签, 2=生态
     val categoryRows = remember(LinuxDoRepository.categories.size) {
         LinuxDoRepository.categories.chunked(3)
-    }
-
-    val beyondDiscussionItems = remember {
-        listOf(
-            Triple("应用广场", LinDoIcons.AppsGrid, "https://linux.do/apps"),
-            Triple("共建看板", LinDoIcons.KanbanBoard, "https://linux.do/boards"),
-            Triple("近期活动", LinDoIcons.Calendar, "https://linux.do/upcoming-events"),
-            Triple("社区 AI", LinDoIcons.Sparkles, "https://linux.do/discourse-ai/ai-bot/conversations"),
-            Triple("群组虫洞", LinDoIcons.Users, "https://linux.do/g"),
-            Triple("全站徽章", LinDoIcons.AwardBadge, "https://linux.do/badges"),
-            Triple("积分排行", LinDoIcons.BarChartPoll, "https://linux.do/leaderboard"),
-            Triple("福利抽奖", LinDoIcons.Trophy, "https://cdk.linux.do/")
-        )
     }
 
     val popularTagRows = remember {
@@ -6520,15 +6730,15 @@ private fun CommunityDiscoverScreen(
     val ecoPortalRows = remember {
         listOf(
             DiscoverBoardEntry("Connect 中心", "保级 / 邮箱 / DeepLX", LinDoIcons.ShieldCheck, Color(0xFF3B82F6), "https://connect.linux.do/"),
+            DiscoverBoardEntry("积分与活跃榜", "全站获赞与活跃排行", LinDoIcons.Trophy, Color(0xFFF59E0B), "https://linux.do/leaderboard"),
+            DiscoverBoardEntry("全站徽章墙", "荣誉徽章与头衔规则", LinDoIcons.AwardBadge, Color(0xFFEAB308), "https://linux.do/badges"),
+            DiscoverBoardEntry("关于与准则", "管理团队 / 统计 / 准则", LinDoIcons.InfoCircle, Color(0xFF6366F1), "https://linux.do/about"),
             DiscoverBoardEntry("Credit 积分", "积分流转与服务认证", LinDoIcons.Coins, Color(0xFFF59E0B), "https://credit.linux.do/"),
             DiscoverBoardEntry("CDK 分发", "社区福利领取与发布", LinDoIcons.Gift, Color(0xFFEC4899), "https://cdk.linux.do/"),
-            DiscoverBoardEntry("Lottery 抽奖", "官方楼层开奖工具", LinDoIcons.Trophy, Color(0xFFEAB308), "https://lottery.linux.do/"),
             DiscoverBoardEntry("LD Hub", "生态 AI 与聚合中心", LinDoIcons.Sparkles, Color(0xFF8B5CF6), "https://hub.linux.do/"),
             DiscoverBoardEntry("社区 Wiki", "共建指南与文档库", LinDoIcons.BookOpen, Color(0xFF10B981), "https://wiki.linux.do/"),
             DiscoverBoardEntry("IDC Flare", "官方云与主机生态站", LinDoIcons.CloudServer, Color(0xFF06B6D4), "https://idcflare.com/"),
-            DiscoverBoardEntry("关于与准则", "管理人员 / 条款 / 统计", LinDoIcons.InfoCircle, Color(0xFF6366F1), "https://linux.do/about"),
-            DiscoverBoardEntry("即时聊天", "频道 / 群聊 / 消息串", LinDoIcons.MessageCircle, Color(0xFF14B8A6), "https://linux.do/chat"),
-            DiscoverBoardEntry("独立筛选器", "多条件表达式过滤", LinDoIcons.Sliders, Color(0xFFF97316), "https://linux.do/filter")
+            DiscoverBoardEntry("Lottery 抽奖", "官方楼层开奖工具", LinDoIcons.Trophy, Color(0xFFF97316), "https://lottery.linux.do/")
         ).chunked(2)
     }
 
@@ -6538,316 +6748,255 @@ private fun CommunityDiscoverScreen(
             .background(palette.canvas)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        // 顶栏：发现 + 搜索图标 + 二级 Tab (版块 | 标签 | 生态)
-        Column(
+        // 顶栏：发现 + 搜索图标（移除二级 Tab，版块/标签/生态全量直出）
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(palette.cardSurface)
-                .padding(start = 18.dp, end = 18.dp, top = 10.dp, bottom = 0.dp)
+                .padding(horizontal = 18.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "发现",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = (-0.4).sp,
-                    color = palette.inkPrimary,
-                    modifier = Modifier.weight(1f)
-                )
+            Text(
+                text = "发现",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = (-0.4).sp,
+                color = palette.inkPrimary,
+                modifier = Modifier.weight(1f)
+            )
 
-                IconButton(onClick = onOpenGlobalSearch) {
-                    Icon(LinDoIcons.Search, "搜索", Modifier.size(20.dp), tint = palette.inkPrimary)
-                }
+            IconButton(onClick = onOpenGlobalSearch) {
+                Icon(LinDoIcons.Search, "搜索", Modifier.size(20.dp), tint = palette.inkPrimary)
             }
-            LinDoSectionTabs(listOf("版块", "标签", "生态"), subTab) { subTab = it }
         }
+
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 128.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            if (subTab == 0) {
-                // 1. 正在热议置顶展示（打开「发现」第一眼即可看到全站实时热议话题）
-                if (hotTopics.isNotEmpty()) {
-                    item {
-                        Column(
+            // 1. 正在热议置顶展示（直连 `/top.json?period=daily` 全站真实今日热榜）
+            if (hotTopics.isNotEmpty() || isLoadingHot) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(palette.cardSurface)
+                            .padding(vertical = 12.dp)
+                    ) {
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(palette.cardSurface)
-                                .padding(vertical = 12.dp)
+                                .padding(horizontal = 14.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Icon(
+                                imageVector = LinDoIcons.Flame,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = palette.brandGold
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "正在热议",
+                                fontSize = 15.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.inkPrimary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "今日热榜",
+                                fontSize = 10.8.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.brandGold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(palette.brandGold.copy(alpha = 0.12f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(enabled = !isLoadingHot) { onRefreshHot() }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.Refresh,
+                                    contentDescription = "刷新热议",
+                                    modifier = Modifier.size(13.dp),
+                                    tint = palette.inkSecondary
+                                )
+                                Text(
+                                    text = if (isLoadingHot) "同步中" else "刷新",
+                                    fontSize = 11.2.sp,
+                                    color = palette.inkSecondary
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        hotTopics.forEachIndexed { idx, topic ->
+                            val replies = maxOf(0, topic.postsCount - 1).coerceAtLeast(topic.replyCount)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 2.dp),
+                                    .clickable { onSelectTopic(topic) }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = LinDoIcons.Flame,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = palette.brandGold
+                                Text(
+                                    text = "${idx + 1}",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (idx < 3) palette.brandGold else palette.inkTertiary,
+                                    modifier = Modifier.width(20.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "正在热议",
-                                    fontSize = 15.5.sp,
-                                    fontWeight = FontWeight.Bold,
+                                    text = topic.title,
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.Medium,
                                     color = palette.inkPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
                                 )
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "HOT",
-                                    fontSize = 10.5.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = palette.brandGold
+                                    text = if (topic.likeCount > 0) "${topic.likeCount} 赞 · $replies 评" else "$replies 评",
+                                    fontSize = 11.2.sp,
+                                    color = palette.inkTertiary
                                 )
                             }
-
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            hotTopics.forEachIndexed { idx, topic ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onSelectTopic(topic) }
-                                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "${idx + 1}",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (idx < 3) palette.brandGold else palette.inkTertiary,
-                                        modifier = Modifier.width(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = topic.title,
-                                        fontSize = 13.5.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = palette.inkPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "${maxOf(0, topic.postsCount - 1)} 评",
-                                        fontSize = 11.2.sp,
-                                        color = palette.inkTertiary
-                                    )
-                                }
-                            }
                         }
                     }
                 }
+            }
 
-                // 2. 标题栏：社区版块导航 + 全部标签 >
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "社区版块",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary,
-                            modifier = Modifier.weight(1f)
-                        )
+            // 2. 社区版块（单张大圆角底板 + 3 列莫兰迪版块入口）
+            item {
+                Text(
+                    text = "社区版块",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(palette.cardSurface)
+                        .padding(vertical = 12.dp, horizontal = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    categoryRows.forEach { rowCats ->
                         Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable { subTab = 1 }
-                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "全部标签",
-                                fontSize = 12.2.sp,
-                                color = palette.inkSecondary
-                            )
-                            Icon(
-                                imageVector = LinDoIcons.ChevronRight,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp),
-                                tint = palette.inkTertiary
-                            )
-                        }
-                    }
-                }
-
-                // 3. 社区版块整体背景板（与「不止于讨论」视觉语言完全统一：单张大圆角底板 + 内容不分割清爽展示）
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(palette.cardSurface)
-                            .padding(vertical = 12.dp, horizontal = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        categoryRows.forEach { rowCats ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                rowCats.forEach { category ->
-                                    CategoryBentoCard(
-                                        category = category,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { onSelectCategory(category.id) }
-                                    )
-                                }
-                                repeat(3 - rowCats.size) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
+                            rowCats.forEach { category ->
+                                CategoryBentoCard(
+                                    category = category,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { onSelectCategory(category.id) }
+                                )
+                            }
+                            repeat(3 - rowCats.size) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }
                 }
+            }
 
-                // 4. 不止于讨论（4x2 无框柔和圆角方块矩阵）
-                item {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "不止于讨论",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.inkPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
+            // 3. 热门社区标签（同页直出，无需切换 Tab）
+            item {
+                Text(
+                    text = "热门社区标签",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary
+                )
+                Spacer(modifier = Modifier.height(10.dp))
 
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(palette.cardSurface)
-                            .padding(vertical = 15.dp, horizontal = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        beyondDiscussionItems.chunked(4).forEach { rowItems ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceEvenly
-                            ) {
-                                rowItems.forEach { (label, iconVec, url) ->
-                                    Column(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .clickable { onOpenWebUrl(url) }
-                                            .padding(vertical = 4.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        Icon(
-                                            imageVector = iconVec,
-                                            contentDescription = label,
-                                            modifier = Modifier.size(22.dp),
-                                            tint = palette.inkPrimary
-                                        )
-                                        Spacer(modifier = Modifier.height(7.dp))
-                                        Text(
-                                            text = label,
-                                            fontSize = 11.8.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = palette.inkPrimary,
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
-                                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(palette.cardSurface)
+                        .padding(vertical = 12.dp, horizontal = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    popularTagRows.forEach { pair ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            pair.forEach { entry ->
+                                DiscoverPortalCard(
+                                    title = "# ${entry.title}",
+                                    subtitle = entry.subtitle,
+                                    icon = entry.icon,
+                                    iconTint = entry.tint,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { onSelectTag(entry.title) }
+                                )
+                            }
+                            if (pair.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }
                 }
-            } else if (subTab == 1) {
-                // 标签页：整体背景板 + 内容不分割清爽展示 + 每个标签配备专属语义图标
-                item {
-                    Text(
-                        text = "热门社区标签",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.inkPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
+            }
 
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(palette.cardSurface)
-                            .padding(vertical = 12.dp, horizontal = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        popularTagRows.forEach { pair ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                pair.forEach { entry ->
-                                    DiscoverPortalCard(
-                                        title = "# ${entry.title}",
-                                        subtitle = entry.subtitle,
-                                        icon = entry.icon,
-                                        iconTint = entry.tint,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { onSelectTag(entry.title) }
-                                    )
-                                }
-                                if (pair.size == 1) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
+            // 4. LINUX DO 官方生态矩阵（同页直出，无需切换 Tab）
+            item {
+                Text(
+                    text = "LINUX DO 官方生态矩阵",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(palette.cardSurface)
+                        .padding(vertical = 12.dp, horizontal = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ecoPortalRows.forEach { pair ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            pair.forEach { entry ->
+                                DiscoverPortalCard(
+                                    title = entry.title,
+                                    subtitle = entry.subtitle,
+                                    icon = entry.icon,
+                                    iconTint = entry.tint,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { onOpenWebUrl(entry.url) }
+                                )
                             }
-                        }
-                    }
-                }
-            } else {
-                // 生态页：整体背景板 + 内容不分割清爽展示 + 每个模块配备专属语义图标
-                item {
-                    Text(
-                        text = "LINUX DO 官方生态矩阵",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.inkPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(palette.cardSurface)
-                            .padding(vertical = 12.dp, horizontal = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        ecoPortalRows.forEach { pair ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                pair.forEach { entry ->
-                                    DiscoverPortalCard(
-                                        title = entry.title,
-                                        subtitle = entry.subtitle,
-                                        icon = entry.icon,
-                                        iconTint = entry.tint,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { onOpenWebUrl(entry.url) }
-                                    )
-                                }
-                                if (pair.size == 1) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
+                            if (pair.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }
@@ -7346,6 +7495,10 @@ private fun CommunityProfileScreen(
     onOpenCloudDrafts: () -> Unit = {},
     onOpenPrivateMessages: () -> Unit,
     onOpenEditProfile: () -> Unit,
+    onOpenFollowSheet: () -> Unit = {},
+    onOpenLeaderboardSheet: () -> Unit = {},
+    onOpenAccountPreferences: () -> Unit = {},
+    onOpenAboutSheet: () -> Unit = {},
     onInspectBadge: (GrantedBadge) -> Unit,
     onOpenBadgesCenter: () -> Unit = {},
     onOpenConnectSheet: () -> Unit,
@@ -7624,24 +7777,23 @@ private fun CommunityProfileScreen(
                     Triple("我的徽章与头衔", badgeSub, LinDoIcons.Trophy) to {
                         onOpenBadgesCenter()
                     },
-                    Triple("我的社区", "话题、回复、投票与互动记录", LinDoIcons.MessageCircle) to {
+                    Triple("我的社区", "话题、回复、点赞与互动记录", LinDoIcons.MessageCircle) to {
                         if (isAuthorized) onOpenActivities() else onPrimaryWebLogin()
                     },
-                    Triple("关注与粉丝", "找到持续交流的同好", LinDoIcons.Users) to {
-                        if (isAuthorized && displayUsername.isNotBlank()) {
-                            onOpenWebUrl("https://linux.do/u/$displayUsername/follow")
-                        } else {
-                            onPrimaryWebLogin()
-                        }
+                    Triple("关注与粉丝", "关注列表、粉丝名录与同好动态", LinDoIcons.Users) to {
+                        if (isAuthorized) onOpenFollowSheet() else onPrimaryWebLogin()
                     },
-                    Triple("社区积分", "社区底板分与积分流转记录", LinDoIcons.Coins) to {
-                        onOpenWebUrl("https://credit.linux.do/")
+                    Triple("社区积分与活跃榜", "全站今日 / 本周 / 本月 / 总榜活跃与获赞排行", LinDoIcons.Coins) to {
+                        onOpenLeaderboardSheet()
                     },
-                    Triple("订阅与权益", "偏好设置、安全与账号管理", LinDoIcons.ShieldCheck) to {
-                        if (isAuthorized) onOpenWebUrl("https://linux.do/my/preferences/account") else onPrimaryWebLogin()
+                    Triple("Connect 保级与成长", "Lv.2 / Lv.3 滚动周期保级进度与阅读指标", LinDoIcons.Sparkles) to {
+                        onOpenConnectSheet()
                     },
-                    Triple("创作与管理", "微应用开发、审核与管理入口", LinDoIcons.AppsGrid) to {
-                        onOpenWebUrl("https://linux.do/apps")
+                    Triple("账号与偏好设置", "资料完善、安全认证、在线状态与私信权限", LinDoIcons.ShieldCheck) to {
+                        if (isAuthorized) onOpenAccountPreferences() else onPrimaryWebLogin()
+                    },
+                    Triple("站内私信中心", "收件箱、已发送、归档会话与发送私信", LinDoIcons.Send) to {
+                        if (isAuthorized) onOpenPrivateMessages() else onPrimaryWebLogin()
                     }
                 )
 
@@ -8143,7 +8295,7 @@ private fun CommunityProfileScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onOpenWebUrl("https://linux.do/about") }
+                            .clickable { onOpenAboutSheet() }
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -8162,7 +8314,7 @@ private fun CommunityProfileScreen(
                                 color = palette.inkPrimary
                             )
                             Text(
-                                text = "社区准则、隐私政策与服务条款",
+                                text = "管理团队、全站统计数据、社区准则与服务条款",
                                 fontSize = 11.8.sp,
                                 color = palette.inkSecondary
                             )
@@ -11012,7 +11164,7 @@ private fun UserNotificationsSheet(
 }
 
 /**
- * 官方功能 5：我的动态抽屉 (`/user_actions.json`：支持全部 / 主帖 / 回复 / 点赞筛选)
+ * 官方功能 5：我的动态抽屉 (`/user_actions.json`：支持全部 / 主帖 / 回复 / 点赞筛选，与全站列表及用户名片动态流视觉完全统一)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -11022,7 +11174,11 @@ private fun UserActivitiesSheet(
     onSelectActivity: (Int, String, Int?) -> Unit
 ) {
     val palette = LocalPalette.current
-    var filterCode by remember { mutableStateOf<String?>(null) } // null=全部, "4"=主帖, "5"=回复, "1"=点赞
+    val filters = remember {
+        listOf("全部动态" to null, "发布主帖" to "4", "我的回复" to "5", "送出的赞" to "1")
+    }
+    var selectedFilterIdx by remember { mutableIntStateOf(0) }
+    val filterCode = filters.getOrNull(selectedFilterIdx)?.second
     var items by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
@@ -11047,99 +11203,58 @@ private fun UserActivitiesSheet(
         containerColor = palette.cardSurface
     ) {
         LinDoPageTopBar(
-            title = "我的动态与历史互动",
-            onBack = onDismiss
+            title = "我的活动与社区互动",
+            onBack = onDismiss,
+            trailingContent = {
+                IconButton(onClick = { reloadToken++ }) {
+                    Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
+                }
+            }
         )
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 10.dp)
+                .fillMaxWidth()
+                .background(palette.cardSurface)
+                .padding(horizontal = 16.dp)
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                val filters = listOf("全部动态" to null, "发布主帖" to "4", "我的回复" to "5", "送出的赞" to "1")
-                filters.forEach { (label, code) ->
-                    GoogleM3FilterPill(
-                        label = label,
-                        dotColor = null,
-                        selected = filterCode == code,
-                        onClick = { filterCode = code }
-                    )
-                }
+            LinDoSectionTabs(
+                labels = filters.map { it.first },
+                selectedIndex = selectedFilterIdx,
+                fontSize = 14.sp
+            ) { selectedFilterIdx = it }
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+        if (isLoading) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoLoadingIndicator(label = "加载中")
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            if (isLoading) {
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LinDoLoadingIndicator(label = "加载中")
-                }
-            } else {
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+            ) {
                 if (loadError != null) {
-                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                    item(key = "error") {
+                        LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                    }
                 }
-
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 6.dp)
-                ) {
-                    if (items.isEmpty() && loadError == null) {
-                        item {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                LinDoEmptyState(message = "暂无动态")
-                            }
+                if (items.isEmpty() && loadError == null) {
+                    item(key = "empty") {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(message = "暂无相关社区动态")
                         }
-                    } else {
-                        itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }, contentType = { _, _ -> "activity" }) { _, item ->
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(palette.canvas)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                    .clickable { onSelectActivity(item.topicId, item.title, item.postNumber) }
-                                    .padding(12.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = item.actionLabel,
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.brandGold
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "${item.categoryName} · ${item.postNumber} 楼 · ${item.createdAtText}",
-                                        fontSize = 11.5.sp,
-                                        color = palette.inkTertiary
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(5.dp))
-                                Text(
-                                    text = item.title,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.inkPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (item.excerpt.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                    Text(
-                                        text = item.excerpt,
-                                        fontSize = 12.5.sp,
-                                        color = palette.inkSecondary,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
+                    }
+                } else {
+                    itemsIndexed(items, key = { idx, item -> "${item.id}_${item.actionType}_$idx" }, contentType = { _, _ -> "activity" }) { _, item ->
+                        ProfileActivityRow(item) {
+                            onSelectActivity(item.topicId, item.title, item.postNumber)
                         }
                     }
                 }
@@ -11149,7 +11264,7 @@ private fun UserActivitiesSheet(
 }
 
 /**
- * 官方功能 6：我的书签收藏独立页面 (`/u/{username}/bookmarks.json`)
+ * 官方功能 6：我的书签收藏独立页面 (`/u/{username}/bookmarks.json`，统一无框分割线列表风格)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -11184,75 +11299,45 @@ private fun UserBookmarksSheet(
     ) {
         LinDoPageTopBar(
             title = "我的书签与收藏",
-            onBack = onDismiss
+            onBack = onDismiss,
+            trailingContent = {
+                IconButton(onClick = { reloadToken++ }) {
+                    Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
+                }
+            }
         )
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 8.dp)
-        ) {
-            if (isLoading) {
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LinDoLoadingIndicator(label = "加载中")
-                }
-            } else {
-                if (loadError != null) {
-                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
-                }
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 8.dp)
-                ) {
-                    if (items.isEmpty() && loadError == null) {
-                        item {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                LinDoEmptyState(message = "暂无书签")
-                            }
+        if (isLoading) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoLoadingIndicator(label = "加载中")
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                if (loadError != null) {
+                    item(key = "error") {
+                        LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                    }
+                }
+                if (items.isEmpty() && loadError == null) {
+                    item(key = "empty") {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(message = "暂无收藏的书签")
                         }
-                    } else {
-                        itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }, contentType = { _, _ -> "activity" }) { _, item ->
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(palette.canvas)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
-                                    .clickable { onSelectBookmark(item.topicId, item.title, item.postNumber) }
-                                    .padding(12.dp)
-                            ) {
-                                Text(
-                                    text = "${item.categoryName} · ${item.postNumber} 楼 · ${item.createdAtText}",
-                                    fontSize = 11.sp,
-                                    color = palette.inkTertiary
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = item.title,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.inkPrimary,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (item.excerpt.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                    Text(
-                                        text = item.excerpt,
-                                        fontSize = 12.sp,
-                                        color = palette.inkSecondary,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
+                    }
+                } else {
+                    itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }, contentType = { _, _ -> "activity" }) { _, item ->
+                        ProfileActivityRow(item) {
+                            onSelectBookmark(item.topicId, item.title, item.postNumber)
                         }
                     }
                 }
@@ -11877,30 +11962,85 @@ private val profileImagePlaceholder = Regex("\\[(?:IMG|PXL|DSC|Screenshot)[-_ ][
 private fun ProfileActivityRow(activity: UserActivityItem, onClick: () -> Unit) {
     val palette = LocalPalette.current
     val excerpt = remember(activity.excerpt) { activity.excerpt.replace(profileImagePlaceholder, "图片").trim() }
-    val meta = listOfNotNull(
-        activity.actionLabel.takeIf { it.isNotBlank() },
-        activity.categoryName.takeIf { it.isNotBlank() }
-    ).joinToString(" · ")
+    val (_, morandiFg) = remember(activity.categoryName, palette.isDark) {
+        resolveMorandiCategoryColors(activity.categoryName, palette.isDark)
+    }
     Column(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(5.dp)
     ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            if (activity.actionLabel.isNotBlank()) {
+                Text(
+                    text = activity.actionLabel,
+                    fontSize = 11.2.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.brandGold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(palette.brandGold.copy(alpha = 0.12f))
+                        .padding(horizontal = 5.5.dp, vertical = 1.5.dp)
+                )
+            }
+            if (activity.categoryName.isNotBlank()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.5.dp)
+                            .clip(CircleShape)
+                            .background(morandiFg)
+                    )
+                    Text(
+                        text = activity.categoryName,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = morandiFg,
+                        maxLines = 1
+                    )
+                }
+            }
+            if (activity.postNumber > 1) {
+                Text(
+                    text = "#${activity.postNumber}",
+                    fontSize = 11.2.sp,
+                    color = palette.inkTertiary
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            if (activity.createdAtText.isNotBlank()) {
+                Text(
+                    text = activity.createdAtText,
+                    color = palette.inkTertiary,
+                    fontSize = 11.5.sp,
+                    maxLines = 1
+                )
+            }
+        }
         Text(
-            activity.title, color = palette.inkPrimary, fontSize = 15.sp, lineHeight = 21.sp,
-            fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis
+            activity.title,
+            color = palette.inkPrimary,
+            fontSize = 15.sp,
+            lineHeight = 21.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
         )
         if (excerpt.isNotBlank() && excerpt != activity.title) {
             Text(
-                excerpt, color = palette.inkSecondary, fontSize = 12.5.sp, lineHeight = 18.sp,
-                maxLines = 2, overflow = TextOverflow.Ellipsis
+                excerpt,
+                color = palette.inkSecondary,
+                fontSize = 12.6.sp,
+                lineHeight = 18.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                meta, color = palette.inkSecondary, fontSize = 11.5.sp, maxLines = 1,
-                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
-            )
-            Text(activity.createdAtText, color = palette.inkSecondary, fontSize = 11.5.sp, maxLines = 1)
         }
     }
     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -11941,50 +12081,52 @@ private fun UserReadHistorySheet(
     ) {
         LinDoPageTopBar(
             title = "阅读历史",
-            onBack = onDismiss
+            onBack = onDismiss,
+            trailingContent = {
+                IconButton(onClick = { reloadToken++ }) {
+                    Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
+                }
+            }
         )
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 8.dp)
-        ) {
-            if (isLoading) {
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LinDoLoadingIndicator(label = "加载中")
-                }
-            } else {
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        if (isLoading) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoLoadingIndicator(label = "加载中")
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(vertical = 4.dp)
+            ) {
                 if (loadError != null) {
-                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                    item(key = "error") {
+                        Box(Modifier.padding(horizontal = 16.dp)) {
+                            LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                        }
+                    }
                 }
-
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 8.dp)
-                ) {
-                    if (items.isEmpty() && loadError == null) {
-                        item {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                LinDoEmptyState(message = "暂无阅读记录")
-                            }
+                if (items.isEmpty() && loadError == null) {
+                    item {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(message = "暂无阅读记录")
                         }
-                    } else {
-                        itemsIndexed(items, key = { _, item -> item.id }, contentType = { _, _ -> "topic" }) { _, topic ->
-                            CommunityTopicItem(
-                                topic = topic,
-                                isSelected = false,
-                                isCompact = true,
-                                enableAnimations = false,
-                                onClick = { onSelectTopic(topic) }
-                            )
-                        }
+                    }
+                } else {
+                    itemsIndexed(items, key = { _, item -> item.id }, contentType = { _, _ -> "topic" }) { _, topic ->
+                        CommunityTopicItem(
+                            topic = topic,
+                            isSelected = false,
+                            isCompact = true,
+                            enableAnimations = false,
+                            onClick = { onSelectTopic(topic) }
+                        )
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     }
                 }
             }
@@ -11999,6 +12141,877 @@ private fun UserReadHistorySheet(
 @Composable
 private fun UserCloudDraftsSheet(onDismiss: () -> Unit, onOpenDraftTopic: (CloudDraftItem) -> Unit) =
     UserDraftsSheet(onDismiss, onOpenDraftTopic)
+
+/**
+ * 官方功能 12：原生个人资料编辑页面 (`GET /u/{username}.json` + `PUT /u/{username}.json`)
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun EditProfileModalSheet(
+    username: String,
+    fullProfile: UserFullProfileSummary?,
+    onDismiss: () -> Unit,
+    onSaved: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
+    var displayName by remember { mutableStateOf(fullProfile?.displayName.orEmpty()) }
+    var userTitle by remember { mutableStateOf(fullProfile?.title.orEmpty()) }
+    var location by remember { mutableStateOf(fullProfile?.location.orEmpty()) }
+    var website by remember { mutableStateOf(fullProfile?.websiteName.orEmpty()) }
+    var bioRaw by remember { mutableStateOf(fullProfile?.bioExcerpt.orEmpty()) }
+    var availableTitles by remember {
+        mutableStateOf(
+            fullProfile?.badges.orEmpty().filter { it.allowTitle }.map { it.name }.distinct()
+        )
+    }
+    var isLoading by remember { mutableStateOf(true) }
+    var isSaving by remember { mutableStateOf(false) }
+    var statusMessage by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(username) {
+        isLoading = true
+        try {
+            val snap = LinuxDoRepository.fetchUserAccountPreferences(username)
+            if (snap != null) {
+                displayName = snap.displayName
+                userTitle = snap.title
+                location = snap.location
+                website = snap.website
+                bioRaw = snap.bioRaw
+                if (snap.availableTitles.isNotEmpty()) {
+                    availableTitles = snap.availableTitles
+                }
+            }
+        } finally {
+            isLoading = false
+        }
+    }
+
+    LinDoFullScreenPage(
+        onBack = onDismiss,
+        containerColor = palette.cardSurface
+    ) {
+        LinDoPageTopBar(
+            title = "编辑个人资料",
+            onBack = onDismiss,
+            trailingContent = {
+                TextButton(
+                    enabled = !isSaving && !isLoading,
+                    onClick = {
+                        isSaving = true
+                        statusMessage = null
+                        scope.launch {
+                            val ok = LinuxDoRepository.updateUserProfileInfo(
+                                username = username,
+                                displayName = displayName,
+                                bioRaw = bioRaw,
+                                title = userTitle,
+                                location = location,
+                                website = website
+                            )
+                            isSaving = false
+                            if (ok) {
+                                onSaved()
+                            } else {
+                                statusMessage = "保存失败，请稍后重试"
+                            }
+                        }
+                    }
+                ) {
+                    Text(
+                        text = if (isSaving) "保存中…" else "保存",
+                        fontWeight = FontWeight.Bold,
+                        color = palette.brandGold
+                    )
+                }
+            }
+        )
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+        if (isLoading) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                LinDoLoadingIndicator(label = "同步资料中")
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    GoogleAccountRingAvatar(
+                        letter = displayName.ifBlank { username.ifBlank { "L" } },
+                        avatarUrl = fullProfile?.avatarTemplate,
+                        animatedAvatar = fullProfile?.animatedAvatar,
+                        flair = fullProfile?.flair,
+                        avatarSize = 56.dp
+                    )
+                    Column {
+                        Text(
+                            text = "@$username",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.inkPrimary
+                        )
+                        Text(
+                            text = fullProfile?.trustLevelName ?: "Linux.do 社区成员",
+                            fontSize = 12.sp,
+                            color = palette.brandGold
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = displayName,
+                    onValueChange = { displayName = it },
+                    label = { Text("昵称 / 显示名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = userTitle,
+                    onValueChange = { userTitle = it },
+                    label = { Text("个人头衔") },
+                    placeholder = { Text("从下方已解锁徽章头衔中选择或留空") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (availableTitles.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "快速佩戴已解锁徽章头衔",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkSecondary
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf("不佩戴" to "").plus(availableTitles.map { it to it }).forEach { (label, value) ->
+                                val selected = userTitle == value
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(
+                                            if (selected) palette.brandGold.copy(alpha = 0.16f)
+                                            else palette.subtleSurface
+                                        )
+                                        .border(
+                                            width = 0.7.dp,
+                                            color = if (selected) palette.brandGold else palette.hairline,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable { userTitle = value }
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        text = label,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selected) palette.brandGold else palette.inkPrimary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = location,
+                    onValueChange = { location = it },
+                    label = { Text("所在地") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = website,
+                    onValueChange = { website = it },
+                    label = { Text("个人网站 / 主页链接") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = bioRaw,
+                    onValueChange = { bioRaw = it },
+                    label = { Text("个人简介（支持 Markdown）") },
+                    minLines = 4,
+                    maxLines = 8,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                statusMessage?.let { msg ->
+                    LinDoFeedbackRow(message = msg, state = LinDoMascotState.NetworkError)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 官方功能 13：原生关注与粉丝网络页面 (`GET /u/{username}/follow/following.json` | `followers.json` | `feed.json`)
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun UserFollowNetworkSheet(
+    username: String,
+    onDismiss: () -> Unit,
+    onInspectUser: (String) -> Unit,
+    onSelectActivity: (Int, String, Int?) -> Unit
+) {
+    val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
+    var activeTab by remember { mutableIntStateOf(0) } // 0=正在关注, 1=我的粉丝, 2=关注动态
+    var users by remember { mutableStateOf<List<FollowUserEntry>>(emptyList()) }
+    var feedItems by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var reloadToken by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(username, activeTab, reloadToken) {
+        isLoading = true
+        try {
+            if (activeTab == 2) {
+                feedItems = LinuxDoRepository.fetchUserFollowFeed(username)
+            } else {
+                users = LinuxDoRepository.fetchUserFollowList(
+                    username = username,
+                    followers = activeTab == 1
+                )
+            }
+        } finally {
+            isLoading = false
+        }
+    }
+
+    LinDoFullScreenPage(
+        onBack = onDismiss,
+        containerColor = palette.cardSurface
+    ) {
+        LinDoPageTopBar(
+            title = "关注与粉丝",
+            onBack = onDismiss,
+            trailingContent = {
+                IconButton(onClick = { reloadToken++ }) {
+                    Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
+                }
+            }
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(palette.cardSurface)
+                .padding(horizontal = 16.dp)
+        ) {
+            LinDoSectionTabs(
+                labels = listOf("正在关注", "我的粉丝", "同好动态"),
+                selectedIndex = activeTab,
+                fontSize = 14.sp
+            ) { activeTab = it }
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+        if (isLoading) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                LinDoLoadingIndicator(label = "加载中")
+            }
+        } else if (activeTab == 2) {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                if (feedItems.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(message = "暂无关注同好的最新动态")
+                        }
+                    }
+                } else {
+                    itemsIndexed(feedItems, key = { idx, it -> "${it.id}_$idx" }) { _, item ->
+                        ProfileActivityRow(item) {
+                            onSelectActivity(item.topicId, item.title, item.postNumber)
+                        }
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                if (users.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(
+                                message = if (activeTab == 0) "还没有关注任何社区同好" else "暂无粉丝记录"
+                            )
+                        }
+                    }
+                } else {
+                    itemsIndexed(users, key = { _, u -> u.username }) { _, user ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onInspectUser(user.username) }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            GoogleAccountRingAvatar(
+                                letter = user.displayName,
+                                avatarUrl = user.avatarUrl,
+                                animatedAvatar = user.animatedAvatar,
+                                avatarSize = 42.dp
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = user.displayName,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "Lv.${user.trustLevel}",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.brandGold
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = buildString {
+                                        append("@${user.username}")
+                                        if (user.title.isNotBlank()) append(" · ${user.title}")
+                                    },
+                                    fontSize = 12.sp,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    val targetFollow = !user.isFollowing
+                                    users = users.map {
+                                        if (it.username == user.username) it.copy(isFollowing = targetFollow) else it
+                                    }
+                                    scope.launch {
+                                        LinuxDoRepository.toggleFollowUser(user.username, follow = targetFollow)
+                                    }
+                                }
+                            ) {
+                                Text(
+                                    text = if (user.isFollowing) "已关注" else "+ 关注",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (user.isFollowing) palette.inkSecondary else palette.brandGold
+                                )
+                            }
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 官方功能 14：原生社区积分与活跃排行榜 (`GET /directory_items.json?period={period}&order=likes_received`)
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CommunityLeaderboardSheet(
+    onDismiss: () -> Unit,
+    onInspectUser: (String) -> Unit
+) {
+    val palette = LocalPalette.current
+    val periods = remember {
+        listOf("今日榜" to "daily", "本周榜" to "weekly", "本月榜" to "monthly", "总榜" to "all")
+    }
+    var selectedPeriodIdx by remember { mutableIntStateOf(1) }
+    var entries by remember { mutableStateOf<List<LeaderboardUserEntry>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var reloadToken by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(selectedPeriodIdx, reloadToken) {
+        isLoading = true
+        try {
+            val periodKey = periods.getOrNull(selectedPeriodIdx)?.second ?: "weekly"
+            entries = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey)
+        } finally {
+            isLoading = false
+        }
+    }
+
+    LinDoFullScreenPage(
+        onBack = onDismiss,
+        containerColor = palette.cardSurface
+    ) {
+        LinDoPageTopBar(
+            title = "社区积分与活跃榜",
+            onBack = onDismiss,
+            trailingContent = {
+                IconButton(onClick = { reloadToken++ }) {
+                    Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
+                }
+            }
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(palette.cardSurface)
+                .padding(horizontal = 16.dp)
+        ) {
+            LinDoSectionTabs(
+                labels = periods.map { it.first },
+                selectedIndex = selectedPeriodIdx,
+                fontSize = 14.sp
+            ) { selectedPeriodIdx = it }
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+        if (isLoading) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                LinDoLoadingIndicator(label = "加载排行榜中")
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                if (entries.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(message = "暂无排行统计数据")
+                        }
+                    }
+                } else {
+                    itemsIndexed(entries, key = { _, e -> "${e.username}_${e.rank}" }) { _, entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onInspectUser(entry.username) }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${entry.rank}",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (entry.rank <= 3) palette.brandGold else palette.inkTertiary,
+                                modifier = Modifier.width(28.dp)
+                            )
+                            GoogleAccountRingAvatar(
+                                letter = entry.displayName,
+                                avatarUrl = entry.avatarUrl,
+                                avatarSize = 40.dp
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = entry.displayName,
+                                        fontSize = 14.8.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (entry.title.isNotBlank()) {
+                                        UserTitleTag(title = entry.title)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "获赞 ${formatCompactNumber(entry.likesReceived)} · 回复 ${formatCompactNumber(entry.postCount)} · 主帖 ${entry.topicCount}",
+                                    fontSize = 11.8.sp,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    text = formatCompactNumber(entry.score),
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.brandGold
+                                )
+                                Text(
+                                    text = "活跃值",
+                                    fontSize = 10.5.sp,
+                                    color = palette.inkTertiary
+                                )
+                            }
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 官方功能 15：原生账号与偏好设置页面 (`GET /u/{username}.json` + `PUT /u/{username}.json`)
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun UserAccountPreferencesSheet(
+    username: String,
+    onDismiss: () -> Unit,
+    onOpenEditProfile: () -> Unit,
+    onUpdated: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
+    var snapshot by remember { mutableStateOf<UserAccountPreferencesSnapshot?>(null) }
+    var hidePresence by remember { mutableStateOf(false) }
+    var allowPm by remember { mutableStateOf(true) }
+    var isLoading by remember { mutableStateOf(true) }
+    var isSavingToggle by remember { mutableStateOf(false) }
+
+    LaunchedEffect(username) {
+        isLoading = true
+        try {
+            val loaded = LinuxDoRepository.fetchUserAccountPreferences(username)
+            snapshot = loaded
+            if (loaded != null) {
+                hidePresence = loaded.hideProfileAndPresence
+                allowPm = loaded.allowPrivateMessages
+            }
+        } finally {
+            isLoading = false
+        }
+    }
+
+    fun persistPrivacyPrefs(newHidePresence: Boolean, newAllowPm: Boolean) {
+        val snap = snapshot ?: return
+        hidePresence = newHidePresence
+        allowPm = newAllowPm
+        isSavingToggle = true
+        scope.launch {
+            LinuxDoRepository.updateUserProfileInfo(
+                username = snap.username,
+                displayName = snap.displayName,
+                bioRaw = snap.bioRaw,
+                title = snap.title,
+                location = snap.location,
+                website = snap.website,
+                hidePresence = newHidePresence,
+                allowPrivateMessages = newAllowPm
+            )
+            isSavingToggle = false
+            onUpdated()
+        }
+    }
+
+    LinDoFullScreenPage(
+        onBack = onDismiss,
+        containerColor = palette.cardSurface
+    ) {
+        LinDoPageTopBar(
+            title = "账号与偏好设置",
+            onBack = onDismiss,
+            trailingContent = {
+                TextButton(onClick = onOpenEditProfile) {
+                    Text("编辑资料", color = palette.brandGold, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        )
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+        if (isLoading && snapshot == null) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                LinDoLoadingIndicator(label = "加载账号信息")
+            }
+        } else {
+            val s = snapshot
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(palette.subtleSurface)
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("账号基础信息", fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
+                        PreferenceInfoRow("用户名", "@${s?.username ?: username}")
+                        PreferenceInfoRow("显示昵称", s?.displayName?.ifBlank { "未设置" } ?: "未设置")
+                        if (!s?.email.isNullOrBlank()) {
+                            PreferenceInfoRow("绑定邮箱", s?.email.orEmpty())
+                        }
+                        PreferenceInfoRow("当前头衔", s?.title?.ifBlank { "未佩戴" } ?: "未佩戴")
+                        PreferenceInfoRow("两步验证 (2FA)", if (s?.twoFactorEnabled == true) "已开启保护" else "标准登录保护")
+                        PreferenceInfoRow("已授权在线设备", "${s?.activeDeviceCount ?: 1} 台设备")
+                    }
+                }
+
+                if (!s?.associatedAccounts.isNullOrEmpty()) {
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(palette.subtleSurface)
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("已关联第三方账号", fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
+                            s?.associatedAccounts.orEmpty().forEach { acc ->
+                                Text(acc, fontSize = 13.sp, color = palette.inkSecondary)
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(palette.subtleSurface)
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("隐私与互动偏好", fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("隐藏我的公开资料与在线状态", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+                                Text("开启后其他用户无法查看你的在线状态", fontSize = 11.8.sp, color = palette.inkSecondary)
+                            }
+                            Switch(
+                                checked = hidePresence,
+                                enabled = !isSavingToggle && s != null,
+                                onCheckedChange = { persistPrivacyPrefs(it, allowPm) }
+                            )
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("允许其他成员向我发送站内私信", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+                                Text("关闭后仅管理员可向你发起私信", fontSize = 11.8.sp, color = palette.inkSecondary)
+                            }
+                            Switch(
+                                checked = allowPm,
+                                enabled = !isSavingToggle && s != null,
+                                onCheckedChange = { persistPrivacyPrefs(hidePresence, it) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PreferenceInfoRow(label: String, value: String) {
+    val palette = LocalPalette.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 13.2.sp, color = palette.inkSecondary)
+        Text(value, fontSize = 13.2.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+    }
+}
+
+/**
+ * 官方功能 16：原生关于社区与管理团队页面 (`GET /about.json`)
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CommunityAboutSheet(
+    onDismiss: () -> Unit,
+    onInspectUser: (String) -> Unit
+) {
+    val palette = LocalPalette.current
+    var aboutData by remember { mutableStateOf<CommunityAboutData?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        isLoading = true
+        try {
+            aboutData = LinuxDoRepository.fetchCommunityAboutInfo()
+        } finally {
+            isLoading = false
+        }
+    }
+
+    LinDoFullScreenPage(
+        onBack = onDismiss,
+        containerColor = palette.cardSurface
+    ) {
+        LinDoPageTopBar(
+            title = "关于 LINUX DO 社区",
+            onBack = onDismiss
+        )
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+        if (isLoading && aboutData == null) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                LinDoLoadingIndicator(label = "加载中")
+            }
+        } else {
+            val info = aboutData
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(palette.subtleSurface)
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = info?.title ?: "LINUX DO · 新的理想型社区",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.inkPrimary
+                        )
+                        Text(
+                            text = info?.description ?: "真诚、友善、团结、专业，共建你我引以为荣之社区。",
+                            fontSize = 13.2.sp,
+                            lineHeight = 19.sp,
+                            color = palette.inkSecondary
+                        )
+                    }
+                }
+
+                if (info != null) {
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(palette.subtleSurface)
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text("全站实时统计", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
+                            Row(Modifier.fillMaxWidth()) {
+                                ProfileMetric(formatCompactNumber(info.topicCount), "累计话题", Modifier.weight(1f))
+                                ProfileMetric(formatCompactNumber(info.postCount), "累计帖子", Modifier.weight(1f))
+                                ProfileMetric(formatCompactNumber(info.userCount), "注册成员", Modifier.weight(1f))
+                            }
+                            Row(Modifier.fillMaxWidth()) {
+                                ProfileMetric(formatCompactNumber(info.activeUsers7Days), "7日活跃", Modifier.weight(1f))
+                                ProfileMetric(formatCompactNumber(info.activeUsers30Days), "30日活跃", Modifier.weight(1f))
+                                ProfileMetric(formatCompactNumber(info.likeCount), "全站获赞", Modifier.weight(1f))
+                            }
+                        }
+                    }
+
+                    if (info.admins.isNotEmpty()) {
+                        item {
+                            Text("社区管理员", fontSize = 15.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
+                        }
+                        itemsIndexed(info.admins, key = { _, u -> "admin_${u.username}" }) { _, admin ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onInspectUser(admin.username) }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                GoogleAccountRingAvatar(
+                                    letter = admin.displayName,
+                                    avatarUrl = admin.avatarUrl,
+                                    animatedAvatar = admin.animatedAvatar,
+                                    avatarSize = 38.dp
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(admin.displayName, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+                                    Text("@${admin.username}${if (admin.title.isNotBlank()) " · ${admin.title}" else ""}", fontSize = 12.sp, color = palette.inkSecondary)
+                                }
+                                Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
+                            }
+                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        }
+                    }
+
+                    if (info.moderators.isNotEmpty()) {
+                        item {
+                            Spacer(Modifier.height(4.dp))
+                            Text("社区版主团队", fontSize = 15.5.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary)
+                        }
+                        itemsIndexed(info.moderators, key = { _, u -> "mod_${u.username}" }) { _, mod ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onInspectUser(mod.username) }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                GoogleAccountRingAvatar(
+                                    letter = mod.displayName,
+                                    avatarUrl = mod.avatarUrl,
+                                    animatedAvatar = mod.animatedAvatar,
+                                    avatarSize = 38.dp
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(mod.displayName, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+                                    Text("@${mod.username}${if (mod.title.isNotBlank()) " · ${mod.title}" else ""}", fontSize = 12.sp, color = palette.inkSecondary)
+                                }
+                                Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
+                            }
+                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 /** Debug host uses production sheets and renderer without logging out the current account. */
 @Composable

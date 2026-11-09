@@ -3468,7 +3468,420 @@ object LinuxDoRepository {
             false
         }
     }
+
+    /**
+     * 获取发现页「正在热议」真实全站热门话题 (`GET /top.json?period=daily`，不足时回退 `/top.json?period=weekly`)
+     */
+    suspend fun fetchDiscoverHotTopics(limit: Int = 5): List<TopicSummary> = withContext(Dispatchers.IO) {
+        val daily = runCatching {
+            fetchTopics(
+                path = "/top.json",
+                categoryId = null,
+                page = 0,
+                topPeriod = "daily",
+                background = true
+            ).filterNot { it.pinned }
+        }.getOrDefault(emptyList())
+        if (daily.size >= limit) return@withContext daily.take(limit)
+        val weekly = runCatching {
+            fetchTopics(
+                path = "/top.json",
+                categoryId = null,
+                page = 0,
+                topPeriod = "weekly",
+                background = true
+            ).filterNot { it.pinned }
+        }.getOrDefault(emptyList())
+        (daily + weekly).distinctBy { it.id }.take(limit)
+    }
+
+    /**
+     * 保存个人资料与偏好设置 (`PUT /u/{username}.json`)
+     */
+    suspend fun updateUserProfileInfo(
+        username: String,
+        displayName: String,
+        bioRaw: String,
+        title: String,
+        location: String = "",
+        website: String = "",
+        hidePresence: Boolean? = null,
+        allowPrivateMessages: Boolean? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext false
+        val params = LinkedHashMap<String, String>().apply {
+            put("name", displayName.trim())
+            put("bio_raw", bioRaw)
+            put("title", title.trim())
+            put("location", location.trim())
+            put("website", website.trim())
+            if (hidePresence != null) {
+                put("hide_profile_and_presence", hidePresence.toString())
+            }
+            if (allowPrivateMessages != null) {
+                put("allow_private_messages", allowPrivateMessages.toString())
+            }
+        }
+        val res = executeHttp(
+            url = "https://linux.do/u/$targetUsername.json",
+            method = "PUT",
+            formParams = params
+        )
+        if (res != null && res.first in 200..299) {
+            fetchCurrentUserProfile()
+            return@withContext true
+        }
+        false
+    }
+
+    /**
+     * 读取个人账号与偏好设置 (`GET /u/{username}.json`)
+     */
+    suspend fun fetchUserAccountPreferences(username: String): UserAccountPreferencesSnapshot? = withContext(Dispatchers.IO) {
+        val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext null
+        val res = executeHttp("https://linux.do/u/${targetUsername.trim()}.json", method = "GET") ?: return@withContext null
+        if (!res.second.trimStart().startsWith("{")) return@withContext null
+        try {
+            val root = json.parseToJsonElement(res.second).jsonObject
+            val u = root["user"] as? JsonObject ?: return@withContext null
+            val uOpt = u["user_option"] as? JsonObject
+            val badgeTitles = parseUserBadgesFromRoot(root)
+                .filter { it.allowTitle }
+                .map { it.name.trim() }
+                .filter { it.isNotEmpty() }
+            val userAuthTokens = (u["user_auth_tokens"] as? JsonArray)?.size ?: 0
+            val associatedAccounts = (u["associated_accounts"] as? JsonArray).orEmpty().mapNotNull { elem ->
+                val obj = elem as? JsonObject ?: return@mapNotNull null
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val desc = obj["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                if (name.isNotBlank()) "$name${if (desc.isNotBlank()) " ($desc)" else ""}" else null
+            }
+            UserAccountPreferencesSnapshot(
+                username = u["username"]?.jsonPrimitive?.contentOrNull ?: targetUsername,
+                displayName = u["name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                email = u["email"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                bioRaw = u["bio_raw"]?.jsonPrimitive?.contentOrNull
+                    ?: u["bio_excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")?.trim().orEmpty(),
+                title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                location = u["location"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                website = u["website"]?.jsonPrimitive?.contentOrNull
+                    ?: u["website_name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                trustLevel = u["trust_level"]?.jsonPrimitive?.intOrNull ?: 1,
+                createdAtText = u["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty().take(10),
+                twoFactorEnabled = u["second_factor_enabled"]?.jsonPrimitive?.booleanOrNull == true,
+                hideProfileAndPresence = uOpt?.get("hide_profile_and_presence")?.jsonPrimitive?.booleanOrNull == true,
+                allowPrivateMessages = uOpt?.get("allow_private_messages")?.jsonPrimitive?.booleanOrNull != false,
+                activeDeviceCount = userAuthTokens.coerceAtLeast(1),
+                associatedAccounts = associatedAccounts,
+                availableTitles = badgeTitles.distinct()
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * 获取关注列表或粉丝列表 (`GET /u/{username}/follow/following.json` 或 `followers.json`)
+     */
+    suspend fun fetchUserFollowList(
+        username: String,
+        followers: Boolean = false
+    ): List<FollowUserEntry> = withContext(Dispatchers.IO) {
+        val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext emptyList()
+        val kind = if (followers) "followers" else "following"
+        val res = executeHttp("https://linux.do/u/${targetUsername.trim()}/follow/$kind.json", method = "GET")
+            ?: return@withContext emptyList()
+        val trimmed = res.second.trimStart()
+        if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return@withContext emptyList()
+        try {
+            val elem = json.parseToJsonElement(trimmed)
+            val arr: JsonArray = when (elem) {
+                is JsonArray -> elem
+                is JsonObject -> (elem["users"] as? JsonArray)
+                    ?: (elem[kind] as? JsonArray)
+                    ?: (elem["follow"] as? JsonArray)
+                    ?: JsonArray(emptyList())
+                else -> JsonArray(emptyList())
+            }
+            arr.mapNotNull { item ->
+                val obj = item as? JsonObject ?: return@mapNotNull null
+                val uname = obj["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                val uid = obj["id"]?.jsonPrimitive?.intOrNull ?: 0
+                val dname = obj["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
+                val tpl = obj["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val avatarUrl = if (tpl.isNotBlank()) {
+                    val sized = tpl.replace("{size}", "120")
+                    if (sized.startsWith("http")) sized else "https://linux.do$sized"
+                } else ""
+                val animRaw = obj["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val animatedAvatar = animRaw?.let { if (it.startsWith("http")) it else "https://linux.do$it" }
+                FollowUserEntry(
+                    id = uid,
+                    username = uname,
+                    displayName = dname,
+                    avatarUrl = avatarUrl,
+                    animatedAvatar = animatedAvatar,
+                    title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    trustLevel = obj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1,
+                    isFollowing = !followers || (obj["is_following"]?.jsonPrimitive?.booleanOrNull == true)
+                )
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 获取关注用户的最新动态 (`GET /u/{username}/follow/feed.json`)
+     */
+    suspend fun fetchUserFollowFeed(username: String): List<UserActivityItem> = withContext(Dispatchers.IO) {
+        val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext emptyList()
+        val res = executeHttp("https://linux.do/u/${targetUsername.trim()}/follow/feed.json", method = "GET")
+        if (res != null && res.second.trimStart().startsWith("{")) {
+            try {
+                val root = json.parseToJsonElement(res.second).jsonObject
+                val postsArr = (root["posts"] as? JsonArray)
+                    ?: (root["user_actions"] as? JsonArray)
+                    ?: (root["feed"] as? JsonArray)
+                if (postsArr != null && postsArr.isNotEmpty()) {
+                    return@withContext postsArr.mapNotNull { elem ->
+                        val obj = elem as? JsonObject ?: return@mapNotNull null
+                        val tid = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+                        val pnum = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
+                        val title = obj["title"]?.jsonPrimitive?.contentOrNull
+                            ?: (obj["topic"] as? JsonObject)?.get("title")?.jsonPrimitive?.contentOrNull
+                            ?: "话题 #$tid"
+                        val excerptRaw = obj["excerpt"]?.jsonPrimitive?.contentOrNull
+                            ?: obj["cooked"]?.jsonPrimitive?.contentOrNull
+                            ?: ""
+                        val excerpt = excerptRaw.replace(Regex("<[^>]+>"), "").trim()
+                        val actorObj = obj["user"] as? JsonObject
+                        val actorName = obj["username"]?.jsonPrimitive?.contentOrNull
+                            ?: actorObj?.get("username")?.jsonPrimitive?.contentOrNull
+                            ?: ""
+                        val catId = obj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
+                        val (catName, _) = resolveCategoryMeta(catId)
+                        val createdAt = obj["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty().take(10)
+                        UserActivityItem(
+                            id = obj["id"]?.jsonPrimitive?.intOrNull ?: tid,
+                            topicId = tid,
+                            postNumber = pnum,
+                            title = if (actorName.isNotBlank()) "[$actorName] $title" else title,
+                            excerpt = excerpt,
+                            actionType = if (pnum <= 1) 4 else 5,
+                            createdAtText = createdAt,
+                            categoryName = catName
+                        )
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        val fallbackTopics = runCatching {
+            fetchTopics(path = "/follow.json", categoryId = null, page = 0)
+        }.getOrDefault(emptyList())
+        fallbackTopics.map { t ->
+            UserActivityItem(
+                id = t.id,
+                topicId = t.id,
+                postNumber = 1,
+                title = t.title,
+                excerpt = t.excerpt.orEmpty(),
+                actionType = 4,
+                createdAtText = t.lastPostedAt,
+                categoryName = t.categoryName
+            )
+        }
+    }
+
+    /**
+     * 获取社区积分与活跃排行榜 (`GET /directory_items.json?period={period}&order=likes_received`)
+     */
+    suspend fun fetchCommunityLeaderboard(period: String = "weekly"): List<LeaderboardUserEntry> = withContext(Dispatchers.IO) {
+        val res = executeHttp(
+            url = "https://linux.do/directory_items.json?period=$period&order=likes_received",
+            method = "GET"
+        ) ?: return@withContext emptyList()
+        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
+        try {
+            val root = json.parseToJsonElement(res.second).jsonObject
+            val arr = root["directory_items"] as? JsonArray ?: return@withContext emptyList()
+            arr.take(40).mapIndexedNotNull { idx, elem ->
+                val obj = elem as? JsonObject ?: return@mapIndexedNotNull null
+                val u = obj["user"] as? JsonObject ?: return@mapIndexedNotNull null
+                val uname = u["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
+                val uid = u["id"]?.jsonPrimitive?.intOrNull ?: obj["id"]?.jsonPrimitive?.intOrNull ?: idx
+                val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
+                val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val avatarUrl = if (tpl.isNotBlank()) {
+                    val sized = tpl.replace("{size}", "120")
+                    if (sized.startsWith("http")) sized else "https://linux.do$sized"
+                } else ""
+                val likesReceived = obj["likes_received"]?.jsonPrimitive?.intOrNull ?: 0
+                val likesGiven = obj["likes_given"]?.jsonPrimitive?.intOrNull ?: 0
+                val postCount = obj["post_count"]?.jsonPrimitive?.intOrNull ?: 0
+                val topicCount = obj["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
+                val daysVisited = obj["days_visited"]?.jsonPrimitive?.intOrNull ?: 0
+                val cheers = obj["cheers"]?.jsonPrimitive?.intOrNull
+                    ?: obj["gamification_score"]?.jsonPrimitive?.intOrNull
+                    ?: (likesReceived * 5 + postCount * 2 + topicCount * 5)
+                LeaderboardUserEntry(
+                    rank = idx + 1,
+                    id = uid,
+                    username = uname,
+                    displayName = dname,
+                    avatarUrl = avatarUrl,
+                    title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    likesReceived = likesReceived,
+                    likesGiven = likesGiven,
+                    postCount = postCount,
+                    topicCount = topicCount,
+                    daysVisited = daysVisited,
+                    score = cheers
+                )
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 获取关于社区及管理团队信息 (`GET /about.json`)
+     */
+    suspend fun fetchCommunityAboutInfo(): CommunityAboutData? = withContext(Dispatchers.IO) {
+        val res = executeHttp("https://linux.do/about.json", method = "GET") ?: return@withContext null
+        if (!res.second.trimStart().startsWith("{")) return@withContext null
+        try {
+            val root = json.parseToJsonElement(res.second).jsonObject
+            val about = root["about"] as? JsonObject ?: return@withContext null
+            val stats = about["stats"] as? JsonObject
+            val usersById = LinkedHashMap<Int, FollowUserEntry>()
+            fun parseUserObj(u: JsonObject): FollowUserEntry? {
+                val uid = u["id"]?.jsonPrimitive?.intOrNull ?: return null
+                val uname = u["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
+                val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val avatarUrl = if (tpl.isNotBlank()) {
+                    val sized = tpl.replace("{size}", "120")
+                    if (sized.startsWith("http")) sized else "https://linux.do$sized"
+                } else ""
+                val animRaw = u["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                return FollowUserEntry(
+                    id = uid,
+                    username = uname,
+                    displayName = dname,
+                    avatarUrl = avatarUrl,
+                    animatedAvatar = animRaw?.let { if (it.startsWith("http")) it else "https://linux.do$it" },
+                    title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    trustLevel = u["trust_level"]?.jsonPrimitive?.intOrNull ?: 4
+                )
+            }
+            (root["users"] as? JsonArray)?.forEach { elem ->
+                (elem as? JsonObject)?.let(::parseUserObj)?.let { usersById[it.id] = it }
+            }
+            val admins = buildList {
+                (about["admins"] as? JsonArray)?.forEach { elem ->
+                    (elem as? JsonObject)?.let(::parseUserObj)?.let { add(it) }
+                }
+                if (isEmpty()) {
+                    (about["admin_ids"] as? JsonArray)?.forEach { idElem ->
+                        idElem.jsonPrimitive.intOrNull?.let { usersById[it] }?.let { add(it) }
+                    }
+                }
+            }.distinctBy { it.username }
+            val moderators = buildList {
+                (about["moderators"] as? JsonArray)?.forEach { elem ->
+                    (elem as? JsonObject)?.let(::parseUserObj)?.let { add(it) }
+                }
+                if (isEmpty()) {
+                    (about["moderator_ids"] as? JsonArray)?.forEach { idElem ->
+                        idElem.jsonPrimitive.intOrNull?.let { usersById[it] }?.let { add(it) }
+                    }
+                }
+            }.distinctBy { it.username }
+            CommunityAboutData(
+                title = about["title"]?.jsonPrimitive?.contentOrNull ?: "LINUX DO",
+                description = about["description"]?.jsonPrimitive?.contentOrNull
+                    ?: "新的理想型社区 · 真诚、友善、团结、专业",
+                topicCount = stats?.get("topics_count")?.jsonPrimitive?.intOrNull
+                    ?: stats?.get("topic_count")?.jsonPrimitive?.intOrNull ?: 0,
+                postCount = stats?.get("posts_count")?.jsonPrimitive?.intOrNull
+                    ?: stats?.get("post_count")?.jsonPrimitive?.intOrNull ?: 0,
+                userCount = stats?.get("users_count")?.jsonPrimitive?.intOrNull
+                    ?: stats?.get("user_count")?.jsonPrimitive?.intOrNull ?: 0,
+                activeUsers7Days = stats?.get("active_users_7_days")?.jsonPrimitive?.intOrNull ?: 0,
+                activeUsers30Days = stats?.get("active_users_30_days")?.jsonPrimitive?.intOrNull ?: 0,
+                likeCount = stats?.get("likes_count")?.jsonPrimitive?.intOrNull
+                    ?: stats?.get("like_count")?.jsonPrimitive?.intOrNull ?: 0,
+                admins = admins,
+                moderators = moderators
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
 }
+
+data class UserAccountPreferencesSnapshot(
+    val username: String,
+    val displayName: String,
+    val email: String,
+    val bioRaw: String,
+    val title: String,
+    val location: String,
+    val website: String,
+    val trustLevel: Int,
+    val createdAtText: String,
+    val twoFactorEnabled: Boolean,
+    val hideProfileAndPresence: Boolean,
+    val allowPrivateMessages: Boolean,
+    val activeDeviceCount: Int = 1,
+    val associatedAccounts: List<String> = emptyList(),
+    val availableTitles: List<String> = emptyList()
+)
+
+data class FollowUserEntry(
+    val id: Int,
+    val username: String,
+    val displayName: String,
+    val avatarUrl: String,
+    val animatedAvatar: String? = null,
+    val title: String = "",
+    val trustLevel: Int = 1,
+    val isFollowing: Boolean = false
+)
+
+data class LeaderboardUserEntry(
+    val rank: Int,
+    val id: Int,
+    val username: String,
+    val displayName: String,
+    val avatarUrl: String,
+    val title: String = "",
+    val likesReceived: Int = 0,
+    val likesGiven: Int = 0,
+    val postCount: Int = 0,
+    val topicCount: Int = 0,
+    val daysVisited: Int = 0,
+    val score: Int = 0
+)
+
+data class CommunityAboutData(
+    val title: String,
+    val description: String,
+    val topicCount: Int,
+    val postCount: Int,
+    val userCount: Int,
+    val activeUsers7Days: Int,
+    val activeUsers30Days: Int,
+    val likeCount: Int,
+    val admins: List<FollowUserEntry>,
+    val moderators: List<FollowUserEntry>
+)
 
 /**
  * 跨平台媒体文件选择器与 WebView Multipart 桥接器
