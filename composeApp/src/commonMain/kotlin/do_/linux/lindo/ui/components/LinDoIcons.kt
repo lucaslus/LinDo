@@ -274,48 +274,42 @@ object LinDoIcons {
 
     val LayoutCards: ImageVector by lazy {
         lucideIcon("LayoutCards") {
-            strokePath(1.8f) {
-                // 上卡片（圆角矩形）
-                moveTo(5.5f, 4f)
-                horizontalLineTo(18.5f)
-                curveTo(19.6f, 4f, 20.5f, 4.9f, 20.5f, 6f)
-                verticalLineTo(8.5f)
-                curveTo(20.5f, 9.6f, 19.6f, 10.5f, 18.5f, 10.5f)
-                horizontalLineTo(5.5f)
-                curveTo(4.4f, 10.5f, 3.5f, 9.6f, 3.5f, 8.5f)
-                verticalLineTo(6f)
-                curveTo(3.5f, 4.9f, 4.4f, 4f, 5.5f, 4f)
-                close()
-                // 下卡片（圆角矩形）
-                moveTo(5.5f, 13.5f)
-                horizontalLineTo(18.5f)
-                curveTo(19.6f, 13.5f, 20.5f, 14.4f, 20.5f, 15.5f)
-                verticalLineTo(18f)
-                curveTo(20.5f, 19.1f, 19.6f, 20f, 18.5f, 20f)
-                horizontalLineTo(5.5f)
-                curveTo(4.4f, 20f, 3.5f, 19.1f, 3.5f, 18f)
-                verticalLineTo(15.5f)
-                curveTo(3.5f, 14.4f, 4.4f, 13.5f, 5.5f, 13.5f)
-                close()
+            strokePath(1.9f) {
+                // 宽松列表视图：两组「左侧圆点 + 主标题长线 + 摘要短线」（与轻分割线宽松列表一一对应，严格处于 y=6.2..17.8 视觉框内）
+                moveTo(4f, 6.5f)
+                horizontalLineTo(5.2f)
+                moveTo(8.5f, 6.5f)
+                horizontalLineTo(20f)
+                moveTo(8.5f, 9.8f)
+                horizontalLineTo(15.5f)
+
+                moveTo(4f, 14.5f)
+                horizontalLineTo(5.2f)
+                moveTo(8.5f, 14.5f)
+                horizontalLineTo(20f)
+                moveTo(8.5f, 17.8f)
+                horizontalLineTo(15.5f)
             }
         }
     }
 
     val LayoutCompact: ImageVector by lazy {
         lucideIcon("LayoutCompact") {
-            strokePath(1.8f) {
-                // 紧凑列表视图：左侧短标 + 右侧长条目线（三行高密度列表）
-                moveTo(4f, 6f)
-                horizontalLineTo(5.5f)
-                moveTo(9f, 6f)
+            strokePath(1.9f) {
+                // 紧凑列表视图：三行「左侧圆点 + 单行标题线」（与宽松图标同宽 x=4..20、同高 y=6.5..17.5）
+                moveTo(4f, 6.5f)
+                horizontalLineTo(5.2f)
+                moveTo(8.5f, 6.5f)
                 horizontalLineTo(20f)
+
                 moveTo(4f, 12f)
-                horizontalLineTo(5.5f)
-                moveTo(9f, 12f)
+                horizontalLineTo(5.2f)
+                moveTo(8.5f, 12f)
                 horizontalLineTo(20f)
-                moveTo(4f, 18f)
-                horizontalLineTo(5.5f)
-                moveTo(9f, 18f)
+
+                moveTo(4f, 17.5f)
+                horizontalLineTo(5.2f)
+                moveTo(8.5f, 17.5f)
                 horizontalLineTo(20f)
             }
         }
