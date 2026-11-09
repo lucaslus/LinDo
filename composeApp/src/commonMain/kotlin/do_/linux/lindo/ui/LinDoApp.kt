@@ -643,19 +643,24 @@ internal fun LinDoPageTopBar(
                 )
             }
             Spacer(modifier = Modifier.width(2.dp))
-            Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Text(
                     text = title,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
                     color = palette.inkPrimary,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
                 if (!subtitle.isNullOrBlank()) {
                     Text(
                         text = subtitle,
-                        fontSize = 12.sp,
+                        fontSize = 12.5.sp,
                         color = palette.inkSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -5672,7 +5677,7 @@ private fun CommunityPostFloor(
                     }
                 }
 
-                if (hasDistinctHandle || hasUserTitle || hasIosDevice || floorAwards.isNotEmpty() ||
+                if (hasUserTitle || hasIosDevice || floorAwards.isNotEmpty() ||
                     post.isTodayBirthday || post.isTodayCakeday
                 ) {
                     Row(
@@ -5680,18 +5685,7 @@ private fun CommunityPostFloor(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        if (hasDistinctHandle) {
-                            Text(
-                                text = "@${post.username}",
-                                modifier = Modifier.weight(1f, fill = false),
-                                fontSize = 11.5.sp,
-                                color = palette.inkTertiary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
                         if (hasUserTitle) {
-                            if (hasDistinctHandle) Text("·", color = palette.inkTertiary, fontSize = 11.sp)
                             UserTitleTag(
                                 title = post.userTitle.orEmpty(),
                                 animatePostTitle = enableAnimations,
@@ -5701,7 +5695,7 @@ private fun CommunityPostFloor(
                             )
                         }
                         if (hasIosDevice) {
-                            if (hasDistinctHandle || hasUserTitle) Text("·", color = palette.inkTertiary, fontSize = 11.sp)
+                            if (hasUserTitle) Text("·", color = palette.inkTertiary, fontSize = 11.sp)
                             Row(
                                 modifier = Modifier.weight(1.25f, fill = false),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -7648,32 +7642,34 @@ private fun CommunityProfileScreen(
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f, fill = false)
                                 )
-                                if (isAuthorized) {
-                                    Text(
-                                        text = trustLabel,
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = palette.brandGold,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(3.dp))
-
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
                                 Text(
                                     text = if (displayUsername.isNotBlank()) "@$displayUsername" else "@linux.do",
                                     fontSize = 12.2.sp,
                                     color = palette.inkSecondary,
                                     maxLines = 1
                                 )
-                                if (!userTitle.isNullOrBlank()) {
-                                    UserTitleTag(title = userTitle)
+                            }
+
+                            if (isAuthorized || !userTitle.isNullOrBlank()) {
+                                Spacer(modifier = Modifier.height(3.dp))
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (isAuthorized) {
+                                        Text(
+                                            text = trustLabel,
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.brandGold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                    if (!userTitle.isNullOrBlank()) {
+                                        UserTitleTag(title = userTitle)
+                                    }
                                 }
                             }
                         }
@@ -8836,7 +8832,6 @@ private fun CommunityBadgesSheet(
     ) {
         LinDoPageTopBar(
             title = "徽章",
-            subtitle = targetUsername.takeIf { it.isNotBlank() }?.let { "@$it" },
             onBack = onDismiss
         )
         Column(
@@ -11708,7 +11703,7 @@ private fun PublicUserCardSheet(
                         avatarSize = 58.dp,
                         strokeWidth = 2.2.dp
                     )
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -11717,18 +11712,18 @@ private fun PublicUserCardSheet(
                                 displayName, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
                             )
+                            if (distinctHandle) {
+                                Text(
+                                    "@$username", fontSize = 12.5.sp, color = palette.inkSecondary,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             if (p?.moderator == true) {
                                 OfficialBadgeArtwork(
                                     url = OfficialModeratorIcon, description = "版主",
                                     colorFilter = ColorFilter.tint(palette.inkSecondary), modifier = Modifier.size(13.5.dp)
                                 )
                             }
-                        }
-                        if (distinctHandle) {
-                            Text(
-                                "@$username", fontSize = 12.5.sp, color = palette.inkSecondary,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
                         }
                         p?.title?.takeIf { it.isNotBlank() }?.let { UserTitleTag(title = it) }
                     }
@@ -12324,23 +12319,42 @@ private fun EditProfileModalSheet(
                         strokeWidth = 2.dp
                     )
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(
-                            text = displayName.ifBlank { username },
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "@$username · ${fullProfile?.trustLevelName ?: "Linux.do 社区成员"}",
-                            fontSize = 12.5.sp,
-                            color = palette.inkSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (userTitle.isNotBlank()) {
-                            UserTitleTag(title = userTitle)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = displayName.ifBlank { username },
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.inkPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Text(
+                                text = "@$username",
+                                fontSize = 12.2.sp,
+                                color = palette.inkSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = fullProfile?.trustLevelName ?: "Linux.do 社区成员",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.brandGold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                            if (userTitle.isNotBlank()) {
+                                UserTitleTag(title = userTitle)
+                            }
                         }
                     }
                 }
@@ -12697,27 +12711,29 @@ private fun UserFollowNetworkSheet(
                                         fontWeight = FontWeight.SemiBold,
                                         color = palette.inkPrimary,
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
-                                    if (user.title.isNotBlank()) {
-                                        UserTitleTag(title = user.title)
-                                    } else {
+                                    if (!user.displayName.equals(user.username, ignoreCase = true)) {
                                         Text(
-                                            text = "Lv.${user.trustLevel}",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = palette.brandGold
+                                            text = "@${user.username}",
+                                            fontSize = 12.sp,
+                                            color = palette.inkSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
+                                    Text(
+                                        text = "Lv.${user.trustLevel}",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.brandGold
+                                    )
                                 }
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "@${user.username} · Lv.${user.trustLevel}",
-                                    fontSize = 12.sp,
-                                    color = palette.inkSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                if (user.title.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    UserTitleTag(title = user.title)
+                                }
                             }
                             TextButton(
                                 onClick = {
@@ -13226,20 +13242,22 @@ private fun CommunityAboutSheet(
                                         fontWeight = FontWeight.SemiBold,
                                         color = palette.inkPrimary,
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
+                                    if (!member.displayName.equals(member.username, ignoreCase = true)) {
+                                        Text(
+                                            text = "@${member.username}",
+                                            fontSize = 12.sp,
+                                            color = palette.inkSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                     if (member.title.isNotBlank()) {
                                         UserTitleTag(title = member.title)
                                     }
                                 }
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    text = "@${member.username}",
-                                    fontSize = 12.sp,
-                                    color = palette.inkSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
                             }
                             Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
                         }
