@@ -197,10 +197,30 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
             is PostBlockNode.ImageGallery -> node.urls.forEachIndexed { index, url ->
                 var failed by remember(url) { mutableStateOf(false) }
                 val alt = node.captions.getOrNull(index).orEmpty().ifBlank { "帖子配图" }
-                if (failed) TextButton(onClick = { onOpenLink(url) }) { Text("$alt · 打开图片") }
-                else AsyncImage(model = url, contentDescription = alt, contentScale = ContentScale.FillWidth,
-                    onError = { failed = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 360.dp)
-                        .clip(RoundedCornerShape(8.dp)).background(palette.subtleSurface).clickable { onOpenLink(url) })
+                if (failed) {
+                    TextButton(onClick = { onOpenLink(url) }) { Text("$alt · 打开图片") }
+                } else {
+                    val context = coil3.compose.LocalPlatformContext.current
+                    val imageRequest = remember(context, url) {
+                        coil3.request.ImageRequest.Builder(context)
+                            .data(url)
+                            .size(coil3.size.Size.ORIGINAL)
+                            .build()
+                    }
+                    AsyncImage(
+                        model = imageRequest,
+                        contentDescription = alt,
+                        contentScale = ContentScale.FillWidth,
+                        filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
+                        onError = { failed = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 60.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(palette.subtleSurface)
+                            .clickable { onOpenLink(url) }
+                    )
+                }
             }
             is PostBlockNode.Table -> Column(Modifier.horizontalScroll(rememberScrollState())) {
                 node.rows.forEachIndexed { index, cells -> Row {

@@ -43,7 +43,7 @@ internal val LocalCurrentAccountUsername = staticCompositionLocalOf<String?> { n
 
 @Composable
 internal fun LinDoDialogTitle(title: String) {
-    Text(title, color = LocalPalette.current.inkPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+    Text(title, color = LocalPalette.current.inkPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
 }
 
 @Composable

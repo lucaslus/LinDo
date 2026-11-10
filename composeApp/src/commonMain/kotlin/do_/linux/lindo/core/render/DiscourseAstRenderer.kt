@@ -296,9 +296,12 @@ object DiscourseAstParser {
                     )
                 }
                 tag == "img" -> {
-                    flush(); val raw = node.attr("src").ifBlank { node.attr("data-src") }
-                    safeUrl(raw, allowMailto = false)?.let { result += PostBlockNode.ImageGallery(listOf(it), listOf(node.attr("alt"))) }
-                        ?: run { result += PostBlockNode.Unsupported("图片暂不可用", node.attr("alt")) }
+                    flush()
+                    resolveBestImageUrl(node)?.let {
+                        result += PostBlockNode.ImageGallery(listOf(it), listOf(node.attr("alt")))
+                    } ?: run {
+                        result += PostBlockNode.Unsupported("图片暂不可用", node.attr("alt"))
+                    }
                 }
                 tag == "hr" -> { flush(); result += PostBlockNode.Divider }
                 tag.matches(Regex("h[1-6]")) -> {
@@ -328,6 +331,36 @@ object DiscourseAstParser {
         nodes.forEach { visit(it) }; flush()
         return result
     }
+
+    private fun resolveBestImageUrl(node: Element): String? {
+        val lightboxHref = node.parents()
+            .firstOrNull {
+                it.normalName() == "a" && (it.hasClass("lightbox") || it.attr("href").contains("/uploads/"))
+            }
+            ?.attr("href")
+            .orEmpty()
+            .trim()
+        val bestSrcset = node.attr("srcset")
+            .split(',')
+            .map { it.trim().substringBefore(' ').trim() }
+            .lastOrNull { it.isNotEmpty() }
+            .orEmpty()
+        val candidates = listOf(
+            lightboxHref,
+            node.attr("data-orig-src").trim(),
+            node.attr("data-large-src").trim(),
+            bestSrcset,
+            node.attr("src").trim(),
+            node.attr("data-src").trim()
+        )
+        for (candidate in candidates) {
+            if (candidate.isNotEmpty()) {
+                safeUrl(candidate, allowMailto = false)?.let { return it }
+            }
+        }
+        return null
+    }
+
     private fun trimmed(runs: List<InlineRun>): RichText {
         val copy = runs.filter { it.text.isNotEmpty() }.toMutableList()
         while (copy.isNotEmpty() && copy.first().text.isBlank()) copy.removeAt(0)

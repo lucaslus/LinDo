@@ -44,7 +44,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import kotlinx.serialization.json.JsonArray
@@ -1344,7 +1346,7 @@ object LinuxDoRepository {
             likesGiven = likesGiven,
             topicCount = topicCount,
             postCount = postCount,
-            badgeCount = badgeCount.coerceAtLeast(topBadges.size),
+            badgeCount = maxOf(badgeCount, topBadges.sumOf { it.count.coerceAtLeast(1) }),
             unreadNotifications = unreadNotifs,
             badges = topBadges,
             flair = flair
@@ -2560,7 +2562,7 @@ object LinuxDoRepository {
             likesGiven = likesGiven,
             topicCount = topicCount,
             postCount = postCount,
-            badgeCount = badgeCount.coerceAtLeast(topBadges.size),
+            badgeCount = maxOf(badgeCount, topBadges.sumOf { it.count.coerceAtLeast(1) }),
             lastSeenText = lastSeenText,
             location = location,
             websiteName = websiteName,
@@ -2812,6 +2814,8 @@ object LinuxDoRepository {
         val replyToPostNumber = pObj["reply_to_post_number"]?.jsonPrimitive?.intOrNull ?: 0
         val replyToUserObj = pObj["reply_to_user"] as? JsonObject
         val replyToUsername = replyToUserObj?.get("username")?.jsonPrimitive?.contentOrNull
+        val replyToDisplayName = replyToUserObj?.get("name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val replyToAvatarTemplate = replyToUserObj?.get("avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
         val reads = pObj["reads"]?.jsonPrimitive?.intOrNull ?: 0
 
         val (rawParsedReactions, rawMyReactionId) = parsePostReactionsAndMine(pObj)
@@ -2888,6 +2892,8 @@ object LinuxDoRepository {
             replyCount = replyCount,
             replyToPostNumber = replyToPostNumber,
             replyToUsername = replyToUsername,
+            replyToDisplayName = replyToDisplayName,
+            replyToAvatarTemplate = replyToAvatarTemplate,
             likeCount = reactionsCount,
             readsCount = reads,
             likedByMe = likedByMe,
@@ -2931,6 +2937,14 @@ object LinuxDoRepository {
                 lastReadPostNumber = lastReadPostNumber,
                 authorBadges = authorBadges
             )
+        }
+        if (id > 0) {
+            posts.firstOrNull()?.cookedHtml?.let { firstCooked ->
+                val ex = extractPlainExcerptFromHtml(firstCooked)
+                if (ex.isNotBlank()) {
+                    topicExcerptCache[id] = ex
+                }
+            }
         }
 
         return TopicDetailModel(
@@ -3014,6 +3028,11 @@ object LinuxDoRepository {
             val rawUnreadPosts = tObj["unread_posts"]?.jsonPrimitive?.intOrNull ?: 0
             val alreadyReadLocally = isTopicRead(id)
 
+            val rawExcerpt = tObj["excerpt"]?.jsonPrimitive?.contentOrNull
+            val cleanedExcerpt = extractPlainExcerptFromHtml(rawExcerpt).takeIf { it.isNotBlank() }
+                ?.also { topicExcerptCache[id] = it }
+                ?: topicExcerptCache[id]?.takeIf { it.isNotBlank() }
+
             TopicSummary(
                 id = id,
                 title = title,
@@ -3026,7 +3045,7 @@ object LinuxDoRepository {
                 categoryColorHex = catColor,
                 tags = tags,
                 lastPostedAt = formatRelativeTime(lastPostedIso),
-                excerpt = tObj["excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")?.trim(),
+                excerpt = cleanedExcerpt,
                 pinned = tObj["pinned"]?.jsonPrimitive?.booleanOrNull ?: false,
                 unseen = if (alreadyReadLocally) false else rawUnseen,
                 unreadPosts = if (alreadyReadLocally) 0 else rawUnreadPosts,
@@ -3034,6 +3053,84 @@ object LinuxDoRepository {
                 originalPoster = op,
                 participantAvatars = posters
             )
+        }
+    }
+
+    private val topicExcerptCache = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    private val excerptFetchSemaphore = Semaphore(3)
+
+    fun getCachedTopicExcerpt(topicId: Int): String? =
+        topicExcerptCache[topicId]?.takeIf { it.isNotBlank() }
+
+    fun cacheTopicExcerpt(topicId: Int, excerpt: String) {
+        if (topicId > 0) {
+            topicExcerptCache[topicId] = excerpt.trim()
+        }
+    }
+
+    internal fun extractPlainExcerptFromHtml(cookedHtml: String?): String {
+        val raw = cookedHtml?.trim().orEmpty()
+        if (raw.isEmpty()) return ""
+        val hasContentImage = raw.contains("<img", ignoreCase = true) &&
+            !Regex("<img[^>]*class\\s*=\\s*[\"'][^\"']*(?:emoji|avatar)[^\"']*[\"']", RegexOption.IGNORE_CASE).containsMatchIn(raw)
+        val stripped = raw
+            .replace(Regex("<aside[\\s\\S]*?</aside>", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("<div[^>]*class\\s*=\\s*[\"'][^\"']*meta[^\"']*[\"'][\\s\\S]*?</div>", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("<[^>]+>"), " ")
+            .replace("&nbsp;", " ")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .replace("&hellip;", "...")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        return when {
+            stripped.isNotEmpty() -> if (stripped.length > 160) stripped.take(160) + "..." else stripped
+            hasContentImage -> "[图片]"
+            else -> ""
+        }
+    }
+
+    /**
+     * 按需静默补全话题一楼纯文本摘要（`/t/{topicId}.json?track_visit=false` + `Discourse-Background: true`）
+     *
+     * Discourse 的 `/latest.json`、`/top.json` 等列表接口默认只为置顶帖 (`pinned: true`) 下发 `excerpt` 字段，
+     * 普通帖子在列表 JSON 中 `excerpt` 为 `null`。此方法在宽松列表模式下按需拉取并缓存一楼摘要，
+     * 同时携带 `track_visit=false` 与 `Discourse-Background: true`，绝不误标已读或污染阅读计数。
+     */
+    suspend fun fetchTopicExcerpt(topicId: Int): String? = withContext(Dispatchers.IO) {
+        if (topicId <= 0) return@withContext null
+        topicExcerptCache[topicId]?.let { cached ->
+            return@withContext cached.takeIf { it.isNotBlank() }
+        }
+        excerptFetchSemaphore.withPermit {
+            topicExcerptCache[topicId]?.let { cached ->
+                return@withPermit cached.takeIf { it.isNotBlank() }
+            }
+            val url = "https://linux.do/t/" + topicId.toString() + ".json?track_visit=false"
+            val res = executeHttp(
+                url = url,
+                method = "GET",
+                extraHeaders = mapOf("Discourse-Background" to "true")
+            )
+            val statusCode = res?.first ?: 0
+            val body = res?.second
+            if (statusCode in 200..299 && body != null && body.trimStart().startsWith("{")) {
+                val extracted = runCatching {
+                    val root = json.parseToJsonElement(body).jsonObject
+                    val postsArr = (root["post_stream"] as? JsonObject)?.get("posts") as? JsonArray
+                    val firstPost = postsArr?.firstOrNull() as? JsonObject
+                    val cooked = firstPost?.get("cooked")?.jsonPrimitive?.contentOrNull
+                        ?: root["excerpt"]?.jsonPrimitive?.contentOrNull
+                    extractPlainExcerptFromHtml(cooked)
+                }.getOrDefault("")
+                topicExcerptCache[topicId] = extracted
+                return@withPermit extracted.takeIf { it.isNotBlank() }
+            }
+            null
         }
     }
 

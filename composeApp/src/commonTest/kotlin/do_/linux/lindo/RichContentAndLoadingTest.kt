@@ -13,11 +13,17 @@ class RichContentAndLoadingTest {
         assertTrue(p.rich.runs.any { it.bold && it.italic && it.href == "https://linux.do/t/12" && it.text == "linked" })
     }
     @Test fun imagesOutsideParagraphsAndNestedLightboxesRetainOrder() {
-        val nodes = DiscourseAstParser.parseCookedHtml("<p>before<img src='//example.test/a.png' alt='caption'>after</p><div><a><img src='/b.png'></a></div>")
+        val nodes = DiscourseAstParser.parseCookedHtml(
+            "<p>before<img src='//example.test/a.png' alt='caption'>after</p>" +
+                "<div class='lightbox-wrapper'><a class='lightbox' href='https://linux.do/uploads/default/original/4X/hd.jpeg'>" +
+                "<img src='https://linux.do/uploads/default/optimized/4X/thumb_2_345x500.jpeg' srcset='https://linux.do/uploads/default/optimized/4X/thumb_2_345x500.jpeg, https://linux.do/uploads/default/optimized/4X/thumb_2_690x1000.jpeg 2x'>" +
+                "</a></div>"
+        )
         assertEquals(listOf("before", "image", "after", "image"), nodes.map { if (it is PostBlockNode.Paragraph) it.text else "image" })
         val images = nodes.filterIsInstance<PostBlockNode.ImageGallery>()
         assertEquals("https://example.test/a.png", images[0].urls.single())
         assertEquals("caption", images[0].captions.single())
+        assertEquals("https://linux.do/uploads/default/original/4X/hd.jpeg", images[1].urls.single())
     }
     @Test fun nestedListsAndOrderedOffsetsSurvive() {
         val list = DiscourseAstParser.parseCookedHtml("<ol start='3'><li>one<ul><li>nested</li></ul></li><li>two</li></ol>").single() as PostBlockNode.BulletList

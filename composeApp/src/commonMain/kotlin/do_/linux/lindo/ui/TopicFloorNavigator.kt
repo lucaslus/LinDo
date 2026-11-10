@@ -73,11 +73,11 @@ internal fun TopicFloorNavigator(
     ) {
         Column(
             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                .padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
+                .padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "楼层导航", Modifier.weight(1f), fontSize = 17.sp, fontWeight = FontWeight.SemiBold
+                    "楼层导航", Modifier.weight(1f), fontSize = 17.sp, fontWeight = FontWeight.Bold
                 )
                 IconButton(onClick = onDismiss) {
                     Icon(LinDoIcons.Close, "关闭楼层导航", Modifier.size(18.dp), tint = palette.inkSecondary)

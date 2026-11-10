@@ -318,6 +318,8 @@ data class PostItemModel(
     val createdAtText: String = "",
     val replyToPostNumber: Int? = null,
     val replyToUsername: String? = null,
+    val replyToDisplayName: String? = null,
+    val replyToAvatarTemplate: String? = null,
     val likeCount: Int = 0,
     val replyCount: Int = 0,
     val readsCount: Int = 0,

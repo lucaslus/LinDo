@@ -68,7 +68,7 @@ internal fun ComposerCategoryPicker(
                 Text(
                     text = "选择发布版块",
                     color = palette.inkPrimary,
-                    fontSize = 16.5.sp,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
                 )
@@ -220,13 +220,13 @@ internal fun ComposerTagPicker(
                     Text(
                         text = "选择话题标签",
                         color = palette.inkPrimary,
-                        fontSize = 16.5.sp,
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
                         text = "已选 ${selected.size}/$limit",
                         color = palette.inkSecondary,
-                        fontSize = 12.5.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
