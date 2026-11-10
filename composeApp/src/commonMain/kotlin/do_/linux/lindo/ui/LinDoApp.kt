@@ -472,6 +472,12 @@ private fun LinearPulseLoadingFooter(
     onLoadMore: () -> Unit
 ) {
     val palette = LocalPalette.current
+    val currentOnLoadMore by androidx.compose.runtime.rememberUpdatedState(onLoadMore)
+    LaunchedEffect(hasMore, isLoadingMore, isError, loadedCount) {
+        if (hasMore && !isLoadingMore && !isError && loadedCount > 0) {
+            currentOnLoadMore()
+        }
+    }
     val state = when {
         isError -> LinDoMascotState.NetworkError
         isLoadingMore -> LinDoMascotState.Loading
@@ -7358,12 +7364,70 @@ private fun CommunityMessagesScreen(
     var subTab by remember { mutableStateOf(0) } // 0=通知, 1=私信
     var categoryFilter by remember { mutableStateOf(0) } // 0=全部, 1=回复我的, 2=收到的赞, 3=@我的, 4=系统通知
     var notifications by remember { mutableStateOf<List<UserNotificationItem>>(emptyList()) }
+    var notifOffset by remember { mutableIntStateOf(0) }
+    var hasMoreNotifications by remember { mutableStateOf(true) }
+    var isLoadingMoreNotifications by remember { mutableStateOf(false) }
+
     var privateMessages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
+    var pmPage by remember { mutableIntStateOf(0) }
+    var hasMorePm by remember { mutableStateOf(true) }
+    var isLoadingMorePm by remember { mutableStateOf(false) }
+
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
     val notifListState = rememberLazyListState()
     val pmListState = rememberLazyListState()
+
+    fun loadMoreNotifications() {
+        if (isLoading || isLoadingMoreNotifications || !hasMoreNotifications || !isAuthorized) return
+        isLoadingMoreNotifications = true
+        scope.launch {
+            try {
+                val nextBatch = LinuxDoRepository.fetchUserNotifications(offset = notifOffset)
+                val merged = (notifications + nextBatch).distinctBy { it.id }
+                val addedCount = merged.size - notifications.size
+                notifications = merged
+                notifOffset += nextBatch.size
+                hasMoreNotifications = nextBatch.size >= 30 && addedCount > 0
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                hasMoreNotifications = false
+            } finally {
+                isLoadingMoreNotifications = false
+            }
+        }
+    }
+
+    fun loadMorePrivateMessages() {
+        if (isLoading || isLoadingMorePm || !hasMorePm || !isAuthorized) return
+        isLoadingMorePm = true
+        scope.launch {
+            try {
+                val effectiveUsername = username.ifBlank {
+                    LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
+                }
+                if (effectiveUsername.isBlank()) {
+                    hasMorePm = false
+                    return@launch
+                }
+                val nextPage = pmPage + 1
+                val nextBatch = LinuxDoRepository.fetchPrivateMessages(effectiveUsername, sent = false, page = nextPage)
+                val merged = (privateMessages + nextBatch).distinctBy { it.id }
+                val addedCount = merged.size - privateMessages.size
+                privateMessages = merged
+                pmPage = nextPage
+                hasMorePm = nextBatch.size >= 20 && addedCount > 0
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                hasMorePm = false
+            } finally {
+                isLoadingMorePm = false
+            }
+        }
+    }
 
     LaunchedEffect(isAuthorized, subTab, username, reloadToken) {
         if (!isAuthorized) return@LaunchedEffect
@@ -7371,8 +7435,10 @@ private fun CommunityMessagesScreen(
         loadError = null
         try {
             if (subTab == 0) {
-                val loaded = LinuxDoRepository.fetchUserNotifications()
+                val loaded = LinuxDoRepository.fetchUserNotifications(offset = 0)
                 notifications = loaded
+                notifOffset = loaded.size
+                hasMoreNotifications = loaded.size >= 30
                 onUnreadCountSynced(loaded.count { !it.read })
                 notifListState.scrollToItem(0)
             } else if (subTab == 1) {
@@ -7380,7 +7446,10 @@ private fun CommunityMessagesScreen(
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
                 }
                 if (effectiveUsername.isNotBlank()) {
-                    privateMessages = LinuxDoRepository.fetchPrivateMessages(effectiveUsername, sent = false)
+                    val loadedPm = LinuxDoRepository.fetchPrivateMessages(effectiveUsername, sent = false, page = 0)
+                    privateMessages = loadedPm
+                    pmPage = 0
+                    hasMorePm = loadedPm.size >= 20
                     pmListState.scrollToItem(0)
                 }
             }
@@ -7529,10 +7598,10 @@ private fun CommunityMessagesScreen(
                         }
                         item(key = "pm_end_footer") {
                             LinearPulseLoadingFooter(
-                                isLoadingMore = false,
-                                hasMore = false,
+                                isLoadingMore = isLoadingMorePm,
+                                hasMore = hasMorePm,
                                 loadedCount = privateMessages.size,
-                                onLoadMore = {}
+                                onLoadMore = ::loadMorePrivateMessages
                             )
                         }
                     }
@@ -7569,14 +7638,25 @@ private fun CommunityMessagesScreen(
                             }
                         }
                     } else if (filteredNotifications.isEmpty() && !isLoading) {
-                        item(key = "notif_empty") {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 56.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                LinDoEmptyState(message = "暂无通知")
+                        if (hasMoreNotifications) {
+                            item(key = "notif_filter_load_more") {
+                                LinearPulseLoadingFooter(
+                                    isLoadingMore = isLoadingMoreNotifications,
+                                    hasMore = true,
+                                    loadedCount = notifications.size.coerceAtLeast(1),
+                                    onLoadMore = ::loadMoreNotifications
+                                )
+                            }
+                        } else {
+                            item(key = "notif_empty") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 56.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    LinDoEmptyState(message = "暂无通知")
+                                }
                             }
                         }
                     } else if (filteredNotifications.isNotEmpty()) {
@@ -7617,10 +7697,10 @@ private fun CommunityMessagesScreen(
                         }
                         item(key = "notifications_end_footer") {
                             LinearPulseLoadingFooter(
-                                isLoadingMore = false,
-                                hasMore = false,
-                                loadedCount = filteredNotifications.size,
-                                onLoadMore = {}
+                                isLoadingMore = isLoadingMoreNotifications,
+                                hasMore = hasMoreNotifications,
+                                loadedCount = notifications.size,
+                                onLoadMore = ::loadMoreNotifications
                             )
                         }
                     }
@@ -10957,16 +11037,43 @@ private fun UserNotificationsSheet(
     var markingAll by remember { mutableStateOf(false) }
     var markAllError by remember { mutableStateOf<String?>(null) }
     var notifications by remember { mutableStateOf<List<UserNotificationItem>>(emptyList()) }
+    var notifOffset by remember { mutableIntStateOf(0) }
+    var hasMore by remember { mutableStateOf(true) }
+    var isLoadingMore by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var filterTab by remember { mutableStateOf(0) } // 0=全部, 1=未读, 2=回复/@, 3=获赞
 
+    fun loadMore() {
+        if (isLoading || isLoadingMore || !hasMore) return
+        isLoadingMore = true
+        scope.launch {
+            try {
+                val nextBatch = LinuxDoRepository.fetchUserNotifications(offset = notifOffset)
+                val merged = (notifications + nextBatch).distinctBy { it.id }
+                val added = merged.size - notifications.size
+                notifications = merged
+                notifOffset += nextBatch.size
+                hasMore = nextBatch.size >= 30 && added > 0
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                hasMore = false
+            } finally {
+                isLoadingMore = false
+            }
+        }
+    }
+
     LaunchedEffect(reloadToken) {
         isLoading = true
         loadError = null
         try {
-            notifications = LinuxDoRepository.fetchUserNotifications()
+            val loaded = LinuxDoRepository.fetchUserNotifications(offset = 0)
+            notifications = loaded
+            notifOffset = loaded.size
+            hasMore = loaded.size >= 30
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -11037,12 +11144,23 @@ private fun UserNotificationsSheet(
                     contentPadding = PaddingValues(bottom = 16.dp)
                 ) {
                     if (filtered.isEmpty() && loadError == null) {
-                        item {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                LinDoEmptyState(message = if (filterTab == 1) "暂无未读通知" else "暂无通知")
+                        if (hasMore) {
+                            item(key = "notif_filter_more") {
+                                LinearPulseLoadingFooter(
+                                    isLoadingMore = isLoadingMore,
+                                    hasMore = true,
+                                    loadedCount = notifications.size.coerceAtLeast(1),
+                                    onLoadMore = ::loadMore
+                                )
+                            }
+                        } else {
+                            item {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    LinDoEmptyState(message = if (filterTab == 1) "暂无未读通知" else "暂无通知")
+                                }
                             }
                         }
                     } else {
@@ -11057,6 +11175,14 @@ private fun UserNotificationsSheet(
                                     actor != null -> { { onInspectUser(actor) } }
                                     else -> null
                                 }
+                            )
+                        }
+                        item(key = "notif_sheet_footer") {
+                            LinearPulseLoadingFooter(
+                                isLoadingMore = isLoadingMore,
+                                hasMore = hasMore,
+                                loadedCount = notifications.size,
+                                onLoadMore = ::loadMore
                             )
                         }
                     }
@@ -11098,21 +11224,47 @@ private fun UserActivitiesSheet(
     onSelectActivity: (Int, String, Int?) -> Unit
 ) {
     val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
     val filters = remember {
         listOf("全部动态" to null, "发布主帖" to "4", "我的回复" to "5", "送出的赞" to "1")
     }
     var selectedFilterIdx by remember { mutableIntStateOf(0) }
     val filterCode = filters.getOrNull(selectedFilterIdx)?.second
     var items by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
+    var actOffset by remember { mutableIntStateOf(0) }
+    var hasMore by remember { mutableStateOf(true) }
+    var isLoadingMore by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
+
+    fun loadMoreActivities() {
+        if (isLoading || isLoadingMore || !hasMore) return
+        isLoadingMore = true
+        scope.launch {
+            try {
+                val nextBatch = LinuxDoRepository.fetchUserActivities(username, filterCode, offset = actOffset)
+                items = items + nextBatch
+                actOffset += nextBatch.size
+                hasMore = nextBatch.size >= 20
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                hasMore = false
+            } finally {
+                isLoadingMore = false
+            }
+        }
+    }
 
     LaunchedEffect(username, filterCode, reloadToken) {
         isLoading = true
         loadError = null
         try {
-            items = LinuxDoRepository.fetchUserActivities(username, filterCode)
+            val loaded = LinuxDoRepository.fetchUserActivities(username, filterCode, offset = 0)
+            items = loaded
+            actOffset = loaded.size
+            hasMore = loaded.size >= 20
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -11181,6 +11333,14 @@ private fun UserActivitiesSheet(
                             onSelectActivity(item.topicId, item.title, item.postNumber)
                         }
                     }
+                    item(key = "activities_footer") {
+                        LinearPulseLoadingFooter(
+                            isLoadingMore = isLoadingMore,
+                            hasMore = hasMore,
+                            loadedCount = items.size,
+                            onLoadMore = ::loadMoreActivities
+                        )
+                    }
                 }
             }
         }
@@ -11198,16 +11358,45 @@ private fun UserBookmarksSheet(
     onSelectBookmark: (Int, String, Int?) -> Unit
 ) {
     val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
     var items by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
+    var bookmarkPage by remember { mutableIntStateOf(0) }
+    var hasMore by remember { mutableStateOf(true) }
+    var isLoadingMore by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
+
+    fun loadMoreBookmarks() {
+        if (isLoading || isLoadingMore || !hasMore) return
+        isLoadingMore = true
+        scope.launch {
+            try {
+                val nextPage = bookmarkPage + 1
+                val nextBatch = LinuxDoRepository.fetchUserBookmarks(username, page = nextPage)
+                val merged = (items + nextBatch).distinctBy { it.id }
+                val added = merged.size - items.size
+                items = merged
+                bookmarkPage = nextPage
+                hasMore = nextBatch.size >= 20 && added > 0
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                hasMore = false
+            } finally {
+                isLoadingMore = false
+            }
+        }
+    }
 
     LaunchedEffect(username, reloadToken) {
         isLoading = true
         loadError = null
         try {
-            items = LinuxDoRepository.fetchUserBookmarks(username)
+            val loaded = LinuxDoRepository.fetchUserBookmarks(username, page = 0)
+            items = loaded
+            bookmarkPage = 0
+            hasMore = loaded.size >= 20
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -11264,6 +11453,14 @@ private fun UserBookmarksSheet(
                             onSelectBookmark(item.topicId, item.title, item.postNumber)
                         }
                     }
+                    item(key = "bookmarks_footer") {
+                        LinearPulseLoadingFooter(
+                            isLoadingMore = isLoadingMore,
+                            hasMore = hasMore,
+                            loadedCount = items.size,
+                            onLoadMore = ::loadMoreBookmarks
+                        )
+                    }
                 }
             }
         }
@@ -11288,6 +11485,9 @@ internal fun UserPrivateMessagesSheet(
     var archiveError by remember { mutableStateOf<String?>(null) }
     var tab by remember(initialRecipient) { mutableIntStateOf(if (!initialRecipient.isNullOrBlank()) 2 else 0) }
     var messages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
+    var pmPage by remember { mutableIntStateOf(0) }
+    var hasMorePm by remember { mutableStateOf(true) }
+    var isLoadingMorePm by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
@@ -11299,6 +11499,31 @@ internal fun UserPrivateMessagesSheet(
     var isUploading by remember { mutableStateOf(false) }
     var statusMsg by remember { mutableStateOf<String?>(null) }
 
+    fun loadMorePm() {
+        if (tab == 2 || isLoading || isLoadingMorePm || !hasMorePm) return
+        isLoadingMorePm = true
+        scope.launch {
+            try {
+                val effectiveUsername = username.ifBlank {
+                    LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
+                }
+                val nextPage = pmPage + 1
+                val nextBatch = LinuxDoRepository.fetchPrivateMessages(effectiveUsername, sent = tab == 1, archived = tab == 3, page = nextPage)
+                val merged = (messages + nextBatch).distinctBy { it.id }
+                val added = merged.size - messages.size
+                messages = merged
+                pmPage = nextPage
+                hasMorePm = nextBatch.size >= 20 && added > 0
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                hasMorePm = false
+            } finally {
+                isLoadingMorePm = false
+            }
+        }
+    }
+
     LaunchedEffect(username, tab, reloadToken) {
         if (tab == 2) return@LaunchedEffect
         isLoading = true
@@ -11308,7 +11533,10 @@ internal fun UserPrivateMessagesSheet(
             val effectiveUsername = username.ifBlank {
                 LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
             }
-            messages = LinuxDoRepository.fetchPrivateMessages(effectiveUsername, sent = tab == 1, archived = tab == 3)
+            val loaded = LinuxDoRepository.fetchPrivateMessages(effectiveUsername, sent = tab == 1, archived = tab == 3, page = 0)
+            messages = loaded
+            pmPage = 0
+            hasMorePm = loaded.size >= 20
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -11425,6 +11653,14 @@ internal fun UserPrivateMessagesSheet(
                                 }
                                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                             }
+                            item(key = "pm_sheet_footer") {
+                                LinearPulseLoadingFooter(
+                                    isLoadingMore = isLoadingMorePm,
+                                    hasMore = hasMorePm,
+                                    loadedCount = messages.size,
+                                    onLoadMore = ::loadMorePm
+                                )
+                            }
                         }
                     }
                 }
@@ -11475,10 +11711,15 @@ private fun PublicUserCardSheet(
     onOpenUserBadges: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
     var cardProfile by remember(username) { mutableStateOf<UserFullProfileSummary?>(null) }
     var allActions by remember(username) { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var topicActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
     var replyActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
+    var hasMoreAll by remember(username) { mutableStateOf(true) }
+    var hasMoreTopics by remember(username) { mutableStateOf(true) }
+    var hasMoreReplies by remember(username) { mutableStateOf(true) }
+    var isLoadingMoreActions by remember(username) { mutableStateOf(false) }
     var profileBadges by remember(username) { mutableStateOf<List<GrantedBadge>?>(null) }
     var profileBadgeError by remember(username) { mutableStateOf(false) }
     var retryProfileBadges by remember(username) { mutableIntStateOf(0) }
@@ -11489,13 +11730,60 @@ private fun PublicUserCardSheet(
     var isLoading by remember(username) { mutableStateOf(true) }
     var showProfileStats by remember(username) { mutableStateOf(false) }
 
+    fun loadMoreCardActions() {
+        val currentHasMore = when (activeTab) {
+            1 -> hasMoreTopics
+            2 -> hasMoreReplies
+            0 -> hasMoreAll
+            else -> false
+        }
+        if (isLoading || tabLoading || isLoadingMoreActions || !currentHasMore) return
+        isLoadingMoreActions = true
+        val targetTab = activeTab
+        scope.launch {
+            try {
+                when (targetTab) {
+                    1 -> {
+                        val cur = topicActions.orEmpty()
+                        val next = LinuxDoRepository.fetchUserActivities(username, filter = "4", offset = cur.size)
+                        topicActions = cur + next
+                        hasMoreTopics = next.size >= 20
+                    }
+                    2 -> {
+                        val cur = replyActions.orEmpty()
+                        val next = LinuxDoRepository.fetchUserActivities(username, filter = "5", offset = cur.size)
+                        replyActions = cur + next
+                        hasMoreReplies = next.size >= 20
+                    }
+                    0 -> {
+                        val next = LinuxDoRepository.fetchUserActivities(username, filter = null, offset = allActions.size)
+                        allActions = allActions + next
+                        hasMoreAll = next.size >= 20
+                    }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                when (targetTab) {
+                    1 -> hasMoreTopics = false
+                    2 -> hasMoreReplies = false
+                    0 -> hasMoreAll = false
+                }
+            } finally {
+                isLoadingMoreActions = false
+            }
+        }
+    }
+
     LaunchedEffect(username, reloadToken) {
         isLoading = true
         loadError = null
         try {
             cardProfile = LinuxDoRepository.fetchPublicUserCard(username)
                 ?: throw do_.linux.lindo.core.network.ApiReadException(do_.linux.lindo.core.network.ApiFailureKind.Connection)
-            allActions = LinuxDoRepository.fetchUserActivities(username).take(25)
+            val loadedAll = LinuxDoRepository.fetchUserActivities(username, offset = 0)
+            allActions = loadedAll
+            hasMoreAll = loadedAll.size >= 20
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -11518,18 +11806,24 @@ private fun PublicUserCardSheet(
         } else if (activeTab == 1 && topicActions == null) {
             tabLoading = true
             try {
-                topicActions = LinuxDoRepository.fetchUserActivities(username, filter = "4").take(25)
+                val loadedTopics = LinuxDoRepository.fetchUserActivities(username, filter = "4", offset = 0)
+                topicActions = loadedTopics
+                hasMoreTopics = loadedTopics.size >= 20
             } catch (_: Exception) {
                 topicActions = allActions.filter { it.actionType == 4 }
+                hasMoreTopics = false
             } finally {
                 tabLoading = false
             }
         } else if (activeTab == 2 && replyActions == null) {
             tabLoading = true
             try {
-                replyActions = LinuxDoRepository.fetchUserActivities(username, filter = "5").take(25)
+                val loadedReplies = LinuxDoRepository.fetchUserActivities(username, filter = "5", offset = 0)
+                replyActions = loadedReplies
+                hasMoreReplies = loadedReplies.size >= 20
             } catch (_: Exception) {
                 replyActions = allActions.filter { it.actionType == 5 }
+                hasMoreReplies = false
             } finally {
                 tabLoading = false
             }
@@ -11868,6 +12162,19 @@ private fun PublicUserCardSheet(
                                 showActionLabel = activeTab == 0
                             ) { onSelectTopicId(act.topicId, act.title, act.postNumber) }
                         }
+                        item(key = "user_card_actions_footer") {
+                            val tabHasMore = when (activeTab) {
+                                1 -> hasMoreTopics
+                                2 -> hasMoreReplies
+                                else -> hasMoreAll
+                            }
+                            LinearPulseLoadingFooter(
+                                isLoadingMore = isLoadingMoreActions,
+                                hasMore = tabHasMore,
+                                loadedCount = activeList.size,
+                                onLoadMore = ::loadMoreCardActions
+                            )
+                        }
                     }
                 }
             }
@@ -11985,16 +12292,45 @@ private fun UserReadHistorySheet(
     onSelectTopic: (TopicSummary) -> Unit
 ) {
     val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
     var items by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
+    var historyPage by remember { mutableIntStateOf(0) }
+    var hasMore by remember { mutableStateOf(true) }
+    var isLoadingMore by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
+
+    fun loadMoreHistory() {
+        if (isLoading || isLoadingMore || !hasMore) return
+        isLoadingMore = true
+        scope.launch {
+            try {
+                val nextPage = historyPage + 1
+                val nextBatch = LinuxDoRepository.fetchReadHistoryTopics(page = nextPage)
+                val merged = (items + nextBatch).distinctBy { it.id }
+                val added = merged.size - items.size
+                items = merged
+                historyPage = nextPage
+                hasMore = nextBatch.size >= 20 && added > 0
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                hasMore = false
+            } finally {
+                isLoadingMore = false
+            }
+        }
+    }
 
     LaunchedEffect(Unit, reloadToken) {
         isLoading = true
         loadError = null
         try {
-            items = LinuxDoRepository.fetchReadHistoryTopics()
+            val loaded = LinuxDoRepository.fetchReadHistoryTopics(page = 0)
+            items = loaded
+            historyPage = 0
+            hasMore = loaded.size >= 20
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -12056,6 +12392,14 @@ private fun UserReadHistorySheet(
                             onClick = { onSelectTopic(topic) }
                         )
                         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                    }
+                    item(key = "history_footer") {
+                        LinearPulseLoadingFooter(
+                            isLoadingMore = isLoadingMore,
+                            hasMore = hasMore,
+                            loadedCount = items.size,
+                            onLoadMore = ::loadMoreHistory
+                        )
                     }
                 }
             }
@@ -12477,13 +12821,19 @@ private fun UserFollowNetworkSheet(
     var users by remember { mutableStateOf<List<FollowUserEntry>>(emptyList()) }
     var feedItems by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+    var isLoadingMoreFeed by remember { mutableStateOf(false) }
+    var hasMoreFeed by remember { mutableStateOf(false) }
+    var feedPage by remember { mutableIntStateOf(0) }
     var reloadToken by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(username, activeTab, reloadToken) {
         isLoading = true
         try {
             if (activeTab == 2) {
-                feedItems = LinuxDoRepository.fetchUserFollowFeed(username)
+                feedPage = 0
+                val firstPage = LinuxDoRepository.fetchUserFollowFeed(username, page = 0)
+                feedItems = firstPage
+                hasMoreFeed = firstPage.size >= 15
             } else {
                 users = LinuxDoRepository.fetchUserFollowList(
                     username = username,
@@ -12492,6 +12842,32 @@ private fun UserFollowNetworkSheet(
             }
         } finally {
             isLoading = false
+        }
+    }
+
+    fun loadMoreFeed() {
+        if (isLoadingMoreFeed || !hasMoreFeed || isLoading || activeTab != 2) return
+        val nextPage = feedPage + 1
+        isLoadingMoreFeed = true
+        scope.launch {
+            try {
+                val more = LinuxDoRepository.fetchUserFollowFeed(username, page = nextPage)
+                if (more.isEmpty()) {
+                    hasMoreFeed = false
+                } else {
+                    val existingKeys = feedItems.map { "${it.id}_${it.topicId}_${it.postNumber}" }.toHashSet()
+                    val deduped = more.filter { "${it.id}_${it.topicId}_${it.postNumber}" !in existingKeys }
+                    if (deduped.isEmpty()) {
+                        hasMoreFeed = false
+                    } else {
+                        feedItems = feedItems + deduped
+                        feedPage = nextPage
+                        hasMoreFeed = more.size >= 15
+                    }
+                }
+            } finally {
+                isLoadingMoreFeed = false
+            }
         }
     }
 
@@ -12545,6 +12921,14 @@ private fun UserFollowNetworkSheet(
                         ProfileActivityRow(item) {
                             onSelectActivity(item.topicId, item.title, item.postNumber)
                         }
+                    }
+                    item {
+                        LinearPulseLoadingFooter(
+                            isLoadingMore = isLoadingMoreFeed,
+                            hasMore = hasMoreFeed,
+                            loadedCount = feedItems.size,
+                            onLoadMore = { loadMoreFeed() }
+                        )
                     }
                 }
             }
@@ -12652,21 +13036,57 @@ private fun CommunityLeaderboardSheet(
     onInspectUser: (String) -> Unit
 ) {
     val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
     val periods = remember {
         listOf("今日榜" to "daily", "本周榜" to "weekly", "本月榜" to "monthly", "总榜" to "all")
     }
     var selectedPeriodIdx by remember { mutableIntStateOf(1) }
     var entries by remember { mutableStateOf<List<LeaderboardUserEntry>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+    var isLoadingMore by remember { mutableStateOf(false) }
+    var hasMore by remember { mutableStateOf(false) }
+    var currentPage by remember { mutableIntStateOf(0) }
     var reloadToken by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(selectedPeriodIdx, reloadToken) {
         isLoading = true
+        currentPage = 0
         try {
             val periodKey = periods.getOrNull(selectedPeriodIdx)?.second ?: "weekly"
-            entries = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey)
+            val firstPage = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey, page = 0)
+            entries = firstPage
+            hasMore = firstPage.size >= 40
         } finally {
             isLoading = false
+        }
+    }
+
+    fun loadMoreLeaderboard() {
+        if (isLoadingMore || !hasMore || isLoading) return
+        val nextPage = currentPage + 1
+        val periodKey = periods.getOrNull(selectedPeriodIdx)?.second ?: "weekly"
+        isLoadingMore = true
+        scope.launch {
+            try {
+                val more = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey, page = nextPage)
+                if (more.isEmpty()) {
+                    hasMore = false
+                } else {
+                    val existingUsers = entries.map { it.username }.toHashSet()
+                    val deduped = more.filter { it.username !in existingUsers }
+                    if (deduped.isEmpty()) {
+                        hasMore = false
+                    } else {
+                        val baseSize = entries.size
+                        val reRanked = deduped.mapIndexed { idx, item -> item.copy(rank = baseSize + idx + 1) }
+                        entries = entries + reRanked
+                        currentPage = nextPage
+                        hasMore = more.size >= 40
+                    }
+                }
+            } finally {
+                isLoadingMore = false
+            }
         }
     }
 
@@ -12777,6 +13197,14 @@ private fun CommunityLeaderboardSheet(
                             }
                         }
                         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                    }
+                    item {
+                        LinearPulseLoadingFooter(
+                            isLoadingMore = isLoadingMore,
+                            hasMore = hasMore,
+                            loadedCount = entries.size,
+                            onLoadMore = { loadMoreLeaderboard() }
+                        )
                     }
                 }
             }

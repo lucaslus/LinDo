@@ -1514,10 +1514,11 @@ object LinuxDoRepository {
     }
 
     /**
-     * 拉取当前登录用户的通知列表 (`/notifications.json?recent=true&limit=30`)
+     * 拉取当前登录用户的通知列表 (`/notifications.json?offset={offset}&limit=60&silent=true`)
      */
-    suspend fun fetchUserNotifications(): List<UserNotificationItem> = withContext(Dispatchers.IO) {
-        val res = executeHttp("https://linux.do/notifications.json?recent=true&limit=30", method = "GET", preserveFailure = true)
+    suspend fun fetchUserNotifications(offset: Int = 0): List<UserNotificationItem> = withContext(Dispatchers.IO) {
+        val cleanOffset = offset.coerceAtLeast(0)
+        val res = executeHttp("https://linux.do/notifications.json?offset=$cleanOffset&limit=60&silent=true", method = "GET", preserveFailure = true)
             ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
@@ -1611,12 +1612,13 @@ object LinuxDoRepository {
     }
 
     /**
-     * 拉取用户个人的历史发帖/回复/点赞动态 (`/user_actions.json?username={username}&Offset=0`)
+     * 拉取用户个人的历史发帖/回复/点赞动态 (`/user_actions.json?offset={offset}&username={username}`)
      */
-    suspend fun fetchUserActivities(username: String, filter: String? = null): List<UserActivityItem> = withContext(Dispatchers.IO) {
+    suspend fun fetchUserActivities(username: String, filter: String? = null, offset: Int = 0): List<UserActivityItem> = withContext(Dispatchers.IO) {
         if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
         val filterParam = if (!filter.isNullOrBlank()) "&filter=$filter" else ""
-        val url = "https://linux.do/user_actions.json?offset=0&username=$username$filterParam"
+        val cleanOffset = offset.coerceAtLeast(0)
+        val url = "https://linux.do/user_actions.json?offset=$cleanOffset&username=$username$filterParam"
         val res = executeHttp(url, method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
@@ -1654,11 +1656,12 @@ object LinuxDoRepository {
     }
 
     /**
-     * 拉取用户个人的书签列表 (`/u/{username}/bookmarks.json`)
+     * 拉取用户个人的书签列表 (`/u/{username}/bookmarks.json?page={page}`)
      */
-    suspend fun fetchUserBookmarks(username: String): List<UserActivityItem> = withContext(Dispatchers.IO) {
+    suspend fun fetchUserBookmarks(username: String, page: Int = 0): List<UserActivityItem> = withContext(Dispatchers.IO) {
         if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
-        val res = executeHttp("https://linux.do/u/$username/bookmarks.json", method = "GET", preserveFailure = true)
+        val pageParam = if (page > 0) "?page=$page" else ""
+        val res = executeHttp("https://linux.do/u/$username/bookmarks.json$pageParam", method = "GET", preserveFailure = true)
             ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
@@ -2386,14 +2389,15 @@ object LinuxDoRepository {
     /**
      * 拉取用户私信箱 (`/topics/private-messages/{username}.json` 或 `private-messages-sent`)
      */
-    suspend fun fetchPrivateMessages(username: String, sent: Boolean = false, archived: Boolean = false): List<TopicSummary> = withContext(Dispatchers.IO) {
+    suspend fun fetchPrivateMessages(username: String, sent: Boolean = false, archived: Boolean = false, page: Int = 0): List<TopicSummary> = withContext(Dispatchers.IO) {
         if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
         val mailbox = when {
             archived -> "private-messages-archive"
             sent -> "private-messages-sent"
             else -> "private-messages"
         }
-        val res = executeHttp("https://linux.do/topics/$mailbox/$username.json", method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
+        val pageParam = if (page > 0) "?page=$page" else ""
+        val res = executeHttp("https://linux.do/topics/$mailbox/$username.json$pageParam", method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
             (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
@@ -3930,10 +3934,12 @@ object LinuxDoRepository {
     /**
      * 获取关注用户的最新动态 (`GET /u/{username}/follow/feed.json`)
      */
-    suspend fun fetchUserFollowFeed(username: String): List<UserActivityItem> = withContext(Dispatchers.IO) {
+    suspend fun fetchUserFollowFeed(username: String, page: Int = 0): List<UserActivityItem> = withContext(Dispatchers.IO) {
         val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
         if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext emptyList()
-        val res = executeHttp("https://linux.do/u/${targetUsername.trim()}/follow/feed.json", method = "GET")
+        val cleanPage = page.coerceAtLeast(0)
+        val offsetParam = if (cleanPage > 0) "?offset=${cleanPage * 20}" else ""
+        val res = executeHttp("https://linux.do/u/${targetUsername.trim()}/follow/feed.json$offsetParam", method = "GET")
         if (res != null && res.second.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(res.second).jsonObject
@@ -3975,7 +3981,7 @@ object LinuxDoRepository {
             }
         }
         val fallbackTopics = runCatching {
-            fetchTopics(path = "/follow.json", categoryId = null, page = 0)
+            fetchTopics(path = "/follow.json", categoryId = null, page = cleanPage)
         }.getOrDefault(emptyList())
         fallbackTopics.map { t ->
             UserActivityItem(
@@ -3992,18 +3998,19 @@ object LinuxDoRepository {
     }
 
     /**
-     * 获取社区积分与活跃排行榜 (`GET /directory_items.json?period={period}&order=likes_received`)
+     * 获取社区积分与活跃排行榜 (`GET /directory_items.json?period={period}&order=likes_received&page={page}`)
      */
-    suspend fun fetchCommunityLeaderboard(period: String = "weekly"): List<LeaderboardUserEntry> = withContext(Dispatchers.IO) {
+    suspend fun fetchCommunityLeaderboard(period: String = "weekly", page: Int = 0): List<LeaderboardUserEntry> = withContext(Dispatchers.IO) {
+        val cleanPage = page.coerceAtLeast(0)
         val res = executeHttp(
-            url = "https://linux.do/directory_items.json?period=$period&order=likes_received",
+            url = "https://linux.do/directory_items.json?period=$period&order=likes_received&page=$cleanPage",
             method = "GET"
         ) ?: return@withContext emptyList()
         if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
         try {
             val root = json.parseToJsonElement(res.second).jsonObject
             val arr = root["directory_items"] as? JsonArray ?: return@withContext emptyList()
-            arr.take(40).mapIndexedNotNull { idx, elem ->
+            arr.mapIndexedNotNull { idx, elem ->
                 val obj = elem as? JsonObject ?: return@mapIndexedNotNull null
                 val u = obj["user"] as? JsonObject ?: return@mapIndexedNotNull null
                 val uname = u["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
@@ -4023,7 +4030,7 @@ object LinuxDoRepository {
                     ?: obj["gamification_score"]?.jsonPrimitive?.intOrNull
                     ?: (likesReceived * 5 + postCount * 2 + topicCount * 5)
                 LeaderboardUserEntry(
-                    rank = idx + 1,
+                    rank = cleanPage * 50 + idx + 1,
                     id = uid,
                     username = uname,
                     displayName = dname,
