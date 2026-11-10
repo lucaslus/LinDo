@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -73,7 +74,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -82,6 +83,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -3205,7 +3207,7 @@ internal fun CommunityHomeFeedPane(
                         contentAlignment = Alignment.CenterStart
                     ) {
                         Text(
-                            text = if (searchQuery.isEmpty()) "搜索话题、用户和你感兴趣的事" else searchQuery,
+                            text = if (searchQuery.isEmpty()) "搜索话题、标签或用户" else searchQuery,
                             style = TextStyle(
                                 fontSize = 13.2.sp,
                                 lineHeight = 16.sp,
@@ -6398,12 +6400,12 @@ internal fun CommunityPostFloor(
                         FlowRow(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 132.dp)
+                                .heightIn(min = 160.dp, max = 220.dp)
                                 .verticalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            activeGroup.items.take(60).forEach { emojiItem ->
+                            activeGroup.items.forEach { emojiItem ->
                                 val token = emojiItem.unicode ?: emojiItem.markdownCode
                                 Box(
                                     modifier = Modifier
@@ -9144,21 +9146,28 @@ internal enum class WorkbenchViewMode(val label: String) {
 
 private enum class WorkbenchSubPanel(val title: String) {
     NONE(""),
-    EMOJI("插入社区表情"),
-    MENTION("提及社区用户 (@)"),
-    LINK("插入帖子引用或链接"),
-    FORMAT("文本排版与标题格式"),
-    QUOTE_LIST("引用、列表与提示框"),
-    CODE_LANG("插入语法高亮代码块"),
-    DETAILS_SPOILER("折叠面板与剧透模糊"),
-    POLL("投票、表格与扩展语法"),
-    MORE_TOOLS("进阶语法工具"),
+    EMOJI("选择表情"),
+    MENTION("提及用户"),
+    LINK("插入链接"),
+    FORMAT("文本排版"),
+    QUOTE_LIST("列表与引用"),
+    CODE_LANG("插入代码块"),
+    DETAILS_SPOILER("折叠与剧透"),
+    POLL("发起投票"),
+    MORE_TOOLS("更多创作工具"),
     HEADINGS("标题层级"),
     CALLOUT("提示框"),
-    TABLE("构建表格")
+    TABLE("插入表格")
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+private data class WorkbenchDrawerToolItem(
+    val label: String,
+    val icon: ImageVector,
+    val accent: Boolean = false,
+    val onClick: () -> Unit
+)
+
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 internal fun LinDoMarkdownWorkbench(
     rawValue: String,
@@ -9213,8 +9222,7 @@ internal fun LinDoMarkdownWorkbench(
         val text = tfv.text
         val start = tfv.selection.min.coerceIn(0, text.length)
         val end = tfv.selection.max.coerceIn(0, text.length)
-        val selected = text.substring(start, end)
-        val inner = selected
+        val inner = text.substring(start, end)
         val replacement = "$prefix$inner$suffix"
         val newText = text.replaceRange(start, end, replacement)
         val newCursorStart = start + prefix.length
@@ -9273,7 +9281,8 @@ internal fun LinDoMarkdownWorkbench(
     var internalViewMode by remember { mutableStateOf(WorkbenchViewMode.SOURCE) }
     val activeViewMode = externalViewMode ?: internalViewMode
     var activeSubPanel by remember { mutableStateOf(WorkbenchSubPanel.NONE) }
-    var showToolShelf by remember { mutableStateOf(false) }
+    var subPanelFromMoreTools by remember { mutableStateOf(false) }
+    var inlineMentionActive by remember { mutableStateOf(false) }
     var restoreEditorKeyboard by remember { mutableStateOf(false) }
     val editorFocus = remember { FocusRequester() }
     var keyboardBeforePreview by remember { mutableStateOf(false) }
@@ -9286,23 +9295,20 @@ internal fun LinDoMarkdownWorkbench(
         keyboard?.show()
     }
 
-    fun closeTools(keepShelf: Boolean = false) {
-        if (!keepShelf) showToolShelf = false
+    fun closeTools() {
+        subPanelFromMoreTools = false
         activeSubPanel = WorkbenchSubPanel.NONE
         restoreEditorFocus()
     }
 
-    fun toggleSubPanel(target: WorkbenchSubPanel, hideKeyboardOnOpen: Boolean = false) {
-        if (activeSubPanel == target) {
-            closeTools(keepShelf = showToolShelf)
+    fun openDrawerPanel(target: WorkbenchSubPanel, fromMoreTools: Boolean = false) {
+        if (activeSubPanel == target && !fromMoreTools) {
+            closeTools()
             return
         }
-        if (hideKeyboardOnOpen) {
-            restoreEditorKeyboard = restoreEditorKeyboard || imeVisible
-            keyboard?.hide()
-        } else {
-            restoreEditorFocus()
-        }
+        restoreEditorKeyboard = restoreEditorKeyboard || imeVisible
+        keyboard?.hide()
+        subPanelFromMoreTools = fromMoreTools
         activeSubPanel = target
     }
 
@@ -9313,8 +9319,7 @@ internal fun LinDoMarkdownWorkbench(
         }
     }
 
-    val toolsOpen = activeViewMode == WorkbenchViewMode.SOURCE &&
-        (showToolShelf || activeSubPanel != WorkbenchSubPanel.NONE)
+    val toolsOpen = activeViewMode == WorkbenchViewMode.SOURCE && activeSubPanel != WorkbenchSubPanel.NONE
     val dismissTools by androidx.compose.runtime.rememberUpdatedState { closeTools() }
     if (toolsOpen) {
         DisposableEffect(Unit) {
@@ -9324,8 +9329,9 @@ internal fun LinDoMarkdownWorkbench(
     }
     LaunchedEffect(activeViewMode) {
         if (activeViewMode == WorkbenchViewMode.PREVIEW) {
-            showToolShelf = false
+            subPanelFromMoreTools = false
             activeSubPanel = WorkbenchSubPanel.NONE
+            inlineMentionActive = false
             restoreEditorKeyboard = false
         } else if (keyboardBeforePreview || restoreKeyboardFromPreview) {
             keyboardBeforePreview = false
@@ -9339,20 +9345,19 @@ internal fun LinDoMarkdownWorkbench(
     var uploadStatusText by remember { mutableStateOf<String?>(null) }
     var lastUploadedImage by remember { mutableStateOf<UploadedMediaResult?>(null) }
 
-    // 检测光标前是否正在输入 `@xxx` 自动唤起提及搜索
+    // 检测光标前是否正在输入 `@xxx` 自动唤起提及搜索或抽屉搜索
     var mentionSearchTerm by remember { mutableStateOf("") }
     var mentionCandidates by remember { mutableStateOf<List<MentionCandidate>>(emptyList()) }
     var isSearchingMentions by remember { mutableStateOf(false) }
 
     var mentionError by remember { mutableStateOf<String?>(null) }
     var mentionReloadToken by remember { mutableIntStateOf(0) }
-    LaunchedEffect(mentionSearchTerm, activeSubPanel, mentionReloadToken) {
-        if (activeSubPanel != WorkbenchSubPanel.MENTION) return@LaunchedEffect
+    LaunchedEffect(mentionSearchTerm, activeSubPanel, inlineMentionActive, mentionReloadToken) {
+        if (activeSubPanel != WorkbenchSubPanel.MENTION && !inlineMentionActive) return@LaunchedEffect
         isSearchingMentions = true
         mentionError = null
-        mentionCandidates = emptyList()
         try {
-            delay(220L)
+            delay(200L)
             mentionCandidates = LinuxDoRepository.searchMentionCandidates(mentionSearchTerm.ifBlank { "linux" })
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -9396,10 +9401,149 @@ internal fun LinDoMarkdownWorkbench(
         }
     }
 
+    val visibleHint = validationHint?.takeIf { tfv.text.isNotBlank() }
+
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = if (fillAvailableHeight) Arrangement.Top else Arrangement.spacedBy(6.dp)
     ) {
+        // 1. 顶部创作工具栏（位于输入框正上方，高频图标直达 + 右侧带图标「工具」抽屉触发器）
+        if (activeViewMode == WorkbenchViewMode.SOURCE) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 46.dp)
+                    .padding(horizontal = if (fillAvailableHeight) 8.dp else 0.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    WorkbenchDockIconButton(LinDoIcons.Image, "图片", isUploadingMedia, enabled && !isUploadingMedia) {
+                        pickMedia("image/*")
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Smile, "表情", activeSubPanel == WorkbenchSubPanel.EMOJI, enabled) {
+                        openDrawerPanel(WorkbenchSubPanel.EMOJI)
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.AtSign, "提及", activeSubPanel == WorkbenchSubPanel.MENTION, enabled) {
+                        openDrawerPanel(WorkbenchSubPanel.MENTION)
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Link, "链接", activeSubPanel == WorkbenchSubPanel.LINK, enabled) {
+                        openDrawerPanel(WorkbenchSubPanel.LINK)
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Bold, "粗体", false, enabled) {
+                        wrapSelection("**", "**")
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Code, "代码块", activeSubPanel == WorkbenchSubPanel.CODE_LANG, enabled) {
+                        openDrawerPanel(WorkbenchSubPanel.CODE_LANG)
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Undo, "撤销", enabled = enabled && undoStack.isNotEmpty()) {
+                        val previous = undoStack.removeAt(undoStack.lastIndex)
+                        redoStack.add(tfv)
+                        updateTfv(previous, false)
+                    }
+                    WorkbenchDockIconButton(LinDoIcons.Redo, "重做", enabled = enabled && redoStack.isNotEmpty()) {
+                        val next = redoStack.removeAt(redoStack.lastIndex)
+                        undoStack.add(tfv)
+                        updateTfv(next, false)
+                    }
+                }
+                if (visibleHint != null) {
+                    Text(
+                        visibleHint,
+                        fontSize = 11.5.sp,
+                        color = palette.inkSecondary,
+                        maxLines = 1,
+                        modifier = Modifier.widthIn(max = 105.dp).padding(end = 6.dp)
+                    )
+                }
+                val moreToolsActive = activeSubPanel != WorkbenchSubPanel.NONE &&
+                    activeSubPanel != WorkbenchSubPanel.EMOJI &&
+                    activeSubPanel != WorkbenchSubPanel.MENTION &&
+                    activeSubPanel != WorkbenchSubPanel.LINK
+                Row(
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .height(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            if (moreToolsActive) palette.brandGold.copy(alpha = 0.14f)
+                            else palette.subtleSurface
+                        )
+                        .border(
+                            width = 0.6.dp,
+                            color = if (moreToolsActive) palette.brandGold.copy(alpha = 0.6f) else palette.hairline,
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        .clickable(enabled = enabled) {
+                            openDrawerPanel(WorkbenchSubPanel.MORE_TOOLS)
+                        }
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.AppsGrid,
+                        contentDescription = "更多工具",
+                        modifier = Modifier.size(14.5.dp),
+                        tint = if (moreToolsActive) palette.brandGold else palette.inkPrimary
+                    )
+                    Text(
+                        text = "工具",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (moreToolsActive) palette.brandGold else palette.inkPrimary,
+                        maxLines = 1
+                    )
+                }
+                if (externalViewMode == null) {
+                    WorkbenchDockIconButton(LinDoIcons.Eye, "预览", enabled = enabled) {
+                        keyboardBeforePreview = imeVisible
+                        internalViewMode = WorkbenchViewMode.PREVIEW
+                        keyboard?.hide()
+                    }
+                }
+            }
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        } else if (externalViewMode == null) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = { internalViewMode = WorkbenchViewMode.SOURCE }) { Text("继续编辑") }
+            }
+        }
+
+        // 2. 行内输入 `@xxx` 时的轻量候选条（保持键盘不收起，一键点选）
+        AnimatedVisibility(visible = inlineMentionActive && activeSubPanel == WorkbenchSubPanel.NONE && mentionCandidates.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.subtleSurface.copy(alpha = 0.6f))
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.AtSign,
+                    contentDescription = null,
+                    modifier = Modifier.size(13.5.dp),
+                    tint = palette.brandGold
+                )
+                mentionCandidates.take(8).forEach { cand ->
+                    WorkbenchToolChip(
+                        label = "@${cand.handle}${if (cand.displayName.isNotBlank() && cand.displayName != cand.handle) " (${cand.displayName})" else ""}",
+                        onClick = {
+                            insertAtCursor("@${cand.handle} ", replaceMention = true)
+                            inlineMentionActive = false
+                        }
+                    )
+                }
+            }
+        }
+
         // 3. 若刚刚上传了图片/附件，提供紧凑状态条与 Discourse 原生图片缩放比例快捷按钮 (100% / 75% / 50%)
         val latestImg = lastUploadedImage
         if (latestImg != null || uploadStatusText != null) {
@@ -9456,7 +9600,7 @@ internal fun LinDoMarkdownWorkbench(
             }
         }
 
-        // 4. 核心创作画布 / 实时 AST 预览区（顶部对齐，占据下方全部可用空间）
+        // 4. 核心创作画布 / 实时 AST 预览区（顶部工具栏下方占据全部可用空间）
         val canvasModifier = if (fillAvailableHeight) {
             Modifier.fillMaxWidth().weight(1f)
         } else {
@@ -9472,8 +9616,10 @@ internal fun LinDoMarkdownWorkbench(
                         val cursor = newVal.selection.min.coerceIn(0, newVal.text.length)
                         val mention = Regex("(?:^|[\\s])@([\\p{L}\\p{N}_-]*)$").find(newVal.text.substring(0, cursor))
                         if (mention != null) {
-                            activeSubPanel = WorkbenchSubPanel.MENTION
+                            inlineMentionActive = true
                             mentionSearchTerm = mention.groupValues[1]
+                        } else {
+                            inlineMentionActive = false
                         }
                     },
                     placeholder = placeholder,
@@ -9491,144 +9637,47 @@ internal fun LinDoMarkdownWorkbench(
                 )
             }
         }
+    }
 
-        val visibleHint = validationHint?.takeIf { tfv.text.isNotBlank() }
-        if (activeViewMode == WorkbenchViewMode.SOURCE) {
-            if (showToolShelf) {
-                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    WorkbenchDockIconButton(LinDoIcons.Undo, "撤销", enabled = enabled && undoStack.isNotEmpty()) {
-                        val previous = undoStack.removeAt(undoStack.lastIndex)
-                        redoStack.add(tfv)
-                        updateTfv(previous, false)
-                    }
-                    WorkbenchDockIconButton(LinDoIcons.Redo, "重做", enabled = enabled && redoStack.isNotEmpty()) {
-                        val next = redoStack.removeAt(redoStack.lastIndex)
-                        undoStack.add(tfv)
-                        updateTfv(next, false)
-                    }
-                    listOf(
-                        "排版" to WorkbenchSubPanel.FORMAT,
-                        "列表与引用" to WorkbenchSubPanel.QUOTE_LIST,
-                        "代码块" to WorkbenchSubPanel.CODE_LANG,
-                        "折叠与剧透" to WorkbenchSubPanel.DETAILS_SPOILER,
-                        "投票与表格" to WorkbenchSubPanel.POLL
-                    ).forEach { (label, panel) ->
-                        TextButton(
-                            enabled = enabled,
-                            onClick = { toggleSubPanel(panel, hideKeyboardOnOpen = panel == WorkbenchSubPanel.POLL) },
-                            contentPadding = PaddingValues(horizontal = 9.dp)
-                        ) {
-                            Text(
-                                label, maxLines = 1,
-                                color = if (activeSubPanel == panel) palette.activeChipText else palette.inkPrimary
-                            )
-                        }
-                    }
-                    TextButton(
-                        enabled = enabled && !isUploadingMedia,
-                        onClick = { pickMedia("*/*") },
-                        contentPadding = PaddingValues(horizontal = 9.dp)
-                    ) { Text("附件", color = palette.inkPrimary) }
-                }
-            }
-            AnimatedVisibility(
-                visible = activeSubPanel != WorkbenchSubPanel.NONE,
-                enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandVertically(),
-                exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkVertically()
-            ) {
-                WorkbenchInteractiveSubPanel(
-                    subPanel = activeSubPanel,
-                    mentionSearchTerm = mentionSearchTerm,
-                    onMentionSearchTermChange = { mentionSearchTerm = it },
-                    mentionCandidates = mentionCandidates,
-                    isSearchingMentions = isSearchingMentions,
-                    mentionError = mentionError,
-                    onRetryMention = { mentionReloadToken++ },
-                    onToggleLinePrefix = { prefix ->
-                        toggleLinePrefix(prefix)
-                        closeTools()
-                    },
-                    onWrapSelection = { prefix, suffix ->
-                        wrapSelection(prefix, suffix)
-                        closeTools()
-                    },
-                    onInsertSnippet = { snippet ->
-                        insertAtCursor(snippet, replaceMention = activeSubPanel == WorkbenchSubPanel.MENTION && snippet.startsWith("@"))
-                        if (activeSubPanel != WorkbenchSubPanel.EMOJI) closeTools()
-                    },
-                    onOptimizePangu = {
-                        val changed = optimizePanguSpacing()
-                        closeTools()
-                        uploadStatusText = if (changed) "已优化中英混排空格" else "当前已符合空格规范"
-                    },
-                    onDismiss = { closeTools(keepShelf = showToolShelf) },
-                    modifier = Modifier.padding(
-                        horizontal = if (fillAvailableHeight) 10.dp else 0.dp,
-                        vertical = 4.dp
-                    )
-                )
-            }
-            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-            Row(
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    WorkbenchDockIconButton(LinDoIcons.Image, "图片", isUploadingMedia, enabled && !isUploadingMedia) {
-                        pickMedia("image/*")
-                    }
-                    WorkbenchDockIconButton(LinDoIcons.Smile, "表情", activeSubPanel == WorkbenchSubPanel.EMOJI, enabled) {
-                        showToolShelf = false
-                        toggleSubPanel(WorkbenchSubPanel.EMOJI, hideKeyboardOnOpen = true)
-                    }
-                    WorkbenchDockIconButton(LinDoIcons.AtSign, "提及", activeSubPanel == WorkbenchSubPanel.MENTION, enabled) {
-                        showToolShelf = false
-                        toggleSubPanel(WorkbenchSubPanel.MENTION)
-                    }
-                    WorkbenchDockIconButton(LinDoIcons.Link, "链接", activeSubPanel == WorkbenchSubPanel.LINK, enabled) {
-                        showToolShelf = false
-                        toggleSubPanel(WorkbenchSubPanel.LINK, hideKeyboardOnOpen = true)
-                    }
-                    TextButton(
-                        enabled = enabled,
-                        onClick = {
-                            if (showToolShelf) closeTools() else {
-                                closeTools()
-                                showToolShelf = true
-                            }
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp)
-                    ) {
-                        Text(
-                            "工具", maxLines = 1,
-                            color = if (showToolShelf) palette.activeChipText else palette.inkSecondary
-                        )
-                    }
-                }
-                if (visibleHint != null) {
-                    Text(
-                        visibleHint, fontSize = 11.5.sp, color = palette.inkSecondary,
-                        modifier = Modifier.widthIn(max = 105.dp).padding(end = 6.dp)
-                    )
-                }
-                if (externalViewMode == null) {
-                    WorkbenchDockIconButton(LinDoIcons.Eye, "预览", enabled = enabled) {
-                        keyboardBeforePreview = imeVisible
-                        internalViewMode = WorkbenchViewMode.PREVIEW
-                        keyboard?.hide()
-                    }
-                }
-            }
-        } else if (externalViewMode == null) {
-            TextButton(onClick = { internalViewMode = WorkbenchViewMode.SOURCE }) { Text("继续编辑") }
-        }
+    // 5. 统一模态底部抽屉（更多工具 / 插入链接 / 选择表情 / 提及用户 / 投票 / 表格 / 代码块 / 折叠块）
+    if (activeViewMode == WorkbenchViewMode.SOURCE && activeSubPanel != WorkbenchSubPanel.NONE) {
+        WorkbenchDrawerBottomSheet(
+            subPanel = activeSubPanel,
+            showBackToMoreTools = subPanelFromMoreTools && activeSubPanel != WorkbenchSubPanel.MORE_TOOLS,
+            onBackToMoreTools = { activeSubPanel = WorkbenchSubPanel.MORE_TOOLS },
+            onNavigateSubPanel = { target ->
+                subPanelFromMoreTools = true
+                activeSubPanel = target
+            },
+            mentionSearchTerm = mentionSearchTerm,
+            onMentionSearchTermChange = { mentionSearchTerm = it },
+            mentionCandidates = mentionCandidates,
+            isSearchingMentions = isSearchingMentions,
+            mentionError = mentionError,
+            onRetryMention = { mentionReloadToken++ },
+            onPickAttachment = {
+                closeTools()
+                pickMedia("*/*")
+            },
+            onToggleLinePrefix = { prefix ->
+                toggleLinePrefix(prefix)
+                closeTools()
+            },
+            onWrapSelection = { prefix, suffix ->
+                wrapSelection(prefix, suffix)
+                closeTools()
+            },
+            onInsertSnippet = { snippet ->
+                insertAtCursor(snippet, replaceMention = activeSubPanel == WorkbenchSubPanel.MENTION && snippet.startsWith("@"))
+                if (activeSubPanel != WorkbenchSubPanel.EMOJI) closeTools()
+            },
+            onOptimizePangu = {
+                val changed = optimizePanguSpacing()
+                closeTools()
+                uploadStatusText = if (changed) "已优化中英混排空格" else "当前已符合空格规范"
+            },
+            onDismiss = { closeTools() }
+        )
     }
 }
 
@@ -9648,7 +9697,7 @@ private fun WorkbenchDockIconButton(
     }
     Box(
         modifier = Modifier
-            .size(48.dp)
+            .size(42.dp)
             .clip(CircleShape)
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center
@@ -9656,7 +9705,7 @@ private fun WorkbenchDockIconButton(
         Icon(
             imageVector = icon,
             contentDescription = label,
-            modifier = Modifier.size(17.dp),
+            modifier = Modifier.size(17.5.dp),
             tint = fg
         )
     }
@@ -9758,50 +9807,77 @@ private fun WorkbenchAstLivePreviewBox(
  */
 private fun compileMarkdownAndBbcodeToPreviewHtml(raw: String): String = do_.linux.lindo.core.render.MarkdownPreview.render(raw)
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun WorkbenchInteractiveSubPanel(
+private fun WorkbenchDrawerBottomSheet(
     subPanel: WorkbenchSubPanel,
+    showBackToMoreTools: Boolean,
+    onBackToMoreTools: () -> Unit,
+    onNavigateSubPanel: (WorkbenchSubPanel) -> Unit,
     mentionSearchTerm: String,
     onMentionSearchTermChange: (String) -> Unit,
     mentionCandidates: List<MentionCandidate>,
     isSearchingMentions: Boolean,
     mentionError: String?,
     onRetryMention: () -> Unit,
+    onPickAttachment: () -> Unit,
     onToggleLinePrefix: (String) -> Unit,
     onWrapSelection: (String, String) -> Unit,
     onInsertSnippet: (String) -> Unit,
     onOptimizePangu: () -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
+    onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(palette.cardSurface)
-            .border(0.6.dp, palette.hairline, RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 9.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = palette.cardSurface,
+        contentColor = palette.inkPrimary
     ) {
-        // 统一抽屉标题栏 + 纯图标关闭按钮
-        if (subPanel != WorkbenchSubPanel.NONE) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .heightIn(min = 420.dp, max = 580.dp)
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // 统一底部抽屉顶栏（支持子面板返回「更多工具」+ 右侧圆角关闭按钮）
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                if (showBackToMoreTools) {
+                    Box(
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(palette.subtleSurface)
+                            .clickable(onClick = onBackToMoreTools),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.ArrowLeft,
+                            contentDescription = "返回更多工具",
+                            modifier = Modifier.size(16.dp),
+                            tint = palette.inkPrimary
+                        )
+                    }
+                }
                 Text(
                     text = subPanel.title,
-                    fontSize = 11.5.sp,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
-                    color = palette.inkSecondary,
+                    color = palette.inkPrimary,
                     modifier = Modifier.weight(1f)
                 )
                 Box(
                     modifier = Modifier
-                        .size(22.dp)
+                        .size(30.dp)
                         .clip(CircleShape)
                         .background(palette.subtleSurface)
                         .clickable(onClick = onDismiss),
@@ -9809,324 +9885,519 @@ private fun WorkbenchInteractiveSubPanel(
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Close,
-                        contentDescription = "收起面板",
-                        modifier = Modifier.size(12.dp),
-                        tint = palette.inkTertiary
+                        contentDescription = "关闭抽屉",
+                        modifier = Modifier.size(16.dp),
+                        tint = palette.inkSecondary
                     )
                 }
             }
-        }
 
-        when (subPanel) {
-            WorkbenchSubPanel.FORMAT, WorkbenchSubPanel.HEADINGS -> {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    WorkbenchToolChip(
-                        label = "B",
-                        onClick = { onWrapSelection("**", "**") }
-                    )
-                    WorkbenchToolChip(
-                        label = "I",
-                        onClick = { onWrapSelection("*", "*") }
-                    )
-                    WorkbenchToolChip(
-                        label = "S",
-                        onClick = { onWrapSelection("~~", "~~") }
-                    )
-                    WorkbenchToolChip(
-                        label = "<>",
-                        onClick = { onWrapSelection("`", "`") }
-                    )
-                    WorkbenchToolChip(
-                        label = "<kbd>",
-                        onClick = { onWrapSelection("<kbd>", "</kbd>") }
-                    )
-                    listOf(
-                        "H1" to "# ",
-                        "H2" to "## ",
-                        "H3" to "### ",
-                        "H4" to "#### "
-                    ).forEach { (label, prefix) ->
-                        WorkbenchToolChip(
-                            label = label,
-                            onClick = { onToggleLinePrefix(prefix) }
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+            when (subPanel) {
+                WorkbenchSubPanel.MORE_TOOLS -> {
+                    val formatTools = remember {
+                        listOf(
+                            WorkbenchDrawerToolItem("标题层级", LinDoIcons.Heading) { onNavigateSubPanel(WorkbenchSubPanel.HEADINGS) },
+                            WorkbenchDrawerToolItem("粗体", LinDoIcons.Bold) { onWrapSelection("**", "**") },
+                            WorkbenchDrawerToolItem("斜体", LinDoIcons.Italic) { onWrapSelection("*", "*") },
+                            WorkbenchDrawerToolItem("行内代码", LinDoIcons.Code) { onWrapSelection("`", "`") },
+                            WorkbenchDrawerToolItem("删除线", LinDoIcons.Edit) { onWrapSelection("~~", "~~") },
+                            WorkbenchDrawerToolItem("按键标签", LinDoIcons.CpuChip) { onWrapSelection("<kbd>", "</kbd>") },
+                            WorkbenchDrawerToolItem("分割线", LinDoIcons.Sliders) { onInsertSnippet("\n\n---\n\n") },
+                            WorkbenchDrawerToolItem("中英空格", LinDoIcons.Sparkles, accent = true) { onOptimizePangu() }
                         )
                     }
-                    WorkbenchToolChip(
-                        label = "―",
-                        onClick = { onInsertSnippet("\n\n---\n\n") }
-                    )
-                    WorkbenchToolChip(
-                        label = "中英空格",
-                        highlighted = true,
-                        onClick = onOptimizePangu
-                    )
-                }
-            }
-
-            WorkbenchSubPanel.QUOTE_LIST, WorkbenchSubPanel.CALLOUT -> {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    WorkbenchToolChip(
-                        label = "❝ 引用",
-                        onClick = { onToggleLinePrefix("> ") }
-                    )
-                    WorkbenchToolChip(
-                        label = "• 列表",
-                        onClick = { onToggleLinePrefix("- ") }
-                    )
-                    WorkbenchToolChip(
-                        label = "1. 编号",
-                        onClick = { onToggleLinePrefix("1. ") }
-                    )
-                    WorkbenchToolChip(
-                        label = "☑ 待办",
-                        onClick = { onToggleLinePrefix("- [ ] ") }
-                    )
-                    listOf(
-                        "NOTE" to "NOTE",
-                        "TIP" to "TIP",
-                        "IMPORTANT" to "IMPORTANT",
-                        "WARNING" to "WARNING",
-                        "CAUTION" to "CAUTION"
-                    ).forEach { (label, kind) ->
-                        WorkbenchToolChip(
-                            label = label,
-                            onClick = {
-                                onWrapSelection("\n> [!$kind]\n> ", "\n")
+                    val blockTools = remember {
+                        listOf(
+                            WorkbenchDrawerToolItem("引用块", LinDoIcons.Quote) { onToggleLinePrefix("> ") },
+                            WorkbenchDrawerToolItem("无序列表", LinDoIcons.ListBullet) { onToggleLinePrefix("- ") },
+                            WorkbenchDrawerToolItem("任务待办", LinDoIcons.CheckSquare) { onToggleLinePrefix("- [ ] ") },
+                            WorkbenchDrawerToolItem("代码块", LinDoIcons.Terminal) { onNavigateSubPanel(WorkbenchSubPanel.CODE_LANG) },
+                            WorkbenchDrawerToolItem("提示框", LinDoIcons.InfoCircle) { onNavigateSubPanel(WorkbenchSubPanel.CALLOUT) },
+                            WorkbenchDrawerToolItem("折叠面板", LinDoIcons.Layers) { onNavigateSubPanel(WorkbenchSubPanel.DETAILS_SPOILER) },
+                            WorkbenchDrawerToolItem("剧透模糊", LinDoIcons.EyeOff) { onWrapSelection("[spoiler]", "[/spoiler]") },
+                            WorkbenchDrawerToolItem("上传附件", LinDoIcons.Paperclip) { onPickAttachment() }
+                        )
+                    }
+                    val advancedTools = remember {
+                        listOf(
+                            WorkbenchDrawerToolItem("插入表格", LinDoIcons.Table) { onNavigateSubPanel(WorkbenchSubPanel.TABLE) },
+                            WorkbenchDrawerToolItem("发起投票", LinDoIcons.BarChartPoll) { onNavigateSubPanel(WorkbenchSubPanel.POLL) },
+                            WorkbenchDrawerToolItem("自动目录", LinDoIcons.BookOpen) { onInsertSnippet("\n[toc]\n") },
+                            WorkbenchDrawerToolItem("数学公式", LinDoIcons.Bolt) { onWrapSelection("\n$$\n", "\n$$\n") },
+                            WorkbenchDrawerToolItem("流程图", LinDoIcons.KanbanBoard) {
+                                onInsertSnippet("\n```mermaid\ngraph TD\n    A[开始] --> B[处理]\n    B --> C[完成]\n```\n")
+                            },
+                            WorkbenchDrawerToolItem("动态时间", LinDoIcons.Calendar) {
+                                val today = java.time.LocalDate.now().toString()
+                                onInsertSnippet("[date=$today timezone=\"Asia/Shanghai\"] ")
                             }
                         )
                     }
-                }
-            }
 
-            WorkbenchSubPanel.CODE_LANG -> {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    WorkbenchToolChip("通用代码块", onClick = { onWrapSelection("\n```\n", "\n```\n") })
-                    listOf("kotlin", "python", "bash", "javascript", "typescript", "json", "yaml",
-                        "rust", "go", "sql", "html", "dockerfile", "mermaid").forEach { language ->
-                        WorkbenchToolChip(language, onClick = { onWrapSelection("\n```$language\n", "\n```\n") })
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        WorkbenchToolGridSection("文本与排版", formatTools)
+                        WorkbenchToolGridSection("列表、引用与块级语法", blockTools)
+                        WorkbenchToolGridSection("互动组件与扩展语法", advancedTools)
                     }
                 }
-            }
 
-            WorkbenchSubPanel.LINK -> {
-                var linkTab by remember { mutableIntStateOf(0) } // 0 = 搜索引用帖子, 1 = 自定义链接
-                var topicSearchQuery by remember { mutableStateOf("") }
-                var topicCandidates by remember { mutableStateOf<List<CommunitySearchResult>>(emptyList()) }
-                var isSearchingTopics by remember { mutableStateOf(false) }
-                var linkTitle by remember { mutableStateOf("") }
-                var linkUrl by remember { mutableStateOf("") }
-
-                LaunchedEffect(topicSearchQuery, linkTab) {
-                    if (linkTab != 0) return@LaunchedEffect
-                    val q = topicSearchQuery.trim()
-                    if (q.isBlank()) {
-                        isSearchingTopics = true
-                        val latest = runCatching { LinuxDoRepository.fetchTopics("latest.json") }.getOrDefault(emptyList())
-                        topicCandidates = latest.take(8).map { item ->
-                            CommunitySearchResult(
-                                topicId = item.id,
-                                postNumber = 1,
-                                title = item.title,
-                                blurb = item.excerpt.orEmpty(),
-                                username = item.originalPoster.username,
-                                avatarTemplate = item.originalPoster.avatarTemplate,
-                                createdAtText = item.lastPostedAt,
-                                categoryName = item.categoryName,
-                                categoryColorHex = item.categoryColorHex,
-                                likeCount = item.likeCount,
-                                postsCount = item.postsCount
-                            )
+                WorkbenchSubPanel.FORMAT, WorkbenchSubPanel.HEADINGS -> {
+                    Column(
+                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("选择标题级别", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                        listOf(
+                            Triple("一级标题 H1", "# ", "用于文章主章节大标题"),
+                            Triple("二级标题 H2", "## ", "用于核心小节标题"),
+                            Triple("三级标题 H3", "### ", "用于子模块细分标题"),
+                            Triple("四级标题 H4", "#### ", "用于紧凑段落小标题")
+                        ).forEach { (title, prefix, desc) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.subtleSurface)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .clickable { onToggleLinePrefix(prefix) }
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(LinDoIcons.Heading, contentDescription = null, modifier = Modifier.size(18.dp), tint = palette.brandGold)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(title, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+                                    Text(desc, fontSize = 12.sp, color = palette.inkSecondary)
+                                }
+                                Text(prefix.trim(), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = palette.inkTertiary)
+                            }
                         }
-                        isSearchingTopics = false
-                    } else {
-                        delay(350L)
-                        isSearchingTopics = true
-                        topicCandidates = runCatching { LinuxDoRepository.searchCommunity(q) }
-                            .getOrDefault(emptyList())
-                            .distinctBy { it.topicId }
-                            .take(10)
-                        isSearchingTopics = false
                     }
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    WorkbenchToolChip(
-                        label = "🔍 搜索社区帖子链接",
-                        active = linkTab == 0,
-                        onClick = { linkTab = 0 }
-                    )
-                    WorkbenchToolChip(
-                        label = "🔗 自定义 URL 链接",
-                        active = linkTab == 1,
-                        onClick = { linkTab = 1 }
-                    )
+                WorkbenchSubPanel.QUOTE_LIST, WorkbenchSubPanel.CALLOUT -> {
+                    Column(
+                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("插入高亮提示框", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                        listOf(
+                            Triple("NOTE · 补充说明", "NOTE", "背景信息、实现细节或常规注解"),
+                            Triple("TIP · 实用技巧", "TIP", "最佳实践、效率技巧或推荐方案"),
+                            Triple("IMPORTANT · 重要提示", "IMPORTANT", "核心前置要求或关键步骤说明"),
+                            Triple("WARNING · 注意事项", "WARNING", "潜在兼容性问题或风险提醒"),
+                            Triple("CAUTION · 高危警告", "CAUTION", "不可逆操作或安全警示")
+                        ).forEach { (title, kind, desc) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.subtleSurface)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .clickable { onWrapSelection("\n> [!$kind]\n> ", "\n") }
+                                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(LinDoIcons.InfoCircle, contentDescription = null, modifier = Modifier.size(18.dp), tint = palette.brandGold)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+                                    Text(desc, fontSize = 12.sp, color = palette.inkSecondary)
+                                }
+                            }
+                        }
+                    }
                 }
 
-                if (linkTab == 0) {
-                    WorkbenchCompactInputBox(
-                        value = topicSearchQuery,
-                        onValueChange = { topicSearchQuery = it },
-                        placeholder = "搜索帖子标题或关键词，点击即可插入帖子链接...",
-                        leadingIcon = LinDoIcons.Search,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (isSearchingTopics) {
-                        LinDoLoadingIndicator(label = "搜索帖子中")
-                    } else if (topicCandidates.isEmpty()) {
-                        Text(
-                            text = "未找到匹配的社区帖子",
-                            fontSize = 11.5.sp,
-                            color = palette.inkTertiary,
-                            modifier = Modifier.padding(vertical = 4.dp)
+                WorkbenchSubPanel.CODE_LANG -> {
+                    val languages = remember {
+                        listOf(
+                            "通用代码块" to "",
+                            "Kotlin" to "kotlin",
+                            "Python" to "python",
+                            "Bash / Shell" to "bash",
+                            "JavaScript" to "javascript",
+                            "TypeScript" to "typescript",
+                            "JSON" to "json",
+                            "YAML" to "yaml",
+                            "Rust" to "rust",
+                            "Go" to "go",
+                            "SQL" to "sql",
+                            "HTML / XML" to "html",
+                            "Dockerfile" to "dockerfile",
+                            "Mermaid" to "mermaid",
+                            "Java" to "java",
+                            "C / C++" to "cpp"
                         )
-                    } else {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 148.dp)
-                                .verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            topicCandidates.forEach { item ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(palette.subtleSurface.copy(alpha = 0.55f))
-                                        .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
-                                        .clickable {
-                                            val suffix = if (item.postNumber > 1) "/${item.postNumber}" else ""
-                                            val url = "https://linux.do/t/topic/${item.topicId}$suffix"
-                                            onInsertSnippet("[${item.title}]($url) ")
-                                        }
-                                        .padding(horizontal = 10.dp, vertical = 7.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = LinDoIcons.Link,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(13.5.dp),
-                                        tint = palette.brandGold
-                                    )
-                                    Spacer(modifier = Modifier.width(7.dp))
-                                    Text(
-                                        text = item.title,
-                                        fontSize = 12.2.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = palette.inkPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    if (item.categoryName.isNotBlank()) {
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = item.categoryName,
-                                            fontSize = 10.5.sp,
-                                            color = palette.inkTertiary,
-                                            maxLines = 1
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("选择代码高亮语言", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                        languages.chunked(2).forEach { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                rowItems.forEach { (label, lang) ->
+                                    Row(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(46.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(palette.subtleSurface)
+                                            .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                onWrapSelection("\n```$lang\n", "\n```\n")
+                                            }
+                                            .padding(horizontal = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (lang.isEmpty()) LinDoIcons.Code else LinDoIcons.Terminal,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = if (lang.isEmpty()) palette.brandGold else palette.inkSecondary
                                         )
+                                        Text(
+                                            text = label,
+                                            fontSize = 13.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = palette.inkPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                if (rowItems.size == 1) {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                WorkbenchSubPanel.LINK -> {
+                    var linkTab by remember { mutableIntStateOf(0) } // 0 = 引用帖子, 1 = 外部链接
+                    var topicSearchQuery by remember { mutableStateOf("") }
+                    var topicCandidates by remember { mutableStateOf<List<CommunitySearchResult>>(emptyList()) }
+                    var isSearchingTopics by remember { mutableStateOf(false) }
+                    var linkTitle by remember { mutableStateOf("") }
+                    var linkUrl by remember { mutableStateOf("") }
+
+                    LaunchedEffect(topicSearchQuery, linkTab) {
+                        if (linkTab != 0) return@LaunchedEffect
+                        val q = topicSearchQuery.trim()
+                        if (q.isBlank()) {
+                            isSearchingTopics = true
+                            val latest = runCatching { LinuxDoRepository.fetchTopics("latest.json") }.getOrDefault(emptyList())
+                            topicCandidates = latest.take(15).map { item ->
+                                CommunitySearchResult(
+                                    topicId = item.id,
+                                    postNumber = 1,
+                                    title = item.title,
+                                    blurb = item.excerpt.orEmpty(),
+                                    username = item.originalPoster.username,
+                                    avatarTemplate = item.originalPoster.avatarTemplate,
+                                    createdAtText = item.lastPostedAt,
+                                    categoryName = item.categoryName,
+                                    categoryColorHex = item.categoryColorHex,
+                                    likeCount = item.likeCount,
+                                    postsCount = item.postsCount
+                                )
+                            }
+                            isSearchingTopics = false
+                        } else {
+                            delay(320L)
+                            isSearchingTopics = true
+                            topicCandidates = runCatching { LinuxDoRepository.searchCommunity(q) }
+                                .getOrDefault(emptyList())
+                                .distinctBy { it.topicId }
+                                .take(15)
+                            isSearchingTopics = false
+                        }
+                    }
+
+                    LinDoSectionTabs(
+                        labels = listOf("引用帖子", "外部链接"),
+                        selectedIndex = linkTab,
+                        fontSize = 14.sp
+                    ) { linkTab = it }
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+                    if (linkTab == 0) {
+                        WorkbenchCompactInputBox(
+                            value = topicSearchQuery,
+                            onValueChange = { topicSearchQuery = it },
+                            placeholder = "搜索帖子",
+                            leadingIcon = LinDoIcons.Search,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (isSearchingTopics) {
+                            Box(
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoLoadingIndicator(label = "搜索中")
+                            }
+                        } else if (topicCandidates.isEmpty()) {
+                            Box(
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                LinDoEmptyState(message = "未找到匹配的帖子")
+                            }
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                contentPadding = PaddingValues(vertical = 2.dp)
+                            ) {
+                                itemsIndexed(topicCandidates, key = { idx, it -> "${it.topicId}_${it.postNumber}_$idx" }) { index, item ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                val suffix = if (item.postNumber > 1) "/${item.postNumber}" else ""
+                                                val url = "https://linux.do/t/topic/${item.topicId}$suffix"
+                                                onInsertSnippet("[${item.title}]($url) ")
+                                            }
+                                            .padding(vertical = 11.dp, horizontal = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = LinDoIcons.Link,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = palette.brandGold
+                                        )
+                                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                            Text(
+                                                text = item.title,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = palette.inkPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                if (item.categoryName.isNotBlank()) {
+                                                    Text(
+                                                        text = item.categoryName,
+                                                        fontSize = 11.5.sp,
+                                                        color = palette.inkSecondary,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                                if (item.username.isNotBlank()) {
+                                                    Text(
+                                                        text = "@${item.username}",
+                                                        fontSize = 11.5.sp,
+                                                        color = palette.inkTertiary,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        Icon(
+                                            imageVector = LinDoIcons.Plus,
+                                            contentDescription = "插入",
+                                            modifier = Modifier.size(15.dp),
+                                            tint = palette.inkTertiary
+                                        )
+                                    }
+                                    if (index < topicCandidates.lastIndex) {
+                                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                                     }
                                 }
                             }
                         }
-                    }
-                } else {
-                    var linkError by remember { mutableStateOf(false) }
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        WorkbenchCompactInputBox(linkUrl, { linkUrl = it; linkError = false }, "https:// 链接地址")
-                        WorkbenchCompactInputBox(linkTitle, { linkTitle = it }, "显示文字（可选）")
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (linkError) Text(
-                                "请输入有效的网页地址", color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.weight(1f), fontSize = 12.sp
-                            ) else Spacer(Modifier.weight(1f))
-                            TextButton(onClick = {
-                                val address = linkUrl.trim()
-                                val uri = runCatching { java.net.URI(address) }.getOrNull()
-                                val valid = uri != null && !uri.host.isNullOrBlank() &&
-                                    (uri.scheme.equals("https", true) || uri.scheme.equals("http", true))
-                                if (!valid) {
-                                    linkError = true
-                                } else {
-                                    val title = linkTitle.trim().ifBlank { address }
-                                        .replace("[", "\\[").replace("]", "\\]")
-                                    onInsertSnippet("[$title](<$address>) ")
+                    } else {
+                        var linkError by remember { mutableStateOf(false) }
+                        Column(
+                            modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("链接地址", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                                WorkbenchCompactInputBox(
+                                    value = linkUrl,
+                                    onValueChange = { linkUrl = it; linkError = false },
+                                    placeholder = "https://...",
+                                    leadingIcon = LinDoIcons.Globe,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("显示文本", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                                WorkbenchCompactInputBox(
+                                    value = linkTitle,
+                                    onValueChange = { linkTitle = it },
+                                    placeholder = "选填，默认显示链接地址",
+                                    leadingIcon = LinDoIcons.Edit,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            if (linkError) {
+                                Text(
+                                    "请输入以 http:// 或 https:// 开头的有效地址",
+                                    color = MaterialTheme.colorScheme.error,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            WorkbenchPrimarySheetButton(
+                                label = "插入链接",
+                                icon = LinDoIcons.Link,
+                                onClick = {
+                                    val address = linkUrl.trim()
+                                    val normalized = if (address.isNotBlank() && !address.startsWith("http://", true) && !address.startsWith("https://", true)) {
+                                        "https://$address"
+                                    } else address
+                                    val uri = runCatching { java.net.URI(normalized) }.getOrNull()
+                                    val valid = uri != null && !uri.host.isNullOrBlank() &&
+                                        (uri.scheme.equals("https", true) || uri.scheme.equals("http", true))
+                                    if (!valid) {
+                                        linkError = true
+                                    } else {
+                                        val title = linkTitle.trim().ifBlank { normalized }
+                                            .replace("[", "\\[").replace("]", "\\]")
+                                        onInsertSnippet("[$title](<$normalized>) ")
+                                    }
                                 }
-                            }) { Text("插入链接") }
+                            )
                         }
                     }
                 }
-            }
 
-            WorkbenchSubPanel.DETAILS_SPOILER -> {
-                var summaryTitle by remember { mutableStateOf("") }
-                WorkbenchCompactInputBox(summaryTitle, { summaryTitle = it }, "折叠块标题（可选）")
-                Row {
-                    TextButton(onClick = {
-                        val title = summaryTitle.trim().ifBlank { "详情" }.replace('"', '”')
-                        onWrapSelection("\n[details=\"$title\"]\n", "\n[/details]\n")
-                    }) { Text("插入折叠块") }
-                    TextButton(onClick = { onWrapSelection("[spoiler]", "[/spoiler]") }) { Text("添加剧透") }
-                }
-            }
-
-            WorkbenchSubPanel.POLL, WorkbenchSubPanel.TABLE, WorkbenchSubPanel.MORE_TOOLS -> {
-                var advTab by remember(subPanel) {
-                    mutableIntStateOf(
-                        when (subPanel) {
-                            WorkbenchSubPanel.TABLE -> 1
-                            WorkbenchSubPanel.MORE_TOOLS -> 2
-                            else -> 0
+                WorkbenchSubPanel.DETAILS_SPOILER -> {
+                    var summaryTitle by remember { mutableStateOf("") }
+                    Column(
+                        modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("折叠块标题", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                            WorkbenchCompactInputBox(
+                                value = summaryTitle,
+                                onValueChange = { summaryTitle = it },
+                                placeholder = "点击展开查看详情（选填）",
+                                leadingIcon = LinDoIcons.Layers,
+                                modifier = Modifier.fillMaxWidth()
+                            )
                         }
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    WorkbenchToolChip(
-                        label = "📊 发起投票",
-                        active = advTab == 0,
-                        onClick = { advTab = 0 }
-                    )
-                    WorkbenchToolChip(
-                        label = "📅 插入表格",
-                        active = advTab == 1,
-                        onClick = { advTab = 1 }
-                    )
-                    WorkbenchToolChip(
-                        label = "🧩 进阶语法",
-                        active = advTab == 2,
-                        onClick = { advTab = 2 }
-                    )
+                        WorkbenchPrimarySheetButton(
+                            label = "插入折叠面板 [details]",
+                            icon = LinDoIcons.Layers,
+                            onClick = {
+                                val title = summaryTitle.trim().ifBlank { "详情" }.replace('"', '”')
+                                onWrapSelection("\n[details=\"$title\"]\n", "\n[/details]\n")
+                            }
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(palette.subtleSurface)
+                                .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                .clickable { onWrapSelection("[spoiler]", "[/spoiler]") }
+                                .padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(LinDoIcons.EyeOff, contentDescription = null, modifier = Modifier.size(16.dp), tint = palette.inkPrimary)
+                            Spacer(Modifier.width(8.dp))
+                            Text("插入剧透模糊 [spoiler]", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+                        }
+                    }
                 }
 
-                when (advTab) {
-                    0 -> {
-                        var pollTitle by remember { mutableStateOf("") }
-                        var pollType by remember { mutableStateOf("regular") }
-                        var pollResults by remember { mutableStateOf("always") }
-                        var pollPublic by remember { mutableStateOf(true) }
-                        var pollOptionsText by remember { mutableStateOf("选项一\n选项二\n选项三") }
+                WorkbenchSubPanel.TABLE -> {
+                    var cols by remember { mutableStateOf(3) }
+                    var rows by remember { mutableStateOf(3) }
+                    Column(
+                        modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Text("选择表格尺寸", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.subtleSurface)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .clickable { cols = if (cols >= 6) 2 else cols + 1 }
+                                    .padding(14.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("列数", fontSize = 12.sp, color = palette.inkSecondary)
+                                Spacer(Modifier.height(4.dp))
+                                Text("$cols 列", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = palette.brandGold)
+                                Text("点击切换 (2~6)", fontSize = 11.sp, color = palette.inkTertiary)
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.subtleSurface)
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .clickable { rows = if (rows >= 8) 2 else rows + 1 }
+                                    .padding(14.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("行数", fontSize = 12.sp, color = palette.inkSecondary)
+                                Spacer(Modifier.height(4.dp))
+                                Text("$rows 行", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = palette.brandGold)
+                                Text("点击切换 (2~8)", fontSize = 11.sp, color = palette.inkTertiary)
+                            }
+                        }
+                        WorkbenchPrimarySheetButton(
+                            label = "插入 ${rows}×${cols} 表格",
+                            icon = LinDoIcons.Table,
+                            onClick = {
+                                val header = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "列 $it" }
+                                val divider = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "---" }
+                                val body = (1..rows).joinToString("\n") { r ->
+                                    (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { c -> "内容 ${r}-${c}" }
+                                }
+                                onInsertSnippet("\n$header\n$divider\n$body\n")
+                            }
+                        )
+                    }
+                }
 
+                WorkbenchSubPanel.POLL -> {
+                    var pollTitle by remember { mutableStateOf("") }
+                    var pollType by remember { mutableStateOf("regular") }
+                    var pollResults by remember { mutableStateOf("always") }
+                    var pollPublic by remember { mutableStateOf(true) }
+                    var pollOptionsText by remember { mutableStateOf("选项一\n选项二\n选项三") }
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -10140,7 +10411,7 @@ private fun WorkbenchInteractiveSubPanel(
                                     onClick = { pollType = k }
                                 )
                             }
-                            listOf("always" to "始终可见结果", "on_vote" to "投票后可见", "on_close" to "结束后可见").forEach { (k, lbl) ->
+                            listOf("always" to "始终可见", "on_vote" to "投票后可见", "on_close" to "结束后可见").forEach { (k, lbl) ->
                                 WorkbenchToolChip(
                                     label = lbl,
                                     active = pollResults == k,
@@ -10148,7 +10419,7 @@ private fun WorkbenchInteractiveSubPanel(
                                 )
                             }
                             WorkbenchToolChip(
-                                label = if (pollPublic) "✓ 公开投票人" else "匿名投票",
+                                label = if (pollPublic) "公开投票人" else "匿名投票",
                                 active = pollPublic,
                                 onClick = { pollPublic = !pollPublic }
                             )
@@ -10156,254 +10427,354 @@ private fun WorkbenchInteractiveSubPanel(
                         WorkbenchCompactInputBox(
                             value = pollTitle,
                             onValueChange = { pollTitle = it },
-                            placeholder = "投票标题（可选，如：你最常用的开发环境是？）",
+                            placeholder = "投票标题（选填）",
+                            leadingIcon = LinDoIcons.BarChartPoll,
                             modifier = Modifier.fillMaxWidth()
                         )
-                        OutlinedTextField(
+                        val optionsStyle = TextStyle(
+                            fontSize = 13.5.sp,
+                            lineHeight = 20.sp,
+                            color = palette.inkPrimary
+                        )
+                        BasicTextField(
                             value = pollOptionsText,
                             onValueChange = { pollOptionsText = it },
-                            placeholder = { Text("每行一个投票选项") },
+                            textStyle = optionsStyle,
+                            cursorBrush = SolidColor(palette.brandGold),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(72.dp),
-                            shape = RoundedCornerShape(8.dp)
+                                .heightIn(min = 110.dp, max = 160.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(palette.subtleSurface.copy(alpha = 0.7f))
+                                .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            decorationBox = { inner ->
+                                LinDoInputDecoration(
+                                    empty = pollOptionsText.isEmpty(),
+                                    placeholder = "每行一个投票选项",
+                                    textStyle = optionsStyle,
+                                    placeholderColor = palette.inkSecondary,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    alignment = Alignment.TopStart,
+                                    placeholderLines = 3,
+                                    innerTextField = inner
+                                )
+                            }
                         )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            WorkbenchToolChip(
-                                label = "插入投票组件",
-                                highlighted = true,
-                                onClick = {
-                                    val opts = pollOptionsText.lines().map { it.trim() }.filter { it.isNotBlank() }
-                                    val extraAttrs = buildString {
-                                        append(" type=$pollType results=$pollResults")
-                                        if (pollType == "multiple") append(" min=1 max=${opts.size.coerceAtLeast(2)}")
-                                        if (pollPublic) append(" public=true")
-                                        append(" chartType=bar")
-                                    }
-                                    val headerLine = if (pollTitle.isNotBlank()) "# ${pollTitle.trim()}\n" else ""
-                                    val optLines = opts.joinToString("\n") { "- $it" }
-                                    onInsertSnippet("\n[poll$extraAttrs]\n$headerLine$optLines\n[/poll]\n")
+                        WorkbenchPrimarySheetButton(
+                            label = "插入投票",
+                            icon = LinDoIcons.BarChartPoll,
+                            onClick = {
+                                val opts = pollOptionsText.lines().map { it.trim() }.filter { it.isNotBlank() }
+                                val extraAttrs = buildString {
+                                    append(" type=$pollType results=$pollResults")
+                                    if (pollType == "multiple") append(" min=1 max=${opts.size.coerceAtLeast(2)}")
+                                    if (pollPublic) append(" public=true")
+                                    append(" chartType=bar")
                                 }
-                            )
+                                val headerLine = if (pollTitle.isNotBlank()) "# ${pollTitle.trim()}\n" else ""
+                                val optLines = opts.joinToString("\n") { "- $it" }
+                                onInsertSnippet("\n[poll$extraAttrs]\n$headerLine$optLines\n[/poll]\n")
+                            }
+                        )
+                    }
+                }
+
+                WorkbenchSubPanel.EMOJI -> {
+                    var emojiQuery by remember { mutableStateOf("") }
+                    var selectedGroupIdx by remember { mutableIntStateOf(0) }
+                    var syncTrigger by remember { mutableIntStateOf(0) }
+
+                    LaunchedEffect(Unit) {
+                        if (LinuxDoRepository.syncSiteEmojis()) {
+                            syncTrigger++
                         }
                     }
 
-                    1 -> {
-                        var cols by remember { mutableStateOf(3) }
-                        var rows by remember { mutableStateOf(3) }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            WorkbenchToolChip(
-                                label = "列数: $cols (+)",
-                                onClick = { cols = if (cols >= 6) 2 else cols + 1 }
-                            )
-                            WorkbenchToolChip(
-                                label = "行数: $rows (+)",
-                                onClick = { rows = if (rows >= 8) 2 else rows + 1 }
-                            )
-                            WorkbenchToolChip(
-                                label = "生成 ${rows}×${cols} 表格",
-                                highlighted = true,
-                                onClick = {
-                                    val header = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "列 $it" }
-                                    val divider = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "---" }
-                                    val body = (1..rows).joinToString("\n") { r ->
-                                        (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { c -> "内容 ${r}-${c}" }
-                                    }
-                                    onInsertSnippet("\n$header\n$divider\n$body\n")
-                                }
-                            )
-                            WorkbenchToolChip(
-                                label = "+ 追加一行",
-                                onClick = {
-                                    val rowStr = (1..cols).joinToString(" | ", prefix = "| ", postfix = " |") { "新单元格" }
-                                    onInsertSnippet("\n$rowStr")
-                                }
-                            )
+                    val groups = remember(syncTrigger) { LinuxDoEmojiCatalog.getPickerGroups() }
+                    val activeItems = remember(emojiQuery, selectedGroupIdx, groups) {
+                        if (emojiQuery.isNotBlank()) {
+                            LinuxDoEmojiCatalog.searchEmojis(emojiQuery)
+                        } else {
+                            groups.getOrNull(selectedGroupIdx.coerceIn(0, (groups.size - 1).coerceAtLeast(0)))?.items.orEmpty()
                         }
                     }
 
-                    2 -> {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            WorkbenchToolChip(
-                                label = "📑 自动目录 [toc]",
-                                onClick = { onInsertSnippet("\n[toc]\n") }
-                            )
-                            WorkbenchToolChip(
-                                label = "∑ 数学公式 $$",
-                                onClick = { onWrapSelection("\n$$\n", "\n$$\n") }
-                            )
-                            WorkbenchToolChip(
-                                label = "📈 Mermaid 流程图",
-                                onClick = {
-                                    onInsertSnippet("\n```mermaid\ngraph TD\n    A[开始] --> B[处理]\n    B --> C[完成]\n```\n")
-                                }
-                            )
-                            WorkbenchToolChip(
-                                label = "🕒 动态时间 [date]",
-                                onClick = {
-                                    val today = java.time.LocalDate.now().toString()
-                                    onInsertSnippet("[date=$today timezone=\"Asia/Shanghai\"] ")
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-
-            WorkbenchSubPanel.EMOJI -> {
-                var emojiQuery by remember { mutableStateOf("") }
-                var selectedGroupIdx by remember { mutableIntStateOf(0) }
-                var syncTrigger by remember { mutableIntStateOf(0) }
-
-                LaunchedEffect(Unit) {
-                    if (LinuxDoRepository.syncSiteEmojis()) {
-                        syncTrigger++
-                    }
-                }
-
-                val groups = remember(syncTrigger) { LinuxDoEmojiCatalog.getPickerGroups() }
-                val activeItems = remember(emojiQuery, selectedGroupIdx, groups) {
-                    if (emojiQuery.isNotBlank()) {
-                        LinuxDoEmojiCatalog.searchEmojis(emojiQuery)
-                    } else {
-                        groups.getOrNull(selectedGroupIdx.coerceIn(0, (groups.size - 1).coerceAtLeast(0)))?.items.orEmpty()
-                    }
-                }
-
-                WorkbenchCompactInputBox(
-                    value = emojiQuery,
-                    onValueChange = { emojiQuery = it },
-                    placeholder = "搜索官方表情或热梗（如：滑稽、融化、哭、火箭...）",
-                    leadingIcon = LinDoIcons.Search,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                if (emojiQuery.isBlank() && groups.isNotEmpty()) {
-                    LinDoSectionTabs(groups.map { it.labelZh }, selectedGroupIdx.coerceIn(groups.indices), fontSize = 12.sp) {
-                        selectedGroupIdx = it
-                    }
-                }
-
-                if (activeItems.isEmpty()) {
-                    Text(
-                        text = "未找到匹配的表情",
-                        fontSize = 11.5.sp,
-                        color = palette.inkTertiary,
-                        modifier = Modifier.padding(vertical = 6.dp)
+                    WorkbenchCompactInputBox(
+                        value = emojiQuery,
+                        onValueChange = { emojiQuery = it },
+                        placeholder = "搜索表情",
+                        leadingIcon = LinDoIcons.Search,
+                        modifier = Modifier.fillMaxWidth()
                     )
-                } else {
-                    val rows = remember(activeItems) { activeItems.chunked(7) }
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 188.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        rows.forEach { rowItems ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                rowItems.forEach { item ->
-                                    val isCustomImage = !item.customUrl.isNullOrBlank() || item.unicode == null
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(36.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(palette.subtleSurface.copy(alpha = 0.45f))
-                                            .clickable {
-                                                val snippet = if (isCustomImage) {
-                                                    ":${item.shortcode}: "
+
+                    if (emojiQuery.isBlank() && groups.isNotEmpty()) {
+                        LinDoSectionTabs(groups.map { it.labelZh }, selectedGroupIdx.coerceIn(groups.indices), fontSize = 13.sp) {
+                            selectedGroupIdx = it
+                        }
+                    }
+
+                    if (activeItems.isEmpty()) {
+                        Box(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(message = "未找到匹配的表情")
+                        }
+                    } else {
+                        val rows = remember(activeItems) { activeItems.chunked(7) }
+                        LazyColumn(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            contentPadding = PaddingValues(vertical = 4.dp)
+                        ) {
+                            itemsIndexed(rows, key = { idx, _ -> idx }) { _, rowItems ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    rowItems.forEach { item ->
+                                        val isCustomImage = !item.customUrl.isNullOrBlank() || item.unicode == null
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(42.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(palette.subtleSurface.copy(alpha = 0.55f))
+                                                .clickable {
+                                                    val snippet = if (isCustomImage) {
+                                                        ":${item.shortcode}: "
+                                                    } else {
+                                                        "${item.unicode} "
+                                                    }
+                                                    onInsertSnippet(snippet)
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (isCustomImage) {
+                                                var imgFailed by remember(item.resolvedImageUrl) { mutableStateOf(false) }
+                                                if (imgFailed) {
+                                                    Text(
+                                                        text = item.unicode ?: item.shortcode.take(3),
+                                                        fontSize = 11.sp,
+                                                        color = palette.inkSecondary,
+                                                        maxLines = 1
+                                                    )
                                                 } else {
-                                                    "${item.unicode} "
+                                                    AsyncImage(
+                                                        model = item.resolvedImageUrl,
+                                                        contentDescription = item.shortcode,
+                                                        contentScale = ContentScale.Fit,
+                                                        onError = { imgFailed = true },
+                                                        modifier = Modifier.size(25.dp)
+                                                    )
                                                 }
-                                                onInsertSnippet(snippet)
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (isCustomImage) {
-                                            var imgFailed by remember(item.resolvedImageUrl) { mutableStateOf(false) }
-                                            if (imgFailed) {
-                                                Text(
-                                                    text = item.unicode ?: item.shortcode.take(3),
-                                                    fontSize = 11.sp,
-                                                    color = palette.inkSecondary,
-                                                    maxLines = 1
-                                                )
                                             } else {
-                                                AsyncImage(
-                                                    model = item.resolvedImageUrl,
-                                                    contentDescription = item.shortcode,
-                                                    contentScale = ContentScale.Fit,
-                                                    onError = { imgFailed = true },
-                                                    modifier = Modifier.size(23.dp)
+                                                Text(
+                                                    text = item.unicode.orEmpty(),
+                                                    fontSize = 20.sp
                                                 )
                                             }
-                                        } else {
-                                            Text(
-                                                text = item.unicode.orEmpty(),
-                                                fontSize = 19.sp
-                                            )
                                         }
                                     }
-                                }
-                                repeat((7 - rowItems.size).coerceAtLeast(0)) {
-                                    Spacer(modifier = Modifier.weight(1f).height(36.dp))
+                                    repeat((7 - rowItems.size).coerceAtLeast(0)) {
+                                        Spacer(modifier = Modifier.weight(1f).height(42.dp))
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            WorkbenchSubPanel.MENTION -> {
-                WorkbenchCompactInputBox(
-                    value = mentionSearchTerm,
-                    onValueChange = onMentionSearchTermChange,
-                    placeholder = "输入用户名或昵称关键字搜索...",
-                    leadingIcon = LinDoIcons.AtSign,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                if (mentionError != null) {
-                    LinDoLoadFailure(mentionError, onRetryMention)
-                } else if (isSearchingMentions) {
-                    LinDoLoadingIndicator(label = "搜索用户中")
-                } else if (mentionCandidates.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        mentionCandidates.forEach { cand ->
-                            WorkbenchToolChip(
-                                label = "@${cand.handle}${if (cand.displayName.isNotBlank() && cand.displayName != cand.handle) " (${cand.displayName})" else ""}",
-                                onClick = { onInsertSnippet("@${cand.handle} ") }
-                            )
+                WorkbenchSubPanel.MENTION -> {
+                    WorkbenchCompactInputBox(
+                        value = mentionSearchTerm,
+                        onValueChange = onMentionSearchTermChange,
+                        placeholder = "搜索用户",
+                        leadingIcon = LinDoIcons.AtSign,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (mentionError != null) {
+                        LinDoLoadFailure(mentionError, onRetryMention)
+                    } else if (isSearchingMentions) {
+                        Box(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoLoadingIndicator(label = "搜索中")
+                        }
+                    } else if (mentionCandidates.isEmpty()) {
+                        Box(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(message = "未找到匹配的用户")
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentPadding = PaddingValues(vertical = 4.dp)
+                        ) {
+                            itemsIndexed(mentionCandidates, key = { _, c -> c.handle }) { idx, cand ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onInsertSnippet("@${cand.handle} ") }
+                                        .padding(vertical = 10.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .clip(CircleShape)
+                                            .background(palette.subtleSurface),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = LinDoIcons.AtSign,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = palette.brandGold
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = cand.displayName.ifBlank { cand.handle },
+                                            fontSize = 14.5.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = palette.inkPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "@${cand.handle}",
+                                            fontSize = 12.sp,
+                                            color = palette.inkSecondary,
+                                            maxLines = 1
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = LinDoIcons.Plus,
+                                        contentDescription = "提及",
+                                        modifier = Modifier.size(15.dp),
+                                        tint = palette.inkTertiary
+                                    )
+                                }
+                                if (idx < mentionCandidates.lastIndex) {
+                                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                                }
+                            }
                         }
                     }
                 }
-            }
 
-            WorkbenchSubPanel.NONE -> {}
+                WorkbenchSubPanel.NONE -> {}
+            }
         }
+    }
+}
+
+@Composable
+private fun WorkbenchToolGridSection(
+    sectionTitle: String,
+    items: List<WorkbenchDrawerToolItem>
+) {
+    val palette = LocalPalette.current
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = sectionTitle,
+            fontSize = 12.2.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = palette.inkSecondary
+        )
+        items.chunked(4).forEach { rowItems ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowItems.forEach { item ->
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(66.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (item.accent) palette.brandGold.copy(alpha = 0.12f)
+                                else palette.subtleSurface
+                            )
+                            .border(
+                                width = 0.5.dp,
+                                color = if (item.accent) palette.brandGold.copy(alpha = 0.5f) else palette.hairline,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable(onClick = item.onClick)
+                            .padding(horizontal = 6.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = item.icon,
+                            contentDescription = item.label,
+                            modifier = Modifier.size(19.dp),
+                            tint = if (item.accent) palette.brandGold else palette.inkPrimary
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = item.label,
+                            fontSize = 11.8.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (item.accent) palette.brandGold else palette.inkPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                repeat((4 - rowItems.size).coerceAtLeast(0)) {
+                    Spacer(modifier = Modifier.weight(1f).height(66.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkbenchPrimarySheetButton(
+    label: String,
+    icon: ImageVector,
+    onClick: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val bg = if (palette.isDark) palette.publishBtnBg else Color(0xFF111827)
+    val fg = if (palette.isDark) palette.publishBtnContent else Color.White
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(46.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = fg
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = label,
+            fontSize = 14.5.sp,
+            fontWeight = FontWeight.Bold,
+            color = fg
+        )
     }
 }
 
@@ -11575,10 +11946,10 @@ internal fun UserPrivateMessagesSheet(
 
             if (tab == 2) {
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
-                ComposerTextInput(recipient, { recipient = it }, "接收人用户名，多人用逗号分隔", enabled = !isSending)
-                ComposerTextInput(pmTitle, { pmTitle = it }, "输入私信主题", enabled = !isSending, title = true)
+                ComposerTextInput(recipient, { recipient = it }, "接收人（多人用逗号分隔）", enabled = !isSending)
+                ComposerTextInput(pmTitle, { pmTitle = it }, "私信主题", enabled = !isSending, title = true)
                 LinDoMarkdownWorkbench(
-                    pmBody, { pmBody = it }, "写下私信内容", enabled = !isSending,
+                    pmBody, { pmBody = it }, "写下私信", enabled = !isSending,
                     onUploadingChange = { isUploading = it }, defaultEditorHeight = 180.dp
                 )
                 if (statusMsg != null) {
@@ -12591,7 +12962,7 @@ private fun EditProfileModalSheet(
                     label = "显示昵称",
                     value = displayName,
                     onValueChange = { displayName = it },
-                    placeholder = "设置对外展示的昵称",
+                    placeholder = "输入昵称",
                     enabled = !isSaving
                 )
                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -12685,7 +13056,7 @@ private fun EditProfileModalSheet(
                     label = "所在地",
                     value = location,
                     onValueChange = { location = it },
-                    placeholder = "填写城市或地区（选填）",
+                    placeholder = "城市或地区",
                     enabled = !isSaving
                 )
                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -12695,7 +13066,7 @@ private fun EditProfileModalSheet(
                     label = "个人网站",
                     value = website,
                     onValueChange = { website = it },
-                    placeholder = "https://example.com（选填）",
+                    placeholder = "个人网站地址",
                     enabled = !isSaving
                 )
                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -12730,7 +13101,7 @@ private fun EditProfileModalSheet(
                         decorationBox = { inner ->
                             LinDoInputDecoration(
                                 empty = bioRaw.isEmpty(),
-                                placeholder = "介绍一下你自己（支持 Markdown）",
+                                placeholder = "个人简介",
                                 textStyle = bioStyle,
                                 placeholderColor = palette.inkTertiary,
                                 modifier = Modifier.fillMaxWidth(),

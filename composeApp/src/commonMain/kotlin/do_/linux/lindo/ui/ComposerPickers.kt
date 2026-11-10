@@ -9,21 +9,22 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -76,13 +77,14 @@ internal fun ComposerCategoryPicker(
                     modifier = Modifier
                         .size(30.dp)
                         .clip(CircleShape)
+                        .background(palette.subtleSurface)
                         .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Close,
                         contentDescription = "关闭版块抽屉",
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(16.dp),
                         tint = palette.inkSecondary
                     )
                 }
@@ -98,7 +100,7 @@ internal fun ComposerCategoryPicker(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 460.dp)
+                        .heightIn(min = 340.dp, max = 520.dp)
                         .verticalScroll(rememberScrollState())
                         .selectableGroup()
                 ) {
@@ -249,6 +251,67 @@ internal fun ComposerTagPicker(
             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
             Spacer(modifier = Modifier.height(10.dp))
 
+            val searchStyle = TextStyle(
+                fontSize = 13.5.sp,
+                lineHeight = 18.sp,
+                color = palette.inkPrimary,
+                fontWeight = FontWeight.Medium
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(palette.subtleSurface.copy(alpha = 0.7f))
+                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.Search,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                    tint = palette.inkTertiary
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                BasicTextField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    enabled = enabled,
+                    singleLine = true,
+                    textStyle = searchStyle,
+                    cursorBrush = SolidColor(palette.brandGold),
+                    modifier = Modifier.weight(1f),
+                    decorationBox = { inner ->
+                        LinDoInputDecoration(
+                            empty = query.isEmpty(),
+                            placeholder = "搜索标签",
+                            textStyle = searchStyle,
+                            placeholderColor = palette.inkSecondary,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            innerTextField = inner
+                        )
+                    }
+                )
+                if (query.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .clickable { onQueryChange("") },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.Close,
+                            contentDescription = "清空",
+                            modifier = Modifier.size(12.dp),
+                            tint = palette.inkTertiary
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+
             // 已选标签置顶一览
             if (selected.isNotEmpty()) {
                 Text(
@@ -298,7 +361,7 @@ internal fun ComposerTagPicker(
             when {
                 loading -> {
                     Box(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         LinDoLoadingIndicator(label = "加载可用标签", compactInline = true)
@@ -311,7 +374,7 @@ internal fun ComposerTagPicker(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 180.dp, max = if (imeVisible) 260.dp else 400.dp)
+                            .heightIn(min = 300.dp, max = if (imeVisible) 320.dp else 480.dp)
                             .verticalScroll(rememberScrollState())
                     ) {
                         val message = choices.forbiddenMessage
