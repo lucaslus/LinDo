@@ -3874,15 +3874,14 @@ private fun CommunityTopicItem(
                     modifier = Modifier.weight(1f)
                 )
 
-                if (isTopicUnread) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
-                    )
-                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .graphicsLayer { alpha = if (isTopicUnread) 1f else 0f }
+                        .clip(CircleShape)
+                        .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
+                )
 
                 Spacer(modifier = Modifier.width(8.dp))
 
@@ -4043,16 +4042,15 @@ private fun CommunityTopicItem(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                if (isTopicUnread) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .padding(top = 7.dp)
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
-                    )
-                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .padding(top = 7.dp)
+                        .size(6.dp)
+                        .graphicsLayer { alpha = if (isTopicUnread) 1f else 0f }
+                        .clip(CircleShape)
+                        .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
+                )
             }
 
             val initialCachedExcerpt = remember(topic.id, topic.excerpt) {
@@ -5895,19 +5893,19 @@ internal fun CommunityPostFloor(
                         if (targetReplyFloorNum != null) {
                             Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(12.dp))
                                     .clickable(enabled = !loadingReplyTarget) {
                                         onJumpToFloorNumber(targetReplyFloorNum)
                                     }
                                     .padding(horizontal = 3.dp, vertical = 1.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.5.dp)
                             ) {
                                 Icon(
                                     imageVector = LinDoIcons.Reply,
                                     contentDescription = "跳转被回复楼层",
                                     modifier = Modifier
-                                        .size(13.dp)
+                                        .size(14.5.dp)
                                         .graphicsLayer { scaleX = -1f },
                                     tint = palette.inkSecondary
                                 )
@@ -5915,32 +5913,10 @@ internal fun CommunityPostFloor(
                                     username = targetReplyUsername ?: "L",
                                     avatarTemplate = targetReplyAvatarTemplate,
                                     animatedAvatar = targetReplyAnimatedAvatar,
-                                    size = 16.dp,
+                                    size = 20.dp,
                                     enableAnimations = enableAnimations
                                 )
                             }
-                        }
-
-                        val unreadDotAlpha by animateFloatAsState(
-                            targetValue = if (isUnread) 1f else 0f,
-                            animationSpec = tween(durationMillis = if (enableAnimations) 200 else 0),
-                            label = "unreadFloorDotAlpha"
-                        )
-                        if (unreadDotAlpha > 0.01f) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.5.dp)
-                                    .graphicsLayer {
-                                        alpha = unreadDotAlpha
-                                        val scale = 0.65f + 0.35f * unreadDotAlpha
-                                        scaleX = scale
-                                        scaleY = scale
-                                    }
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
-                                    )
-                            )
                         }
 
                         val floorMeta = listOfNotNull(
@@ -5957,6 +5933,26 @@ internal fun CommunityPostFloor(
                                 softWrap = false
                             )
                         }
+
+                        val unreadDotAlpha by animateFloatAsState(
+                            targetValue = if (isUnread) 1f else 0f,
+                            animationSpec = tween(durationMillis = if (enableAnimations) 200 else 0),
+                            label = "unreadFloorDotAlpha"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(6.5.dp)
+                                .graphicsLayer {
+                                    alpha = unreadDotAlpha
+                                    val scale = 0.65f + 0.35f * unreadDotAlpha
+                                    scaleX = scale
+                                    scaleY = scale
+                                }
+                                .clip(CircleShape)
+                                .background(
+                                    if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
+                                )
+                        )
                     }
                 }
 
