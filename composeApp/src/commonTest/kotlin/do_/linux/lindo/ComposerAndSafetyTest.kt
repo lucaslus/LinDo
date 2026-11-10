@@ -41,9 +41,9 @@ class ComposerAndSafetyTest {
         withTransport({ url, method, _ ->
             assertEquals("GET", method)
             requests.add(URLDecoder.decode(url, "UTF-8"))
-            if (url.endsWith("&limit=5")) 400 to """{"errors":["limit is invalid"]}"""
+            if (!url.endsWith("&limit=5")) 400 to """{"errors":["limit is required"]}"""
             else 200 to """
-                {"results":[{"id":42,"name":"快问快答"},
+                {"results":[{"id":42,"name":"快问快答","count":1280},
                 {"id":43,"name":"仅限其他版块","disabled":true,"title":"这个版块不能使用此标签"}],
                 "required_tag_group":{"name":"讨论类型"}}
             """.trimIndent()
@@ -52,8 +52,9 @@ class ComposerAndSafetyTest {
             assertEquals(2, requests.size)
             assertTrue(requests.all { it.contains("categoryId=4") && it.contains("filterForInput=true") })
             assertTrue(requests.all { it.contains("selected_tag_ids[]=7") })
-            assertFalse(requests.last().contains("limit="))
+            assertTrue(requests.last().contains("limit=5"))
             assertEquals("快问快答", choices.options.first().name)
+            assertEquals(1280, choices.options.first().count)
             assertTrue(choices.options.last().disabled)
             assertEquals("讨论类型", choices.requiredGroup)
         }

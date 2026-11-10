@@ -263,17 +263,30 @@ internal fun ComposerSheet(
         }
         tagsError = null
         try {
-            if (tagQuery.isNotBlank()) delay(300)
+            val cleanQuery = tagQuery.trim()
+            if (cleanQuery.isNotEmpty()) delay(220)
             val selected = draft.tags.associateWith { tagIds[it] }
             val fetched = kotlinx.coroutines.withTimeoutOrNull(6_500L) {
-                LinuxDoRepository.fetchCategoryAllowedTags(draft.categoryId ?: initialCategoryId, tagQuery, selected)
+                LinuxDoRepository.fetchCategoryAllowedTags(draft.categoryId ?: initialCategoryId, cleanQuery, selected)
             } ?: throw ApiMutationException("标签暂时无法加载")
             val mergedMap = linkedMapOf<String, do_.linux.lindo.core.network.ComposerTagOption>()
             accumulatedTagOptions.forEach { mergedMap[it.name] = it }
             fetched.options.forEach { mergedMap[it.name] = it }
             val mergedOptions = mergedMap.values.toList()
             accumulatedTagOptions = mergedOptions
-            tagChoices = fetched.copy(options = mergedOptions)
+            val displayOptions = if (cleanQuery.isEmpty()) {
+                mergedOptions
+            } else {
+                val queryMap = linkedMapOf<String, do_.linux.lindo.core.network.ComposerTagOption>()
+                fetched.options.forEach { queryMap[it.name] = it }
+                mergedOptions.forEach { opt ->
+                    if (opt.name.contains(cleanQuery, ignoreCase = true) && !queryMap.containsKey(opt.name)) {
+                        queryMap[opt.name] = opt
+                    }
+                }
+                queryMap.values.toList()
+            }
+            tagChoices = fetched.copy(options = displayOptions)
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             if (!hadExistingOptions) {
@@ -626,6 +639,7 @@ internal fun ComposerSheet(
                                 selected = draft.tags,
                                 choices = tagChoices,
                                 limit = COMPOSER_TAG_LIMIT,
+                                canCreateTag = LinuxDoRepository.canCreateTag,
                                 loading = tagsLoading,
                                 error = tagsError,
                                 enabled = !busy,
@@ -639,7 +653,7 @@ internal fun ComposerSheet(
                                     }
                                 },
                                 onRetry = { tagRetry++ },
-                                onDismiss = { keyboard?.hide(); showTagPicker = false }
+                                onDismiss = { keyboard?.hide(); tagQuery = ""; showTagPicker = false }
                             )
                         }
 

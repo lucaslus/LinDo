@@ -566,6 +566,7 @@ data class LinuxDoCategoryMeta(
 internal data class ComposerTagOption(
     val name: String,
     val id: Int? = null,
+    val count: Int? = null,
     val disabled: Boolean = false,
     val reason: String? = null
 )
@@ -658,6 +659,10 @@ object LinuxDoRepository {
     var categories: List<LinuxDoCategoryMeta> = defaultCategories
         private set
 
+    @Volatile
+    var canCreateTag: Boolean = false
+        internal set
+
     private val categoryLookup = java.util.concurrent.ConcurrentHashMap<Int, Pair<String, String>>().apply {
         defaultCategories.forEach { put(it.id, it.name to it.colorHex) }
         put(20, "开发调优" to "0E76BD")
@@ -675,6 +680,9 @@ object LinuxDoRepository {
     }
 
     private fun mergeCategoriesFromSiteRoot(root: JsonObject) {
+        (root["can_create_tag"] as? JsonPrimitive)?.booleanOrNull?.let {
+            canCreateTag = it
+        }
         val catArr = root["categories"] as? JsonArray ?: return
         val mergedById = LinkedHashMap<Int, LinuxDoCategoryMeta>()
         defaultCategories.forEach { mergedById[it.id] = it }
@@ -1773,6 +1781,7 @@ object LinuxDoRepository {
             ComposerTagOption(
                 name = name,
                 id = rawId?.intOrNull,
+                count = (tag["count"] as? JsonPrimitive)?.intOrNull,
                 disabled = (tag["disabled"] as? JsonPrimitive)?.booleanOrNull == true,
                 reason = (tag["title"] as? JsonPrimitive)?.contentOrNull
             )

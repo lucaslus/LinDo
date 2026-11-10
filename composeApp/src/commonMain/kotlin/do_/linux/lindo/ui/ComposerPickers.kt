@@ -3,6 +3,7 @@ package do_.linux.lindo.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -176,7 +177,7 @@ internal fun ComposerCategoryPicker(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ComposerTagPicker(
     query: String,
@@ -184,6 +185,7 @@ internal fun ComposerTagPicker(
     selected: List<String>,
     choices: ComposerTagChoices,
     limit: Int,
+    canCreateTag: Boolean = false,
     loading: Boolean,
     error: String?,
     enabled: Boolean,
@@ -234,16 +236,17 @@ internal fun ComposerTagPicker(
                 }
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable(onClick = onDismiss)
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(palette.subtleSurface)
+                        .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "完成",
-                        color = palette.brandGold,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.5.sp
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "关闭标签抽屉",
+                        modifier = Modifier.size(16.dp),
+                        tint = palette.inkSecondary
                     )
                 }
             }
@@ -260,10 +263,10 @@ internal fun ComposerTagPicker(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 40.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .heightIn(min = 38.dp)
+                    .clip(RoundedCornerShape(8.dp))
                     .background(palette.subtleSurface.copy(alpha = 0.7f))
-                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                    .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
                     .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -288,7 +291,7 @@ internal fun ComposerTagPicker(
                             placeholder = "搜索标签",
                             textStyle = searchStyle,
                             placeholderColor = palette.inkSecondary,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
                             innerTextField = inner
                         )
                     }
@@ -310,53 +313,47 @@ internal fun ComposerTagPicker(
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(10.dp))
 
-            // 已选标签置顶一览
             if (selected.isNotEmpty()) {
-                Text(
-                    text = "已选标签（点击移除）",
-                    color = palette.inkSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(bottom = 6.dp)
-                )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     selected.forEach { tagName ->
                         Row(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.brandGold.copy(alpha = 0.14f))
-                                .border(1.dp, palette.brandGold, RoundedCornerShape(8.dp))
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(palette.brandGold.copy(alpha = 0.10f))
                                 .clickable(enabled = enabled) {
                                     onToggle(ComposerTagOption(tagName))
                                 }
-                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Text(
                                 text = "#$tagName",
-                                fontSize = 13.sp,
+                                fontSize = 12.2.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = palette.brandGold
                             )
                             Icon(
                                 imageVector = LinDoIcons.Close,
                                 contentDescription = "移除 $tagName",
-                                modifier = Modifier.size(12.dp),
+                                modifier = Modifier.size(11.dp),
                                 tint = palette.brandGold
                             )
                         }
                     }
                 }
-                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                Spacer(modifier = Modifier.height(10.dp))
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
             when {
                 loading -> {
@@ -371,94 +368,191 @@ internal fun ComposerTagPicker(
                     LinDoLoadFailure(error, onRetry)
                 }
                 else -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 300.dp, max = if (imeVisible) 320.dp else 480.dp)
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        val message = choices.forbiddenMessage
-                            ?: choices.requiredGroup?.let { "请先选择「$it」中的标签" }
-                        if (message != null) {
-                            Text(
-                                text = message,
-                                color = palette.brandGold,
-                                fontSize = 12.2.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.padding(bottom = 8.dp)
-                            )
-                        }
+                    val cleanQuery = query.trim().removePrefix("#").trim()
+                    val baseOptions = (selected.map { name ->
+                        choices.options.find { it.name.equals(name, ignoreCase = true) } ?: ComposerTagOption(name)
+                    } + choices.options).distinctBy { it.name.lowercase() }
 
-                        val options = (selected.map { ComposerTagOption(it) } + choices.options).distinctBy { it.name }
-                        if (options.isEmpty() && message == null) {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = if (query.isBlank()) "当前版块暂无可用标签" else "没有匹配的标签",
-                                    color = palette.inkSecondary,
-                                    fontSize = 13.5.sp
-                                )
-                            }
-                        } else {
-                            Text(
-                                text = "全部可选标签",
-                                color = palette.inkSecondary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.padding(bottom = 8.dp)
+                    val filteredOptions = if (cleanQuery.isEmpty()) {
+                        baseOptions
+                    } else {
+                        baseOptions
+                            .filter { it.name.contains(cleanQuery, ignoreCase = true) }
+                            .sortedWith(
+                                compareByDescending<ComposerTagOption> { it.name.equals(cleanQuery, ignoreCase = true) }
+                                    .thenByDescending { it.name.startsWith(cleanQuery, ignoreCase = true) }
+                                    .thenByDescending { it.name in selected }
                             )
-                            FlowRow(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                options.forEach { option ->
-                                    val checked = option.name in selected
-                                    val canClick = enabled && (checked || (!option.disabled && selected.size < limit))
-                                    Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(9.dp))
-                                            .background(
-                                                when {
-                                                    checked -> palette.brandGold.copy(alpha = 0.14f)
-                                                    option.disabled -> palette.subtleSurface.copy(alpha = 0.45f)
-                                                    else -> palette.subtleSurface
-                                                }
-                                            )
-                                            .border(
-                                                width = if (checked) 1.2.dp else 0.6.dp,
-                                                color = if (checked) palette.brandGold else palette.hairline,
-                                                shape = RoundedCornerShape(9.dp)
-                                            )
-                                            .selectable(
-                                                selected = checked,
-                                                enabled = canClick,
-                                                role = Role.Checkbox
-                                            ) { onToggle(option) }
-                                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
-                                        Text(
-                                            text = "#${option.name}",
-                                            fontSize = 13.2.sp,
-                                            fontWeight = if (checked) FontWeight.Bold else FontWeight.Medium,
-                                            color = when {
-                                                checked -> palette.brandGold
-                                                option.disabled -> palette.inkTertiary
-                                                else -> palette.inkPrimary
-                                            }
-                                        )
-                                        if (checked) {
-                                            Icon(
-                                                imageVector = LinDoIcons.Check,
-                                                contentDescription = "已选",
-                                                modifier = Modifier.size(14.dp),
-                                                tint = palette.brandGold
-                                            )
+                    }
+
+                    val message = choices.forbiddenMessage
+                        ?: choices.requiredGroup?.let { "请先选择「$it」中的标签" }
+                    val hasExactMatch = baseOptions.any { it.name.equals(cleanQuery, ignoreCase = true) }
+                    val canCreateNewTag = canCreateTag &&
+                        cleanQuery.isNotEmpty() &&
+                        !hasExactMatch &&
+                        choices.forbiddenMessage == null &&
+                        choices.requiredGroup == null &&
+                        selected.size < limit
+
+                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        val minimumCellWidth = 148 * LocalDensity.current.fontScale.coerceAtLeast(1f)
+                        val columns = (maxWidth.value / minimumCellWidth).toInt().coerceIn(2, 3)
+                        val tagRows = filteredOptions.chunked(columns)
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 320.dp, max = if (imeVisible) 340.dp else 480.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            if (message != null) {
+                                Text(
+                                    text = message,
+                                    color = palette.brandGold,
+                                    fontSize = 12.2.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                            }
+
+                            if (canCreateNewTag) {
+                                val normalizedNewTag = cleanQuery.take(20)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 46.dp)
+                                        .background(palette.brandGold.copy(alpha = 0.08f))
+                                        .clickable(enabled = enabled) {
+                                            onToggle(ComposerTagOption(normalizedNewTag))
+                                            onQueryChange("")
                                         }
+                                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = LinDoIcons.Plus,
+                                        contentDescription = "创建标签",
+                                        modifier = Modifier.size(15.dp),
+                                        tint = palette.brandGold
+                                    )
+                                    Text(
+                                        text = "创建标签 #$normalizedNewTag",
+                                        color = palette.brandGold,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.5.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                            }
+
+                            if (tagRows.isEmpty() && !canCreateNewTag) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 36.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = if (cleanQuery.isEmpty()) "当前版块暂无可用标签" else "未找到「#$cleanQuery」相关标签",
+                                        color = palette.inkSecondary,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    if (cleanQuery.isNotEmpty() && !canCreateTag) {
+                                        Text(
+                                            text = "当前账号权限仅支持选用社区已有标签",
+                                            color = palette.inkTertiary,
+                                            fontSize = 11.8.sp
+                                        )
+                                    }
+                                }
+                            } else {
+                                tagRows.forEachIndexed { rowIdx, group ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        group.forEachIndexed { colIdx, option ->
+                                            val checked = option.name in selected
+                                            val canClick = enabled && (checked || (!option.disabled && selected.size < limit))
+                                            Row(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .heightIn(min = 46.dp)
+                                                    .background(
+                                                        if (checked) palette.brandGold.copy(alpha = 0.10f)
+                                                        else palette.cardSurface
+                                                    )
+                                                    .selectable(
+                                                        selected = checked,
+                                                        enabled = canClick,
+                                                        role = Role.Checkbox
+                                                    ) { onToggle(option) }
+                                                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                            ) {
+                                                Text(
+                                                    text = "#",
+                                                    color = when {
+                                                        checked -> palette.brandGold
+                                                        option.disabled -> palette.inkTertiary.copy(alpha = 0.45f)
+                                                        else -> palette.inkTertiary
+                                                    },
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 13.5.sp
+                                                )
+                                                Text(
+                                                    text = option.name,
+                                                    color = when {
+                                                        checked -> palette.brandGold
+                                                        option.disabled -> palette.inkTertiary
+                                                        else -> palette.inkPrimary
+                                                    },
+                                                    fontWeight = if (checked) FontWeight.Bold else FontWeight.Medium,
+                                                    fontSize = 13.5.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                if (checked) {
+                                                    Icon(
+                                                        imageVector = LinDoIcons.Check,
+                                                        contentDescription = "已选中",
+                                                        modifier = Modifier.size(15.dp),
+                                                        tint = palette.brandGold
+                                                    )
+                                                } else if (option.count != null && option.count > 0) {
+                                                    Text(
+                                                        text = formatTagTopicCount(option.count),
+                                                        color = palette.inkTertiary,
+                                                        fontSize = 11.sp
+                                                    )
+                                                }
+                                            }
+                                            if (colIdx < columns - 1) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(0.5.dp)
+                                                        .height(22.dp)
+                                                        .background(palette.hairline)
+                                                )
+                                            }
+                                        }
+                                        repeat(columns - group.size) { emptyIdx ->
+                                            Spacer(Modifier.weight(1f))
+                                            if (group.size + emptyIdx < columns - 1) {
+                                                Spacer(Modifier.width(0.5.dp))
+                                            }
+                                        }
+                                    }
+                                    if (rowIdx < tagRows.lastIndex) {
+                                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                                     }
                                 }
                             }
@@ -468,4 +562,10 @@ internal fun ComposerTagPicker(
             }
         }
     }
+}
+
+private fun formatTagTopicCount(count: Int): String = when {
+    count >= 10_000 -> String.format("%.1fw", count / 10_000.0)
+    count >= 1_000 -> String.format("%.1fk", count / 1_000.0)
+    else -> count.toString()
 }

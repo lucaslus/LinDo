@@ -9905,7 +9905,7 @@ private fun WorkbenchDrawerBottomSheet(
                             WorkbenchDrawerToolItem("删除线", LinDoIcons.Edit) { onWrapSelection("~~", "~~") },
                             WorkbenchDrawerToolItem("按键标签", LinDoIcons.CpuChip) { onWrapSelection("<kbd>", "</kbd>") },
                             WorkbenchDrawerToolItem("分割线", LinDoIcons.Sliders) { onInsertSnippet("\n\n---\n\n") },
-                            WorkbenchDrawerToolItem("中英空格", LinDoIcons.Sparkles, accent = true) { onOptimizePangu() }
+                            WorkbenchDrawerToolItem("中英空格", LinDoIcons.Sparkles) { onOptimizePangu() }
                         )
                     }
                     val blockTools = remember {
@@ -9941,7 +9941,7 @@ private fun WorkbenchDrawerBottomSheet(
                             .weight(1f)
                             .fillMaxWidth()
                             .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         WorkbenchToolGridSection("文本与排版", formatTools)
                         WorkbenchToolGridSection("列表、引用与块级语法", blockTools)
@@ -9950,68 +9950,72 @@ private fun WorkbenchDrawerBottomSheet(
                 }
 
                 WorkbenchSubPanel.FORMAT, WorkbenchSubPanel.HEADINGS -> {
-                    Column(
-                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text("选择标题级别", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                    val headingItems = remember {
                         listOf(
-                            Triple("一级标题 H1", "# ", "用于文章主章节大标题"),
-                            Triple("二级标题 H2", "## ", "用于核心小节标题"),
-                            Triple("三级标题 H3", "### ", "用于子模块细分标题"),
-                            Triple("四级标题 H4", "#### ", "用于紧凑段落小标题")
-                        ).forEach { (title, prefix, desc) ->
+                            Triple("一级标题 H1", "# ", "文章主章节大标题"),
+                            Triple("二级标题 H2", "## ", "核心小节标题"),
+                            Triple("三级标题 H3", "### ", "子模块细分标题"),
+                            Triple("四级标题 H4", "#### ", "紧凑段落小标题")
+                        )
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                    ) {
+                        headingItems.forEachIndexed { idx, (title, prefix, desc) ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .heightIn(min = 48.dp)
                                     .clickable { onToggleLinePrefix(prefix) }
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    .padding(horizontal = 10.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Icon(LinDoIcons.Heading, contentDescription = null, modifier = Modifier.size(18.dp), tint = palette.brandGold)
+                                Icon(LinDoIcons.Heading, contentDescription = null, modifier = Modifier.size(16.dp), tint = palette.inkSecondary)
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(title, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
-                                    Text(desc, fontSize = 12.sp, color = palette.inkSecondary)
+                                    Text(title, fontSize = 13.8.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+                                    Text(desc, fontSize = 11.8.sp, color = palette.inkSecondary)
                                 }
-                                Text(prefix.trim(), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = palette.inkTertiary)
+                                Text(prefix.trim(), fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = palette.inkTertiary)
+                            }
+                            if (idx < headingItems.lastIndex) {
+                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                             }
                         }
                     }
                 }
 
                 WorkbenchSubPanel.QUOTE_LIST, WorkbenchSubPanel.CALLOUT -> {
-                    Column(
-                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text("插入高亮提示框", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
+                    val calloutItems = remember {
                         listOf(
                             Triple("NOTE · 补充说明", "NOTE", "背景信息、实现细节或常规注解"),
                             Triple("TIP · 实用技巧", "TIP", "最佳实践、效率技巧或推荐方案"),
                             Triple("IMPORTANT · 重要提示", "IMPORTANT", "核心前置要求或关键步骤说明"),
                             Triple("WARNING · 注意事项", "WARNING", "潜在兼容性问题或风险提醒"),
                             Triple("CAUTION · 高危警告", "CAUTION", "不可逆操作或安全警示")
-                        ).forEach { (title, kind, desc) ->
+                        )
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                    ) {
+                        calloutItems.forEachIndexed { idx, (title, kind, desc) ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .heightIn(min = 48.dp)
                                     .clickable { onWrapSelection("\n> [!$kind]\n> ", "\n") }
-                                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    .padding(horizontal = 10.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Icon(LinDoIcons.InfoCircle, contentDescription = null, modifier = Modifier.size(18.dp), tint = palette.brandGold)
+                                Icon(LinDoIcons.InfoCircle, contentDescription = null, modifier = Modifier.size(16.dp), tint = palette.inkSecondary)
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
-                                    Text(desc, fontSize = 12.sp, color = palette.inkSecondary)
+                                    Text(title, fontSize = 13.8.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+                                    Text(desc, fontSize = 11.8.sp, color = palette.inkSecondary)
                                 }
+                            }
+                            if (idx < calloutItems.lastIndex) {
+                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                             }
                         }
                     }
@@ -10038,28 +10042,24 @@ private fun WorkbenchDrawerBottomSheet(
                             "C / C++" to "cpp"
                         )
                     }
+                    val langRows = remember(languages) { languages.chunked(2) }
                     Column(
-                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
                     ) {
-                        Text("选择代码高亮语言", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
-                        languages.chunked(2).forEach { rowItems ->
+                        langRows.forEachIndexed { rowIdx, rowItems ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                rowItems.forEach { (label, lang) ->
+                                rowItems.forEachIndexed { colIdx, (label, lang) ->
                                     Row(
                                         modifier = Modifier
                                             .weight(1f)
-                                            .height(46.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(palette.subtleSurface)
-                                            .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                            .heightIn(min = 46.dp)
                                             .clickable {
                                                 onWrapSelection("\n```$lang\n", "\n```\n")
                                             }
-                                            .padding(horizontal = 12.dp),
+                                            .padding(horizontal = 10.dp, vertical = 10.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
@@ -10075,13 +10075,25 @@ private fun WorkbenchDrawerBottomSheet(
                                             fontWeight = FontWeight.Medium,
                                             color = palette.inkPrimary,
                                             maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    if (colIdx < 1) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(0.5.dp)
+                                                .height(22.dp)
+                                                .background(palette.hairline)
                                         )
                                     }
                                 }
                                 if (rowItems.size == 1) {
                                     Spacer(Modifier.weight(1f))
                                 }
+                            }
+                            if (rowIdx < langRows.lastIndex) {
+                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                             }
                         }
                     }
@@ -10682,61 +10694,64 @@ private fun WorkbenchToolGridSection(
     items: List<WorkbenchDrawerToolItem>
 ) {
     val palette = LocalPalette.current
+    val rows = remember(items) { items.chunked(2) }
     Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        modifier = Modifier.fillMaxWidth()
     ) {
         Text(
             text = sectionTitle,
-            fontSize = 12.2.sp,
+            fontSize = 11.8.sp,
             fontWeight = FontWeight.SemiBold,
-            color = palette.inkSecondary
+            color = palette.inkSecondary,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp)
         )
-        items.chunked(4).forEach { rowItems ->
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        rows.forEachIndexed { rowIdx, rowItems ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                rowItems.forEach { item ->
-                    Column(
+                rowItems.forEachIndexed { colIdx, item ->
+                    Row(
                         modifier = Modifier
                             .weight(1f)
-                            .height(66.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(
-                                if (item.accent) palette.brandGold.copy(alpha = 0.12f)
-                                else palette.subtleSurface
-                            )
-                            .border(
-                                width = 0.5.dp,
-                                color = if (item.accent) palette.brandGold.copy(alpha = 0.5f) else palette.hairline,
-                                shape = RoundedCornerShape(12.dp)
-                            )
+                            .heightIn(min = 46.dp)
                             .clickable(onClick = item.onClick)
-                            .padding(horizontal = 6.dp, vertical = 8.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
+                            .padding(horizontal = 10.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(
                             imageVector = item.icon,
                             contentDescription = item.label,
-                            modifier = Modifier.size(19.dp),
-                            tint = if (item.accent) palette.brandGold else palette.inkPrimary
+                            modifier = Modifier.size(16.dp),
+                            tint = if (item.accent) palette.brandGold else palette.inkSecondary
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = item.label,
-                            fontSize = 11.8.sp,
+                            fontSize = 13.5.sp,
                             fontWeight = FontWeight.Medium,
-                            color = if (item.accent) palette.brandGold else palette.inkPrimary,
+                            color = palette.inkPrimary,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    if (colIdx < 1) {
+                        Box(
+                            modifier = Modifier
+                                .width(0.5.dp)
+                                .height(22.dp)
+                                .background(palette.hairline)
                         )
                     }
                 }
-                repeat((4 - rowItems.size).coerceAtLeast(0)) {
-                    Spacer(modifier = Modifier.weight(1f).height(66.dp))
+                if (rowItems.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
                 }
+            }
+            if (rowIdx < rows.lastIndex) {
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
             }
         }
     }
