@@ -4055,32 +4055,46 @@ private fun CommunityTopicItem(
                 }
             }
 
-            var resolvedExcerpt by remember(topic.id, topic.excerpt, topic.title) {
-                mutableStateOf(
-                    topic.excerpt?.trim()?.takeIf { it.isNotEmpty() && it != topic.title }
-                        ?: LinuxDoRepository.getCachedTopicExcerpt(topic.id)?.takeIf { it != topic.title }
-                )
+            val initialCachedExcerpt = remember(topic.id, topic.excerpt) {
+                topic.excerpt?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: LinuxDoRepository.getCachedTopicExcerpt(topic.id)
             }
-            if (resolvedExcerpt == null && topic.id > 0 && !topic.pinned) {
+            var resolvedExcerpt by remember(topic.id, initialCachedExcerpt) {
+                mutableStateOf(initialCachedExcerpt)
+            }
+            var excerptFetchDone by remember(topic.id, initialCachedExcerpt) {
+                mutableStateOf(initialCachedExcerpt != null || LinuxDoRepository.hasCachedTopicExcerpt(topic.id))
+            }
+            if (!excerptFetchDone && topic.id > 0 && !topic.pinned) {
                 LaunchedEffect(topic.id) {
-                    delay(60)
                     val fetched = LinuxDoRepository.fetchTopicExcerpt(topic.id)
-                    if (!fetched.isNullOrBlank() && fetched != topic.title) {
+                    if (!fetched.isNullOrBlank()) {
                         resolvedExcerpt = fetched
                     }
+                    excerptFetchDone = true
                 }
             }
-            val cleanExcerpt = resolvedExcerpt
-            if (cleanExcerpt != null) {
+            val cleanExcerpt = resolvedExcerpt?.takeIf { it.isNotBlank() }
+                ?: if (excerptFetchDone && !topic.pinned) topic.title else null
+            if (!topic.pinned || cleanExcerpt != null) {
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = cleanExcerpt,
-                    fontSize = LinDoTokens.Sub,
-                    lineHeight = 20.sp,
-                    color = palette.inkSecondary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = cleanExcerpt ?: " \n ",
+                        fontSize = LinDoTokens.Sub,
+                        lineHeight = 20.sp,
+                        color = if (cleanExcerpt != null) palette.inkSecondary else Color.Transparent,
+                        minLines = 2,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (cleanExcerpt == null) {
+                        TopicExcerptSkeleton(
+                            modifier = Modifier.matchParentSize()
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(10.dp))
@@ -4168,6 +4182,43 @@ private fun formatCompactNumber(value: Int): String {
         "${k / 10}.${k % 10}k"
     } else {
         value.toString()
+    }
+}
+
+@Composable
+private fun TopicExcerptSkeleton(
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalPalette.current
+    val transition = rememberInfiniteTransition(label = "excerptSkeleton")
+    val pulseAlpha by transition.animateFloat(
+        initialValue = if (palette.isDark) 0.06f else 0.05f,
+        targetValue = if (palette.isDark) 0.13f else 0.11f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 750, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "excerptSkeletonAlpha"
+    )
+    val barColor = palette.inkSecondary.copy(alpha = pulseAlpha)
+    Column(
+        modifier = modifier.padding(vertical = 3.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .height(13.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(barColor)
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.62f)
+                .height(13.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(barColor)
+        )
     }
 }
 

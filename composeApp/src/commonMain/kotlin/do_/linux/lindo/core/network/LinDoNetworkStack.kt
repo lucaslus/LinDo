@@ -40,14 +40,19 @@ import java.time.Instant
 import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.*
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -1039,7 +1044,8 @@ object LinuxDoRepository {
         val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         val root = readApiObject(executeHttp(url = url, extraHeaders = headers, preserveFailure = true))
         (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
-        parseTopicListRoot(root)
+        val initialList = parseTopicListRoot(root)
+        hydrateFirstScreenExcerptsAndPrefetchRest(initialList)
     }
 
     /**
@@ -3057,7 +3063,12 @@ object LinuxDoRepository {
     }
 
     private val topicExcerptCache = java.util.concurrent.ConcurrentHashMap<Int, String>()
-    private val excerptFetchSemaphore = Semaphore(3)
+    private val inFlightExcerptJobs = java.util.concurrent.ConcurrentHashMap<Int, Deferred<String?>>()
+    private val excerptPrefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val excerptFetchSemaphore = Semaphore(8)
+
+    fun hasCachedTopicExcerpt(topicId: Int): Boolean =
+        topicId > 0 && topicExcerptCache.containsKey(topicId)
 
     fun getCachedTopicExcerpt(topicId: Int): String? =
         topicExcerptCache[topicId]?.takeIf { it.isNotBlank() }
@@ -3066,6 +3077,53 @@ object LinuxDoRepository {
         if (topicId > 0) {
             topicExcerptCache[topicId] = excerpt.trim()
         }
+    }
+
+    /**
+     * 首屏并发行内预水合（有界等待 420ms 尽量随列表一次性对齐返回）+ 后续条目后台静默预热缓存。
+     * 未在 420ms 内完成的条目会在 UI 层由等高 2 行骨架屏无缝承接并在后台继续完成。
+     */
+    private suspend fun hydrateFirstScreenExcerptsAndPrefetchRest(topics: List<TopicSummary>): List<TopicSummary> {
+        val missingTopics = topics.filter { !it.pinned && it.id > 0 && it.excerpt.isNullOrBlank() && !topicExcerptCache.containsKey(it.id) }
+        if (missingTopics.isEmpty()) return topics
+
+        val firstScreenIds = missingTopics.take(6).map { it.id }
+        val backgroundIds = missingTopics.drop(6).take(12).map { it.id }
+
+        firstScreenIds.forEach { tid -> startExcerptFetchAsync(tid) }
+        backgroundIds.forEach { tid -> startExcerptFetchAsync(tid) }
+
+        withTimeoutOrNull(420L) {
+            firstScreenIds.mapNotNull { inFlightExcerptJobs[it] }.awaitAll()
+        }
+
+        return topics.map { topic ->
+            if (!topic.excerpt.isNullOrBlank()) {
+                topic
+            } else {
+                val hydrated = getCachedTopicExcerpt(topic.id)
+                if (!hydrated.isNullOrBlank()) topic.copy(excerpt = hydrated) else topic
+            }
+        }
+    }
+
+    private fun startExcerptFetchAsync(topicId: Int): Deferred<String?> {
+        inFlightExcerptJobs[topicId]?.let { existing ->
+            if (existing.isActive || existing.isCompleted) return existing
+        }
+        val created = excerptPrefetchScope.async {
+            try {
+                performTopicExcerptFetch(topicId)
+            } finally {
+                inFlightExcerptJobs.remove(topicId)
+            }
+        }
+        val prev = inFlightExcerptJobs.putIfAbsent(topicId, created)
+        if (prev != null && (prev.isActive || prev.isCompleted)) {
+            created.cancel()
+            return prev
+        }
+        return created
     }
 
     internal fun extractPlainExcerptFromHtml(cookedHtml: String?): String {
@@ -3095,27 +3153,44 @@ object LinuxDoRepository {
     }
 
     /**
-     * 按需静默补全话题一楼纯文本摘要（`/t/{topicId}.json?track_visit=false` + `Discourse-Background: true`）
-     *
-     * Discourse 的 `/latest.json`、`/top.json` 等列表接口默认只为置顶帖 (`pinned: true`) 下发 `excerpt` 字段，
-     * 普通帖子在列表 JSON 中 `excerpt` 为 `null`。此方法在宽松列表模式下按需拉取并缓存一楼摘要，
-     * 同时携带 `track_visit=false` 与 `Discourse-Background: true`，绝不误标已读或污染阅读计数。
+     * 按需静默补全话题一楼纯文本摘要：
+     * 优先请求轻量级单帖接口 `/posts/by_number/{topicId}/1.json`（仅约 2KB，比 `/t/{topicId}.json` 小 50 倍且天然不计入阅读），
+     * 失败时回退至 `/t/{topicId}.json?track_visit=false`，全程携带 `Discourse-Background: true`。
      */
     suspend fun fetchTopicExcerpt(topicId: Int): String? = withContext(Dispatchers.IO) {
         if (topicId <= 0) return@withContext null
         topicExcerptCache[topicId]?.let { cached ->
             return@withContext cached.takeIf { it.isNotBlank() }
         }
-        excerptFetchSemaphore.withPermit {
+        startExcerptFetchAsync(topicId).await()
+    }
+
+    private suspend fun performTopicExcerptFetch(topicId: Int): String? {
+        topicExcerptCache[topicId]?.let { cached ->
+            return cached.takeIf { it.isNotBlank() }
+        }
+        return excerptFetchSemaphore.withPermit {
             topicExcerptCache[topicId]?.let { cached ->
                 return@withPermit cached.takeIf { it.isNotBlank() }
             }
-            val url = "https://linux.do/t/" + topicId.toString() + ".json?track_visit=false"
-            val res = executeHttp(
-                url = url,
-                method = "GET",
-                extraHeaders = mapOf("Discourse-Background" to "true")
-            )
+            val bgHeaders = mapOf("Discourse-Background" to "true")
+            val fastUrl = "https://linux.do/posts/by_number/" + topicId.toString() + "/1.json"
+            val fastRes = executeHttp(url = fastUrl, method = "GET", extraHeaders = bgHeaders)
+            val fastBody = fastRes?.second
+            if (fastRes != null && fastRes.first in 200..299 && fastBody != null && fastBody.trimStart().startsWith("{")) {
+                val fastExtracted = runCatching {
+                    val root = json.parseToJsonElement(fastBody).jsonObject
+                    val cooked = root["cooked"]?.jsonPrimitive?.contentOrNull
+                    extractPlainExcerptFromHtml(cooked)
+                }.getOrDefault("")
+                if (fastExtracted.isNotBlank()) {
+                    topicExcerptCache[topicId] = fastExtracted
+                    return@withPermit fastExtracted
+                }
+            }
+
+            val fallbackUrl = "https://linux.do/t/" + topicId.toString() + ".json?track_visit=false"
+            val res = executeHttp(url = fallbackUrl, method = "GET", extraHeaders = bgHeaders)
             val statusCode = res?.first ?: 0
             val body = res?.second
             if (statusCode in 200..299 && body != null && body.trimStart().startsWith("{")) {
