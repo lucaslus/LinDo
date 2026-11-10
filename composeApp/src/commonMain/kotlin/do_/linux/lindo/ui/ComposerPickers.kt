@@ -314,45 +314,7 @@ internal fun ComposerTagPicker(
                 }
             }
 
-            if (selected.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 10.dp)
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    selected.forEach { tagName ->
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(palette.brandGold.copy(alpha = 0.10f))
-                                .clickable(enabled = enabled) {
-                                    onToggle(ComposerTagOption(tagName))
-                                }
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = "#$tagName",
-                                fontSize = 12.2.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.brandGold
-                            )
-                            Icon(
-                                imageVector = LinDoIcons.Close,
-                                contentDescription = "移除 $tagName",
-                                modifier = Modifier.size(11.dp),
-                                tint = palette.brandGold
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
             when {

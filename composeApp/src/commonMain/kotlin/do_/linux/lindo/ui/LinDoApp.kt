@@ -9144,7 +9144,7 @@ internal enum class WorkbenchViewMode(val label: String) {
     PREVIEW("预览")
 }
 
-private enum class WorkbenchSubPanel(val title: String) {
+internal enum class WorkbenchSubPanel(val title: String) {
     NONE(""),
     EMOJI("选择表情"),
     MENTION("提及用户"),
@@ -9809,7 +9809,7 @@ private fun compileMarkdownAndBbcodeToPreviewHtml(raw: String): String = do_.lin
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun WorkbenchDrawerBottomSheet(
+internal fun WorkbenchDrawerBottomSheet(
     subPanel: WorkbenchSubPanel,
     showBackToMoreTools: Boolean,
     onBackToMoreTools: () -> Unit,
@@ -10067,7 +10067,7 @@ private fun WorkbenchDrawerBottomSheet(
                                             imageVector = if (lang.isEmpty()) LinDoIcons.Code else LinDoIcons.Terminal,
                                             contentDescription = null,
                                             modifier = Modifier.size(16.dp),
-                                            tint = if (lang.isEmpty()) palette.brandGold else palette.inkSecondary
+                                            tint = palette.inkSecondary
                                         )
                                         Text(
                                             text = label,
