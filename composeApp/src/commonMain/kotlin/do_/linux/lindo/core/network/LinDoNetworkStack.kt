@@ -284,7 +284,7 @@ object UserApiKeyAuthManager {
     var customUserAgent: String? = null
 
     @Volatile
-    var uiFontScale: Float = 1.0f
+    var uiFontScale: Float = 0.92f
 
     @Volatile
     var uiDarkTheme: Boolean = false

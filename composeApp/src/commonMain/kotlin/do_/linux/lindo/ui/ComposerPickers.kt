@@ -78,7 +78,6 @@ internal fun ComposerCategoryPicker(
                     modifier = Modifier
                         .size(30.dp)
                         .clip(CircleShape)
-                        .background(palette.subtleSurface)
                         .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center
                 ) {
@@ -253,7 +252,6 @@ internal fun ComposerTagPicker(
                     modifier = Modifier
                         .size(30.dp)
                         .clip(CircleShape)
-                        .background(palette.subtleSurface)
                         .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center
                 ) {

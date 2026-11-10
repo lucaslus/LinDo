@@ -93,7 +93,6 @@ internal fun TopicFloorNavigator(
                     modifier = Modifier
                         .size(30.dp)
                         .clip(CircleShape)
-                        .background(palette.subtleSurface)
                         .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center
                 ) {

@@ -302,7 +302,7 @@ class MainActivity : ComponentActivity() {
         UserApiKeyAuthManager.onPersistUiPrefs = { fontScale, darkTheme, enableAnimations ->
             runCatching {
                 prefs.edit()
-                    .putFloat("ui_font_scale", fontScale)
+                    .putFloat("ui_font_scale_v2", fontScale)
                     .putBoolean("ui_dark_theme", darkTheme)
                     .putBoolean("ui_enable_animations", enableAnimations)
                     .apply()
@@ -1165,8 +1165,8 @@ class MainActivity : ComponentActivity() {
             val savedPendingNonce = prefs.getString("pending_rsa_nonce", null)
             UserApiKeyAuthManager.restorePendingPrivateKeyBase64(savedPendingPrivKey, savedPendingNonce, prefs.getLong("pending_rsa_created_at", 0L))
 
-            // 恢复用户的阅读密度/字号、深色模式、动效与主题色偏好（默认官方黑白黄）
-            UserApiKeyAuthManager.uiFontScale = prefs.getFloat("ui_font_scale", 1.0f)
+            // 恢复用户的阅读密度/字号、深色模式、动效与主题色偏好（默认官方黑白黄，标准字号默认 0.92f）
+            UserApiKeyAuthManager.uiFontScale = prefs.getFloat("ui_font_scale_v2", 0.92f)
             UserApiKeyAuthManager.uiDarkTheme = prefs.getBoolean("ui_dark_theme", false)
             UserApiKeyAuthManager.uiEnableAnimations = prefs.getBoolean("ui_enable_animations", true)
             UserApiKeyAuthManager.uiThemeAccent = prefs.getString("ui_theme_accent", "OFFICIAL_GOLD") ?: "OFFICIAL_GOLD"

@@ -509,41 +509,66 @@ internal fun ComposerSheet(
                     if (action == ComposerAction.NEW_TOPIC) {
                         val activeCat = LinuxDoRepository.categories.firstOrNull { it.id == draft.categoryId }
                             ?: LinuxDoRepository.categories.firstOrNull()
+                        val catFallbackColor = remember(activeCat?.colorHex) {
+                            LinuxDoSiteRules.parseHexColor(activeCat?.colorHex ?: "0E76BD")
+                        }
+                        val (catIcon, catColor, isCatRestricted) = remember(
+                            activeCat?.id,
+                            activeCat?.name,
+                            activeCat?.icon,
+                            activeCat?.readRestricted,
+                            catFallbackColor
+                        ) {
+                            if (activeCat != null) {
+                                resolveOfficialCategoryVisual(
+                                    categoryName = activeCat.name,
+                                    fallbackColor = catFallbackColor,
+                                    iconNameOverride = activeCat.icon,
+                                    restrictedOverride = activeCat.readRestricted
+                                )
+                            } else {
+                                Triple(LinDoIcons.FaCode, catFallbackColor, false)
+                            }
+                        }
 
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            // 1. 版块类别抽屉触发器胶囊
+                            // 1. 版块类别抽屉触发器（无底色无边框，与版块图标体系严格一致）
                             Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.6.dp, palette.hairline, RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(6.dp))
                                     .clickable(enabled = !busy) {
                                         keyboard?.hide()
                                         showTagPicker = false
                                         showCategoryPicker = true
                                     }
-                                    .padding(horizontal = 10.dp, vertical = 6.5.dp),
+                                    .padding(vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.5.dp)
-                                        .background(
-                                            LinuxDoSiteRules.parseHexColor(activeCat?.colorHex ?: "0E76BD"),
-                                            CircleShape
-                                        )
+                                Icon(
+                                    imageVector = catIcon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = catColor
                                 )
+                                if (isCatRestricted) {
+                                    Icon(
+                                        imageVector = LinDoIcons.FaLock,
+                                        contentDescription = "受限版块",
+                                        modifier = Modifier.size(11.dp),
+                                        tint = palette.inkSecondary
+                                    )
+                                }
                                 Text(
                                     text = activeCat?.name ?: "选择版块",
-                                    fontSize = 12.8.sp,
+                                    fontSize = 13.5.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = palette.inkPrimary
                                 )
@@ -555,60 +580,79 @@ internal fun ComposerSheet(
                                 )
                             }
 
-                            // 2. 已选标签胶囊（点击可快速移除）
+                            Box(
+                                modifier = Modifier
+                                    .width(0.5.dp)
+                                    .height(15.dp)
+                                    .background(palette.hairline)
+                            )
+
+                            // 2. 已选标签（无底色无边框，使用官方标签图标，点击可快速移除）
                             draft.tags.forEach { tag ->
+                                val tagVisual = remember(tag) { resolveOfficialTagVisual(tag) }
                                 Row(
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(palette.brandGold.copy(alpha = 0.12f))
-                                        .border(0.7.dp, palette.brandGold, RoundedCornerShape(8.dp))
+                                        .clip(RoundedCornerShape(6.dp))
                                         .clickable(enabled = !busy) {
                                             update(draft.copy(tags = draft.tags - tag))
                                         }
-                                        .padding(horizontal = 9.dp, vertical = 6.dp),
+                                        .padding(vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
+                                    if (tagVisual != null) {
+                                        Icon(
+                                            imageVector = tagVisual.first,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(12.dp),
+                                            tint = tagVisual.second
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = LinDoIcons.FaTag,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(10.5.dp),
+                                            tint = palette.brandGold
+                                        )
+                                    }
                                     Text(
-                                        text = "#$tag",
-                                        fontSize = 12.2.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = palette.brandGold
+                                        text = tag,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.inkPrimary
                                     )
                                     Icon(
                                         imageVector = LinDoIcons.Close,
                                         contentDescription = "移除标签",
-                                        modifier = Modifier.size(11.dp),
-                                        tint = palette.brandGold
+                                        modifier = Modifier.size(11.5.dp),
+                                        tint = palette.inkTertiary
                                     )
                                 }
                             }
 
-                            // 3. 标签抽屉触发器胶囊
+                            // 3. 标签抽屉触发器（无底色无边框，清爽图标+文字）
                             Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.6.dp, palette.hairline, RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(6.dp))
                                     .clickable(enabled = !busy) {
                                         keyboard?.hide()
                                         showCategoryPicker = false
                                         if (tagsError != null) tagRetry++
                                         showTagPicker = true
                                     }
-                                    .padding(horizontal = 10.dp, vertical = 6.5.dp),
+                                    .padding(vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Icon(
                                     imageVector = LinDoIcons.Plus,
                                     contentDescription = "打开标签抽屉",
-                                    modifier = Modifier.size(12.5.dp),
+                                    modifier = Modifier.size(13.dp),
                                     tint = palette.inkSecondary
                                 )
                                 Text(
                                     text = if (draft.tags.isEmpty()) "选择标签" else "管理标签 (${draft.tags.size}/$COMPOSER_TAG_LIMIT)",
-                                    fontSize = 12.5.sp,
+                                    fontSize = 13.2.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = palette.inkSecondary
                                 )

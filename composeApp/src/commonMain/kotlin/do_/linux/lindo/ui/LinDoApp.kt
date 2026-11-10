@@ -425,7 +425,7 @@ internal val DarkMaterialScheme = darkColorScheme(
     outlineVariant = DarkPalette.hairline
 )
 
-private val LocalFontScale = staticCompositionLocalOf { 1.0f }
+private val LocalFontScale = staticCompositionLocalOf { 0.92f }
 
 internal enum class MainTab(
     val title: String,
@@ -782,7 +782,7 @@ internal fun resolveOfficialTagVisual(tagName: String): Pair<ImageVector, Color>
     return when {
         clean == "纯水" || clean.contains("水") -> LinDoIcons.FaFaucet to Color(0xFFF7941D)
         clean == "快问快答" || clean.contains("问答") || clean.contains("求助") -> LinDoIcons.FaCircleQuestion to Color(0xFF32C3C3)
-        clean == "人工智能" || lower in setOf("ai", "chatgpt", "claude", "claudecode", "gemini", "openai", "deepseek", "codex", "cursor") ->
+        clean == "人工智能" || lower in setOf("ai", "chatgpt", "claude", "claudecode", "gemini", "openai", "deepseek", "codex", "cursor", "mcp") ->
             LinDoIcons.FaRobot to Color(0xFFA8C6FE)
         clean == "公告" || clean.contains("站务") -> LinDoIcons.FaBullhorn to Color(0xFFF1592A)
         clean == "原创" -> LinDoIcons.FaFeatherPointed to Color(0xFF3AB54A)
@@ -792,10 +792,10 @@ internal fun resolveOfficialTagVisual(tagName: String): Pair<ImageVector, Color>
         clean == "集中帖" || clean.contains("合集") -> LinDoIcons.FaLayerGroup to Color(0xFF12A89D)
         clean == "树洞" || clean == "情感" || clean == "病友" -> LinDoIcons.FaTree to Color(0xFF16B176)
         clean.contains("网盘") || clean.contains("夸克") || clean.contains("云盘") -> LinDoIcons.FaCloud to Color(0xFF38BDF8)
-        clean == "软件开发" || clean == "配置优化" || clean == "开源推广" || clean == "教程" || clean == "软件调试" ->
+        clean == "软件开发" || clean == "配置优化" || clean.contains("开源") || clean == "教程" || clean == "软件调试" || lower == "linux" ->
             LinDoIcons.FaCode to Color(0xFF32C3C3)
         clean == "网络安全" -> LinDoIcons.FaShieldHalved to Color(0xFF10B981)
-        lower in setOf("vps", "nas", "pt") || clean.contains("服务器") -> LinDoIcons.FaServer to Color(0xFF60A5FA)
+        lower in setOf("vps", "nas", "pt", "docker") || clean.contains("服务") -> LinDoIcons.FaServer to Color(0xFF60A5FA)
         clean in setOf("影视", "电影", "动漫") -> LinDoIcons.FaFilm to Color(0xFFBB8FCE)
         clean == "游戏" -> LinDoIcons.FaGamepad to Color(0xFFF472B6)
         clean in setOf("读书", "书籍") -> LinDoIcons.FaBook to Color(0xFFE0D900)
@@ -924,23 +924,43 @@ internal fun LinDoStatItem(
 @Composable
 internal fun LinDoTagChip(
     name: String,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
-    Box(
-        modifier = Modifier
-            .clip(LinDoTokens.ShapeXS)
-            .background(palette.subtleSurface)
+    val cleanTag = remember(name) { name.trim().removePrefix("#").trim() }
+    val tagVisual = remember(cleanTag) { resolveOfficialTagVisual(cleanTag) }
+    Row(
+        modifier = modifier
+            .heightIn(min = 46.dp)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        if (tagVisual != null) {
+            Icon(
+                imageVector = tagVisual.first,
+                contentDescription = null,
+                modifier = Modifier.size(13.5.dp),
+                tint = tagVisual.second
+            )
+        } else {
+            Icon(
+                imageVector = LinDoIcons.FaTag,
+                contentDescription = null,
+                modifier = Modifier.size(12.dp),
+                tint = palette.inkTertiary
+            )
+        }
         Text(
-            text = "#$name",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Normal,
-            color = palette.inkSecondary,
+            text = cleanTag,
+            fontSize = 13.5.sp,
+            fontWeight = FontWeight.Medium,
+            color = palette.inkPrimary,
             maxLines = 1,
-            softWrap = false
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
         )
     }
 }
@@ -3124,7 +3144,7 @@ internal fun CommunityHomeFeedPane(
     refreshUpToDateNotice: Boolean = false,
     pendingNewCount: Int = 0,
     enableAnimations: Boolean,
-    fontScale: Float = 1.0f,
+    fontScale: Float = 0.92f,
     isCompactFeed: Boolean = false,
     isAuthorized: Boolean,
     currentUser: AuthenticatedUserProfile?,
@@ -3475,7 +3495,7 @@ internal fun CommunityHomeFeedPane(
                     }
                 }
 
-                // 4. 可折叠纯文字分类筛选条（点击「分类」展开，选择版块或下滑列表时自动平滑收起）
+                // 4. 可折叠分类筛选条（点击「分类」展开，无底色带官方版块图标，选择版块或下滑列表时自动平滑收起）
                 AnimatedVisibility(visible = isCategoryBarExpanded) {
                     Row(
                         modifier = Modifier
@@ -3497,89 +3517,155 @@ internal fun CommunityHomeFeedPane(
                         )
 
                         LinuxDoRepository.categories.forEach { category ->
-                            val (_, catTextColor) = resolveMorandiCategoryColors(category.name, palette.isDark)
-                            GoogleM3FilterPill(
-                                label = category.name,
-                                dotColor = catTextColor,
-                                selected = selectedCategoryId == category.id,
-                                modifier = Modifier.heightIn(min = 36.dp),
-                                onClick = {
-                                    onSelectCategory(
-                                        if (selectedCategoryId == category.id) null else category.id
+                            val (catIcon, catColor, isRestricted) = remember(category.id, category.name, category.icon, category.readRestricted) {
+                                resolveOfficialCategoryVisual(
+                                    categoryName = category.name,
+                                    fallbackColor = LinuxDoSiteRules.parseHexColor(category.colorHex),
+                                    iconNameOverride = category.icon,
+                                    restrictedOverride = category.readRestricted
+                                )
+                            }
+                            val selected = selectedCategoryId == category.id
+                            Row(
+                                modifier = Modifier
+                                    .heightIn(min = 36.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        onSelectCategory(if (selected) null else category.id)
+                                        isCategoryBarExpanded = false
+                                    }
+                                    .padding(horizontal = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = catIcon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp),
+                                    tint = catColor
+                                )
+                                if (isRestricted) {
+                                    Icon(
+                                        imageVector = LinDoIcons.FaLock,
+                                        contentDescription = "受限版块",
+                                        modifier = Modifier.size(10.5.dp),
+                                        tint = if (selected) catColor else palette.inkSecondary
                                     )
-                                    isCategoryBarExpanded = false
                                 }
-                            )
+                                Text(
+                                    text = category.name,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (selected) catColor else palette.inkSecondary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
                 }
 
-                // 4.5 已选分类 / 已选 #Tag / 热门时间维度：单独一行展示，绝不挤占上方频道 Tab 栏
+                // 4.5 已选分类 / 已选 #Tag / 热门时间维度：单独一行无底色清爽展示，绝不挤占上方频道 Tab 栏
                 if (activeCategoryMeta != null || selectedTag != null || currentSort == FeedSortFilter.TOP) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (activeCategoryMeta != null) {
-                            val activeCatColor = resolveMorandiCategoryColors(activeCategoryMeta.name, palette.isDark).second
+                            val (activeCatIcon, activeCatColor, activeCatRestricted) = remember(
+                                activeCategoryMeta.id,
+                                activeCategoryMeta.name,
+                                activeCategoryMeta.icon,
+                                activeCategoryMeta.readRestricted
+                            ) {
+                                resolveOfficialCategoryVisual(
+                                    categoryName = activeCategoryMeta.name,
+                                    fallbackColor = LinuxDoSiteRules.parseHexColor(activeCategoryMeta.colorHex),
+                                    iconNameOverride = activeCategoryMeta.icon,
+                                    restrictedOverride = activeCategoryMeta.readRestricted
+                                )
+                            }
                             Row(
                                 modifier = Modifier
                                     .height(26.dp)
-                                    .clip(RoundedCornerShape(99.dp))
-                                    .background(palette.subtleSurface)
+                                    .clip(RoundedCornerShape(6.dp))
                                     .clickable(role = Role.Button, onClickLabel = "清除分类筛选") { onSelectCategory(null) }
-                                    .padding(horizontal = 10.dp),
+                                    .padding(horizontal = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(CircleShape)
-                                        .background(activeCatColor)
+                                Icon(
+                                    imageVector = activeCatIcon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp),
+                                    tint = activeCatColor
                                 )
+                                if (activeCatRestricted) {
+                                    Icon(
+                                        imageVector = LinDoIcons.FaLock,
+                                        contentDescription = "受限版块",
+                                        modifier = Modifier.size(10.5.dp),
+                                        tint = palette.inkSecondary
+                                    )
+                                }
                                 Text(
                                     text = activeCategoryMeta.name,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = activeCatColor,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.inkPrimary,
                                     maxLines = 1,
                                     softWrap = false
                                 )
                                 Icon(
                                     imageVector = LinDoIcons.Close,
                                     contentDescription = "清除分类筛选",
-                                    modifier = Modifier.size(12.5.dp),
-                                    tint = palette.inkSecondary
+                                    modifier = Modifier.size(12.dp),
+                                    tint = palette.inkTertiary
                                 )
                             }
                         }
 
                         if (selectedTag != null) {
+                            val cleanSelectedTag = remember(selectedTag) { selectedTag.trim().removePrefix("#").trim() }
+                            val tagVisual = remember(cleanSelectedTag) { resolveOfficialTagVisual(cleanSelectedTag) }
                             Row(
                                 modifier = Modifier
                                     .widthIn(max = 220.dp)
                                     .height(26.dp)
-                                    .clip(RoundedCornerShape(99.dp))
-                                    .background(palette.subtleSurface)
+                                    .clip(RoundedCornerShape(6.dp))
                                     .clickable(role = Role.Button, onClickLabel = "清除标签筛选") { onSelectTag(null) }
-                                    .padding(horizontal = 10.dp),
+                                    .padding(horizontal = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
+                                if (tagVisual != null) {
+                                    Icon(
+                                        imageVector = tagVisual.first,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp),
+                                        tint = tagVisual.second
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = LinDoIcons.FaTag,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(10.5.dp),
+                                        tint = palette.activeChipText
+                                    )
+                                }
                                 Text(
-                                    text = "#$selectedTag",
-                                    fontSize = 12.sp,
+                                    text = cleanSelectedTag,
+                                    fontSize = 12.5.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = palette.activeChipText,
+                                    color = palette.inkPrimary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Icon(LinDoIcons.Close, null, Modifier.size(12.5.dp), tint = palette.inkSecondary)
+                                Icon(LinDoIcons.Close, null, Modifier.size(12.dp), tint = palette.inkTertiary)
                             }
                         }
 
@@ -7168,15 +7254,15 @@ internal fun CommunityDiscoverScreen(
 ) {
     val palette = LocalPalette.current
     val categoryRows = remember(LinuxDoRepository.categories.size) {
-        LinuxDoRepository.categories.chunked(3)
+        LinuxDoRepository.categories.chunked(2)
     }
 
-    val popularTags = remember {
+    val popularTagRows = remember {
         listOf(
             "人工智能", "OpenAI", "Claude", "Docker",
             "Linux", "开源项目", "Cursor", "DeepSeek",
             "VPS", "自建服务", "福利", "抽奖"
-        )
+        ).chunked(2)
     }
 
     val ecoPortalRows = remember {
@@ -7217,7 +7303,7 @@ internal fun CommunityDiscoverScreen(
                 .background(palette.cardSurface),
             contentPadding = PaddingValues(bottom = 128.dp)
         ) {
-            // 1. 社区版块（3 列平铺，仅保留水平分割线，无垂直切线）
+            // 1. 社区版块（与发布/回复版块选择器完全一致的双列细分割线网格）
             item {
                 Column(
                     modifier = Modifier
@@ -7230,17 +7316,25 @@ internal fun CommunityDiscoverScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = LinDoTokens.PageHorizontalPadding),
+                                .padding(horizontal = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            rowCats.forEach { category ->
+                            rowCats.forEachIndexed { colIdx, category ->
                                 CategoryBentoCard(
                                     category = category,
                                     modifier = Modifier.weight(1f),
                                     onClick = { onSelectCategory(category.id) }
                                 )
+                                if (colIdx < 1) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(0.5.dp)
+                                            .height(22.dp)
+                                            .background(palette.hairline)
+                                    )
+                                }
                             }
-                            repeat(3 - rowCats.size) {
+                            if (rowCats.size == 1) {
                                 Spacer(modifier = Modifier.weight(1f))
                             }
                         }
@@ -7258,7 +7352,7 @@ internal fun CommunityDiscoverScreen(
                 }
             }
 
-            // 2. 热门标签（轻量芯片组 FlowRow，与版块/生态形成清晰视觉区分）
+            // 2. 热门标签（与发布/回复标签选择器完全一致的双列细分割线网格）
             item {
                 Column(
                     modifier = Modifier
@@ -7267,27 +7361,47 @@ internal fun CommunityDiscoverScreen(
                 ) {
                     LinDoSectionHeader(title = "热门标签")
 
-                    FlowRow(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        popularTags.forEach { tag ->
-                            LinDoTagChip(
-                                name = tag,
-                                onClick = { onSelectTag(tag) }
+                    popularTagRows.forEachIndexed { rowIdx, rowTags ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            rowTags.forEachIndexed { colIdx, tag ->
+                                LinDoTagChip(
+                                    name = tag,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { onSelectTag(tag) }
+                                )
+                                if (colIdx < 1) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(0.5.dp)
+                                            .height(22.dp)
+                                            .background(palette.hairline)
+                                    )
+                                }
+                            }
+                            if (rowTags.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
+                        if (rowIdx < popularTagRows.lastIndex) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = LinDoTokens.PageHorizontalPadding),
+                                thickness = 0.5.dp,
+                                color = palette.hairline
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
             }
 
-            // 3. 官方生态（双列平铺，仅保留水平分割线，无垂直切线）
+            // 3. 官方生态（双列细分割线网格）
             item {
                 Column(
                     modifier = Modifier
@@ -7300,10 +7414,10 @@ internal fun CommunityDiscoverScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = LinDoTokens.PageHorizontalPadding),
+                                .padding(horizontal = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            pair.forEach { entry ->
+                            pair.forEachIndexed { colIdx, entry ->
                                 DiscoverPortalCard(
                                     title = entry.title,
                                     subtitle = entry.subtitle,
@@ -7312,6 +7426,14 @@ internal fun CommunityDiscoverScreen(
                                     modifier = Modifier.weight(1f),
                                     onClick = { onOpenWebUrl(entry.url) }
                                 )
+                                if (colIdx < 1) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(0.5.dp)
+                                            .height(22.dp)
+                                            .background(palette.hairline)
+                                    )
+                                }
                             }
                             if (pair.size == 1) {
                                 Spacer(modifier = Modifier.weight(1f))
@@ -7351,21 +7473,21 @@ private fun DiscoverPortalCard(
     val palette = LocalPalette.current
     Row(
         modifier = modifier
-            .height(44.dp)
+            .heightIn(min = 46.dp)
             .clickable(onClick = onClick)
-            .padding(end = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = title,
-            modifier = Modifier.size(18.dp),
+            modifier = Modifier.size(16.dp),
             tint = iconTint
         )
-        Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = title,
-            fontSize = LinDoTokens.Sub,
+            fontSize = 13.5.sp,
             fontWeight = FontWeight.Medium,
             color = palette.inkPrimary,
             maxLines = 1,
@@ -7401,33 +7523,35 @@ private fun CategoryBentoCard(
 
     Row(
         modifier = modifier
-            .height(44.dp)
+            .heightIn(min = 46.dp)
             .clickable(onClick = onClick)
-            .padding(end = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Icon(
-            imageVector = categoryIcon,
-            contentDescription = category.name,
-            modifier = Modifier.size(16.dp),
-            tint = officialColor
-        )
-
-        if (isRestricted) {
-            Spacer(modifier = Modifier.width(4.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
             Icon(
-                imageVector = LinDoIcons.FaLock,
-                contentDescription = "受限版块",
-                modifier = Modifier.size(12.5.dp),
-                tint = palette.inkSecondary
+                imageVector = categoryIcon,
+                contentDescription = category.name,
+                modifier = Modifier.size(14.dp),
+                tint = officialColor
             )
+            if (isRestricted) {
+                Icon(
+                    imageVector = LinDoIcons.FaLock,
+                    contentDescription = "受限版块",
+                    modifier = Modifier.size(11.dp),
+                    tint = palette.inkSecondary
+                )
+            }
         }
-
-        Spacer(modifier = Modifier.width(8.dp))
 
         Text(
             text = category.name,
-            fontSize = LinDoTokens.Sub,
+            fontSize = 13.5.sp,
             fontWeight = FontWeight.Medium,
             color = palette.inkPrimary,
             maxLines = 1,
@@ -8060,9 +8184,8 @@ internal fun CommunityProfileScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
-                                    .background(palette.subtleSurface)
                                     .clickable { onOpenBadgesCenter() }
-                                    .padding(horizontal = 8.dp, vertical = 3.5.dp)
+                                    .padding(horizontal = 4.dp, vertical = 3.5.dp)
                             ) {
                                 Text(
                                     text = "全部 ${fullProfile.badgeCount.coerceAtLeast(fullProfile.badges.size)} 枚",
@@ -8202,8 +8325,8 @@ internal fun CommunityProfileScreen(
 
             // 3. 外观分组（主题配色、应用图标、首页列表视图、阅读字号、关于社区）
             item {
-                val nextScale = if (fontScale < 0.96f) 1.0f else if (fontScale < 1.05f) 1.10f else 0.92f
-                val scaleLabel = if (fontScale < 0.96f) "小字号" else if (fontScale < 1.05f) "标准" else "大字号"
+                val nextScale = if (fontScale < 0.885f) 0.92f else if (fontScale < 0.96f) 1.0f else 0.85f
+                val scaleLabel = if (fontScale < 0.885f) "小字号" else if (fontScale < 0.96f) "标准" else "大字号"
 
                 Column(
                     modifier = Modifier
@@ -8260,31 +8383,26 @@ internal fun CommunityProfileScreen(
                         )
                     }
 
-                    // 3.2 首页列表视图（精简紧凑单行分段切换）
+                    // 3.2 首页列表视图（无框细分割线切换）
                     LinDoSettingRow(
                         icon = if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
                         title = "首页列表视图",
                         onClick = onToggleCompactFeed,
                         trailing = {
+                            val feedOptions = listOf("宽松" to false, "紧凑" to true)
                             Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(8.dp))
-                                    .padding(2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
-                                listOf("宽松" to false, "紧凑" to true).forEach { (label, compactMode) ->
+                                feedOptions.forEachIndexed { idx, (label, compactMode) ->
                                     val selected = isCompactFeed == compactMode
                                     Box(
                                         modifier = Modifier
                                             .clip(LinDoTokens.ShapeXS)
-                                            .background(if (selected) palette.cardSurface else Color.Transparent)
                                             .clickable {
                                                 if (isCompactFeed != compactMode) onToggleCompactFeed()
                                             }
-                                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
@@ -8294,17 +8412,61 @@ internal fun CommunityProfileScreen(
                                             color = if (selected) palette.brandGold else palette.inkSecondary
                                         )
                                     }
+                                    if (idx < feedOptions.lastIndex) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(0.5.dp)
+                                                .height(12.dp)
+                                                .background(palette.hairline)
+                                        )
+                                    }
                                 }
                             }
                         }
                     )
 
-                    // 3.3 阅读字号
+                    // 3.3 阅读字号（小字号 0.85f / 标准 0.92f / 大字号 1.00f，无框细分割线切换）
                     LinDoSettingRow(
                         icon = LinDoIcons.Sliders,
                         title = "阅读字号",
-                        value = scaleLabel,
-                        onClick = { onChangeFontScale(nextScale) }
+                        onClick = { onChangeFontScale(nextScale) },
+                        trailing = {
+                            val scaleOptions = listOf(
+                                "小字号" to 0.85f,
+                                "标准" to 0.92f,
+                                "大字号" to 1.00f
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                scaleOptions.forEachIndexed { idx, (label, targetScale) ->
+                                    val selected = scaleLabel == label
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(LinDoTokens.ShapeXS)
+                                            .clickable { onChangeFontScale(targetScale) }
+                                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            fontSize = LinDoTokens.Meta,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (selected) palette.brandGold else palette.inkSecondary
+                                        )
+                                    }
+                                    if (idx < scaleOptions.lastIndex) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(0.5.dp)
+                                                .height(12.dp)
+                                                .background(palette.hairline)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     )
 
                     // 3.4 关于社区
@@ -9562,38 +9724,34 @@ internal fun LinDoMarkdownWorkbench(
                     activeSubPanel != WorkbenchSubPanel.EMOJI &&
                     activeSubPanel != WorkbenchSubPanel.MENTION &&
                     activeSubPanel != WorkbenchSubPanel.LINK
+                val moreToolsFg = when {
+                    !enabled -> palette.inkTertiary.copy(alpha = 0.4f)
+                    moreToolsActive -> palette.brandGold
+                    else -> palette.inkSecondary
+                }
                 Row(
                     modifier = Modifier
-                        .padding(horizontal = 4.dp)
-                        .height(32.dp)
+                        .padding(horizontal = 2.dp)
+                        .height(42.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(
-                            if (moreToolsActive) palette.brandGold.copy(alpha = 0.14f)
-                            else palette.subtleSurface
-                        )
-                        .border(
-                            width = 0.6.dp,
-                            color = if (moreToolsActive) palette.brandGold.copy(alpha = 0.6f) else palette.hairline,
-                            shape = RoundedCornerShape(8.dp)
-                        )
                         .clickable(enabled = enabled) {
                             openDrawerPanel(WorkbenchSubPanel.MORE_TOOLS)
                         }
-                        .padding(horizontal = 10.dp),
+                        .padding(horizontal = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Icon(
                         imageVector = LinDoIcons.AppsGrid,
                         contentDescription = "更多工具",
-                        modifier = Modifier.size(14.5.dp),
-                        tint = if (moreToolsActive) palette.brandGold else palette.inkPrimary
+                        modifier = Modifier.size(16.dp),
+                        tint = moreToolsFg
                     )
                     Text(
                         text = "工具",
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (moreToolsActive) palette.brandGold else palette.inkPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = moreToolsFg,
                         maxLines = 1
                     )
                 }
@@ -9956,7 +10114,6 @@ internal fun WorkbenchDrawerBottomSheet(
                             .padding(end = 8.dp)
                             .size(30.dp)
                             .clip(CircleShape)
-                            .background(palette.subtleSurface)
                             .clickable(onClick = onBackToMoreTools),
                         contentAlignment = Alignment.Center
                     ) {
@@ -9979,7 +10136,6 @@ internal fun WorkbenchDrawerBottomSheet(
                     modifier = Modifier
                         .size(30.dp)
                         .clip(CircleShape)
-                        .background(palette.subtleSurface)
                         .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center
                 ) {
@@ -10653,7 +10809,6 @@ internal fun WorkbenchDrawerBottomSheet(
                                                 .weight(1f)
                                                 .height(42.dp)
                                                 .clip(RoundedCornerShape(10.dp))
-                                                .background(palette.subtleSurface.copy(alpha = 0.55f))
                                                 .clickable {
                                                     val snippet = if (isCustomImage) {
                                                         ":${item.shortcode}: "
@@ -11272,48 +11427,53 @@ internal fun GlobalSearchModalSheet(
         ) {
             if (query.isBlank() && results.isEmpty() && !isSearching) {
                 item {
+                    val hotKeywordRows = remember {
+                        listOf(
+                            "Claude", "DeepSeek", "MCP", "人工智能",
+                            "Cursor", "开源项目", "Docker", "快问快答"
+                        ).chunked(2)
+                    }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                            .padding(vertical = 8.dp)
                     ) {
-                        Text(
-                            text = "热门搜索关键词",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkSecondary
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        val hotKeywords = listOf(
-                            "Claude", "DeepSeek", "MCP", "人工智能",
-                            "Cursor", "开源", "Docker", "快问快答"
-                        )
-                        @OptIn(ExperimentalLayoutApi::class)
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            hotKeywords.forEach { kw ->
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(palette.subtleSurface)
-                                        .clickable {
+                        LinDoSectionHeader(title = "热门搜索关键词")
+                        hotKeywordRows.forEachIndexed { rowIdx, rowKws ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                rowKws.forEachIndexed { colIdx, kw ->
+                                    LinDoTagChip(
+                                        name = kw,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = {
                                             query = kw
                                             performSearch(kw)
                                         }
-                                        .padding(horizontal = 11.dp, vertical = 5.5.dp)
-                                ) {
-                                    Text(
-                                        text = kw,
-                                        fontSize = 12.5.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = palette.inkPrimary,
-                                        maxLines = 1,
-                                        softWrap = false
                                     )
+                                    if (colIdx < 1) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(0.5.dp)
+                                                .height(22.dp)
+                                                .background(palette.hairline)
+                                        )
+                                    }
                                 }
+                                if (rowKws.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                            if (rowIdx < hotKeywordRows.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    thickness = 0.5.dp,
+                                    color = palette.hairline
+                                )
                             }
                         }
                     }
@@ -11359,9 +11519,6 @@ internal fun GlobalSearchModalSheet(
                     val catDotColor = remember(item.categoryColorHex) {
                         LinuxDoSiteRules.parseHexColor(item.categoryColorHex)
                     }
-                    val (_, catFg) = remember(item.categoryName, palette.isDark) {
-                        resolveMorandiCategoryColors(item.categoryName, palette.isDark)
-                    }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -11401,23 +11558,11 @@ internal fun GlobalSearchModalSheet(
                                 maxLines = 1,
                                 modifier = Modifier.weight(1f)
                             ) else Spacer(Modifier.weight(1f))
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.5.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(5.5.dp)
-                                        .clip(CircleShape)
-                                        .background(catDotColor)
-                                )
-                                Text(
-                                    text = item.categoryName,
-                                    fontSize = 11.2.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = catFg,
-                                    maxLines = 1,
-                                    softWrap = false
+                            if (item.categoryName.isNotBlank()) {
+                                LinDoCategoryLabel(
+                                    name = item.categoryName,
+                                    dotColor = catDotColor,
+                                    dotSize = 12.dp
                                 )
                             }
                         }
@@ -12700,24 +12845,11 @@ internal fun ProfileActivityRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             if (activity.categoryName.isNotBlank()) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.5.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(5.5.dp)
-                            .clip(CircleShape)
-                            .background(morandiFg)
-                    )
-                    Text(
-                        text = activity.categoryName,
-                        fontSize = 11.8.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = morandiFg,
-                        maxLines = 1
-                    )
-                }
+                LinDoCategoryLabel(
+                    name = activity.categoryName,
+                    dotColor = morandiFg,
+                    dotSize = 12.dp
+                )
             }
             if (showActionLabel && activity.actionLabel.isNotBlank()) {
                 Text(
@@ -13102,16 +13234,13 @@ private fun EditProfileModalSheet(
                         Row(
                             modifier = Modifier
                                 .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.subtleSurface)
-                                .border(0.6.dp, palette.hairline, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                                .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
                                 text = userTitle.ifBlank { "不佩戴头衔" },
-                                fontSize = 13.8.sp,
+                                fontSize = 14.5.sp,
                                 fontWeight = if (userTitle.isNotBlank()) FontWeight.SemiBold else FontWeight.Normal,
                                 color = if (userTitle.isNotBlank()) palette.inkPrimary else palette.inkSecondary,
                                 maxLines = 1,
