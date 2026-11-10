@@ -817,6 +817,7 @@ internal fun LinDoCategoryLabel(
     }
     val iconSize = if (dotSize < 10.dp) 12.5.dp else dotSize
     Row(
+        modifier = Modifier.height(22.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
@@ -837,6 +838,7 @@ internal fun LinDoCategoryLabel(
         Text(
             text = name,
             fontSize = 12.5.sp,
+            lineHeight = 14.sp,
             fontWeight = FontWeight.Normal,
             color = palette.inkSecondary,
             maxLines = 1,
@@ -856,10 +858,11 @@ internal fun LinDoTopicTagBadge(
     val chipBg = if (palette.isDark) Color(0xFF2B2D31) else Color(0xFFF0F2F5)
     Row(
         modifier = Modifier
+            .height(22.dp)
             .clip(RoundedCornerShape(4.dp))
             .background(chipBg)
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
+            .padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
@@ -1341,16 +1344,8 @@ internal fun LinDoApp(
                     put(effectiveCount, 1000)
                 }
             }
+            // 仅将已读批次入队到 ScreenTrackEngine，由后台 2s 轮询器在话题详情加载完成后平稳上报，避免点击瞬间与 fetchTopicDetail 并发抢占连接触发 429
             ScreenTrackEngine.consolidateBatch(topicId, 1000, timings)
-            scope.launch {
-                val batch = ScreenTrackEngine.popNextSendableBatch() ?: return@launch
-                var status: Int? = null
-                try {
-                    status = LinuxDoRepository.sendTopicTimings(batch)
-                } finally {
-                    ScreenTrackEngine.onBatchSendResult(batch, status)
-                }
-            }
         }
         topics = topics.map {
             if (it.id == topicId) it.copy(unseen = false, unreadPosts = 0, postsCount = maxOf(it.postsCount, seenPostsCount)) else it
@@ -1365,13 +1360,18 @@ internal fun LinDoApp(
 
     fun syncUserProfile(background: Boolean = false) {
         scope.launch {
+            if (background) {
+                delay(400L)
+            }
             val profile = LinuxDoRepository.fetchCurrentUserProfile(background = background)
             if (profile != null) {
                 fullUserProfile = profile
+                delay(1200L)
                 launch { runCatching { LinuxDoRepository.fetchUserBadges(profile.username) } }
             }
+            delay(1600L)
             launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
-            delay(1800L)
+            delay(2200L)
             launch { runCatching { LinuxDoRepository.syncSiteEmojis() } }
         }
     }
@@ -1746,9 +1746,11 @@ internal fun LinDoApp(
     }
 
     LaunchedEffect(Unit) {
-        launch { LinuxDoRepository.syncSiteCategories() }
-        launch { refreshDiscoverHotTopics() }
         loadTopics(FeedSortFilter.LATEST, null)
+        launch {
+            delay(600L)
+            LinuxDoRepository.syncSiteCategories()
+        }
         syncUserProfile(background = true)
     }
 
@@ -1766,7 +1768,7 @@ internal fun LinDoApp(
     // 实时新帖子推送检测（LIST-024：在首页静默检测是否有新发布或新回复的话题，有则在顶部弹出「查看 N 条新帖子动态」提示条）
     LaunchedEffect(currentTab, mobileShowingDetail, currentSort, selectedCategoryId, selectedTag, currentTopPeriod) {
         while (currentTab == MainTab.HOME && !mobileShowingDetail) {
-            delay(18_000L)
+            delay(45_000L)
             if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) continue
             if (!isLoadingTopics && !isLoadingMoreTopics && topics.isNotEmpty() && searchQuery.isBlank()) {
                 val fresh = try {
@@ -4230,6 +4232,7 @@ private fun CommunityTopicItem(
                 }
                 if (!excerptFetchDone && topic.id > 0 && !topic.pinned) {
                     LaunchedEffect(topic.id) {
+                        delay(140L)
                         val fetched = LinuxDoRepository.fetchTopicExcerpt(topic.id)
                         if (!fetched.isNullOrBlank()) {
                             resolvedExcerpt = fetched
@@ -5039,15 +5042,14 @@ internal fun CommunityTopicReaderPane(
                     FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        itemVerticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(modifier = Modifier.padding(vertical = 2.dp)) {
-                            LinDoCategoryLabel(
-                                name = resolvedCategoryName,
-                                dotColor = catColor,
-                                dotSize = 13.5.dp
-                            )
-                        }
+                        LinDoCategoryLabel(
+                            name = resolvedCategoryName,
+                            dotColor = catColor,
+                            dotSize = 13.dp
+                        )
 
                         allTopicTags.forEach { tag ->
                             LinDoTopicTagBadge(

@@ -889,6 +889,25 @@ object LinuxDoRepository {
         }
     }
 
+    private val rateLimitedUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val foregroundPriorityUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
+
+    private fun noteRateLimitHit(cooldownMs: Long = 8_000L) {
+        val until = System.currentTimeMillis() + cooldownMs
+        rateLimitedUntilMs.updateAndGet { prev -> maxOf(prev, until) }
+    }
+
+    internal fun isRateLimitedNow(): Boolean =
+        System.currentTimeMillis() < rateLimitedUntilMs.get()
+
+    internal fun markForegroundPriority(durationMs: Long = 2_200L) {
+        val until = System.currentTimeMillis() + durationMs
+        foregroundPriorityUntilMs.updateAndGet { prev -> maxOf(prev, until) }
+    }
+
+    private fun isForegroundPriorityActive(): Boolean =
+        System.currentTimeMillis() < foregroundPriorityUntilMs.get()
+
     /**
      * 统一 HTTP 执行器：
      * 1. 若平台已挂载 Chromium WebView 通道 (`webViewHttpExecutor`) 或 `webViewJsonFetcher`，优先走共享 TLS 指纹通道，天然携带 `cf_clearance`、`_t` 与 CSRF Token；
@@ -933,6 +952,7 @@ object LinuxDoRepository {
         // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
         if (!method.equals("GET", true) && !method.equals("HEAD", true) && UserApiKeyAuthManager.webViewHttpExecutor != null) {
             val writeResult = callWebView()
+            if (writeResult?.first == 429) noteRateLimitHit()
             return@withContext writeResult?.takeIf {
                 preserveFailure || isSuccessfulApiResponse(it.first, it.second)
             }
@@ -941,10 +961,11 @@ object LinuxDoRepository {
         // 只要平台已挂载同源 Chromium WebView 通道（Android），所有请求一律走 WebView BoringSSL 通道（内建无感重试），
         // 严禁回落至缺少 cf_clearance 且为 Java TLS 指纹的 OkHttp sharedClient，彻底杜绝触发 Cloudflare 403 风控！
         val isReadMethod = method.equals("GET", true) || method.equals("HEAD", true)
-        val maxReadAttempts = if (isReadMethod) 2 else 1
+        val maxReadAttempts = if (isReadMethod && mergedHeaders["Discourse-Background"] != "true") 2 else 1
         var firstBrowserResult: Pair<Int, String>? = null
         if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
             firstBrowserResult = callWebView()
+            if (firstBrowserResult?.first == 429) noteRateLimitHit()
             if (firstBrowserResult != null && isSuccessfulApiResponse(firstBrowserResult.first, firstBrowserResult.second)) {
                 if (mergedHeaders["Discourse-Background"] != "true") {
                     UserPresenceService.recordSuccessfulForegroundRequest()
@@ -983,6 +1004,7 @@ object LinuxDoRepository {
                 }
                 var status = response.status.value
                 var text = response.bodyAsText()
+                if (status == 429) noteRateLimitHit()
                 if (isMutation && status in setOf(403, 422) && text.contains("CSRF", ignoreCase = true) && hasWebCookie) {
                     val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
                     if (!freshCsrf.isNullOrBlank()) {
@@ -1022,7 +1044,8 @@ object LinuxDoRepository {
                 // A read can safely fall back to the existing authenticated browser transport.
             }
             if (attempt < maxReadAttempts - 1) {
-                kotlinx.coroutines.delay(300L * (attempt + 1))
+                val backoffMs = if (lastResponse?.first == 429) 1200L else 350L * (attempt + 1)
+                kotlinx.coroutines.delay(backoffMs)
             }
         }
         val browserResult = firstBrowserResult ?: callWebView()
@@ -1127,13 +1150,20 @@ object LinuxDoRepository {
         if (page > 0) {
             queryParams.add("page=$page")
         }
+        if (!background) {
+            markForegroundPriority(2_200L)
+        }
         val sep = if (basePath.contains("?")) "&" else "?"
         val url = "https://linux.do/${basePath.trimStart('/')}$sep${queryParams.joinToString("&")}"
         val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         val root = readApiObject(executeHttp(url = url, extraHeaders = headers, preserveFailure = true))
         (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
         val initialList = parseTopicListRoot(root)
-        hydrateFirstScreenExcerptsAndPrefetchRest(initialList)
+        if (background || UserApiKeyAuthManager.uiCompactFeed || isRateLimitedNow()) {
+            initialList
+        } else {
+            hydrateFirstScreenExcerptsAndPrefetchRest(initialList)
+        }
     }
 
     /**
@@ -1150,6 +1180,7 @@ object LinuxDoRepository {
         filterUsername: String? = null,
         targetPostNumber: Int? = null
     ): TopicDetailModel = withContext(Dispatchers.IO) {
+        markForegroundPriority(2_600L)
         val s = summaryFallback
         if (topicId <= 0) {
             return@withContext TopicDetailModel(
@@ -1249,6 +1280,7 @@ object LinuxDoRepository {
         knownAuthorBadges: Map<Int, List<GrantedBadge>>
     ): List<PostItemModel> = withContext(Dispatchers.IO) {
         if (postIds.isEmpty()) return@withContext emptyList()
+        markForegroundPriority(2_200L)
         val query = postIds.take(20).joinToString("&") { "post_ids[]=$it" }
         val url = "https://linux.do/t/$topicId/posts.json?$query"
         try {
@@ -1601,17 +1633,43 @@ object LinuxDoRepository {
         true
     }
 
+    private val consolidatedCountExtractRegex = Regex(
+        """^(\d+)\s*(?:个|条|位|次)?\s*(?:新)?(?:回复|消息|用户|人|发言|赞|replies|users|messages|notifications).*$""",
+        RegexOption.IGNORE_CASE
+    )
+
     /**
      * 拉取当前登录用户的通知列表 (`/notifications.json?offset={offset}&limit=60&silent=true`)
      */
     suspend fun fetchUserNotifications(offset: Int = 0): List<UserNotificationItem> = withContext(Dispatchers.IO) {
+        markForegroundPriority(1_800L)
         val cleanOffset = offset.coerceAtLeast(0)
         val res = executeHttp("https://linux.do/notifications.json?offset=$cleanOffset&limit=60&silent=true", method = "GET", preserveFailure = true)
             ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
             val arr = root["notifications"] as? JsonArray ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
-            arr.mapNotNull { elem ->
+            // 第一遍扫描：将当前响应中已携带真实头像模板的用户写入缓存，以便同列表中的合并通知立即命中头像
+            arr.forEach { elem ->
+                val obj = elem as? JsonObject ?: return@forEach
+                val dataObj = obj["data"] as? JsonObject
+                val tpl = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: return@forEach
+                val candidateNames = listOfNotNull(
+                    dataObj?.get("original_username")?.jsonPrimitive?.contentOrNull,
+                    dataObj?.get("username")?.jsonPrimitive?.contentOrNull,
+                    dataObj?.get("display_username")?.jsonPrimitive?.contentOrNull,
+                    obj["acting_user_name"]?.jsonPrimitive?.contentOrNull
+                )
+                candidateNames.firstOrNull { name ->
+                    val trimmed = name.trim()
+                    trimmed.isNotEmpty() && trimmed != "系统" && !consolidatedCountExtractRegex.matches(trimmed)
+                }?.let { validUser ->
+                    cacheUserAvatar(validUser, tpl)
+                }
+            }
+            val parsedItems = arr.mapNotNull { elem ->
                 val obj = elem as? JsonObject ?: return@mapNotNull null
                 val id = obj["id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
                 val nType = obj["notification_type"]?.jsonPrimitive?.intOrNull ?: 0
@@ -1621,21 +1679,33 @@ object LinuxDoRepository {
                 val postNumber = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
                 val slug = obj["slug"]?.jsonPrimitive?.contentOrNull ?: ""
                 val dataObj = obj["data"] as? JsonObject
-                val consolidatedReplies = if (nType == 2) dataObj?.get("consolidated_count")?.jsonPrimitive?.intOrNull else null
-                val count = consolidatedReplies ?: dataObj?.get("count")?.jsonPrimitive?.intOrNull
+                val rawDisplayUsername = dataObj?.get("display_username")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                val consolidatedMatch = rawDisplayUsername?.let { consolidatedCountExtractRegex.find(it) }
+                val parsedConsolidatedCount = consolidatedMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val consolidatedReplies = if (nType == 2 || nType == 9) dataObj?.get("consolidated_count")?.jsonPrimitive?.intOrNull else null
+                val count = consolidatedReplies
+                    ?: dataObj?.get("count")?.jsonPrimitive?.intOrNull
                     ?: dataObj?.get("inbox_count")?.jsonPrimitive?.intOrNull
+                    ?: parsedConsolidatedCount
                     ?: 0
                 val badgeId = dataObj?.get("badge_id")?.jsonPrimitive?.intOrNull ?: 0
                 val badgeName = dataObj?.get("badge_name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                 val chatChannelId = dataObj?.get("chat_channel_id")?.jsonPrimitive?.intOrNull ?: 0
-                val primaryActor = dataObj?.get("display_username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                    ?: dataObj?.get("username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                    ?: dataObj?.get("original_username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                    ?: dataObj?.get("mentioned_by_username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                    ?: obj["acting_user_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val nonConsolidatedDisplayUsername = rawDisplayUsername?.takeIf { consolidatedMatch == null }
+                val primaryActor = nonConsolidatedDisplayUsername
+                    ?: dataObj?.get("original_username")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() && !consolidatedCountExtractRegex.matches(it) }
+                    ?: dataObj?.get("username")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() && !consolidatedCountExtractRegex.matches(it) }
+                    ?: dataObj?.get("mentioned_by_username")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+                    ?: obj["acting_user_name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() && !consolidatedCountExtractRegex.matches(it) }
                     ?: "系统"
-                val secondActor = dataObj?.get("username2")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                val actor = if (secondActor != null && secondActor != primaryActor) "$primaryActor、$secondActor" else primaryActor
+                val secondActor = dataObj?.get("username2")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf {
+                    it.isNotEmpty() && !consolidatedCountExtractRegex.matches(it)
+                }
+                val actor = if (secondActor != null && secondActor != primaryActor && primaryActor != "系统") {
+                    "$primaryActor、$secondActor"
+                } else {
+                    primaryActor
+                }
                 val cleanFancyTitle = obj["fancy_title"]?.jsonPrimitive?.contentOrNull
                     ?.takeIf { it.isNotBlank() }
                     ?.replace(Regex("<[^>]+>"), "")
@@ -1669,8 +1739,11 @@ object LinuxDoRepository {
                     topicId > 0 -> "话题 #$topicId"
                     else -> ""
                 }
-                val actingAvatarTemplate = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull
-                    ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull
+                val primaryActorUsername = primaryActor.takeIf { it != "系统" }
+                val actingAvatarTemplate = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("original_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: primaryActorUsername?.let { getCachedUserAvatar(it) }
                 val excerpt = cleanSearchSnippet(rawExcerpt)
                 UserNotificationItem(
                     id = id,
@@ -1689,6 +1762,28 @@ object LinuxDoRepository {
                     badgeName = badgeName,
                     chatChannelId = chatChannelId
                 )
+            }
+            val missingAvatarUsers = parsedItems
+                .filter { it.actingAvatarTemplate.isNullOrBlank() && it.actorUsername != null }
+                .mapNotNull { it.actorUsername }
+                .distinctBy { it.lowercase() }
+                .take(4)
+            if (missingAvatarUsers.isNotEmpty() && !isRateLimitedNow()) {
+                withTimeoutOrNull(1400L) {
+                    coroutineScope {
+                        missingAvatarUsers.map { uname ->
+                            async { resolveUserAvatarTemplate(uname) }
+                        }.awaitAll()
+                    }
+                }
+            }
+            parsedItems.map { item ->
+                if (!item.actingAvatarTemplate.isNullOrBlank()) {
+                    item
+                } else {
+                    val resolved = item.actorUsername?.let { getCachedUserAvatar(it) }
+                    if (!resolved.isNullOrBlank()) item.copy(actingAvatarTemplate = resolved) else item
+                }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -2887,6 +2982,7 @@ object LinuxDoRepository {
         val username = pObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$userId"
         val displayName = pObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
         val avatarTemplate = pObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
+        cacheUserAvatar(username, avatarTemplate)
         val animatedAvatar = pObj["animated_avatar"]?.jsonPrimitive?.contentOrNull
         val primaryGroupName = pObj["primary_group_name"]?.jsonPrimitive?.contentOrNull
         val userTitle = pObj["user_title"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
@@ -3077,11 +3173,14 @@ object LinuxDoRepository {
         (root["users"] as? JsonArray)?.forEach { elem ->
             val uObj = elem as? JsonObject ?: return@forEach
             val id = uObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            val uname = uObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$id"
+            val avatarTpl = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
+            cacheUserAvatar(uname, avatarTpl)
             usersMap[id] = TopicUser(
                 id = id,
-                username = uObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$id",
+                username = uname,
                 name = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
-                avatarTemplate = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: "",
+                avatarTemplate = avatarTpl,
                 animatedAvatar = uObj["animated_avatar"]?.jsonPrimitive?.contentOrNull,
                 primaryGroupName = uObj["primary_group_name"]?.jsonPrimitive?.contentOrNull,
                 flairName = uObj["flair_name"]?.jsonPrimitive?.contentOrNull,
@@ -3155,10 +3254,75 @@ object LinuxDoRepository {
         }
     }
 
+    private val userAvatarCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val inFlightAvatarJobs = java.util.concurrent.ConcurrentHashMap<String, Deferred<String?>>()
+
+    fun cacheUserAvatar(username: String?, avatarTemplate: String?) {
+        val cleanName = username?.trim()?.lowercase()?.takeIf {
+            it.isNotEmpty() && it != "系统" && !consolidatedCountExtractRegex.matches(it)
+        } ?: return
+        val cleanTpl = avatarTemplate?.trim()?.takeIf { it.isNotEmpty() } ?: return
+        userAvatarCache[cleanName] = cleanTpl
+    }
+
+    fun getCachedUserAvatar(username: String): String? {
+        val key = username.trim().lowercase().takeIf { it.isNotEmpty() } ?: return null
+        return userAvatarCache[key]?.takeIf { it.isNotBlank() }
+    }
+
+    suspend fun resolveUserAvatarTemplate(username: String): String? = withContext(Dispatchers.IO) {
+        val clean = username.trim().takeIf {
+            it.isNotEmpty() && it != "系统" && !consolidatedCountExtractRegex.matches(it)
+        } ?: return@withContext null
+        getCachedUserAvatar(clean)?.let { return@withContext it }
+        if (isRateLimitedNow()) return@withContext null
+        val key = clean.lowercase()
+        inFlightAvatarJobs[key]?.let { existing ->
+            if (existing.isActive || existing.isCompleted) return@withContext existing.await()
+        }
+        val deferred = excerptPrefetchScope.async {
+            try {
+                excerptFetchSemaphore.withPermit {
+                    getCachedUserAvatar(clean)?.let { return@withPermit it }
+                    if (isRateLimitedNow()) return@withPermit null
+                    if (isForegroundPriorityActive()) {
+                        kotlinx.coroutines.delay(250L)
+                    }
+                    val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
+                    val bgHeaders = mapOf("Discourse-Background" to "true")
+                    val res = executeHttp("https://linux.do/u/$encoded/card.json", method = "GET", extraHeaders = bgHeaders)
+                        ?: executeHttp("https://linux.do/u/$encoded.json", method = "GET", extraHeaders = bgHeaders)
+                    val body = res?.second
+                    if (res != null && res.first in 200..299 && body != null && body.trimStart().startsWith("{")) {
+                        val tpl = runCatching {
+                            val root = json.parseToJsonElement(body).jsonObject
+                            val uObj = (root["user"] as? JsonObject) ?: root
+                            uObj["avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        }.getOrNull()
+                        if (!tpl.isNullOrBlank()) {
+                            cacheUserAvatar(clean, tpl)
+                            return@withPermit tpl
+                        }
+                    }
+                    null
+                }
+            } finally {
+                inFlightAvatarJobs.remove(key)
+            }
+        }
+        val prev = inFlightAvatarJobs.putIfAbsent(key, deferred)
+        if (prev != null && (prev.isActive || prev.isCompleted)) {
+            deferred.cancel()
+            return@withContext prev.await()
+        }
+        deferred.await()
+    }
+
     private val topicExcerptCache = java.util.concurrent.ConcurrentHashMap<Int, String>()
     private val inFlightExcerptJobs = java.util.concurrent.ConcurrentHashMap<Int, Deferred<String?>>()
     private val excerptPrefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val excerptFetchSemaphore = Semaphore(8)
+    // 限制后台摘要补全最大并发为 2（原为 8），彻底杜绝首屏瞬间突发 18+ 请求打满 WebView 连接池并触发 Linux.do 429 限流
+    private val excerptFetchSemaphore = Semaphore(2)
 
     fun hasCachedTopicExcerpt(topicId: Int): Boolean =
         topicId > 0 && topicExcerptCache.containsKey(topicId)
@@ -3173,20 +3337,18 @@ object LinuxDoRepository {
     }
 
     /**
-     * 首屏并发行内预水合（有界等待 420ms 尽量随列表一次性对齐返回）+ 后续条目后台静默预热缓存。
-     * 未在 420ms 内完成的条目会在 UI 层由等高 2 行骨架屏无缝承接并在后台继续完成。
+     * 首屏轻量预水合（仅对首屏前 4 条缺失摘要的非置顶话题做有界 240ms 预热，其余条目随列表滚动按需防抖加载），
+     * 避免一次性发起 18 条后台请求导致点击帖子时触发 HTTP 429（「请求太频繁，请稍后再试」）。
      */
     private suspend fun hydrateFirstScreenExcerptsAndPrefetchRest(topics: List<TopicSummary>): List<TopicSummary> {
+        if (isRateLimitedNow() || UserApiKeyAuthManager.uiCompactFeed) return topics
         val missingTopics = topics.filter { !it.pinned && it.id > 0 && it.excerpt.isNullOrBlank() && !topicExcerptCache.containsKey(it.id) }
         if (missingTopics.isEmpty()) return topics
 
-        val firstScreenIds = missingTopics.take(6).map { it.id }
-        val backgroundIds = missingTopics.drop(6).take(12).map { it.id }
-
+        val firstScreenIds = missingTopics.take(4).map { it.id }
         firstScreenIds.forEach { tid -> startExcerptFetchAsync(tid) }
-        backgroundIds.forEach { tid -> startExcerptFetchAsync(tid) }
 
-        withTimeoutOrNull(420L) {
+        withTimeoutOrNull(240L) {
             firstScreenIds.mapNotNull { inFlightExcerptJobs[it] }.awaitAll()
         }
 
@@ -3247,14 +3409,15 @@ object LinuxDoRepository {
 
     /**
      * 按需静默补全话题一楼纯文本摘要：
-     * 优先请求轻量级单帖接口 `/posts/by_number/{topicId}/1.json`（仅约 2KB，比 `/t/{topicId}.json` 小 50 倍且天然不计入阅读），
-     * 失败时回退至 `/t/{topicId}.json?track_visit=false`，全程携带 `Discourse-Background: true`。
+     * 仅请求轻量级单帖接口 `/posts/by_number/{topicId}/1.json`（仅约 2KB，天然不计入阅读），
+     * 若遇前台点击导航或 429 冷却期自动退让，且绝不回退请求重型 `/t/{topicId}.json` 接口。
      */
     suspend fun fetchTopicExcerpt(topicId: Int): String? = withContext(Dispatchers.IO) {
         if (topicId <= 0) return@withContext null
         topicExcerptCache[topicId]?.let { cached ->
             return@withContext cached.takeIf { it.isNotBlank() }
         }
+        if (isRateLimitedNow()) return@withContext null
         startExcerptFetchAsync(topicId).await()
     }
 
@@ -3262,42 +3425,39 @@ object LinuxDoRepository {
         topicExcerptCache[topicId]?.let { cached ->
             return cached.takeIf { it.isNotBlank() }
         }
+        if (isRateLimitedNow()) return null
         return excerptFetchSemaphore.withPermit {
             topicExcerptCache[topicId]?.let { cached ->
                 return@withPermit cached.takeIf { it.isNotBlank() }
             }
+            if (isRateLimitedNow()) return@withPermit null
+            if (isForegroundPriorityActive()) {
+                kotlinx.coroutines.delay(320L)
+                if (isRateLimitedNow()) return@withPermit null
+            }
             val bgHeaders = mapOf("Discourse-Background" to "true")
             val fastUrl = "https://linux.do/posts/by_number/" + topicId.toString() + "/1.json"
             val fastRes = executeHttp(url = fastUrl, method = "GET", extraHeaders = bgHeaders)
+            val statusCode = fastRes?.first ?: 0
+            if (statusCode == 429) {
+                noteRateLimitHit()
+                return@withPermit null
+            }
             val fastBody = fastRes?.second
-            if (fastRes != null && fastRes.first in 200..299 && fastBody != null && fastBody.trimStart().startsWith("{")) {
+            if (statusCode in 200..299 && fastBody != null && fastBody.trimStart().startsWith("{")) {
                 val fastExtracted = runCatching {
                     val root = json.parseToJsonElement(fastBody).jsonObject
                     val cooked = root["cooked"]?.jsonPrimitive?.contentOrNull
                     extractPlainExcerptFromHtml(cooked)
                 }.getOrDefault("")
-                if (fastExtracted.isNotBlank()) {
-                    topicExcerptCache[topicId] = fastExtracted
-                    return@withPermit fastExtracted
-                }
+                topicExcerptCache[topicId] = fastExtracted
+                kotlinx.coroutines.delay(80L)
+                return@withPermit fastExtracted.takeIf { it.isNotBlank() }
             }
-
-            val fallbackUrl = "https://linux.do/t/" + topicId.toString() + ".json?track_visit=false"
-            val res = executeHttp(url = fallbackUrl, method = "GET", extraHeaders = bgHeaders)
-            val statusCode = res?.first ?: 0
-            val body = res?.second
-            if (statusCode in 200..299 && body != null && body.trimStart().startsWith("{")) {
-                val extracted = runCatching {
-                    val root = json.parseToJsonElement(body).jsonObject
-                    val postsArr = (root["post_stream"] as? JsonObject)?.get("posts") as? JsonArray
-                    val firstPost = postsArr?.firstOrNull() as? JsonObject
-                    val cooked = firstPost?.get("cooked")?.jsonPrimitive?.contentOrNull
-                        ?: root["excerpt"]?.jsonPrimitive?.contentOrNull
-                    extractPlainExcerptFromHtml(cooked)
-                }.getOrDefault("")
-                topicExcerptCache[topicId] = extracted
-                return@withPermit extracted.takeIf { it.isNotBlank() }
+            if (statusCode in listOf(403, 404, 410)) {
+                topicExcerptCache[topicId] = ""
             }
+            kotlinx.coroutines.delay(80L)
             null
         }
     }

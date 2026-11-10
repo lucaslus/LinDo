@@ -17,9 +17,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
@@ -32,6 +37,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import do_.linux.lindo.core.model.UserNotificationItem
+import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.ui.components.LinDoIcons
 import do_.linux.lindo.ui.components.SmartAvatar
 
@@ -67,11 +73,33 @@ internal fun LinDoNotificationRow(
 ) {
     val palette = LocalPalette.current
     val actor = item.actorUsername
+    val initialAvatarTemplate = remember(actor, item.actingAvatarTemplate) {
+        item.actingAvatarTemplate?.takeIf { it.isNotBlank() }
+            ?: actor?.let { LinuxDoRepository.getCachedUserAvatar(it) }
+    }
+    var resolvedAvatarTemplate by remember(actor, initialAvatarTemplate) {
+        mutableStateOf(initialAvatarTemplate)
+    }
+    var avatarResolveDone by remember(actor, initialAvatarTemplate) {
+        mutableStateOf(actor == null || !initialAvatarTemplate.isNullOrBlank())
+    }
+    if (actor != null && resolvedAvatarTemplate.isNullOrBlank() && !avatarResolveDone) {
+        LaunchedEffect(actor) {
+            val fetched = LinuxDoRepository.resolveUserAvatarTemplate(actor)
+            if (!fetched.isNullOrBlank()) {
+                resolvedAvatarTemplate = fetched
+            }
+            avatarResolveDone = true
+        }
+    }
     val activity = remember(item, actor, palette.inkPrimary) {
         buildAnnotatedString {
             if (actor != null) {
+                val displayActor = item.actingUsername
+                    .takeUnless { UserNotificationItem.CONSOLIDATED_NOTIFICATION_ACTOR_REGEX.matches(it.trim()) }
+                    ?: actor
                 withStyle(SpanStyle(color = palette.inkPrimary, fontWeight = FontWeight.SemiBold)) {
-                    append(item.actingUsername)
+                    append(displayActor)
                 }
                 append(" ")
             }
@@ -97,21 +125,30 @@ internal fun LinDoNotificationRow(
             ),
             contentAlignment = Alignment.Center
         ) {
-            if (actor != null) {
+            if (actor != null && (!resolvedAvatarTemplate.isNullOrBlank() || !avatarResolveDone)) {
                 SmartAvatar(
                     username = actor,
-                    avatarTemplate = item.actingAvatarTemplate,
+                    avatarTemplate = resolvedAvatarTemplate,
                     animatedAvatar = null,
                     size = 36.dp,
                     enableAnimations = false
                 )
             } else {
                 val icon = when {
-                    item.isGroupedReply -> LinDoIcons.MessageCircle
-                    item.badgeId > 0 -> LinDoIcons.AwardBadge
+                    item.isGroupedReply || item.notificationType in setOf(1, 2, 3, 6, 9, 29, 30, 33) -> LinDoIcons.MessageCircle
+                    item.badgeId > 0 || item.notificationType == 12 -> LinDoIcons.AwardBadge
+                    item.notificationType in setOf(5, 19, 25) -> LinDoIcons.Heart
                     else -> LinDoIcons.Bell
                 }
-                Icon(icon, contentDescription = null, modifier = Modifier.size(21.dp), tint = palette.inkSecondary)
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(palette.subtleSurface),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp), tint = palette.inkSecondary)
+                }
             }
         }
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {

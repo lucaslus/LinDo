@@ -836,10 +836,12 @@ class MainActivity : ComponentActivity() {
                         }
                         return o;
                     }
-                    const maxFetchAttempts = isRead ? 2 : 1;
+                    const isBg = hdrs['Discourse-Background'] === 'true';
+                    const maxFetchAttempts = (isRead && !isBg) ? 3 : 1;
                     let resp = null;
                     let text = '';
                     for (let attempt = 0; attempt < maxFetchAttempts; attempt++) {
+                        let waitMs = 450 * (attempt + 1);
                         try {
                             resp = await fetch(targetUrl, buildOpts());
                             text = await resp.text();
@@ -847,12 +849,20 @@ class MainActivity : ComponentActivity() {
                             if (!transientStatus || attempt === maxFetchAttempts - 1) {
                                 break;
                             }
+                            if (resp.status === 429) {
+                                const retryAfterSec = parseInt(resp.headers.get('Retry-After') || '', 10);
+                                if (!isNaN(retryAfterSec) && retryAfterSec > 0) {
+                                    waitMs = Math.min(Math.max(retryAfterSec * 1000, 1100), 2800);
+                                } else {
+                                    waitMs = 1200 * (attempt + 1);
+                                }
+                            }
                         } catch (fetchErr) {
                             if (attempt === maxFetchAttempts - 1) {
                                 throw fetchErr;
                             }
                         }
-                        await new Promise(r => setTimeout(r, 200));
+                        await new Promise(r => setTimeout(r, waitMs));
                     }
                     if (!isRead && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token|bad csrf/i.test(text)) {
                         window.__lindoCsrf = null;
