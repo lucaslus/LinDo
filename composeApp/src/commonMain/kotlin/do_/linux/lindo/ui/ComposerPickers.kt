@@ -113,6 +113,12 @@ internal fun ComposerCategoryPicker(
                             group.forEachIndexed { colIdx, category ->
                                 val selected = selectedId == category.id
                                 val dotColor = LinuxDoSiteRules.parseHexColor(category.colorHex)
+                                val (catIcon, officialColor, isRestricted) = resolveOfficialCategoryVisual(
+                                    categoryName = category.name,
+                                    fallbackColor = dotColor,
+                                    iconNameOverride = category.icon,
+                                    restrictedOverride = category.readRestricted
+                                )
                                 Row(
                                     modifier = Modifier
                                         .weight(1f)
@@ -126,13 +132,22 @@ internal fun ComposerCategoryPicker(
                                         }
                                         .padding(horizontal = 10.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(7.5.dp)
-                                            .background(dotColor, CircleShape)
+                                    Icon(
+                                        imageVector = catIcon,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                        tint = officialColor
                                     )
+                                    if (isRestricted) {
+                                        Icon(
+                                            imageVector = LinDoIcons.FaLock,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(11.dp),
+                                            tint = palette.inkSecondary
+                                        )
+                                    }
                                     Text(
                                         text = category.name,
                                         color = if (selected) palette.brandGold else palette.inkPrimary,
@@ -442,6 +457,7 @@ internal fun ComposerTagPicker(
                                         group.forEachIndexed { colIdx, option ->
                                             val checked = option.name in selected
                                             val canClick = enabled && (checked || (!option.disabled && selected.size < limit))
+                                            val tagVisual = resolveOfficialTagVisual(option.name)
                                             Row(
                                                 modifier = Modifier
                                                     .weight(1f)
@@ -457,18 +473,27 @@ internal fun ComposerTagPicker(
                                                     ) { onToggle(option) }
                                                     .padding(horizontal = 10.dp, vertical = 10.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                                             ) {
-                                                Text(
-                                                    text = "#",
-                                                    color = when {
-                                                        checked -> palette.brandGold
-                                                        option.disabled -> palette.inkTertiary.copy(alpha = 0.45f)
-                                                        else -> palette.inkTertiary
-                                                    },
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 13.5.sp
-                                                )
+                                                if (tagVisual != null) {
+                                                    Icon(
+                                                        imageVector = tagVisual.first,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(13.dp),
+                                                        tint = if (option.disabled) palette.inkTertiary.copy(alpha = 0.45f) else tagVisual.second
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        imageVector = LinDoIcons.FaTag,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(11.5.dp),
+                                                        tint = when {
+                                                            checked -> palette.brandGold
+                                                            option.disabled -> palette.inkTertiary.copy(alpha = 0.45f)
+                                                            else -> palette.inkTertiary
+                                                        }
+                                                    )
+                                                }
                                                 Text(
                                                     text = option.name,
                                                     color = when {

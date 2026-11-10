@@ -50,6 +50,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import do_.linux.lindo.ui.LocalLinDoAnimations
 import do_.linux.lindo.ui.LocalLinDoDarkTheme
+import do_.linux.lindo.ui.LocalPalette
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -106,10 +107,12 @@ fun SmartAvatar(
     } else rememberUpdatedState(0.25f)
 
     val hasAnimated = !animatedUrl.isNullOrBlank()
-    val fallbackColor = remember(username) { avatarFallbackColor(username) }
+    val palette = LocalPalette.current
     androidx.compose.runtime.key(username, staticUrl, animatedUrl) {
         var animatedReady by remember { mutableStateOf(false) }
-        var staticLoaded by remember { mutableStateOf(false) }
+        var staticLoaded by remember {
+            mutableStateOf(staticUrl.isNotEmpty() && staticUrl in loadedStaticAvatarUrls)
+        }
 
         Box(
             modifier = modifier.size(size).then(
@@ -125,22 +128,18 @@ fun SmartAvatar(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(shape)
-                    .background(if (staticLoaded || animatedReady) Color.Transparent else fallbackColor.copy(alpha = 0.22f))
                     .border(
                         width = 0.5.dp,
-                        color = Color(0x14000000),
+                        color = palette.hairline,
                         shape = shape
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 if (staticUrl.isEmpty() || (!staticLoaded && !animatedReady)) {
-                    val letterSp = (size.value * 0.42f).sp
-                    Text(
-                        text = username.firstOrNull()?.uppercase() ?: "L",
-                        color = fallbackColor,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = letterSp,
-                        lineHeight = letterSp
+                    AvatarSkeletonPlaceholder(
+                        isDark = palette.isDark,
+                        baseTint = palette.inkSecondary,
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
 
@@ -149,8 +148,22 @@ fun SmartAvatar(
                         model = staticUrl,
                         contentDescription = username,
                         contentScale = ContentScale.Crop,
-                        onSuccess = { if (!staticLoaded) staticLoaded = true },
-                        modifier = Modifier.fillMaxSize()
+                        onLoading = {
+                            if (staticUrl !in loadedStaticAvatarUrls) {
+                                staticLoaded = false
+                            }
+                        },
+                        onSuccess = {
+                            rememberLoadedAvatarUrl(staticUrl)
+                            if (!staticLoaded) staticLoaded = true
+                        },
+                        onError = {
+                            loadedStaticAvatarUrls.remove(staticUrl)
+                            staticLoaded = false
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .alpha(if (staticLoaded) 1f else 0f)
                     )
                 }
 
@@ -388,17 +401,50 @@ fun UniversalBadgeChip(
     }
 }
 
-private fun avatarFallbackColor(username: String): Color {
-    val palette = listOf(
-        Color(0xFFF59E0B),
-        Color(0xFF60A5FA),
-        Color(0xFFA78BFA),
-        Color(0xFF34D399),
-        Color(0xFFF472B6),
-        Color(0xFF38BDF8)
+@Composable
+private fun AvatarSkeletonPlaceholder(
+    isDark: Boolean,
+    baseTint: Color,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "avatarSkeleton")
+    val pulsePhase by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 750, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "avatarSkeletonPhase"
     )
-    val idx = (username.hashCode() and 0x7FFFFFFF) % palette.size
-    return palette[idx]
+    val baseAlpha = if (isDark) 0.08f else 0.06f
+    val peakAlpha = if (isDark) 0.17f else 0.13f
+    val lowColor = baseTint.copy(alpha = baseAlpha)
+    val highColor = baseTint.copy(alpha = baseAlpha + (peakAlpha - baseAlpha) * pulsePhase)
+
+    Box(
+        modifier = modifier.drawWithCache {
+            val brush = Brush.linearGradient(
+                colors = listOf(lowColor, highColor, lowColor),
+                start = Offset.Zero,
+                end = Offset(size.width, size.height)
+            )
+            onDrawBehind {
+                drawRect(brush = brush)
+            }
+        }
+    )
+}
+
+private val loadedStaticAvatarUrls = LinkedHashSet<String>()
+
+private fun rememberLoadedAvatarUrl(url: String) {
+    if (url.isEmpty()) return
+    if (loadedStaticAvatarUrls.size >= 1024 && url !in loadedStaticAvatarUrls) {
+        val oldest = loadedStaticAvatarUrls.firstOrNull()
+        if (oldest != null) loadedStaticAvatarUrls.remove(oldest)
+    }
+    loadedStaticAvatarUrls.add(url)
 }
 
 private val avatarThumbnailSizes = intArrayOf(45, 60, 90, 120, 180, 240)

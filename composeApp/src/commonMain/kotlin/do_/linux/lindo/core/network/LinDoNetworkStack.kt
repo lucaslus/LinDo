@@ -560,7 +560,9 @@ data class LinuxDoCategoryMeta(
     val name: String,
     val slug: String,
     val colorHex: String,
-    val description: String
+    val description: String,
+    val icon: String? = null,
+    val readRestricted: Boolean = false
 )
 
 internal data class ComposerTagOption(
@@ -642,17 +644,23 @@ object LinuxDoRepository {
     }
 
     val defaultCategories: List<LinuxDoCategoryMeta> = listOf(
-        LinuxDoCategoryMeta(4, "开发调优", "develop", "0E76BD", "软件开发与开源实践"),
-        LinuxDoCategoryMeta(14, "资源荟萃", "resource", "12A89D", "软件工具与数字资源"),
-        LinuxDoCategoryMeta(42, "文档共建", "wiki", "25AAE2", "技术沉淀与教程指南"),
-        LinuxDoCategoryMeta(11, "搞七捻三", "gossip", "9EB83B", "日常交流与职场故事"),
-        LinuxDoCategoryMeta(36, "福利羊毛", "welfare", "F7941D", "社区福利与公益接口"),
-        LinuxDoCategoryMeta(34, "前沿快讯", "news", "BF1E2E", "AI 动态与前沿科技"),
-        LinuxDoCategoryMeta(27, "非我莫属", "jobs", "652D90", "人才对接与远程协作"),
-        LinuxDoCategoryMeta(10, "跳蚤市场", "market", "F1592A", "闲置数码与算力流转"),
-        LinuxDoCategoryMeta(32, "读书成诗", "reading", "0088CC", "书评笔记与阅读推荐"),
-        LinuxDoCategoryMeta(46, "扬帆起航", "startup", "3AB54A", "独立开发与产品出海"),
-        LinuxDoCategoryMeta(2, "运营反馈", "feedback", "808281", "社区站务与功能建议")
+        LinuxDoCategoryMeta(4, "开发调优", "develop", "32C3C3", "软件开发与开源实践", icon = "code"),
+        LinuxDoCategoryMeta(14, "资源荟萃", "resource", "12A89D", "软件工具与数字资源", icon = "square-share-nodes"),
+        LinuxDoCategoryMeta(42, "文档共建", "wiki", "9CB6C4", "技术沉淀与教程指南", icon = "book"),
+        LinuxDoCategoryMeta(11, "搞七捻三", "gossip", "3AB54A", "日常交流与职场故事", icon = "droplet"),
+        LinuxDoCategoryMeta(36, "福利羊毛", "welfare", "E45735", "社区福利与公益接口", icon = "piggy-bank"),
+        LinuxDoCategoryMeta(34, "前沿快讯", "news", "BB8FCE", "AI 动态与前沿科技", icon = "newspaper"),
+        LinuxDoCategoryMeta(27, "非我莫属", "job", "A8C6FE", "人才对接与远程协作", icon = "briefcase"),
+        LinuxDoCategoryMeta(10, "跳蚤市场", "market", "ED207B", "闲置数码与算力流转", icon = "store", readRestricted = true),
+        LinuxDoCategoryMeta(32, "读书成诗", "reading", "E0D900", "书评笔记与阅读推荐", icon = "book-open-reader"),
+        LinuxDoCategoryMeta(46, "扬帆起航", "startup", "F7941D", "独立开发与产品出海", icon = "rocket", readRestricted = true),
+        LinuxDoCategoryMeta(2, "运营反馈", "feedback", "808281", "社区站务与功能建议", icon = "comments"),
+        LinuxDoCategoryMeta(98, "国产替代", "domestic", "D12C25", "软硬件国产化与信创", icon = "seedling"),
+        LinuxDoCategoryMeta(95, "积分乐园", "playground", "E0D900", "社区活动与积分互动", icon = "coins", readRestricted = true),
+        LinuxDoCategoryMeta(92, "网络记忆", "feeds", "F7941D", "互联网记忆与归档", icon = "rss"),
+        LinuxDoCategoryMeta(102, "社区孵化", "incubation", "F7941D", "社区共创与项目孵化", icon = "lightbulb", readRestricted = true),
+        LinuxDoCategoryMeta(110, "虫洞广场", "square", "FF00F7", "跨界视野与奇思妙想", icon = "hurricane"),
+        LinuxDoCategoryMeta(108, "深海幽域", "abyss", "12A89D", "深度讨论与高阶专区", icon = "water", readRestricted = true)
     )
 
     @Volatile
@@ -665,18 +673,59 @@ object LinuxDoRepository {
 
     private val categoryLookup = java.util.concurrent.ConcurrentHashMap<Int, Pair<String, String>>().apply {
         defaultCategories.forEach { put(it.id, it.name to it.colorHex) }
-        put(20, "开发调优" to "0E76BD")
-        put(21, "资源荟萃" to "12A89D")
-        put(30, "搞七捻三" to "9EB83B")
-        put(45, "福利羊毛" to "F7941D")
-        put(52, "前沿快讯" to "BF1E2E")
-        put(64, "开发调优" to "0E76BD")
-        put(72, "前沿快讯" to "BF1E2E")
-        put(88, "资源荟萃" to "12A89D")
+        put(94, "网盘资源" to "16B176")
+        put(49, "公告" to "F1592A")
+        put(123, "悬赏" to "C4B512")
+        put(30, "活动" to "38571A")
+        put(124, "模板" to "04A407")
+        put(20, "开发调优, Lv1" to "32C3C3")
+        put(21, "资源荟萃, Lv1" to "12A89D")
+        put(45, "福利羊毛, Lv1" to "E45735")
+        put(52, "前沿快讯, Lv1" to "BB8FCE")
+        put(64, "开发调优, Lv2" to "32C3C3")
+        put(72, "前沿快讯, Lv2" to "BB8FCE")
+        put(88, "资源荟萃, Lv2" to "12A89D")
+    }
+
+    private val categoryIconLookup = java.util.concurrent.ConcurrentHashMap<String, String>().apply {
+        defaultCategories.forEach { meta ->
+            meta.icon?.let { put(meta.name, it) }
+        }
+        put("网盘资源", "hard-drive")
+        put("公告", "bullhorn")
+        put("悬赏", "award")
+        put("活动", "users")
+        put("模板", "clone")
+    }
+
+    private val categoryRestrictedLookup = java.util.concurrent.ConcurrentHashMap<String, Boolean>().apply {
+        defaultCategories.forEach { meta ->
+            put(meta.name, meta.readRestricted)
+        }
     }
 
     fun resolveCategoryMeta(categoryId: Int): Pair<String, String> {
-        return categoryLookup[categoryId] ?: ("技术讨论" to "0E76BD")
+        return categoryLookup[categoryId] ?: ("开发调优" to "32C3C3")
+    }
+
+    fun resolveCategoryIconName(categoryName: String): String? {
+        val trimmed = categoryName.trim()
+        categoryIconLookup[trimmed]?.let { return it }
+        val base = trimmed.substringBefore(",").trim()
+        return categoryIconLookup[base]
+    }
+
+    fun isCategoryRestricted(categoryName: String): Boolean {
+        val trimmed = categoryName.trim()
+        if (trimmed.contains(", Lv", ignoreCase = true) ||
+            Regex("\\bLv[1-4]\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)
+        ) {
+            return true
+        }
+        categoryRestrictedLookup[trimmed]?.let { if (it) return true }
+        val base = trimmed.substringBefore(",").trim()
+        return categoryRestrictedLookup[base] == true ||
+            base in setOf("跳蚤市场", "深海幽域", "积分乐园", "扬帆起航", "社区孵化")
     }
 
     private fun mergeCategoriesFromSiteRoot(root: JsonObject) {
@@ -686,13 +735,39 @@ object LinuxDoRepository {
         val catArr = root["categories"] as? JsonArray ?: return
         val mergedById = LinkedHashMap<Int, LinuxDoCategoryMeta>()
         defaultCategories.forEach { mergedById[it.id] = it }
+
+        val rawById = HashMap<Int, JsonObject>()
+        catArr.forEach { elem ->
+            val cObj = elem as? JsonObject ?: return@forEach
+            val id = cObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            rawById[id] = cObj
+        }
+
         catArr.forEach { elem ->
             val cObj = elem as? JsonObject ?: return@forEach
             val id = cObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
             val name = cObj["name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@forEach
             val slug = cObj["slug"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: "cat-$id"
-            val color = cObj["color"]?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
-                ?: mergedById[id]?.colorHex ?: "0E76BD"
+            val parentId = cObj["parent_category_id"]?.jsonPrimitive?.intOrNull
+            val parentObj = parentId?.let { rawById[it] }
+            val parentMeta = parentId?.let { mergedById[it] }
+
+            val rawColor = cObj["color"]?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
+            val parentColor = parentObj?.get("color")?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
+                ?: parentMeta?.colorHex
+            val color = when {
+                rawColor != null && !(parentColor != null && rawColor.equals("0088CC", ignoreCase = true)) -> rawColor
+                parentColor != null -> parentColor
+                else -> mergedById[id]?.colorHex ?: "32C3C3"
+            }
+            val icon = cObj["icon"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: parentObj?.get("icon")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: parentMeta?.icon
+                ?: mergedById[id]?.icon
+            val readRestricted = cObj["read_restricted"]?.jsonPrimitive?.booleanOrNull
+                ?: mergedById[id]?.readRestricted
+                ?: false
+
             val desc = cObj["description_text"]?.jsonPrimitive?.contentOrNull?.trim()
                 ?.takeIf { it.isNotEmpty() }
                 ?: cObj["description_excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")?.trim()
@@ -705,7 +780,6 @@ object LinuxDoRepository {
             } else {
                 name
             }
-            val parentId = cObj["parent_category_id"]?.jsonPrimitive?.intOrNull
             val existingLookup = categoryLookup[id]
             val lookupName = if (existingLookup != null && existingLookup.first.any { it.code > 127 } && preferredName.all { it.code < 128 }) {
                 existingLookup.first
@@ -713,13 +787,19 @@ object LinuxDoRepository {
                 preferredName
             }
             categoryLookup[id] = lookupName to color
+            if (icon != null) {
+                categoryIconLookup[lookupName] = icon
+            }
+            categoryRestrictedLookup[lookupName] = readRestricted
             if (parentId == null || mergedById.containsKey(id)) {
                 mergedById[id] = LinuxDoCategoryMeta(
                     id = id,
                     name = preferredName,
                     slug = slug,
                     colorHex = color,
-                    description = desc.take(28)
+                    description = desc.take(28),
+                    icon = icon,
+                    readRestricted = readRestricted
                 )
             }
         }

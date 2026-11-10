@@ -63,9 +63,14 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.Placeholder
+import androidx.compose.ui.text.PlaceholderVerticalAlign
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -731,30 +736,157 @@ internal fun LinDoSectionHeader(
     }
 }
 
+internal fun resolveOfficialCategoryVisual(
+    categoryName: String,
+    fallbackColor: Color? = null,
+    iconNameOverride: String? = null,
+    restrictedOverride: Boolean? = null
+): Triple<ImageVector, Color, Boolean> {
+    val trimmed = categoryName.trim()
+    val base = trimmed.substringBefore(",").trim()
+    val iconKey = (iconNameOverride ?: LinuxDoRepository.resolveCategoryIconName(trimmed)).orEmpty().lowercase()
+
+    val iconAndOfficialColor: Pair<ImageVector, Color> = when {
+        iconKey == "code" || base.contains("开发") -> LinDoIcons.FaCode to Color(0xFF32C3C3)
+        iconKey == "droplet" || base.contains("搞七") || base.contains("日常") -> LinDoIcons.FaDroplet to Color(0xFF3AB54A)
+        iconKey == "piggy-bank" || base.contains("福利") || base.contains("羊毛") -> LinDoIcons.FaPiggyBank to Color(0xFFE45735)
+        iconKey == "square-share-nodes" || base.contains("资源荟萃") -> LinDoIcons.FaShareNodes to Color(0xFF12A89D)
+        iconKey == "hard-drive" || base.contains("网盘") -> LinDoIcons.FaHardDrive to Color(0xFF16B176)
+        iconKey == "book" || base.contains("文档") -> LinDoIcons.FaBook to Color(0xFF9CB6C4)
+        iconKey == "briefcase" || base.contains("非我") || base.contains("招聘") -> LinDoIcons.FaBriefcase to Color(0xFFA8C6FE)
+        iconKey == "book-open-reader" || base.contains("读书") -> LinDoIcons.FaBookOpenReader to Color(0xFFE0D900)
+        iconKey == "newspaper" || base.contains("快讯") || base.contains("前沿") -> LinDoIcons.FaNewspaper to Color(0xFFBB8FCE)
+        iconKey == "rss" || base.contains("记忆") -> LinDoIcons.FaRss to Color(0xFFF7941D)
+        iconKey == "seedling" || base.contains("国产") -> LinDoIcons.FaSeedling to Color(0xFFD12C25)
+        iconKey == "hurricane" || base.contains("虫洞") || base.contains("广场") -> LinDoIcons.FaHurricane to Color(0xFFFF00F7)
+        iconKey == "comments" || base.contains("运营") || base.contains("反馈") -> LinDoIcons.FaComments to Color(0xFF808281)
+        iconKey == "bullhorn" || base.contains("公告") -> LinDoIcons.FaBullhorn to Color(0xFFF1592A)
+        iconKey == "award" || base.contains("悬赏") -> LinDoIcons.FaAward to Color(0xFFC4B512)
+        iconKey == "users" || base.contains("活动") -> LinDoIcons.FaUsers to Color(0xFF38571A)
+        iconKey == "clone" || base.contains("模板") -> LinDoIcons.FaClone to Color(0xFF04A407)
+        iconKey == "store" || base.contains("跳蚤") || base.contains("市场") -> LinDoIcons.FaStore to Color(0xFFED207B)
+        iconKey == "rocket" || base.contains("扬帆") || base.contains("起航") -> LinDoIcons.FaRocket to Color(0xFFF7941D)
+        iconKey == "coins" || base.contains("积分") || base.contains("乐园") -> LinDoIcons.FaCoins to Color(0xFFE0D900)
+        iconKey == "lightbulb" || base.contains("孵化") -> LinDoIcons.FaLightbulb to Color(0xFFF7941D)
+        iconKey == "water" || base.contains("深海") || base.contains("幽域") -> LinDoIcons.FaWater to Color(0xFF12A89D)
+        else -> LinDoIcons.FaCode to (fallbackColor ?: Color(0xFF32C3C3))
+    }
+
+    val isRestricted = restrictedOverride ?: LinuxDoRepository.isCategoryRestricted(trimmed)
+    return Triple(iconAndOfficialColor.first, iconAndOfficialColor.second, isRestricted)
+}
+
+internal fun resolveOfficialTagVisual(tagName: String): Pair<ImageVector, Color>? {
+    val clean = tagName.trim().removePrefix("#").trim()
+    val lower = clean.lowercase()
+    return when {
+        clean == "纯水" || clean.contains("水") -> LinDoIcons.FaFaucet to Color(0xFFF7941D)
+        clean == "快问快答" || clean.contains("问答") || clean.contains("求助") -> LinDoIcons.FaCircleQuestion to Color(0xFF32C3C3)
+        clean == "人工智能" || lower in setOf("ai", "chatgpt", "claude", "claudecode", "gemini", "openai", "deepseek", "codex", "cursor") ->
+            LinDoIcons.FaRobot to Color(0xFFA8C6FE)
+        clean == "公告" || clean.contains("站务") -> LinDoIcons.FaBullhorn to Color(0xFFF1592A)
+        clean == "原创" -> LinDoIcons.FaFeatherPointed to Color(0xFF3AB54A)
+        clean == "抽奖" || clean.contains("福利") || clean.contains("公益") || clean.contains("羊毛") ->
+            LinDoIcons.FaGift to Color(0xFFE45735)
+        clean == "精华神帖" || clean.contains("精华") -> LinDoIcons.FaFire to Color(0xFFF59E0B)
+        clean == "集中帖" || clean.contains("合集") -> LinDoIcons.FaLayerGroup to Color(0xFF12A89D)
+        clean == "树洞" || clean == "情感" || clean == "病友" -> LinDoIcons.FaTree to Color(0xFF16B176)
+        clean.contains("网盘") || clean.contains("夸克") || clean.contains("云盘") -> LinDoIcons.FaCloud to Color(0xFF38BDF8)
+        clean == "软件开发" || clean == "配置优化" || clean == "开源推广" || clean == "教程" || clean == "软件调试" ->
+            LinDoIcons.FaCode to Color(0xFF32C3C3)
+        clean == "网络安全" -> LinDoIcons.FaShieldHalved to Color(0xFF10B981)
+        lower in setOf("vps", "nas", "pt") || clean.contains("服务器") -> LinDoIcons.FaServer to Color(0xFF60A5FA)
+        clean in setOf("影视", "电影", "动漫") -> LinDoIcons.FaFilm to Color(0xFFBB8FCE)
+        clean == "游戏" -> LinDoIcons.FaGamepad to Color(0xFFF472B6)
+        clean in setOf("读书", "书籍") -> LinDoIcons.FaBook to Color(0xFFE0D900)
+        clean in setOf("职场", "求职") -> LinDoIcons.FaBriefcase to Color(0xFFA8C6FE)
+        clean == "金融经济" || lower == "aff" -> LinDoIcons.FaCoins to Color(0xFFFADB14)
+        else -> null
+    }
+}
+
 @Composable
 internal fun LinDoCategoryLabel(
     name: String,
     dotColor: Color,
-    dotSize: Dp = 7.dp
+    dotSize: Dp = 13.dp
 ) {
     val palette = LocalPalette.current
+    val (categoryIcon, officialColor, isRestricted) = remember(name, dotColor) {
+        resolveOfficialCategoryVisual(name, fallbackColor = dotColor)
+    }
+    val iconSize = if (dotSize < 10.dp) 12.5.dp else dotSize
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .size(dotSize)
-                .clip(CircleShape)
-                .background(dotColor)
+        Icon(
+            imageVector = categoryIcon,
+            contentDescription = null,
+            modifier = Modifier.size(iconSize),
+            tint = officialColor
         )
+        if (isRestricted) {
+            Icon(
+                imageVector = LinDoIcons.FaLock,
+                contentDescription = "受限版块",
+                modifier = Modifier.size(iconSize * 0.85f),
+                tint = palette.inkSecondary
+            )
+        }
         Text(
             text = name,
-            fontSize = LinDoTokens.Meta,
+            fontSize = 12.5.sp,
             fontWeight = FontWeight.Normal,
             color = palette.inkSecondary,
             maxLines = 1,
             softWrap = false
+        )
+    }
+}
+
+@Composable
+internal fun LinDoTopicTagBadge(
+    tag: String,
+    onClick: (() -> Unit)? = null
+) {
+    val palette = LocalPalette.current
+    val cleanTag = remember(tag) { tag.trim().removePrefix("#").trim() }
+    val tagVisual = remember(cleanTag) { resolveOfficialTagVisual(cleanTag) }
+    val chipBg = if (palette.isDark) Color(0xFF2B2D31) else Color(0xFFF0F2F5)
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(chipBg)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        if (tagVisual != null) {
+            Icon(
+                imageVector = tagVisual.first,
+                contentDescription = null,
+                modifier = Modifier.size(11.dp),
+                tint = tagVisual.second
+            )
+        } else {
+            Icon(
+                imageVector = LinDoIcons.FaTag,
+                contentDescription = null,
+                modifier = Modifier.size(9.5.dp),
+                tint = palette.inkTertiary
+            )
+        }
+        Text(
+            text = cleanTag,
+            fontSize = 11.5.sp,
+            lineHeight = 14.sp,
+            fontWeight = FontWeight.Normal,
+            color = palette.inkSecondary,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
@@ -3839,9 +3971,6 @@ private fun CommunityTopicItem(
     val catDotColor = remember(topic.categoryColorHex) {
         LinuxDoSiteRules.parseHexColor(topic.categoryColorHex)
     }
-    val (_, morandiFg) = remember(topic.categoryName, palette.isDark) {
-        resolveMorandiCategoryColors(topic.categoryName, palette.isDark)
-    }
     val replies = maxOf(0, topic.postsCount - 1).coerceAtLeast(topic.replyCount)
     val rowBgColor = if (isSelected) palette.subtleSurface else palette.cardSurface
     val itemInteractionSource = remember { MutableInteractionSource() }
@@ -3850,14 +3979,67 @@ private fun CommunityTopicItem(
         drawRect(if (isItemPressed) palette.subtleSurface else rowBgColor)
     }
     val isTopicUnread = (topic.unseen || topic.unreadPosts > 0) && !LinuxDoRepository.isTopicRead(topic.id)
-    val unreadDotAlpha = if (isTopicUnread) 1f else 0f
+    val unreadDotColor = if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
+    val titleAnnotated = remember(topic.title, isTopicUnread) {
+        buildAnnotatedString {
+            append(topic.title)
+            if (isTopicUnread) {
+                append("  ")
+                appendInlineContent("unread_dot", "●")
+            }
+        }
+    }
+    val titleInlineContent = remember(unreadDotColor) {
+        mapOf(
+            "unread_dot" to InlineTextContent(
+                Placeholder(
+                    width = 12.sp,
+                    height = 12.sp,
+                    placeholderVerticalAlign = PlaceholderVerticalAlign.Center
+                )
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.5.dp)
+                            .clip(CircleShape)
+                            .background(unreadDotColor)
+                    )
+                }
+            }
+        )
+    }
     val formattedViews = remember(topic.views) {
         if (topic.views > 0) formatCompactNumber(topic.views) else ""
     }
 
+    val fittedTags = remember(topic.categoryName, topic.tags, isCompact) {
+        val maxTags = if (isCompact) 2 else 3
+        val maxTotalUnits = if (isCompact) 28 else 36
+        val categoryUnits = 2 +
+            (if (topic.categoryName.contains("Lv", ignoreCase = true)) 2 else 0) +
+            topic.categoryName.sumOf { ch -> if (ch.code > 127) 2 else 1 }
+        val result = mutableListOf<String>()
+        var usedUnits = categoryUnits
+        for (tag in topic.tags) {
+            val tagUnits = 3 + tag.sumOf { ch -> if (ch.code > 127) 2 else 1 }
+            if (result.isEmpty() || (result.size < maxTags && usedUnits + tagUnits <= maxTotalUnits)) {
+                result.add(tag)
+                usedUnits += tagUnits
+            } else {
+                break
+            }
+        }
+        result
+    }
+    val remainingTagCount = (topic.tags.size - fittedTags.size).coerceAtLeast(0)
+
     if (isCompact) {
-        // 模式 B：紧凑列表模式（首行 15sp 单行标题 + 未读蓝点 + 12sp 评论数；次行 16dp Tonal 头像 + 作者 + ● 版块名 + #Tag + 时间）
-        Column(
+        // 模式 B：紧凑列表模式（Web 端左头像 44dp 独占左侧高度 + 右侧上下两行：首行标题+行内未读蓝点，次行版块图标+锁+版块名 + 带图标标签胶囊 + 右侧回复/时间）
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .then(pressBackground)
@@ -3866,157 +4048,86 @@ private fun CommunityTopicItem(
                     indication = null,
                     onClick = onClick
                 )
-                .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 10.dp)
+                .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 11.dp),
+            verticalAlignment = Alignment.Top
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = topic.title,
-                    fontSize = LinDoTokens.Body,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.inkPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-
-                Spacer(modifier = Modifier.width(6.dp))
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .graphicsLayer { alpha = if (isTopicUnread) 1f else 0f }
-                        .clip(CircleShape)
-                        .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
-                )
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                LinDoStatItem(
-                    icon = LinDoIcons.MessageCircle,
-                    text = "$replies"
-                )
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Box(modifier = Modifier.padding(top = 1.dp)) {
                 SmartAvatar(
                     username = op.username,
                     avatarTemplate = op.avatarTemplate,
                     animatedAvatar = op.animatedAvatar,
                     primaryGroupName = op.primaryGroupName,
                     flair = null,
-                    size = 16.dp,
+                    size = 44.dp,
                     enableAnimations = false
                 )
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                Text(
-                    text = authorDisplay,
-                    fontSize = LinDoTokens.Meta,
-                    fontWeight = FontWeight.Normal,
-                    color = palette.inkSecondary,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 88.dp)
-                )
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                LinDoCategoryLabel(
-                    name = topic.categoryName,
-                    dotColor = catDotColor,
-                    dotSize = 6.dp
-                )
-
-                if (topic.tags.isNotEmpty()) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        topic.tags.take(2).forEach { tag ->
-                            Text(
-                                text = "#$tag",
-                                fontSize = LinDoTokens.Meta,
-                                color = palette.inkTertiary,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                } else {
-                    Spacer(modifier = Modifier.weight(1f))
-                }
-
-                if (topic.lastPostedAt.isNotBlank()) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = topic.lastPostedAt,
-                        fontSize = LinDoTokens.Meta,
-                        color = palette.inkTertiary,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
             }
-        }
-    } else {
-        // 模式 A：宽松列表模式（20dp Tonal 头像 + 作者 · 时间 | 右侧 ● 版块名；16sp SemiBold 标题；14sp 摘要；#Tag | ♡ 💬 👁 统一 12sp 次级色）
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .then(pressBackground)
-                .clickable(
-                    interactionSource = itemInteractionSource,
-                    indication = null,
-                    onClick = onClick
-                )
-                .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 12.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(
+                modifier = Modifier.weight(1f)
             ) {
+                Text(
+                    text = titleAnnotated,
+                    inlineContent = titleInlineContent,
+                    fontSize = 15.8.sp,
+                    lineHeight = 21.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.inkPrimary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
                 Row(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    SmartAvatar(
-                        username = op.username,
-                        avatarTemplate = op.avatarTemplate,
-                        animatedAvatar = op.animatedAvatar,
-                        primaryGroupName = op.primaryGroupName,
-                        flair = null,
-                        size = 20.dp,
-                        enableAnimations = false
+                    LinDoCategoryLabel(
+                        name = topic.categoryName,
+                        dotColor = catDotColor,
+                        dotSize = 13.dp
                     )
+
+                    if (fittedTags.isNotEmpty()) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            fittedTags.forEach { tag ->
+                                LinDoTopicTagBadge(tag = tag)
+                            }
+                            if (remainingTagCount > 0) {
+                                Text(
+                                    text = "+$remainingTagCount",
+                                    fontSize = LinDoTokens.Caption,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkTertiary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    Text(
-                        text = authorDisplay,
-                        fontSize = LinDoTokens.Meta,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.inkSecondary,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
+                    LinDoStatItem(
+                        icon = LinDoIcons.MessageCircle,
+                        text = "$replies"
                     )
 
                     if (topic.lastPostedAt.isNotBlank()) {
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = " · ${topic.lastPostedAt}",
+                            text = topic.lastPostedAt,
                             fontSize = LinDoTokens.Meta,
                             color = palette.inkTertiary,
                             maxLines = 1,
@@ -4024,157 +4135,182 @@ private fun CommunityTopicItem(
                         )
                     }
                 }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                LinDoCategoryLabel(
-                    name = topic.categoryName,
-                    dotColor = catDotColor,
-                    dotSize = 7.dp
+            }
+        }
+    } else {
+        // 模式 A：宽松列表模式（Web 端左头像 46dp 独立左列 + 右侧四层：标题+未读蓝点 -> 版块图标+锁+版块名+带图标标签胶囊 -> 2行摘要 -> 作者·时间 | 互动指标）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(pressBackground)
+                .clickable(
+                    interactionSource = itemInteractionSource,
+                    indication = null,
+                    onClick = onClick
+                )
+                .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 13.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Box(modifier = Modifier.padding(top = 2.dp)) {
+                SmartAvatar(
+                    username = op.username,
+                    avatarTemplate = op.avatarTemplate,
+                    animatedAvatar = op.animatedAvatar,
+                    primaryGroupName = op.primaryGroupName,
+                    flair = null,
+                    size = 46.dp,
+                    enableAnimations = false
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Top
+            Column(
+                modifier = Modifier.weight(1f)
             ) {
                 Text(
-                    text = topic.title,
+                    text = titleAnnotated,
+                    inlineContent = titleInlineContent,
                     fontSize = LinDoTokens.Headline,
                     fontWeight = FontWeight.SemiBold,
                     lineHeight = 22.sp,
                     color = palette.inkPrimary,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                Box(
-                    modifier = Modifier
-                        .padding(top = 7.dp)
-                        .size(6.dp)
-                        .graphicsLayer { alpha = if (isTopicUnread) 1f else 0f }
-                        .clip(CircleShape)
-                        .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
-                )
-            }
 
-            val initialCachedExcerpt = remember(topic.id, topic.excerpt) {
-                topic.excerpt?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: LinuxDoRepository.getCachedTopicExcerpt(topic.id)
-            }
-            var resolvedExcerpt by remember(topic.id, initialCachedExcerpt) {
-                mutableStateOf(initialCachedExcerpt)
-            }
-            var excerptFetchDone by remember(topic.id, initialCachedExcerpt) {
-                mutableStateOf(initialCachedExcerpt != null || LinuxDoRepository.hasCachedTopicExcerpt(topic.id))
-            }
-            if (!excerptFetchDone && topic.id > 0 && !topic.pinned) {
-                LaunchedEffect(topic.id) {
-                    val fetched = LinuxDoRepository.fetchTopicExcerpt(topic.id)
-                    if (!fetched.isNullOrBlank()) {
-                        resolvedExcerpt = fetched
-                    }
-                    excerptFetchDone = true
-                }
-            }
-            val cleanExcerpt = resolvedExcerpt?.takeIf { it.isNotBlank() }
-                ?: if (excerptFetchDone && !topic.pinned) topic.title else null
-            if (!topic.pinned || cleanExcerpt != null) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = cleanExcerpt ?: " \n ",
-                        fontSize = LinDoTokens.Sub,
-                        lineHeight = 20.sp,
-                        color = if (cleanExcerpt != null) palette.inkSecondary else Color.Transparent,
-                        minLines = 2,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.fillMaxWidth()
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    LinDoCategoryLabel(
+                        name = topic.categoryName,
+                        dotColor = catDotColor,
+                        dotSize = 13.dp
                     )
-                    if (cleanExcerpt == null) {
-                        TopicExcerptSkeleton(
-                            modifier = Modifier.matchParentSize()
-                        )
-                    }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (topic.tags.isNotEmpty()) {
-                    val fittedTags = remember(topic.tags) {
-                        val result = mutableListOf<String>()
-                        var usedUnits = 0
-                        for (tag in topic.tags) {
-                            val tagUnits = 2 + tag.sumOf { ch -> if (ch.code > 127) 2 else 1 }
-                            if (result.isEmpty() || (result.size < 3 && usedUnits + tagUnits <= 26)) {
-                                result.add(tag)
-                                usedUnits += tagUnits
-                            } else {
-                                break
+                    if (fittedTags.isNotEmpty()) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            fittedTags.forEach { tag ->
+                                LinDoTopicTagBadge(tag = tag)
+                            }
+                            if (remainingTagCount > 0) {
+                                Text(
+                                    text = "+$remainingTagCount",
+                                    fontSize = LinDoTokens.Caption,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkTertiary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
                             }
                         }
-                        result
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
                     }
-                    val remainingCount = (topic.tags.size - fittedTags.size).coerceAtLeast(0)
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        fittedTags.forEach { tag ->
-                            Text(
-                                text = "#$tag",
-                                fontSize = LinDoTokens.Meta,
-                                fontWeight = FontWeight.Normal,
-                                color = palette.inkTertiary,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis
+                }
+
+                val initialCachedExcerpt = remember(topic.id, topic.excerpt) {
+                    topic.excerpt?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: LinuxDoRepository.getCachedTopicExcerpt(topic.id)
+                }
+                var resolvedExcerpt by remember(topic.id, initialCachedExcerpt) {
+                    mutableStateOf(initialCachedExcerpt)
+                }
+                var excerptFetchDone by remember(topic.id, initialCachedExcerpt) {
+                    mutableStateOf(initialCachedExcerpt != null || LinuxDoRepository.hasCachedTopicExcerpt(topic.id))
+                }
+                if (!excerptFetchDone && topic.id > 0 && !topic.pinned) {
+                    LaunchedEffect(topic.id) {
+                        val fetched = LinuxDoRepository.fetchTopicExcerpt(topic.id)
+                        if (!fetched.isNullOrBlank()) {
+                            resolvedExcerpt = fetched
+                        }
+                        excerptFetchDone = true
+                    }
+                }
+                val cleanExcerpt = resolvedExcerpt?.takeIf { it.isNotBlank() }
+                    ?: if (excerptFetchDone && !topic.pinned) topic.title else null
+                if (!topic.pinned || cleanExcerpt != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = cleanExcerpt ?: " \n ",
+                            fontSize = 13.8.sp,
+                            lineHeight = 19.5.sp,
+                            color = if (cleanExcerpt != null) palette.inkSecondary else Color.Transparent,
+                            minLines = 2,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (cleanExcerpt == null) {
+                            TopicExcerptSkeleton(
+                                modifier = Modifier.matchParentSize()
                             )
                         }
-                        if (remainingCount > 0) {
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = authorDisplay,
+                            fontSize = 12.2.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkTertiary,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (topic.lastPostedAt.isNotBlank()) {
                             Text(
-                                text = "+$remainingCount",
-                                fontSize = LinDoTokens.Caption,
-                                fontWeight = FontWeight.Medium,
+                                text = " · ${topic.lastPostedAt}",
+                                fontSize = LinDoTokens.Meta,
                                 color = palette.inkTertiary,
                                 maxLines = 1,
                                 softWrap = false
                             )
                         }
                     }
-                } else {
-                    Spacer(modifier = Modifier.weight(1f))
-                }
 
-                Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    LinDoStatItem(
-                        icon = LinDoIcons.Heart,
-                        text = "${topic.likeCount}"
-                    )
-                    LinDoStatItem(
-                        icon = LinDoIcons.MessageCircle,
-                        text = "$replies"
-                    )
-                    if (topic.views > 0) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
                         LinDoStatItem(
-                            icon = LinDoIcons.Eye,
-                            text = formattedViews
+                            icon = LinDoIcons.Heart,
+                            text = "${topic.likeCount}"
                         )
+                        LinDoStatItem(
+                            icon = LinDoIcons.MessageCircle,
+                            text = "$replies"
+                        )
+                        if (topic.views > 0) {
+                            LinDoStatItem(
+                                icon = LinDoIcons.Eye,
+                                text = formattedViews
+                            )
+                        }
                     }
                 }
             }
@@ -4898,45 +5034,25 @@ internal fun CommunityTopicReaderPane(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Linux.do 官方折行风格：`● 版块名` + 自动折行 `#Tag` 标签组（纯圆点与纯文字标签，无底色块）
+                    // Linux.do Web 官方折行风格：版块图标 + 可选锁图标 + 版块名 + 带图标标签胶囊组
                     @OptIn(ExperimentalLayoutApi::class)
                     FlowRow(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.5.dp)
-                                    .clip(CircleShape)
-                                    .background(catColor)
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text(
-                                text = resolvedCategoryName,
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = catColor,
-                                maxLines = 1,
-                                softWrap = false
+                        Box(modifier = Modifier.padding(vertical = 2.dp)) {
+                            LinDoCategoryLabel(
+                                name = resolvedCategoryName,
+                                dotColor = catColor,
+                                dotSize = 13.5.dp
                             )
                         }
 
                         allTopicTags.forEach { tag ->
-                            Text(
-                                text = "#$tag",
-                                fontSize = 12.2.sp,
-                                fontWeight = FontWeight.Normal,
-                                color = palette.inkSecondary,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier
-                                    .clickable { onSelectTag(tag) }
-                                    .padding(vertical = 2.dp)
+                            LinDoTopicTagBadge(
+                                tag = tag,
+                                onClick = { onSelectTag(tag) }
                             )
                         }
                     }
@@ -5982,22 +6098,24 @@ internal fun CommunityPostFloor(
                             )
                         }
                         if (hasIosDevice) {
-                            if (hasUserTitle) Text("·", color = palette.inkTertiary, fontSize = 11.sp, lineHeight = 14.sp)
+                            if (hasUserTitle) Text("·", color = palette.inkTertiary, fontSize = 11.5.sp, lineHeight = 15.sp)
                             Row(
                                 modifier = Modifier.weight(1.25f, fill = false),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                horizontalArrangement = Arrangement.spacedBy(3.5.dp)
                             ) {
                                 Icon(
                                     imageVector = LinDoIcons.AppleLogo,
                                     contentDescription = null,
-                                    modifier = Modifier.size(10.dp),
+                                    modifier = Modifier
+                                        .size(13.5.dp)
+                                        .offset(y = (-0.5).dp),
                                     tint = palette.inkSecondary
                                 )
                                 Text(
                                     text = post.iosDeviceName.orEmpty(),
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp,
+                                    fontSize = 11.5.sp,
+                                    lineHeight = 15.sp,
                                     color = palette.inkSecondary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -7256,43 +7374,11 @@ private fun DiscoverPortalCard(
 }
 
 private fun resolveDistinctCategoryIcon(category: LinuxDoCategoryMeta): ImageVector {
-    val name = category.name.trim()
-    return when {
-        name.contains("开发") || category.id == 4 -> LinDoIcons.Code
-        name.contains("资源") || category.id == 14 -> LinDoIcons.Layers
-        name.contains("文档") || category.id == 42 -> LinDoIcons.FileText
-        name.contains("非我") || name.contains("招聘") || category.id == 27 -> LinDoIcons.Users
-        name.contains("读书") || category.id == 32 -> LinDoIcons.BookOpen
-        name.contains("快讯") || name.contains("前沿") || category.id == 34 -> LinDoIcons.Bolt
-        name.contains("记忆") || name.contains("历史") -> LinDoIcons.HistoryClock
-        name.contains("福利") || name.contains("羊毛") || category.id == 36 -> LinDoIcons.Gift
-        name.contains("搞七") || name.contains("日常") || category.id == 11 -> LinDoIcons.Coffee
-        name.contains("孵化") || name.contains("创新") -> LinDoIcons.Seedling
-        name.contains("运营") || name.contains("反馈") || name.contains("公告") -> LinDoIcons.Megaphone
-        name.contains("深海") || name.contains("幽域") -> LinDoIcons.Anchor
-        name.contains("扬帆") || name.contains("起航") -> LinDoIcons.Rocket
-        name.contains("跳蚤") || name.contains("市场") || name.contains("交易") || category.id == 10 -> LinDoIcons.ShoppingBag
-        name.contains("国产") || name.contains("替代") || name.contains("硬件") -> LinDoIcons.CpuChip
-        name.contains("积分") || name.contains("乐园") -> LinDoIcons.Coins
-        name.contains("虫洞") || name.contains("广场") -> LinDoIcons.Globe
-        name.contains("智能") || name.contains("AI") || category.id == 46 -> LinDoIcons.Sparkles
-        name.contains("问答") || name.contains("讨论") -> LinDoIcons.MessageCircle
-        name.contains("安全") || name.contains("认证") -> LinDoIcons.ShieldCheck
-        name.contains("主机") || name.contains("云") -> LinDoIcons.CloudServer
-        else -> {
-            val fallbackPool = listOf(
-                LinDoIcons.Terminal,
-                LinDoIcons.KanbanBoard,
-                LinDoIcons.AwardBadge,
-                LinDoIcons.BarChartPoll,
-                LinDoIcons.AppsGrid,
-                LinDoIcons.Trophy,
-                LinDoIcons.WifiSpeed,
-                LinDoIcons.Sliders
-            )
-            fallbackPool[(category.id.coerceAtLeast(0)) % fallbackPool.size]
-        }
-    }
+    return resolveOfficialCategoryVisual(
+        categoryName = category.name,
+        iconNameOverride = category.icon,
+        restrictedOverride = category.readRestricted
+    ).first
 }
 
 @Composable
@@ -7302,11 +7388,13 @@ private fun CategoryBentoCard(
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
-    val (_, morandiFg) = remember(category.name, palette.isDark) {
-        resolveMorandiCategoryColors(category.name, palette.isDark)
-    }
-    val categoryIcon = remember(category.id, category.name) {
-        resolveDistinctCategoryIcon(category)
+    val (categoryIcon, officialColor, isRestricted) = remember(category.id, category.name, category.icon, category.readRestricted) {
+        resolveOfficialCategoryVisual(
+            categoryName = category.name,
+            fallbackColor = LinuxDoSiteRules.parseHexColor(category.colorHex),
+            iconNameOverride = category.icon,
+            restrictedOverride = category.readRestricted
+        )
     }
 
     Row(
@@ -7319,9 +7407,19 @@ private fun CategoryBentoCard(
         Icon(
             imageVector = categoryIcon,
             contentDescription = category.name,
-            modifier = Modifier.size(18.dp),
-            tint = morandiFg
+            modifier = Modifier.size(16.dp),
+            tint = officialColor
         )
+
+        if (isRestricted) {
+            Spacer(modifier = Modifier.width(4.dp))
+            Icon(
+                imageVector = LinDoIcons.FaLock,
+                contentDescription = "受限版块",
+                modifier = Modifier.size(12.5.dp),
+                tint = palette.inkSecondary
+            )
+        }
 
         Spacer(modifier = Modifier.width(8.dp))
 
@@ -11279,13 +11377,13 @@ internal fun GlobalSearchModalSheet(
                                 animatedAvatar = null,
                                 primaryGroupName = null,
                                 flair = null,
-                                size = 20.dp,
+                                size = 26.dp,
                                 enableAnimations = false
                             )
-                            Spacer(modifier = Modifier.width(7.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = item.username,
-                                fontSize = 12.2.sp,
+                                fontSize = 13.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = palette.inkSecondary,
                                 maxLines = 1

@@ -160,13 +160,14 @@ fun LinDoWaveDots(
                     ),
                     label = "dot_$idx"
                 )
-            } else rememberUpdatedState(0.75f)
+            } else rememberUpdatedState(0.625f)
             val p = animProgress.value
             Box(
                 modifier = Modifier
                     .size(dotSize)
                     .graphicsLayer {
-                        translationY = -(p - 0.25f) * 3.2f * density
+                        // 以水平中线（0dp）为基准上下对称微幅跳动（±0.82dp），消除原先单向负偏移导致的整体偏上
+                        translationY = (0.625f - p) * 2.2f * density
                         alpha = p
                     }
                     .clip(CircleShape)
@@ -222,7 +223,7 @@ fun LinDoLoadingIndicator(
         ) {
             LinDoMascot(state = state, compact = true, size = 24.dp, animate = true, useIconArtwork = useIconArtwork)
             Spacer(Modifier.width(7.dp))
-            Text(cleanLabel, fontSize = 12.sp, color = color, maxLines = 1)
+            Text(cleanLabel, fontSize = 12.sp, lineHeight = 16.sp, color = color, maxLines = 1)
             Spacer(Modifier.width(4.dp))
             LinDoWaveDots(color = color, dotSize = 3.5.dp)
         }
@@ -260,7 +261,8 @@ fun LinDoLoadingIndicator(
                 ) {
                     Text(
                         text = cleanLabel,
-                        fontSize = 12.2.sp,
+                        fontSize = 12.5.sp,
+                        lineHeight = 16.sp,
                         fontWeight = FontWeight.Medium,
                         color = color,
                         maxLines = 1
