@@ -247,6 +247,81 @@ object CookieSentinel {
         ingestRawCookieString(rawCookieHeader, domain = domain, hostOnly = false)
     }
 
+    @Synchronized
+    fun removeCookieByName(name: String, domain: String = "linux.do") {
+        val cleanName = name.trim()
+        if (cleanName.isEmpty()) return
+        val normalizedDomain = domain.trim().lowercase().trimStart('.')
+        val toRemove = store.keys.filter {
+            it.name == cleanName && matchesDomain(it, normalizedDomain)
+        }
+        toRemove.forEach { store.remove(it) }
+    }
+
+    fun ingestSetCookieHeader(
+        rawSetCookie: String?,
+        domain: String = "linux.do"
+    ) {
+        if (rawSetCookie.isNullOrBlank()) return
+        val segments = rawSetCookie.split(';')
+        val firstPair = segments.firstOrNull()?.trim().orEmpty()
+        val eqIdx = firstPair.indexOf('=')
+        if (eqIdx <= 0) return
+        val name = firstPair.substring(0, eqIdx).trim()
+        if (name.isEmpty()) return
+        val value = firstPair.substring(eqIdx + 1).trim()
+        var effectiveDomain = domain.trim().lowercase().trimStart('.')
+        var hasExplicitDomain = false
+        var isExpiredDeletion = value.isEmpty() || value.equals("deleted", ignoreCase = true)
+        for (i in 1 until segments.size) {
+            val attr = segments[i].trim()
+            val attrEq = attr.indexOf('=')
+            if (attrEq > 0) {
+                val attrName = attr.substring(0, attrEq).trim().lowercase()
+                val attrVal = attr.substring(attrEq + 1).trim().trim('"')
+                when (attrName) {
+                    "domain" -> if (attrVal.isNotEmpty()) {
+                        effectiveDomain = attrVal.lowercase().trimStart('.')
+                        hasExplicitDomain = true
+                    }
+                    "max-age" -> {
+                        val maxAge = attrVal.toLongOrNull()
+                        if (maxAge != null && maxAge <= 0L) {
+                            isExpiredDeletion = true
+                        }
+                    }
+                    "expires" -> {
+                        if (attrVal.contains("1970")) {
+                            isExpiredDeletion = true
+                        }
+                    }
+                }
+            }
+        }
+        if (isExpiredDeletion) {
+            removeCookieByName(name, effectiveDomain)
+            val fallbackDomain = domain.trim().lowercase().trimStart('.')
+            if (effectiveDomain != fallbackDomain) {
+                removeCookieByName(name, fallbackDomain)
+            }
+            return
+        }
+        val discourseHostOnlyNames = setOf("_t", "_forum_session")
+        val effectiveHostOnly = !hasExplicitDomain || name in discourseHostOnlyNames
+        putCookie(
+            StoredCookieRecord(
+                key = CookieQuadrupleKey(
+                    name = name,
+                    domain = effectiveDomain,
+                    path = "/",
+                    hostOnly = effectiveHostOnly
+                ),
+                value = value,
+                updatedAtEpochMs = System.currentTimeMillis()
+            )
+        )
+    }
+
     suspend fun <T> withSingleFlightRefresh(block: suspend () -> T): T {
         return sessionRefreshMutex.withLock {
             block()
@@ -271,6 +346,10 @@ object CookieSentinel {
         val keysToRemove = store.keys.filter { it.name !in cfTrustCookieNames }
         keysToRemove.forEach { store.remove(it) }
     }
+}
+
+internal fun ingestSetCookieHeader(rawSetCookie: String, domain: String = "linux.do") {
+    CookieSentinel.ingestSetCookieHeader(rawSetCookie, domain)
 }
 
 /**
@@ -428,8 +507,15 @@ object UserApiKeyAuthManager {
         onAuthStateChanged?.invoke()
     }
 
+    @Volatile
+    internal var authStateNotifyEpoch: Long = 0L
+
     internal fun clearApiKeyQuietly() {
         activeUserApiKey = null
+    }
+
+    internal fun restoreApiKeyQuietly(apiKey: String?) {
+        activeUserApiKey = apiKey?.trim()?.takeIf { it.isNotEmpty() }
     }
 
     internal fun persistSessionQuietly() {
@@ -453,6 +539,17 @@ object UserApiKeyAuthManager {
         LinuxDoRepository.updateCsrfToken(null)
         onPersistSession?.invoke(null, null)
         onAuthStateChanged?.invoke()
+    }
+
+    internal suspend fun <T> withServerAuthInvalidationSuppressed(block: suspend () -> T): T {
+        val acquired = invalidatingServerAuth.compareAndSet(false, true)
+        return try {
+            block()
+        } finally {
+            if (acquired) {
+                invalidatingServerAuth.set(false)
+            }
+        }
     }
 
     fun handleServerAuthInvalidated() {
@@ -502,7 +599,8 @@ object UserApiKeyAuthManager {
     ) {
         if (username.isBlank() || username == "linuxdo_user") return
         val prevUsername = currentUser?.username
-        if (prevUsername.isNullOrBlank() || !prevUsername.equals(username, ignoreCase = true)) {
+        val accountChanged = prevUsername.isNullOrBlank() || !prevUsername.equals(username, ignoreCase = true)
+        if (accountChanged) {
             sessionGeneration++
             fullProfileCache = null
             LinuxDoRepository.clearUserSessionCaches()
@@ -521,6 +619,10 @@ object UserApiKeyAuthManager {
         )
         currentUser = updated
         onPersistSession?.invoke(updated, activeUserApiKey)
+        if (accountChanged) {
+            authStateNotifyEpoch++
+            onAuthStateChanged?.invoke()
+        }
     }
 
     fun restorePersistedSession(
@@ -710,13 +812,12 @@ internal data class ComposerTagChoices(
  * Linux.do 核心数据仓库（100% 纯净线上社区内容）
  */
 internal fun isSuccessfulApiResponse(status: Int, body: String): Boolean {
+    if (status !in 200..299 || looksLikeCloudflareChallenge(body)) return false
     val trimmed = body.trimStart()
-    return status in 200..299 && (
-        trimmed.isEmpty() ||
-            trimmed.startsWith("{") ||
-            trimmed.startsWith("[") ||
-            trimmed.equals("ok", ignoreCase = true)
-    )
+    return trimmed.isEmpty() ||
+        trimmed.startsWith("{") ||
+        trimmed.startsWith("[") ||
+        trimmed.equals("ok", ignoreCase = true)
 }
 
 object LinuxDoRepository {
@@ -732,6 +833,9 @@ object LinuxDoRepository {
     private val detachedDraftScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val followFeedCursors = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val userFollowFeedActivityCursors = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    @Volatile
+    private var lastFollowUsedTopicListFallback: Boolean = false
 
     var readTopicsVersion by mutableIntStateOf(0)
         private set
@@ -858,15 +962,24 @@ object LinuxDoRepository {
     }
 
     fun clearUserSessionCaches() {
+        activeAuthVerifyJob?.cancel()
+        activeAuthVerifyJob = null
+        lastAuthVerifyEpochMs.set(0L)
         ScreenTrackEngine.resetSessionState()
         clearPollVoteState()
+        updateCsrfToken(null)
         clearReadTopics()
         followFeedCursors.clear()
+        lastFollowUsedTopicListFallback = false
         userFollowFeedActivityCursors.clear()
         cachedUserBadgesByUsername = emptyMap()
         cachedCategoryTemplates = null
         syncedCategoriesSessionGen = -1L
         categoriesLastSyncedAtMs = 0L
+        synchronized(imageByteCache) {
+            imageByteCache.clear()
+            imageByteCacheTotalBytes = 0L
+        }
         bumpReadTopicsVersion()
     }
 
@@ -1289,14 +1402,31 @@ object LinuxDoRepository {
         }
     }
 
-    private val imageByteCache = object : LinkedHashMap<String, UserApiKeyAuthManager.BinaryHttpPayload>(128, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, UserApiKeyAuthManager.BinaryHttpPayload>?): Boolean {
-            return size > 512
+    private val uploadHttpClient: HttpClient by lazy {
+        HttpClient(OkHttp) {
+            engine {
+                config {
+                    connectTimeout(15, TimeUnit.SECONDS)
+                    writeTimeout(90, TimeUnit.SECONDS)
+                    readTimeout(90, TimeUnit.SECONDS)
+                    callTimeout(120, TimeUnit.SECONDS)
+                    retryOnConnectionFailure(false)
+                }
+            }
         }
     }
+
+    private const val MAX_IMAGE_CACHE_ENTRIES = 256
+    private const val MAX_IMAGE_CACHE_SINGLE_BYTES = 512 * 1024
+    private const val MAX_IMAGE_CACHE_TOTAL_BYTES = 24L * 1024L * 1024L
+
+    private val imageByteCache = LinkedHashMap<String, UserApiKeyAuthManager.BinaryHttpPayload>(128, 0.75f, true)
+    private var imageByteCacheTotalBytes: Long = 0L
     private val inFlightBinaryFetches = java.util.concurrent.ConcurrentHashMap<String, Deferred<UserApiKeyAuthManager.BinaryHttpPayload?>>()
     private val binaryFetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val authVerifyScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
+    private var activeAuthVerifyJob: kotlinx.coroutines.Job? = null
     private val lastAuthVerifyEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val inFlightForegroundApiCount = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -1306,7 +1436,10 @@ object LinuxDoRepository {
         val prev = lastAuthVerifyEpochMs.get()
         if (now - prev in 0 until 8_000L) return
         if (!lastAuthVerifyEpochMs.compareAndSet(prev, now)) return
-        authVerifyScope.launch {
+        val expectedGen = UserApiKeyAuthManager.sessionGeneration
+        activeAuthVerifyJob?.cancel()
+        activeAuthVerifyJob = authVerifyScope.launch {
+            if (UserApiKeyAuthManager.sessionGeneration != expectedGen) return@launch
             runCatching { fetchCurrentUserProfile(background = true) }
         }
     }
@@ -1316,9 +1449,20 @@ object LinuxDoRepository {
     }
 
     private fun putCachedImagePayload(url: String, payload: UserApiKeyAuthManager.BinaryHttpPayload) {
-        if (payload.bytes.isEmpty() || payload.bytes.size > 768 * 1024) return
+        val itemBytes = payload.bytes.size
+        if (itemBytes <= 0 || itemBytes > MAX_IMAGE_CACHE_SINGLE_BYTES) return
         synchronized(imageByteCache) {
-            imageByteCache[url] = payload
+            val previous = imageByteCache.put(url, payload)
+            if (previous != null) {
+                imageByteCacheTotalBytes = (imageByteCacheTotalBytes - previous.bytes.size).coerceAtLeast(0L)
+            }
+            imageByteCacheTotalBytes += itemBytes
+            val iter = imageByteCache.entries.iterator()
+            while (iter.hasNext() && (imageByteCache.size > MAX_IMAGE_CACHE_ENTRIES || imageByteCacheTotalBytes > MAX_IMAGE_CACHE_TOTAL_BYTES)) {
+                val eldest = iter.next()
+                imageByteCacheTotalBytes = (imageByteCacheTotalBytes - eldest.value.bytes.size).coerceAtLeast(0L)
+                iter.remove()
+            }
         }
     }
 
@@ -1487,8 +1631,7 @@ object LinuxDoRepository {
                 if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
             }
             csrfResp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                val pair = setCookie.substringBefore(';')
-                CookieSentinel.ingestRawCookieString(pair, domain = "linux.do")
+                ingestSetCookieHeader(setCookie, domain = "linux.do")
                 UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke(setCookie)
             }
             val body = csrfResp.bodyAsText()
@@ -1577,6 +1720,12 @@ object LinuxDoRepository {
         val isForegroundRequest = mergedHeaders["Discourse-Background"] != "true"
         if (isForegroundRequest) {
             inFlightForegroundApiCount.incrementAndGet()
+        } else if (method.equals("GET", ignoreCase = true)) {
+            var waited = 0L
+            while (waited < 600L && inFlightForegroundApiCount.get() > 0) {
+                kotlinx.coroutines.delay(150L)
+                waited += 150L
+            }
         }
         try {
             suspend fun callWebView(): Pair<Int, String>? {
@@ -1662,7 +1811,7 @@ object LinuxDoRepository {
                     if (cookieHeader.isNotEmpty()) requestHeaders["Cookie"] = cookieHeader
                     var response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
                     response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                        CookieSentinel.ingestRawCookieString(setCookie.substringBefore(';'), domain = "linux.do")
+                        ingestSetCookieHeader(setCookie, domain = "linux.do")
                     }
                     var status = response.status.value
                     var text = response.bodyAsText()
@@ -1674,6 +1823,9 @@ object LinuxDoRepository {
                             val updatedCookieHeader = currentSafeCookieHeader()
                             if (updatedCookieHeader.isNotEmpty()) requestHeaders["Cookie"] = updatedCookieHeader
                             response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+                            response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                                ingestSetCookieHeader(setCookie, domain = "linux.do")
+                            }
                             status = response.status.value
                             text = response.bodyAsText()
                         }
@@ -1682,6 +1834,9 @@ object LinuxDoRepository {
                     if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In") && method.equals("GET", true)) {
                         requestHeaders.remove("Discourse-Logged-In")
                         response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+                        response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                            ingestSetCookieHeader(setCookie, domain = "linux.do")
+                        }
                         status = response.status.value
                         text = response.bodyAsText()
                     }
@@ -1742,16 +1897,61 @@ object LinuxDoRepository {
     suspend fun redeemOtpSilently(otp: String): Boolean = withContext(Dispatchers.IO) {
         if (otp.isBlank()) {
             if (!UserApiKeyAuthManager.getApiKey().isNullOrBlank()) {
+                val epochBefore = UserApiKeyAuthManager.authStateNotifyEpoch
                 val profile = fetchCurrentUserProfile()
                 if (profile != null || UserApiKeyAuthManager.isAuthorized()) {
                     UserApiKeyAuthManager.persistSessionQuietly()
-                    UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+                    if (UserApiKeyAuthManager.authStateNotifyEpoch == epochBefore) {
+                        UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+                    }
                     return@withContext true
                 }
             }
             return@withContext false
         }
+
+        suspend fun verifyAndFinalizeOtpSession(previousT: String): Boolean {
+            val currentT = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value.orEmpty()
+            if (currentT.isBlank() || currentT == "demo_session_token") {
+                return false
+            }
+            val epochBefore = UserApiKeyAuthManager.authStateNotifyEpoch
+            if (currentT == previousT) {
+                val preservedApiKey = UserApiKeyAuthManager.getApiKey()
+                val preservedCachedProfile = UserApiKeyAuthManager.fullProfileCache
+                UserApiKeyAuthManager.fullProfileCache = null
+                val profile = UserApiKeyAuthManager.withServerAuthInvalidationSuppressed {
+                    fetchCurrentUserProfile()
+                }
+                if (profile == null) {
+                    if (!preservedApiKey.isNullOrBlank() && UserApiKeyAuthManager.getApiKey() != preservedApiKey) {
+                        UserApiKeyAuthManager.restoreApiKeyQuietly(preservedApiKey)
+                    }
+                    if (UserApiKeyAuthManager.fullProfileCache == null && preservedCachedProfile != null && UserApiKeyAuthManager.isAuthorized()) {
+                        UserApiKeyAuthManager.fullProfileCache = preservedCachedProfile
+                    }
+                    return false
+                }
+                UserApiKeyAuthManager.clearApiKeyQuietly()
+                UserApiKeyAuthManager.persistSessionQuietly()
+                if (UserApiKeyAuthManager.authStateNotifyEpoch == epochBefore) {
+                    UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+                }
+                return true
+            }
+            UserApiKeyAuthManager.clearApiKeyQuietly()
+            val profile = fetchCurrentUserProfile()
+            UserApiKeyAuthManager.persistSessionQuietly()
+            if (UserApiKeyAuthManager.authStateNotifyEpoch == epochBefore) {
+                UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+            }
+            return profile != null || UserApiKeyAuthManager.isAuthorized()
+        }
+
         try {
+            val previousT = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
+                ?.takeUnless { it == "demo_session_token" }
+                .orEmpty()
             if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 val otpRes = executeHttp(
                     url = "https://linux.do/session/otp/${otp.trim()}",
@@ -1759,12 +1959,8 @@ object LinuxDoRepository {
                     formParams = emptyMap(),
                     preserveFailure = true
                 )
-                if (otpRes != null && CookieSentinel.resolveWinningCookies(targetHost = "linux.do").containsKey("_t")) {
-                    UserApiKeyAuthManager.clearApiKeyQuietly()
-                    val profile = fetchCurrentUserProfile()
-                    UserApiKeyAuthManager.persistSessionQuietly()
-                    UserApiKeyAuthManager.onAuthStateChanged?.invoke()
-                    return@withContext profile != null || UserApiKeyAuthManager.isAuthorized()
+                if (otpRes != null && otpRes.first in 200..399 && !looksLikeCloudflareChallenge(otpRes.second)) {
+                    return@withContext verifyAndFinalizeOtpSession(previousT)
                 }
                 return@withContext false
             }
@@ -1777,8 +1973,7 @@ object LinuxDoRepository {
                 if (initialCookie.isNotEmpty()) header("Cookie", initialCookie)
             }
             csrfResp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                val pair = setCookie.substringBefore(';')
-                CookieSentinel.ingestRawCookieString(pair, domain = "linux.do", hostOnly = false)
+                ingestSetCookieHeader(setCookie, domain = "linux.do")
                 UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke(setCookie)
             }
             val csrfBody = csrfResp.bodyAsText()
@@ -1798,17 +1993,12 @@ object LinuxDoRepository {
                 if (updatedCookie.isNotEmpty()) header("Cookie", updatedCookie)
             }
             otpResp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                val pair = setCookie.substringBefore(';')
-                CookieSentinel.ingestRawCookieString(pair, domain = "linux.do", hostOnly = false)
+                ingestSetCookieHeader(setCookie, domain = "linux.do")
                 UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke(setCookie)
             }
-
-            if (CookieSentinel.resolveWinningCookies(targetHost = "linux.do").containsKey("_t")) {
-                UserApiKeyAuthManager.clearApiKeyQuietly()
-                val profile = fetchCurrentUserProfile()
-                UserApiKeyAuthManager.persistSessionQuietly()
-                UserApiKeyAuthManager.onAuthStateChanged?.invoke()
-                return@withContext profile != null || UserApiKeyAuthManager.isAuthorized()
+            val otpBody = runCatching { otpResp.bodyAsText() }.getOrDefault("")
+            if (otpResp.status.value in 200..399 && !looksLikeCloudflareChallenge(otpBody)) {
+                return@withContext verifyAndFinalizeOtpSession(previousT)
             }
         } catch (ce: kotlinx.coroutines.CancellationException) {
             throw ce
@@ -2005,6 +2195,7 @@ object LinuxDoRepository {
             val root = readApiObject(effectiveRes)
             val postsArr = (root["posts"] as? JsonArray) ?: (root["feed"] as? JsonArray)
             if (postsArr != null) {
+                lastFollowUsedTopicListFallback = false
                 val hasMore = (root["extras"] as? JsonObject)?.get("has_more")?.jsonPrimitive?.booleanOrNull == true
                 val lastCreatedAt = (postsArr.lastOrNull() as? JsonObject)
                     ?.get("created_at")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
@@ -2021,6 +2212,7 @@ object LinuxDoRepository {
                 )
             }
             if (root["topic_list"] is JsonObject) {
+                lastFollowUsedTopicListFallback = true
                 val parsed = parseTopicListRoot(root)
                 return@withContext parsed.filter { item ->
                     val catOk = categoryId == null || item.categoryId == categoryId ||
@@ -2085,6 +2277,22 @@ object LinuxDoRepository {
         val root = readApiObject(executeHttp(url = url, extraHeaders = headers, preserveFailure = true))
         (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
         parseTopicListRoot(root)
+    }
+
+    fun computeHasMoreTopics(
+        path: String,
+        currentPage: Int,
+        fetchedCount: Int
+    ): Boolean {
+        val cleanMode = path.removePrefix("/").substringBefore(".json").substringBefore("?").lowercase()
+        if (cleanMode == "follow") {
+            if (lastFollowUsedTopicListFallback) return fetchedCount >= 15
+            val uname = UserApiKeyAuthManager.currentUser?.username?.trim()?.lowercase().orEmpty()
+            if (uname.isBlank()) return false
+            val nextKey = "$uname:${currentPage.coerceAtLeast(0) + 1}"
+            return !followFeedCursors[nextKey].isNullOrBlank()
+        }
+        return fetchedCount >= 15
     }
 
     /**
@@ -2434,6 +2642,7 @@ object LinuxDoRepository {
             userTitle = title
         )
 
+        val cachedDistinctCount = getCachedUserBadges(uname)?.distinctBy { it.id }?.size ?: 0
         val fullProfile = UserFullProfileSummary(
             id = userId,
             username = uname,
@@ -2456,7 +2665,7 @@ object LinuxDoRepository {
             likesGiven = likesGiven,
             topicCount = topicCount,
             postCount = postCount,
-            badgeCount = maxOf(badgeCount, topBadges.sumOf { it.count.coerceAtLeast(1) }),
+            badgeCount = maxOf(badgeCount, topBadges.distinctBy { it.id }.size, cachedDistinctCount),
             unreadNotifications = unreadNotifs,
             location = location,
             websiteName = websiteName,
@@ -2630,15 +2839,38 @@ object LinuxDoRepository {
         true
     }
 
+    private fun checkBooleanMutationResponse(res: Pair<Int, String>?): Boolean {
+        if (res == null) return false
+        val (status, rawBody) = res
+        if (status in 200..299) {
+            return isSuccessfulApiResponse(status, rawBody)
+        }
+        if (!looksLikeCloudflareChallenge(rawBody)) {
+            val body = rawBody.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart()
+            val errorType = if (body.startsWith("{")) {
+                runCatching {
+                    (json.parseToJsonElement(body) as? JsonObject)?.get("error_type")?.jsonPrimitive?.contentOrNull?.lowercase()
+                }.getOrNull().orEmpty()
+            } else {
+                ""
+            }
+            if (status == 401 || (status == 403 && errorType == "not_logged_in")) {
+                onAuthenticationInvalidated?.invoke()
+            }
+        }
+        return false
+    }
+
     /**
      * 删除自己发布的评论楼层 (`DELETE /posts/{id}.json`)
      */
     suspend fun deletePost(postId: Int): Boolean = withContext(Dispatchers.IO) {
         val res = executeHttp(
             url = "https://linux.do/posts/$postId.json",
-            method = "DELETE"
+            method = "DELETE",
+            preserveFailure = true
         )
-        res != null && res.first in 200..299
+        checkBooleanMutationResponse(res)
     }
 
     /**
@@ -2671,12 +2903,8 @@ object LinuxDoRepository {
             url = "https://linux.do/bookmarks/$bookmarkId.json",
             method = "DELETE",
             preserveFailure = true
-        ) ?: return@withContext false
-        if (res.first in 200..299) {
-            return@withContext true
-        }
-        runCatching { readApiObject(res) }
-        false
+        )
+        checkBooleanMutationResponse(res)
     }
 
     suspend fun archivePrivateMessage(topicId: Int, archived: Boolean = true): Boolean = withContext(Dispatchers.IO) {
@@ -3205,9 +3433,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/notifications/mark-read.json",
             method = "PUT",
-            formParams = emptyMap()
+            formParams = emptyMap(),
+            preserveFailure = true
         )
-        val ok = res != null && res.first in 200..299
+        val ok = checkBooleanMutationResponse(res)
         if (ok) {
             UserApiKeyAuthManager.updateCachedUnreadNotifications(0)
         }
@@ -3222,9 +3451,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/notifications/mark-read.json",
             method = "PUT",
-            formParams = mapOf("id" to notificationId.toString())
+            formParams = mapOf("id" to notificationId.toString()),
+            preserveFailure = true
         )
-        res != null && res.first in 200..299
+        checkBooleanMutationResponse(res)
     }
 
     /**
@@ -3235,9 +3465,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/t/$topicId/notifications.json",
             method = "POST",
-            formParams = mapOf("notification_level" to level.toString())
+            formParams = mapOf("notification_level" to level.toString()),
+            preserveFailure = true
         )
-        res != null && res.first in 200..299
+        checkBooleanMutationResponse(res)
     }
 
     data class ReactionToggleResult(
@@ -3274,10 +3505,16 @@ object LinuxDoRepository {
             return "网络或认证通道暂不可用，请检查网络或重新登录"
         }
         val (status, body) = res
-        val trimmed = body.trimStart()
+        val isCfChallenge = looksLikeCloudflareChallenge(body)
+        val trimmed = body.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart()
+        var errorType = ""
         if (trimmed.startsWith("{")) {
             runCatching {
                 val root = json.parseToJsonElement(trimmed).jsonObject
+                errorType = root["error_type"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
+                if (!isCfChallenge && (status == 401 || (status == 403 && errorType == "not_logged_in"))) {
+                    onAuthenticationInvalidated?.invoke()
+                }
                 val messages = when (val errs = root["errors"]) {
                     is JsonArray -> errs.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) }
                     is JsonPrimitive -> listOfNotNull(errs.contentOrNull?.takeIf(String::isNotBlank))
@@ -3298,10 +3535,19 @@ object LinuxDoRepository {
                     }
                 }
             }
+        } else if (!isCfChallenge && status == 401) {
+            onAuthenticationInvalidated?.invoke()
+        }
+        if (isCfChallenge) {
+            return "需要完成站点验证，请打开官网检查"
         }
         return when (status) {
             401 -> "登录状态已失效，请重新登录后操作"
-            403 -> "当前无权限执行该操作（不能给自己的帖子、已删除或已锁定的楼层操作）"
+            403 -> if (errorType == "not_logged_in") {
+                "登录状态已失效，请重新登录后操作"
+            } else {
+                "当前无权限执行该操作（不能给自己的帖子、已删除或已锁定的楼层操作）"
+            }
             404, 410 -> "目标楼层不存在或已被作者删除"
             422 -> "操作未生效（不能给自己的帖子操作，或表情不在站点白名单内）"
             429 -> "操作过于频繁，请稍后再试"
@@ -3428,7 +3674,7 @@ object LinuxDoRepository {
         val encodedReaction = java.net.URLEncoder.encode(cleanReaction, "UTF-8")
         val url = "https://linux.do/discourse-reactions/posts/$postId/custom-reactions/$encodedReaction/toggle.json"
         val res = executeHttp(url = url, method = "PUT", formParams = emptyMap(), preserveFailure = true)
-        if (res != null && res.first in 200..299) {
+        if (res != null && isSuccessfulApiResponse(res.first, res.second)) {
             val trimmed = res.second.trimStart()
             if (trimmed.startsWith("{")) {
                 runCatching {
@@ -3466,7 +3712,7 @@ object LinuxDoRepository {
                 ),
                 preserveFailure = true
             )
-            if (fallbackRes != null && fallbackRes.first in 200..299) {
+            if (fallbackRes != null && isSuccessfulApiResponse(fallbackRes.first, fallbackRes.second)) {
                 val trimmed = fallbackRes.second.trimStart()
                 if (trimmed.startsWith("{")) {
                     runCatching {
@@ -3532,7 +3778,7 @@ object LinuxDoRepository {
             formParams = mapOf("raw" to trimmed),
             preserveFailure = true
         )
-        if (res != null && res.first in 200..299) {
+        if (res != null && isSuccessfulApiResponse(res.first, res.second)) {
             val body = res.second.trimStart()
             var createdBoost: PostBoostItem? = null
             if (body.startsWith("{")) {
@@ -3574,7 +3820,7 @@ object LinuxDoRepository {
             method = "DELETE",
             preserveFailure = true
         )
-        if (res != null && res.first in 200..299) {
+        if (res != null && isSuccessfulApiResponse(res.first, res.second)) {
             postBoostSnapshots.computeIfPresent(postId) { _, snap ->
                 val remaining = snap.boosts.filterNot { it.id == boostId }
                 if (remaining.size == snap.boosts.size) snap else snap.copy(boosts = remaining, canBoost = true)
@@ -3808,6 +4054,7 @@ object LinuxDoRepository {
             }
         }
 
+        val cachedDistinctCount = getCachedUserBadges(clean)?.distinctBy { it.id }?.size ?: 0
         UserFullProfileSummary(
             id = userId,
             username = clean,
@@ -3830,7 +4077,7 @@ object LinuxDoRepository {
             likesGiven = likesGiven,
             topicCount = topicCount,
             postCount = postCount,
-            badgeCount = maxOf(badgeCount, topBadges.sumOf { it.count.coerceAtLeast(1) }),
+            badgeCount = maxOf(badgeCount, topBadges.distinctBy { it.id }.size, cachedDistinctCount),
             lastSeenText = lastSeenText,
             location = location,
             websiteName = websiteName,
@@ -3934,13 +4181,16 @@ object LinuxDoRepository {
             }
             var response = executeApiRequest(sharedClient, url, "GET", null, requestHeaders)
             response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                CookieSentinel.ingestRawCookieString(setCookie.substringBefore(';'), domain = "linux.do")
+                ingestSetCookieHeader(setCookie, domain = "linux.do")
             }
             var status = response.status.value
             var text = response.bodyAsText()
             if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In")) {
                 requestHeaders.remove("Discourse-Logged-In")
                 response = executeApiRequest(sharedClient, url, "GET", null, requestHeaders)
+                response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                    ingestSetCookieHeader(setCookie, domain = "linux.do")
+                }
                 status = response.status.value
                 text = response.bodyAsText()
             }
@@ -3998,6 +4248,11 @@ object LinuxDoRepository {
             val parsed = parseUserBadgesFromRoot(root)
             if (parsed.isNotEmpty()) {
                 cachedUserBadgesByUsername = cachedUserBadgesByUsername + (clean.lowercase() to parsed)
+                if (UserApiKeyAuthManager.fullProfileCache?.username?.equals(clean, ignoreCase = true) == true) {
+                    UserApiKeyAuthManager.fullProfileCache = UserApiKeyAuthManager.fullProfileCache?.copy(
+                        badgeCount = parsed.distinctBy { it.id }.size
+                    )
+                }
             }
             parsed
         } catch (cancelled: CancellationException) {
@@ -4464,7 +4719,6 @@ object LinuxDoRepository {
             val rawExcerpt = tObj["excerpt"]?.jsonPrimitive?.contentOrNull
             val cleanedExcerpt = extractPlainExcerptFromHtml(rawExcerpt).takeIf { it.isNotBlank() }
                 ?.also { putBounded(topicExcerptCache, id, it) }
-                ?: topicExcerptCache[id]?.takeIf { it.isNotBlank() }
 
             TopicSummary(
                 id = id,
@@ -4674,7 +4928,7 @@ object LinuxDoRepository {
                             val resolved = runCatching {
                                 val root = json.parseToJsonElement(pBody).jsonObject
                                 val pObj = (root["post"] as? JsonObject) ?: root
-                                parseSinglePostObject(pObj, item.topicId)
+                                parseSinglePostObject(pObj = pObj, fallbackIdx = 0, topicId = item.topicId)
                                 postAuthorCache[item.originalPostId]
                             }.getOrNull()
                             if (resolved != null && resolved.username.isNotBlank() && !resolved.username.startsWith("user_")) {
@@ -4703,7 +4957,7 @@ object LinuxDoRepository {
                                     it["post_number"]?.jsonPrimitive?.intOrNull == targetFloor
                                 } ?: (postsArr?.firstOrNull() as? JsonObject)
                                 if (targetPostObj != null) {
-                                    val parsed = parseSinglePostObject(targetPostObj, item.topicId)
+                                    val parsed = parseSinglePostObject(pObj = targetPostObj, fallbackIdx = 0, topicId = item.topicId)
                                     parsed?.let { postAuthorCache[it.id] }
                                 } else if (createdBy != null && targetFloor == 1) {
                                     val uname = createdBy["username"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -5163,9 +5417,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/follow/${encodeUrlSegment(username)}.json",
             method = if (follow) "PUT" else "DELETE",
-            formParams = emptyMap()
+            formParams = emptyMap(),
+            preserveFailure = true
         )
-        res != null && res.first in 200..299
+        checkBooleanMutationResponse(res)
     }
 
     data class PollVoteSnapshot(
@@ -5280,9 +5535,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/solution/accept.json",
             method = "POST",
-            formParams = mapOf("id" to postId.toString())
+            formParams = mapOf("id" to postId.toString()),
+            preserveFailure = true
         )
-        res != null && res.first in 200..299
+        checkBooleanMutationResponse(res)
     }
 
     /**
@@ -5300,9 +5556,10 @@ object LinuxDoRepository {
         val res = executeHttp(
             url = "https://linux.do/post_actions.json",
             method = "POST",
-            formParams = params
+            formParams = params,
+            preserveFailure = true
         )
-        res != null && res.first in 200..299
+        checkBooleanMutationResponse(res)
     }
 
     /**
@@ -5458,52 +5715,63 @@ object LinuxDoRepository {
         bytes: ByteArray
     ): UploadedMediaResult? = withContext(Dispatchers.IO) {
         if (bytes.isEmpty()) return@withContext null
-        val b64 = Base64.getEncoder().encodeToString(bytes)
+        val binaryUploadExecutor = PlatformMediaPicker.webViewBinaryUploadExecutor
         val webUploadExecutor = PlatformMediaPicker.webViewUploadExecutor
-        val obj: JsonObject = if (webUploadExecutor != null) {
-            val uploadRes = webUploadExecutor(fileName, mimeType, b64)
-            requireMutationObject(uploadRes)
-        } else {
-            val fallbackRes: Pair<Int, String>? = try {
-                val csrfBody = executeHttp("https://linux.do/session/csrf.json", method = "GET")?.second.orEmpty()
-                val csrf = if (csrfBody.trimStart().startsWith("{")) {
-                    runCatching { json.parseToJsonElement(csrfBody).jsonObject["csrf"]?.jsonPrimitive?.contentOrNull }.getOrNull()
-                } else null
-                val cookieHeader = CookieSentinel.buildCookieHeader(includeCloudflareCookies = false)
-                val resp = sharedClient.submitFormWithBinaryData(
-                    url = "https://linux.do/uploads.json",
-                    formData = formData {
-                        append("type", "composer")
-                        append("synchronous", "true")
-                        append(
-                            "files[]",
-                            bytes,
-                            Headers.build {
-                                append(HttpHeaders.ContentType, mimeType)
-                                append(HttpHeaders.ContentDisposition, "filename=\"${fileName.replace("\"", "")}\"")
-                            }
-                        )
-                    }
-                ) {
-                    header("Accept", "application/json")
-                    header("X-Requested-With", "XMLHttpRequest")
-                    UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
-                    if (!CookieSentinel.resolveWinningCookies().containsKey("_t")) {
-                        UserApiKeyAuthManager.getApiKey()?.let {
-                            header("User-Api-Key", it)
-                            header("User-Api-Client-Id", UserApiKeyAuthManager.getClientId())
-                        }
-                    }
-                    if (!csrf.isNullOrBlank()) header("X-CSRF-Token", csrf)
-                    if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
-                }
-                resp.status.value to resp.bodyAsText()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                null
+        val obj: JsonObject = when {
+            binaryUploadExecutor != null -> {
+                val uploadRes = binaryUploadExecutor(fileName, mimeType, bytes)
+                requireMutationObject(uploadRes)
             }
-            requireMutationObject(fallbackRes)
+            webUploadExecutor != null -> {
+                val b64 = Base64.getEncoder().encodeToString(bytes)
+                val uploadRes = webUploadExecutor(fileName, mimeType, b64)
+                requireMutationObject(uploadRes)
+            }
+            else -> {
+                val fallbackRes: Pair<Int, String>? = try {
+                    val csrfBody = executeHttp("https://linux.do/session/csrf.json", method = "GET")?.second.orEmpty()
+                    val csrf = if (csrfBody.trimStart().startsWith("{")) {
+                        runCatching { json.parseToJsonElement(csrfBody).jsonObject["csrf"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    } else null
+                    val cookieHeader = CookieSentinel.buildCookieHeader(includeCloudflareCookies = false)
+                    val resp = uploadHttpClient.submitFormWithBinaryData(
+                        url = "https://linux.do/uploads.json",
+                        formData = formData {
+                            append("type", "composer")
+                            append("synchronous", "true")
+                            append(
+                                "files[]",
+                                bytes,
+                                Headers.build {
+                                    append(HttpHeaders.ContentType, mimeType)
+                                    append(HttpHeaders.ContentDisposition, "filename=\"${fileName.replace("\"", "")}\"")
+                                }
+                            )
+                        }
+                    ) {
+                        header("Accept", "application/json")
+                        header("X-Requested-With", "XMLHttpRequest")
+                        UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
+                        if (!CookieSentinel.resolveWinningCookies().containsKey("_t")) {
+                            UserApiKeyAuthManager.getApiKey()?.let {
+                                header("User-Api-Key", it)
+                                header("User-Api-Client-Id", UserApiKeyAuthManager.getClientId())
+                            }
+                        }
+                        if (!csrf.isNullOrBlank()) header("X-CSRF-Token", csrf)
+                        if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+                    }
+                    resp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                        ingestSetCookieHeader(setCookie, domain = "linux.do")
+                    }
+                    resp.status.value to resp.bodyAsText()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    null
+                }
+                requireMutationObject(fallbackRes)
+            }
         }
         try {
             val shortUrl = obj["short_url"]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -6204,6 +6472,7 @@ data class CommunityAboutData(
  */
 object PlatformMediaPicker {
     var launchPicker: ((mimeType: String, onPicked: (fileName: String, mimeType: String, bytes: ByteArray) -> Unit) -> Unit)? = null
+    var webViewBinaryUploadExecutor: (suspend (fileName: String, mimeType: String, bytes: ByteArray) -> Pair<Int, String>?)? = null
     var webViewUploadExecutor: (suspend (fileName: String, mimeType: String, base64Bytes: String) -> Pair<Int, String>?)? = null
 }
 

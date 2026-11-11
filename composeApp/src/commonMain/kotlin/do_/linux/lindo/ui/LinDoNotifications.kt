@@ -41,6 +41,7 @@ import do_.linux.lindo.core.model.TopicUser
 import do_.linux.lindo.core.model.UserNotificationItem
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.ui.components.LinDoIcons
+import do_.linux.lindo.ui.components.LocalLinDoNetworkRestoreVersion
 import do_.linux.lindo.ui.components.SmartAvatar
 
 @Composable
@@ -74,6 +75,7 @@ internal fun LinDoNotificationRow(
     onInspectUser: ((String) -> Unit)? = null
 ) {
     val palette = LocalPalette.current
+    val networkRestoreVersion = LocalLinDoNetworkRestoreVersion.current
     val canResolvePostAuthor = item.actorUsername == null &&
         item.notificationType in setOf(17, 36, 801, 802) &&
         (item.originalPostId > 0 || item.topicId > 0)
@@ -84,9 +86,12 @@ internal fun LinDoNotificationRow(
         mutableStateOf(!canResolvePostAuthor)
     }
     if (canResolvePostAuthor && !postAuthorResolveDone) {
-        LaunchedEffect(item.id) {
-            resolvedActorUser = LinuxDoRepository.resolveNotificationActor(item)
-            postAuthorResolveDone = true
+        LaunchedEffect(item.id, item.actorUsername, item.originalPostId, item.topicId, networkRestoreVersion) {
+            val resolved = LinuxDoRepository.resolveNotificationActor(item)
+            if (resolved != null) {
+                resolvedActorUser = resolved
+                postAuthorResolveDone = true
+            }
         }
     }
 
@@ -105,26 +110,28 @@ internal fun LinDoNotificationRow(
         }
     }
 
-    val actor = effectiveItem.actorUsername
-    val initialAvatarTemplate = remember(actor, effectiveItem.actingAvatarTemplate) {
+    val effectiveActorUsername = effectiveItem.actorUsername
+    val initialAvatarTemplate = remember(effectiveActorUsername, effectiveItem.actingAvatarTemplate) {
         effectiveItem.actingAvatarTemplate?.takeIf { it.isNotBlank() }
-            ?: actor?.let { LinuxDoRepository.getCachedUserAvatar(it) }
+            ?: effectiveActorUsername?.let { LinuxDoRepository.getCachedUserAvatar(it) }
     }
-    var resolvedAvatarTemplate by remember(actor, initialAvatarTemplate) {
+    var effectiveAvatarTemplate by remember(effectiveActorUsername, initialAvatarTemplate) {
         mutableStateOf(initialAvatarTemplate)
     }
-    var avatarResolveDone by remember(actor, initialAvatarTemplate) {
-        mutableStateOf(actor == null || !initialAvatarTemplate.isNullOrBlank())
+    var avatarResolveDone by remember(effectiveActorUsername, initialAvatarTemplate) {
+        mutableStateOf(effectiveActorUsername == null || !initialAvatarTemplate.isNullOrBlank())
     }
-    if (actor != null && resolvedAvatarTemplate.isNullOrBlank() && !avatarResolveDone) {
-        LaunchedEffect(actor) {
-            val fetched = LinuxDoRepository.resolveUserAvatarTemplate(actor)
-            if (!fetched.isNullOrBlank()) {
-                resolvedAvatarTemplate = fetched
+    if (effectiveActorUsername != null && effectiveAvatarTemplate.isNullOrBlank() && !avatarResolveDone) {
+        LaunchedEffect(effectiveActorUsername, effectiveAvatarTemplate, networkRestoreVersion) {
+            val resolved = LinuxDoRepository.resolveUserAvatarTemplate(effectiveActorUsername)
+            if (!resolved.isNullOrBlank()) {
+                effectiveAvatarTemplate = resolved
+                avatarResolveDone = true
             }
-            avatarResolveDone = true
         }
     }
+    val actor = effectiveActorUsername
+    val resolvedAvatarTemplate = effectiveAvatarTemplate
     val activity = remember(effectiveItem, actor, palette.inkPrimary) {
         buildAnnotatedString {
             if (actor != null) {

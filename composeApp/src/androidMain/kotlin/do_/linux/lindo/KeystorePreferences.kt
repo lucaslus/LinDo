@@ -23,11 +23,12 @@ internal class KeystorePreferences(context: Context) : SharedPreferences by cont
     private val backing = context.getSharedPreferences("lindo_auth_session", Context.MODE_PRIVATE)
     private val secrets = setOf("raw_cookies", "api_key", "pending_rsa_priv_b64", "pending_rsa_nonce", "composer_drafts")
     private val prefix = "keystore:v1:"
-    private fun key(recreate: Boolean = false): SecretKey {
+    private val keyLock = Any()
+    private fun key(recreate: Boolean = false): SecretKey = synchronized(keyLock) {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (recreate) runCatching { store.deleteEntry(KEY_ALIAS) }
-        else (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+        else (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return@synchronized it }
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
             init(KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
         }.generateKey()

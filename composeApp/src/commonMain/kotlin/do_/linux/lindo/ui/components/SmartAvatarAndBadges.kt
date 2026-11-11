@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +77,8 @@ import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.allDrawableResources
 import org.jetbrains.compose.resources.painterResource
 
+val LocalLinDoNetworkRestoreVersion = compositionLocalOf { 0 }
+
 /**
  * LinDo 双栈智能动态头像组件 (`SmartAvatar`)
  *
@@ -98,6 +101,7 @@ fun SmartAvatar(
     // 确保首页、帖子正文、个人主页、用户名片、小火箭与通知中心 100% 共享同一 CDN URL 与内存/磁盘缓存，零 302 重定向！
     val thumbnailSize = if (size <= 60.dp) 144 else 288
     val motionEnabled = enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused
+    val networkRestoreVersion = LocalLinDoNetworkRestoreVersion.current
 
     var cachedVisual by remember(username) {
         mutableStateOf(LinuxDoRepository.getCachedUserVisualMeta(username))
@@ -109,7 +113,7 @@ fun SmartAvatar(
                 ?: LinuxDoRepository.getCachedUserAvatar(username).orEmpty()
         )
     }
-    LaunchedEffect(username, effectiveTemplate) {
+    LaunchedEffect(username, effectiveTemplate, networkRestoreVersion) {
         if (effectiveTemplate.isBlank()) {
             val clean = username.trim().removePrefix("@")
             if (clean.isNotEmpty() && clean != "L" && !clean.startsWith("user_")) {
@@ -167,6 +171,17 @@ fun SmartAvatar(
         }
         var retryAttempt by remember { mutableIntStateOf(0) }
         var failedAttempt by remember { mutableIntStateOf(-1) }
+        var lastHandledRestoreVersion by remember { mutableIntStateOf(networkRestoreVersion) }
+
+        LaunchedEffect(networkRestoreVersion) {
+            if (networkRestoreVersion > 0 && networkRestoreVersion != lastHandledRestoreVersion) {
+                lastHandledRestoreVersion = networkRestoreVersion
+                if (!staticLoaded && failedAttempt >= 0 && staticUrl.isNotEmpty()) {
+                    failedAttempt = -1
+                    retryAttempt = (retryAttempt + 1).coerceAtLeast(1)
+                }
+            }
+        }
 
         LaunchedEffect(failedAttempt, staticLoaded) {
             if (!staticLoaded && failedAttempt in 0..2) {
@@ -276,14 +291,13 @@ fun SmartAvatar(
                         },
                         onSuccess = {
                             rememberLoadedAvatarUrl(staticUrl)
+                            failedAttempt = -1
                             if (!staticLoaded) staticLoaded = true
                         },
                         onError = {
                             forgetLoadedAvatarUrl(staticUrl)
                             staticLoaded = false
-                            if (retryAttempt <= 2) {
-                                failedAttempt = retryAttempt
-                            }
+                            failedAttempt = retryAttempt
                         },
                         modifier = Modifier
                             .fillMaxSize()

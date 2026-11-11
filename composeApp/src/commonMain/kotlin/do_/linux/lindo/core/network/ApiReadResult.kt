@@ -25,9 +25,12 @@ internal fun requireMutationSuccess(response: Pair<Int, String>?) {
 
 internal fun requireMutationObject(response: Pair<Int, String>?): JsonObject {
     val status = response?.first ?: 0
-    val root = response?.second?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
+    val rawBody = response?.second
+    val root = rawBody?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
     val errorType = root?.get("error_type")?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
-    if ((status == 401 || (status == 403 && errorType == "not_logged_in")) && UserApiKeyAuthManager.isAuthorized()) {
+    if (((status == 401 && !looksLikeCloudflareChallenge(rawBody)) || (status == 403 && errorType == "not_logged_in")) &&
+        UserApiKeyAuthManager.isAuthorized()
+    ) {
         onAuthenticationInvalidated?.invoke()
     }
     val messages = when (val errors = root?.get("errors")) {
@@ -93,24 +96,31 @@ internal fun readApiObject(response: Pair<Int, String>?): JsonObject {
             else -> emptyList()
         }.joinToString("；").let { if (it.isNotBlank()) org.jsoup.Jsoup.parse(it).text().take(200) else null }
 
-        if ((status == 401 || (status == 403 && errorType == "not_logged_in")) && UserApiKeyAuthManager.isAuthorized()) {
+        val isCfChallenge = errorType != "not_logged_in" && looksLikeCloudflareChallenge(rawBody)
+        if (!isCfChallenge &&
+            (status == 401 || (status == 403 && errorType == "not_logged_in")) &&
+            UserApiKeyAuthManager.isAuthorized()
+        ) {
             onAuthenticationInvalidated?.invoke()
+        }
+
+        if (isCfChallenge) {
+            throw ApiReadException(ApiFailureKind.Verification)
         }
 
         throw when (status) {
             401 -> ApiReadException(ApiFailureKind.Authentication, customMessage = serverMsg)
-            403 -> when {
-                errorType == "not_logged_in" -> ApiReadException(ApiFailureKind.Authentication, customMessage = serverMsg)
-                looksLikeCloudflareChallenge(rawBody) -> ApiReadException(ApiFailureKind.Verification)
-                else -> ApiReadException(ApiFailureKind.PermissionDenied, customMessage = serverMsg)
-            }
-            429 -> if (looksLikeCloudflareChallenge(rawBody)) {
-                ApiReadException(ApiFailureKind.Verification)
+            403 -> if (errorType == "not_logged_in") {
+                ApiReadException(ApiFailureKind.Authentication, customMessage = serverMsg)
             } else {
-                ApiReadException(ApiFailureKind.RateLimited, customMessage = serverMsg)
+                ApiReadException(ApiFailureKind.PermissionDenied, customMessage = serverMsg)
             }
+            429 -> ApiReadException(ApiFailureKind.RateLimited, customMessage = serverMsg)
             else -> ApiReadException(ApiFailureKind.Server, customMessage = serverMsg)
         }
+    }
+    if (looksLikeCloudflareChallenge(rawBody)) {
+        throw ApiReadException(ApiFailureKind.Verification)
     }
     try {
         val root = Json.parseToJsonElement(body) as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)

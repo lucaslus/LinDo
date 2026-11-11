@@ -28,6 +28,9 @@ object UserPresenceService {
     var isForeground: Boolean = true
         private set
 
+    var isForegroundState by mutableStateOf(true)
+        private set
+
     @Volatile
     var lastUserActivityEpochMs: Long = System.currentTimeMillis()
         private set
@@ -40,6 +43,9 @@ object UserPresenceService {
 
     fun setAppForeground(foreground: Boolean, countAsActivity: Boolean = true) {
         isForeground = foreground
+        Snapshot.withMutableSnapshot {
+            isForegroundState = foreground
+        }
         if (foreground && countAsActivity) {
             markUserActivity()
         }
@@ -432,17 +438,22 @@ object ScreenTrackEngine {
             retryCounts.remove(batch.topicId)
             releaseUnconfirmedFloorTrackingLocked(batch)
         } else if (statusCode == null || statusCode == 0 || statusCode in RETRYABLE_STATUS_CODES) {
-            val retries = (retryCounts[batch.topicId] ?: 0) + 1
-            if (retries >= MAX_TOPIC_RETRIES) {
-                retryCounts.remove(batch.topicId)
-                releaseUnconfirmedFloorTrackingLocked(batch)
-            } else {
-                retryCounts[batch.topicId] = retries
-                val delayIdx = consecutiveFailures.coerceIn(0, BACKOFF_DELAYS_MS.lastIndex)
-                consecutiveFailures += 1
-                blockSendingUntilEpochMs = nowMs + BACKOFF_DELAYS_MS[delayIdx]
-                // 失败不丢数据：重新合并回队列尾部等待退避后重发（FIFO 不阻塞其他话题）
+            if (!UserPresenceService.isForeground) {
+                blockSendingUntilEpochMs = nowMs + 15_000L
                 consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
+            } else {
+                val retries = (retryCounts[batch.topicId] ?: 0) + 1
+                if (retries >= MAX_TOPIC_RETRIES) {
+                    retryCounts.remove(batch.topicId)
+                    releaseUnconfirmedFloorTrackingLocked(batch)
+                } else {
+                    retryCounts[batch.topicId] = retries
+                    val delayIdx = consecutiveFailures.coerceIn(0, BACKOFF_DELAYS_MS.lastIndex)
+                    consecutiveFailures += 1
+                    blockSendingUntilEpochMs = nowMs + BACKOFF_DELAYS_MS[delayIdx]
+                    // 失败不丢数据：重新合并回队列尾部等待退避后重发（FIFO 不阻塞其他话题）
+                    consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
+                }
             }
         } else {
             retryCounts.remove(batch.topicId)

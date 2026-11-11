@@ -105,8 +105,9 @@ private object DesktopStateStore {
             null
         }
         val savedApiKey = props.getProperty("api_key")?.takeIf { it.isNotBlank() }
-        val savedCookies = if (profile != null || savedApiKey != null) {
-            props.getProperty("raw_cookies").orEmpty()
+        val rawSavedCookies = props.getProperty("raw_cookies").orEmpty()
+        val savedCookies = if (profile != null || savedApiKey != null || rawSavedCookies.contains("_t=")) {
+            rawSavedCookies
         } else {
             ""
         }
@@ -160,7 +161,6 @@ private object DesktopStateStore {
                     putOrRemove("animated_avatar", currentProfile.animatedAvatar)
                     putOrRemove("user_title", currentProfile.userTitle)
                     setProperty("trust_level", currentProfile.trustLevel.toString())
-                    putOrRemove("raw_cookies", cookies.takeIf { it.isNotBlank() })
                 } else {
                     remove("user_id")
                     remove("username")
@@ -169,8 +169,8 @@ private object DesktopStateStore {
                     remove("animated_avatar")
                     remove("user_title")
                     remove("trust_level")
-                    remove("raw_cookies")
                 }
+                putOrRemove("raw_cookies", cookies.takeIf { it.isNotBlank() })
             }
         }
         UserApiKeyAuthManager.onLogoutPlatformClear = {

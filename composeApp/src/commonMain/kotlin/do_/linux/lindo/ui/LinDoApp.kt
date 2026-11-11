@@ -206,6 +206,7 @@ import do_.linux.lindo.core.render.PostBlockNode
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
+import do_.linux.lindo.ui.components.LocalLinDoNetworkRestoreVersion
 import do_.linux.lindo.ui.components.OfficialBadgeArtwork
 import do_.linux.lindo.ui.components.PostGrantedBadgeIcon
 import lindo.composeapp.generated.resources.*
@@ -1599,6 +1600,11 @@ internal fun LinDoApp(
     var authVersion by remember { mutableStateOf(0) }
     var networkRestoreVersion by remember { mutableIntStateOf(0) }
     var wasAuthorized by remember { mutableStateOf(UserApiKeyAuthManager.isAuthorized()) }
+    var lastAuthenticatedUsername by remember {
+        mutableStateOf(
+            UserApiKeyAuthManager.currentUser?.username?.takeIf { it.isNotBlank() && it != "linuxdo_user" }
+        )
+    }
     var isGuestMode by remember { mutableStateOf(false) }
     var activeWebLoginUrl by remember { mutableStateOf<String?>(null) }
     var fullUserProfile by remember { mutableStateOf<UserFullProfileSummary?>(UserApiKeyAuthManager.fullProfileCache) }
@@ -1825,7 +1831,7 @@ internal fun LinDoApp(
                         fetched.first().postsCount == previousTopPostsCount
                     val filtered = if (excludedTopicId == null) fetched else fetched.filterNot { it.id == excludedTopicId }
                     topics = normalizeReadTopics(filtered)
-                    hasMoreTopics = fetched.size >= 15
+                    hasMoreTopics = LinuxDoRepository.computeHasMoreTopics(sort.apiPath, currentPage, fetched.size)
                     if (isUnchanged) {
                         refreshUpToDateNotice = true
                         scope.launch {
@@ -1857,11 +1863,11 @@ internal fun LinDoApp(
         }
     }
 
-    fun loadNextPageTopics() {
+    fun loadNextPageTopics(forcePrepareRecovery: Boolean = false) {
         if (searchQuery.isNotBlank()) return
         if (isLoadingTopics || isLoadingMoreTopics || !hasMoreTopics) return
-        val retryingAfterError = loadMoreError
-        if (retryingAfterError && loadMoreErrorMessage.contains("站点验证")) {
+        val retryingAfterError = loadMoreError || forcePrepareRecovery
+        if (loadMoreError && loadMoreErrorMessage.contains("站点验证")) {
             openWebPage("https://linux.do/")
             return
         }
@@ -1873,22 +1879,27 @@ internal fun LinDoApp(
                     LinuxDoRepository.prepareForManualRecovery()
                 }
                 val nextPage = currentPage + 1
-                val more = LinuxDoRepository.fetchTopics(
+                val nextTopics = LinuxDoRepository.fetchTopics(
                     path = currentSort.apiPath,
                     categoryId = selectedCategoryId,
                     page = nextPage,
                     tag = selectedTag,
                     topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null
                 )
-                if (more.isNotEmpty()) {
+                if (nextTopics.isNotEmpty()) {
                     val existingIds = topics.map { it.id }.toSet()
-                    val uniqueNew = normalizeReadTopics(more.filterNot { it.id in existingIds })
-                    if (uniqueNew.isNotEmpty()) {
+                    val uniqueNew = normalizeReadTopics(nextTopics.filterNot { it.id in existingIds })
+                    val addedCount = uniqueNew.size
+                    if (addedCount > 0) {
                         currentPage = nextPage
                         topics = topics + uniqueNew
-                        hasMoreTopics = more.size >= 10
+                    } else if (currentSort == FeedSortFilter.FOLLOW) {
+                        currentPage = nextPage
+                    }
+                    hasMoreTopics = if (currentSort == FeedSortFilter.FOLLOW) {
+                        LinuxDoRepository.computeHasMoreTopics(currentSort.apiPath, nextPage, nextTopics.size)
                     } else {
-                        hasMoreTopics = false
+                        nextTopics.size >= 15 && addedCount > 0
                     }
                 } else {
                     // 正常分页已到底：切换为“没有更多了”零度娘收尾提示
@@ -1998,17 +2009,29 @@ internal fun LinDoApp(
 
     LaunchedEffect(networkRestoreVersion) {
         if (networkRestoreVersion == 0) return@LaunchedEffect
-        if (loadMoreError && isTransientRecoverableLoadError(loadMoreErrorMessage)) {
+        val shouldRetryLoadMore = loadMoreError && isTransientRecoverableLoadError(loadMoreErrorMessage)
+        if (shouldRetryLoadMore) {
             loadMoreError = false
             loadMoreErrorMessage = "网络异常"
         }
-        if ((isAuthorized || isGuestMode) && !isLoadingTopics && isTransientRecoverableLoadError(feedError)) {
+        val hasRecoverableFeedError = (isAuthorized || isGuestMode) && !isLoadingTopics && isTransientRecoverableLoadError(feedError)
+        if (hasRecoverableFeedError) {
             if (topics.isEmpty()) {
                 loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
             } else {
                 feedError = null
                 loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
             }
+        } else if (shouldRetryLoadMore &&
+            (isAuthorized || isGuestMode) &&
+            !isLoadingTopics &&
+            !isLoadingMoreTopics &&
+            topics.isNotEmpty()
+        ) {
+            loadNextPageTopics(forcePrepareRecovery = true)
+        }
+        if (isAuthorized && fullUserProfile == null) {
+            syncUserProfile(force = true)
         }
         val currentSummary = activeTopicSummary
         val currentDetailErr = activeTopicDetail?.loadError
@@ -2024,6 +2047,7 @@ internal fun LinDoApp(
 
     LaunchedEffect(authVersion) {
         val otp = UserApiKeyAuthManager.consumePendingOtpToken()
+        var preFetchedProfile: UserFullProfileSummary? = null
         if (!otp.isNullOrBlank()) {
             // 优先在后台静默兑换 OTP 令牌，免弹 WebView 页面以避免二次触发 Cloudflare Turnstile 验证
             val redeemed = LinuxDoRepository.redeemOtpSilently(otp)
@@ -2031,28 +2055,54 @@ internal fun LinDoApp(
                 openWebPage("https://linux.do/session/otp/$otp")
                 return@LaunchedEffect
             }
-        } else if (UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.currentUser == null) {
+        } else if (UserApiKeyAuthManager.isAuthorized() &&
+            UserApiKeyAuthManager.currentUser?.username?.takeIf { it.isNotBlank() && it != "linuxdo_user" } == null
+        ) {
             LinuxDoRepository.fetchCurrentUserProfile()?.let { profile ->
-                fullUserProfile = profile
+                preFetchedProfile = profile
                 UserApiKeyAuthManager.persistSessionQuietly()
             }
         }
         val nowAuth = UserApiKeyAuthManager.isAuthorized()
-        if (nowAuth && !wasAuthorized) {
+        val nowUsername = UserApiKeyAuthManager.currentUser?.username?.takeIf { it.isNotBlank() && it != "linuxdo_user" }
+        val switchedUser = nowAuth &&
+            wasAuthorized &&
+            nowUsername != null &&
+            lastAuthenticatedUsername != null &&
+            !nowUsername.equals(lastAuthenticatedUsername, ignoreCase = true)
+        if ((nowAuth && !wasAuthorized) || switchedUser) {
+            if (switchedUser) {
+                resetSessionUiState()
+                topics = emptyList()
+                discoverHotTopics = emptyList()
+                activeTopicDetail = null
+                activeTopicSummary = null
+                activeTargetPostNumber = null
+                mobileShowingDetail = false
+            }
+            val fetched = preFetchedProfile
+            if (fetched != null && (nowUsername == null || fetched.username.equals(nowUsername, ignoreCase = true))) {
+                fullUserProfile = fetched
+            }
             wasAuthorized = true
+            lastAuthenticatedUsername = nowUsername
             isGuestMode = false
             activeWebLoginUrl = null
             showAuthSheet = false
             loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
             syncUserProfile(force = true)
-            activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) }
+            if (!switchedUser) {
+                activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) }
+            }
         } else if (!nowAuth && wasAuthorized) {
             wasAuthorized = false
+            lastAuthenticatedUsername = null
             resetSessionUiState()
             if (currentSort !in setOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)) {
                 currentSort = FeedSortFilter.LATEST
             }
             topics = emptyList()
+            discoverHotTopics = emptyList()
             activeTopicDetail = null
             activeTopicSummary = null
             activeTargetPostNumber = null
@@ -2061,8 +2111,17 @@ internal fun LinDoApp(
                 loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
             }
         } else {
+            if (preFetchedProfile != null) {
+                fullUserProfile = preFetchedProfile
+            }
             if (!nowAuth && currentSort !in setOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)) {
                 currentSort = FeedSortFilter.LATEST
+            }
+            if (nowAuth && nowUsername != null && lastAuthenticatedUsername == null) {
+                lastAuthenticatedUsername = nowUsername
+                if (fullUserProfile == null) {
+                    syncUserProfile(force = true)
+                }
             }
             wasAuthorized = nowAuth
         }
@@ -2306,10 +2365,14 @@ internal fun LinDoApp(
         }
     }
 
-    LaunchedEffect(isAuthorized) {
-        while (isAuthorized) {
-            ScreenTrackEngine.awaitFlushSignalOrTimeout(2000L)
-            if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground && !ScreenTrackEngine.hasPendingWork()) continue
+    val isAppForeground = UserPresenceService.isForegroundState
+    var flushedForCurrentBackgroundSession by remember { mutableStateOf(false) }
+    LaunchedEffect(isAuthorized, isAppForeground) {
+        if (!isAuthorized) {
+            flushedForCurrentBackgroundSession = false
+            return@LaunchedEffect
+        }
+        suspend fun flushPendingBatchesOnce() {
             while (isAuthorized) {
                 val batch = ScreenTrackEngine.popNextSendableBatch() ?: break
                 var status: Int? = null
@@ -2317,6 +2380,22 @@ internal fun LinDoApp(
                 finally { ScreenTrackEngine.onBatchSendResult(batch, status) }
                 if (status == null || status !in 200..299) break
             }
+        }
+        if (!isAppForeground) {
+            if (!flushedForCurrentBackgroundSession && ScreenTrackEngine.hasPendingWork()) {
+                flushedForCurrentBackgroundSession = true
+                flushPendingBatchesOnce()
+            }
+            return@LaunchedEffect
+        }
+        flushedForCurrentBackgroundSession = false
+        if (ScreenTrackEngine.hasPendingWork()) {
+            flushPendingBatchesOnce()
+        }
+        while (isAuthorized && UserPresenceService.isForeground) {
+            ScreenTrackEngine.awaitFlushSignalOrTimeout(2000L)
+            if (!UserPresenceService.isForeground) break
+            flushPendingBatchesOnce()
         }
     }
 
@@ -2522,6 +2601,7 @@ internal fun LinDoApp(
         LocalLinDoAppIcon provides appIcon,
         LocalFontScale provides fontScale,
         LocalTargetFontScale provides targetFontScale,
+        LocalLinDoNetworkRestoreVersion provides networkRestoreVersion,
         LocalDensity provides scaledDensity
     ) {
         MaterialTheme(
@@ -3307,12 +3387,23 @@ internal fun LinDoApp(
                 }
 
                 if (showBadgesCenterSheet) {
-                    val isSelfBadges = badgesCenterUsername == null || badgesCenterUsername.equals(currentUser?.username, true)
+                    val selfUsername = fullUserProfile?.username ?: currentUser?.username
+                    val isSelfBadges = badgesCenterUsername == null ||
+                        (!selfUsername.isNullOrBlank() && badgesCenterUsername.equals(selfUsername, ignoreCase = true))
                     CommunityBadgesSheet(
                         targetUsername = badgesCenterUsername ?: fullUserProfile?.username ?: currentUser?.username.orEmpty(),
                         currentUserTitle = if (isSelfBadges) fullUserProfile?.title ?: currentUser?.userTitle.orEmpty() else "",
                         initialEarnedBadges = if (isSelfBadges) fullUserProfile?.badges.orEmpty() else emptyList(),
-                        initialEarnedCount = if (isSelfBadges) (fullUserProfile?.badgeCount?.coerceAtLeast(fullUserProfile?.badges?.size ?: 0) ?: 0) else 0,
+                        initialEarnedCount = if (isSelfBadges) {
+                            fullUserProfile?.badgeCount?.coerceAtLeast(fullUserProfile?.badges?.distinctBy { it.id }?.size ?: 0) ?: 0
+                        } else 0,
+                        onEarnedCountResolved = { distinctCount ->
+                            if (isSelfBadges && distinctCount > 0) {
+                                fullUserProfile = fullUserProfile?.let { p ->
+                                    if (p.badgeCount != distinctCount) p.copy(badgeCount = distinctCount) else p
+                                }
+                            }
+                        },
                         onDismiss = { showBadgesCenterSheet = false },
                         onInspectBadge = { badge ->
                             inspectedBadge = badge
@@ -3467,6 +3558,7 @@ internal fun LinDoApp(
                     onDismiss = { showLogoutConfirm = false }, onConfirm = {
                         showLogoutConfirm = false
                         wasAuthorized = false
+                        lastAuthenticatedUsername = null
                         isGuestMode = false
                         resetSessionUiState()
                         UserApiKeyAuthManager.logout()
@@ -3476,6 +3568,7 @@ internal fun LinDoApp(
                         currentTopPeriod = TopPeriodFilter.DAILY
                         searchQuery = ""
                         topics = emptyList()
+                        discoverHotTopics = emptyList()
                         activeTopicDetail = null
                         activeTopicSummary = null
                         activeTargetPostNumber = null
@@ -5105,6 +5198,7 @@ internal fun CommunityHomeFeedPane(
                                 topic = topic,
                                 isSelected = topic.id == selectedTopicId,
                                 isCompact = isCompact,
+                                showExcerpt = currentSort == FeedSortFilter.FOLLOW && searchQuery.isBlank(),
                                 enableAnimations = enableAnimations,
                                 onClick = { onSelectTopic(topic) }
                             )
@@ -5617,6 +5711,7 @@ private fun CommunityTopicItem(
     topic: TopicSummary,
     isSelected: Boolean,
     isCompact: Boolean = false,
+    showExcerpt: Boolean = false,
     enableAnimations: Boolean,
     trailingAction: (@Composable () -> Unit)? = null,
     onClick: () -> Unit
@@ -5905,9 +6000,12 @@ private fun CommunityTopicItem(
                     }
                 }
 
-                val cleanExcerpt = remember(topic.id, topic.excerpt) {
-                    topic.excerpt?.trim()?.takeIf { it.isNotEmpty() }
-                        ?: LinuxDoRepository.getCachedTopicExcerpt(topic.id)
+                val cleanExcerpt = remember(topic.id, topic.excerpt, showExcerpt) {
+                    if (showExcerpt) {
+                        topic.excerpt?.trim()?.takeIf { it.isNotEmpty() }
+                    } else {
+                        null
+                    }
                 }
                 if (!cleanExcerpt.isNullOrBlank()) {
                     Spacer(modifier = Modifier.height(6.dp))
@@ -6106,9 +6204,12 @@ internal fun CommunityTopicReaderPane(
     LaunchedEffect(detail?.notificationLevel) {
         detail?.notificationLevel?.let { notificationLevel = it }
     }
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
     var isLoadingGapPosts by remember(summary.id) { mutableStateOf(false) }
     var loadMorePostsError by remember(summary.id) { mutableStateOf(false) }
+    var floorLoadError by remember(summary.id) { mutableStateOf<String?>(null) }
     var copiedShareLink by remember(summary.id) { mutableStateOf(false) }
     var showFloorNavigator by remember(summary.id) { mutableStateOf(false) }
 
@@ -6154,8 +6255,9 @@ internal fun CommunityTopicReaderPane(
     var replyReturnFloor by remember(summary.id) { mutableStateOf<Int?>(null) }
     var highlightedFloor by remember(summary.id) { mutableStateOf<Int?>(null) }
     var pendingJumpRequiresExact by remember(summary.id) { mutableStateOf(false) }
-    fun jumpToFloor(number: Int, returnTo: Int? = null, exact: Boolean = false) {
+    fun jumpToFloor(number: Int, returnTo: Int? = null, exact: Boolean = false, isManualRetry: Boolean = false) {
         if (changingReaderFilter || fetchingJumpWindow) return
+        val retryingAfterNavError = isManualRetry || navigationError != null
         pendingJumpFloor = number
         pendingReturnFloor = returnTo
         pendingJumpRequiresExact = exact
@@ -6165,6 +6267,9 @@ internal fun CommunityTopicReaderPane(
         fetchingJumpWindow = true
         scope.launch {
             try {
+                if (retryingAfterNavError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val window = LinuxDoRepository.fetchTopicDetail(
                     summary.id, summary, trackVisit = false,
                     filterUsername = effectiveOpUsername.takeIf { onlyOpFilter },
@@ -6178,6 +6283,10 @@ internal fun CommunityTopicReaderPane(
                     jumpFetchedWindow = true
                     latestDetail?.let { onDetailUpdated(it.copy(posts = mergeTopicPosts(it.posts, window.posts))) }
                 }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (err: Throwable) {
+                navigationError = err.message?.takeIf { it.isNotBlank() } ?: "楼层加载失败"
             } finally {
                 fetchingJumpWindow = false
             }
@@ -6249,14 +6358,15 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
-    fun loadMoreFloorBatch(batchSize: Int = 20, earlier: Boolean = false) {
+    fun loadMoreFloorBatch(batchSize: Int = 20, earlier: Boolean = false, isManualRetry: Boolean = false) {
         val currentDetail = detail ?: return
         val candidateIds = if (earlier) previousPostIds else afterTailPostIds
         if (changingReaderFilter || isLoadingMorePosts || isLoadingGapPosts || candidateIds.isEmpty()) return
-        val retryingAfterFloorError = loadMorePostsError
+        val retryingAfterFloorError = isManualRetry || loadMorePostsError || floorLoadError != null
         scope.launch {
             isLoadingMorePosts = true
             loadMorePostsError = false
+            floorLoadError = null
             try {
                 if (retryingAfterFloorError) {
                     LinuxDoRepository.prepareForManualRecovery()
@@ -6288,11 +6398,13 @@ internal fun CommunityTopicReaderPane(
                     }
                 } else {
                     loadMorePostsError = true
+                    floorLoadError = "楼层加载失败"
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Throwable) {
+            } catch (err: Throwable) {
                 loadMorePostsError = true
+                floorLoadError = err.message?.takeIf { it.isNotBlank() } ?: "楼层加载失败"
             } finally {
                 isLoadingMorePosts = false
             }
@@ -6467,11 +6579,15 @@ internal fun CommunityTopicReaderPane(
 
     fun toggleOnlyOpMode() {
         if (changingReaderFilter || fetchingJumpWindow || isLoadingMorePosts) return
+        val retryingAfterFilterError = filterError != null
         val nextState = !onlyOpFilter
         changingReaderFilter = true
         filterError = null
         scope.launch {
             try {
+                if (retryingAfterFilterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val filtered = LinuxDoRepository.fetchTopicDetail(
                     topicId = summary.id, summaryFallback = summary, trackVisit = false,
                     filterUsername = if (nextState) effectiveOpUsername else null
@@ -6484,13 +6600,47 @@ internal fun CommunityTopicReaderPane(
                     replyReturnFloor = null
                     jumpFetchedWindow = false
                     loadMorePostsError = false
+                    floorLoadError = null
                     onlyOpFilter = nextState
                     onDetailUpdated(filtered)
                 } else {
                     filterError = error
                 }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (err: Throwable) {
+                filterError = err.message?.takeIf { it.isNotBlank() } ?: "加载失败"
             } finally {
                 changingReaderFilter = false
+            }
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            val currentFloorErr = floorLoadError ?: "楼层加载失败".takeIf { loadMorePostsError }
+            if (currentFloorErr != null && isTransientRecoverableLoadError(currentFloorErr)) {
+                floorLoadError = null
+                loadMorePostsError = false
+                if (afterTailPostIds.isNotEmpty() && !isLoadingMorePosts && !isLoadingGapPosts && !changingReaderFilter) {
+                    loadMoreFloorBatch(20, isManualRetry = true)
+                }
+            }
+            if (navigationError != null && isTransientRecoverableLoadError(navigationError)) {
+                val target = pendingJumpFloor
+                if (target != null && !fetchingJumpWindow && !changingReaderFilter) {
+                    jumpToFloor(target, pendingReturnFloor, pendingJumpRequiresExact, isManualRetry = true)
+                } else {
+                    navigationError = null
+                }
+            }
+            if (filterError != null && isTransientRecoverableLoadError(filterError)) {
+                if (!changingReaderFilter && !fetchingJumpWindow && !isLoadingMorePosts) {
+                    toggleOnlyOpMode()
+                } else {
+                    filterError = null
+                }
             }
         }
     }
@@ -6729,7 +6879,7 @@ internal fun CommunityTopicReaderPane(
         if (!showRemoveBookmark) bookmarkError?.let { LinDoFeedbackRow(it, LinDoMascotState.NetworkError) }
         navigationError?.let { message ->
             LinDoLoadFailure(message) {
-                pendingJumpFloor?.let { jumpToFloor(it, pendingReturnFloor, pendingJumpRequiresExact) }
+                pendingJumpFloor?.let { jumpToFloor(it, pendingReturnFloor, pendingJumpRequiresExact, isManualRetry = true) }
             }
         }
         filterError?.let { message -> LinDoLoadFailure(message, ::toggleOnlyOpMode) }
@@ -7046,13 +7196,13 @@ internal fun CommunityTopicReaderPane(
                         isLoadingMore = isLoadingMorePosts,
                         hasMore = afterTailPostIds.isNotEmpty(),
                         loadedCount = posts.size,
-                        isError = loadMorePostsError,
+                        isError = loadMorePostsError || floorLoadError != null,
                         autoLoadWhenVisible = false,
                         loadingText = "正在同步后续楼层 (${posts.size}/$totalFloorCount)",
                         moreText = "加载后续楼层",
-                        errorText = "楼层加载失败",
+                        errorText = floorLoadError ?: "楼层加载失败",
                         doneText = "已到话题末尾",
-                        onLoadMore = { loadMoreFloorBatch(20) }
+                        onLoadMore = { loadMoreFloorBatch(20, isManualRetry = true) }
                     )
                 }
             }
@@ -9473,6 +9623,8 @@ private fun CommunityMessagesScreen(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var showMarkAllConfirm by remember { mutableStateOf(false) }
     var markingAll by remember { mutableStateOf(false) }
     var markAllError by remember { mutableStateOf<String?>(null) }
@@ -9494,17 +9646,23 @@ private fun CommunityMessagesScreen(
 
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
+    var lastLoadedMessagesUser by remember { mutableStateOf(username) }
     var isLoading by remember { mutableStateOf(false) }
     val notifListState = rememberLazyListState()
     val pmListState = rememberLazyListState()
     var filterAutoFetches by remember(categoryFilter, reloadToken) { mutableIntStateOf(0) }
 
-    fun loadMoreNotifications() {
+    fun loadMoreNotifications(isManualRetry: Boolean = false) {
         if (isLoading || isLoadingMoreNotifications || !hasMoreNotifications || !isAuthorized) return
+        val retryingAfterError = isManualRetry || loadMoreNotifError
         isLoadingMoreNotifications = true
         loadMoreNotifError = false
         loadMoreNotifJob = scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val nextBatch = LinuxDoRepository.fetchUserNotifications(offset = notifOffset)
                 val merged = (notifications + nextBatch).distinctBy { it.id }
                 val addedCount = merged.size - notifications.size
@@ -9521,12 +9679,16 @@ private fun CommunityMessagesScreen(
         }
     }
 
-    fun loadMorePrivateMessages() {
+    fun loadMorePrivateMessages(isManualRetry: Boolean = false) {
         if (isLoading || isLoadingMorePm || !hasMorePm || !isAuthorized) return
+        val retryingAfterError = isManualRetry || loadMorePmError
         isLoadingMorePm = true
         loadMorePmError = false
         loadMorePmJob = scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val effectiveUsername = username.ifBlank {
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
                 }
@@ -9558,10 +9720,41 @@ private fun CommunityMessagesScreen(
         isLoadingMorePm = false
         loadMoreNotifError = false
         loadMorePmError = false
-        if (!isAuthorized) return@LaunchedEffect
+        if (!isAuthorized) {
+            manualRecoveryRequested = false
+            notifications = emptyList()
+            notifOffset = 0
+            hasMoreNotifications = true
+            privateMessages = emptyList()
+            pmPage = 0
+            hasMorePm = true
+            loadError = null
+            lastLoadedMessagesUser = ""
+            return@LaunchedEffect
+        }
+        if (username.isNotBlank() &&
+            lastLoadedMessagesUser.isNotBlank() &&
+            !username.equals(lastLoadedMessagesUser, ignoreCase = true)
+        ) {
+            notifications = emptyList()
+            notifOffset = 0
+            hasMoreNotifications = true
+            privateMessages = emptyList()
+            pmPage = 0
+            hasMorePm = true
+            loadError = null
+        }
+        if (username.isNotBlank()) {
+            lastLoadedMessagesUser = username
+        }
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             if (subTab == 0) {
                 val loaded = LinuxDoRepository.fetchUserNotifications(offset = 0)
                 notifications = loaded
@@ -9579,6 +9772,7 @@ private fun CommunityMessagesScreen(
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
                 }
                 if (effectiveUsername.isNotBlank()) {
+                    lastLoadedMessagesUser = effectiveUsername
                     val loadedPm = LinuxDoRepository.fetchPrivateMessages(effectiveUsername, sent = false, page = 0)
                     privateMessages = loadedPm
                     pmPage = 0
@@ -9592,6 +9786,24 @@ private fun CommunityMessagesScreen(
             loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (isAuthorized) {
+                if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                    manualRecoveryRequested = true
+                    reloadToken++
+                }
+                if (subTab == 0 && loadMoreNotifError && !isLoadingMoreNotifications) {
+                    loadMoreNotifications(isManualRetry = true)
+                }
+                if (subTab == 1 && loadMorePmError && !isLoadingMorePm) {
+                    loadMorePrivateMessages(isManualRetry = true)
+                }
+            }
         }
     }
 
@@ -9663,7 +9875,10 @@ private fun CommunityMessagesScreen(
                         canMarkAll = (notifications.any { !it.read } || globalUnreadCount > 0) && !markingAll,
                         enabled = !isLoading && !markingAll,
                         onMarkAll = { showMarkAllConfirm = true },
-                        onRefresh = { reloadToken++ }
+                        onRefresh = {
+                            manualRecoveryRequested = true
+                            reloadToken++
+                        }
                     )
                     else -> TextButton(onClick = onManagePrivateMessages) { Text("管理私信", color = palette.activeChipText) }
                 }
@@ -9734,7 +9949,10 @@ private fun CommunityMessagesScreen(
                                 LinDoStatePanel(
                                     state = LinDoMascotState.NetworkError,
                                     detail = loadError!!,
-                                    onRetry = { reloadToken++ }
+                                    onRetry = {
+                                        manualRecoveryRequested = true
+                                        reloadToken++
+                                    }
                                 )
                             }
                         }
@@ -9772,7 +9990,7 @@ private fun CommunityMessagesScreen(
                                 hasMore = hasMorePm,
                                 loadedCount = privateMessages.size,
                                 isError = loadMorePmError,
-                                onLoadMore = ::loadMorePrivateMessages
+                                onLoadMore = { loadMorePrivateMessages(isManualRetry = loadMorePmError) }
                             )
                         }
                     }
@@ -9791,7 +10009,12 @@ private fun CommunityMessagesScreen(
                 ) {
                     val error = loadError
                     if (error != null && notifications.isNotEmpty()) {
-                        item(key = "notif_refresh_error") { LinDoLoadFailure(error) { reloadToken++ } }
+                        item(key = "notif_refresh_error") {
+                            LinDoLoadFailure(error) {
+                                manualRecoveryRequested = true
+                                reloadToken++
+                            }
+                        }
                     }
                     if (error != null && notifications.isEmpty()) {
                         item(key = "notif_error") {
@@ -9804,7 +10027,10 @@ private fun CommunityMessagesScreen(
                                 LinDoStatePanel(
                                     state = LinDoMascotState.NetworkError,
                                     detail = error,
-                                    onRetry = { reloadToken++ }
+                                    onRetry = {
+                                        manualRecoveryRequested = true
+                                        reloadToken++
+                                    }
                                 )
                             }
                         }
@@ -9822,7 +10048,7 @@ private fun CommunityMessagesScreen(
                                     } else {
                                         LinDoEmptyState(message = "已加载通知中暂无此类通知")
                                         Spacer(modifier = Modifier.height(10.dp))
-                                        TextButton(onClick = ::loadMoreNotifications) {
+                                        TextButton(onClick = { loadMoreNotifications(isManualRetry = loadMoreNotifError) }) {
                                             Text(
                                                 text = if (loadMoreNotifError) "加载失败，点击重试" else "加载更早通知",
                                                 color = palette.activeChipText,
@@ -9905,7 +10131,7 @@ private fun CommunityMessagesScreen(
                                     if (isLoadingMoreNotifications) {
                                         LinDoLoadingIndicator(label = "加载中")
                                     } else {
-                                        TextButton(onClick = ::loadMoreNotifications) {
+                                        TextButton(onClick = { loadMoreNotifications(isManualRetry = loadMoreNotifError) }) {
                                             Text(
                                                 text = if (loadMoreNotifError) "加载失败，点击重试" else "加载更早通知",
                                                 color = palette.activeChipText,
@@ -9921,7 +10147,7 @@ private fun CommunityMessagesScreen(
                                     hasMore = hasMoreNotifications,
                                     loadedCount = notifications.size,
                                     isError = loadMoreNotifError,
-                                    onLoadMore = ::loadMoreNotifications
+                                    onLoadMore = { loadMoreNotifications(isManualRetry = loadMoreNotifError) }
                                 )
                             }
                         }
@@ -10234,7 +10460,7 @@ internal fun CommunityProfileScreen(
                                     .padding(horizontal = 4.dp, vertical = 3.5.dp)
                             ) {
                                 Text(
-                                    text = "全部 ${fullProfile.badgeCount.coerceAtLeast(fullProfile.badges.size)} 枚",
+                                    text = "全部 ${fullProfile.badgeCount.coerceAtLeast(fullProfile.badges.distinctBy { it.id }.size)} 枚",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = palette.inkSecondary,
@@ -10741,6 +10967,8 @@ private fun BadgeDetailBottomSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
 
     var officialBadge by remember(badge.id) { mutableStateOf<GrantedBadge?>(null) }
     val effectiveBadge = officialBadge ?: badge
@@ -10754,12 +10982,36 @@ private fun BadgeDetailBottomSheet(
         mutableStateOf(currentUserTitle.isNotBlank() && currentUserTitle.trim().equals(effectiveBadge.name.trim(), ignoreCase = true))
     }
 
-    LaunchedEffect(badge.id, badge.grantedAtText, badge.topicId) {
-        officialBadge = LinuxDoRepository.fetchBadgeDefinition(badge.id.takeIf { it > 0 } ?: return@LaunchedEffect)?.copy(
-            isFirstTimeGrant = badge.isFirstTimeGrant,
-            count = badge.count, grantedAtText = badge.grantedAtText,
-            topicId = badge.topicId, topicTitle = badge.topicTitle, postNumber = badge.postNumber
-        )
+    LaunchedEffect(badge.id, badge.count, badge.grantedAtText, badge.topicId) {
+        val id = badge.id.takeIf { it > 0 } ?: return@LaunchedEffect
+        officialBadge = LinuxDoRepository.fetchBadgeDefinition(id)?.let { def ->
+            def.copy(
+                isFirstTimeGrant = badge.isFirstTimeGrant,
+                count = maxOf(badge.count, def.count),
+                grantedAtText = badge.grantedAtText.ifBlank { def.grantedAtText },
+                topicId = badge.topicId.takeIf { it > 0 } ?: def.topicId,
+                topicTitle = badge.topicTitle.ifBlank { def.topicTitle },
+                postNumber = badge.postNumber.takeIf { it > 0 } ?: def.postNumber
+            )
+        }
+    }
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            val id = badge.id.takeIf { it > 0 } ?: return@LaunchedEffect
+            if (officialBadge == null) {
+                officialBadge = LinuxDoRepository.fetchBadgeDefinition(id)?.let { def ->
+                    def.copy(
+                        isFirstTimeGrant = badge.isFirstTimeGrant,
+                        count = maxOf(badge.count, def.count),
+                        grantedAtText = badge.grantedAtText.ifBlank { def.grantedAtText },
+                        topicId = badge.topicId.takeIf { it > 0 } ?: def.topicId,
+                        topicTitle = badge.topicTitle.ifBlank { def.topicTitle },
+                        postNumber = badge.postNumber.takeIf { it > 0 } ?: def.postNumber
+                    )
+                }
+            }
+        }
     }
 
     LinDoFullScreenPage(
@@ -10785,10 +11037,26 @@ private fun BadgeDetailBottomSheet(
                     PostGrantedBadgeIcon(effectiveBadge, size = 36.dp)
                 }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        effectiveBadge.name, fontSize = 18.sp, fontWeight = FontWeight.Bold,
-                        color = palette.inkPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            effectiveBadge.name, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                            color = palette.inkPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (effectiveBadge.count > 1) {
+                            Text(
+                                text = "×${effectiveBadge.count}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = UniversalBadgeEngine.badgeTierColor(effectiveBadge.badgeType),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
                     val metadata = listOfNotNull(
                         effectiveBadge.badgeType.labelZh,
                         "已获得 ${effectiveBadge.count} 次".takeIf { effectiveBadge.count > 1 },
@@ -10894,11 +11162,14 @@ private fun CommunityBadgesSheet(
     currentUserTitle: String = "",
     initialEarnedBadges: List<GrantedBadge> = emptyList(),
     initialEarnedCount: Int = 0,
+    onEarnedCountResolved: (Int) -> Unit = {},
     onDismiss: () -> Unit,
     onInspectBadge: (GrantedBadge) -> Unit
 ) {
     val palette = LocalPalette.current
     val focusManager = LocalFocusManager.current
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
 
     var selectedTab by remember(targetUsername) { mutableIntStateOf(if (targetUsername.isBlank()) 1 else 0) }
     var tierFilter by remember { mutableIntStateOf(0) } // 0=全部, 1=金徽章, 2=银徽章, 3=铜徽章, 4=可设头衔
@@ -10908,7 +11179,7 @@ private fun CommunityBadgesSheet(
         val cached = LinuxDoRepository.getCachedUserBadges(targetUsername).orEmpty()
         val initialFull = if (cached.isNotEmpty()) {
             cached
-        } else if (initialEarnedCount <= 0 || initialEarnedBadges.size >= initialEarnedCount) {
+        } else if (initialEarnedCount <= 0 || initialEarnedBadges.distinctBy { it.id }.size >= initialEarnedCount) {
             initialEarnedBadges.distinctBy { it.id }
         } else {
             emptyList()
@@ -10924,30 +11195,43 @@ private fun CommunityBadgesSheet(
     var catalogError by remember { mutableStateOf(false) }
     var retryCatalog by remember { mutableIntStateOf(0) }
     var retryOwned by remember(targetUsername) { mutableIntStateOf(0) }
+    var manualRetryOwned by remember(targetUsername) { mutableStateOf(false) }
+    var manualRetryCatalog by remember { mutableStateOf(false) }
 
     LaunchedEffect(targetUsername, retryOwned) {
         val cleanUser = targetUsername.trim().removePrefix("@")
         if (cleanUser.isBlank()) return@LaunchedEffect
+        val shouldPrepare = manualRetryOwned || ownedError
+        manualRetryOwned = false
         loadingOwned = true
         ownedError = false
         try {
-            earnedBadges = LinuxDoRepository.fetchUserBadges(cleanUser)
+            if (shouldPrepare) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
+            val loaded = LinuxDoRepository.fetchUserBadges(cleanUser)
+            earnedBadges = loaded
+            onEarnedCountResolved(loaded.distinctBy { it.id }.size)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (_: Exception) {
             if (earnedBadges.isEmpty() && initialEarnedBadges.isNotEmpty()) {
                 earnedBadges = initialEarnedBadges.distinctBy { it.id }
-            } else {
-                ownedError = true
             }
+            ownedError = true
         } finally {
             loadingOwned = false
         }
     }
     LaunchedEffect(retryCatalog) {
+        val shouldPrepare = manualRetryCatalog || catalogError
+        manualRetryCatalog = false
         isLoading = true
         catalogError = false
         try {
+            if (shouldPrepare) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             allSiteBadges = LinuxDoRepository.fetchAllSiteBadges()
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -10955,6 +11239,19 @@ private fun CommunityBadgesSheet(
             catalogError = allSiteBadges.isEmpty()
         } finally {
             isLoading = false
+        }
+    }
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (ownedError && !loadingOwned && targetUsername.isNotBlank()) {
+                manualRetryOwned = true
+                retryOwned++
+            }
+            if ((catalogError || allSiteBadges.isEmpty()) && !isLoading) {
+                manualRetryCatalog = true
+                retryCatalog++
+            }
         }
     }
 
@@ -10986,12 +11283,16 @@ private fun CommunityBadgesSheet(
         }
     }
 
-    val earnedCountDisplay = if (earnedBadges.isNotEmpty()) {
-        maxOf(initialEarnedCount, earnedBadges.sumOf { it.count.coerceAtLeast(1) })
+    val distinctEarnedCount = if (earnedBadges.isNotEmpty()) {
+        if (ownedError) maxOf(initialEarnedCount, earnedBadges.distinctBy { it.id }.size)
+        else earnedBadges.distinctBy { it.id }.size
     } else {
         initialEarnedCount
     }
-    val earnedTabLabel = if (earnedCountDisplay > 0 || !loadingOwned) "已获徽章 $earnedCountDisplay" else "已获徽章"
+    val totalGrantCount = remember(earnedBadges) {
+        earnedBadges.sumOf { it.count.coerceAtLeast(1) }
+    }
+    val earnedTabLabel = if (distinctEarnedCount > 0 || !loadingOwned) "已获徽章 $distinctEarnedCount" else "已获徽章"
     val siteTabLabel = if (allSiteBadges.isNotEmpty() || !isLoading) "全站徽章 ${allSiteBadges.size}" else "全站徽章"
 
     LinDoFullScreenPage(
@@ -11052,9 +11353,15 @@ private fun CommunityBadgesSheet(
                     LinDoLoadingIndicator(label = "正在同步社区徽章目录")
                 }
             } else if (selectedTab == 0 && ownedError && sourceList.isEmpty()) {
-                LinDoLoadFailure("已获徽章加载失败") { retryOwned++ }
+                LinDoLoadFailure("已获徽章加载失败") {
+                    manualRetryOwned = true
+                    retryOwned++
+                }
             } else if (selectedTab == 1 && catalogError) {
-                LinDoLoadFailure("徽章目录加载失败") { retryCatalog++ }
+                LinDoLoadFailure("徽章目录加载失败") {
+                    manualRetryCatalog = true
+                    retryCatalog++
+                }
             } else if (filteredBadges.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -11086,6 +11393,16 @@ private fun CommunityBadgesSheet(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     contentPadding = PaddingValues(bottom = 20.dp)
                 ) {
+                    if (selectedTab == 0 && totalGrantCount > distinctEarnedCount && searchQuery.isBlank() && tierFilter == 0) {
+                        item(key = "earned_badges_summary", contentType = "summary") {
+                            Text(
+                                text = "共解锁 $distinctEarnedCount 种徽章，累计获授 $totalGrantCount 次",
+                                fontSize = 11.5.sp,
+                                color = palette.inkTertiary,
+                                modifier = Modifier.padding(top = 12.dp, bottom = 2.dp)
+                            )
+                        }
+                    }
                     itemsIndexed(filteredBadges, key = { _, badge -> badge.id }, contentType = { _, _ -> "badge" }) { index, badge ->
                         val startsGroup = badge.badgeGroupingName.isNotBlank() &&
                             filteredBadges.getOrNull(index - 1)?.badgeGroupingId != badge.badgeGroupingId
@@ -11133,11 +11450,27 @@ private fun CommunityBadgesSheet(
                                 PostGrantedBadgeIcon(badge, size = 24.dp)
                             }
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(
-                                    badge.name, color = palette.inkPrimary, fontSize = 15.sp,
-                                    fontWeight = FontWeight.SemiBold, maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        badge.name, color = palette.inkPrimary, fontSize = 15.sp,
+                                        fontWeight = FontWeight.SemiBold, maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if ((selectedTab == 0 || badge.isEarned) && badge.count > 1) {
+                                        Text(
+                                            text = "×${badge.count}",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = UniversalBadgeEngine.badgeTierColor(badge.badgeType),
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                }
                                 if (description.isNotBlank()) {
                                     Text(
                                         description, color = palette.inkSecondary, fontSize = 12.5.sp,
@@ -11174,20 +11507,39 @@ private fun CommunityBadgesSheet(
 private fun ConnectTrustLevelSheet(onDismiss: () -> Unit) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var report by remember { mutableStateOf<ConnectTrustLevelReport?>(null) }
     var isLoading by remember { mutableStateOf(true) }
-    suspend fun refresh() {
+    suspend fun refresh(isManualRetry: Boolean = false) {
         isLoading = true
-        try { report = LinuxDoRepository.fetchConnectTrustLevelReport() }
-        finally { isLoading = false }
+        try {
+            if (isManualRetry) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
+            report = LinuxDoRepository.fetchConnectTrustLevelReport()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+        } finally {
+            isLoading = false
+        }
     }
     LaunchedEffect(Unit) { refresh() }
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && report?.metrics.isNullOrEmpty()) {
+                refresh(isManualRetry = true)
+            }
+        }
+    }
     LinDoFullScreenPage(onBack = onDismiss, containerColor = palette.cardSurface) {
         LinDoPageTopBar(
             title = "Connect",
             onBack = onDismiss,
             trailingContent = {
-                TextButton(enabled = !isLoading, onClick = { scope.launch { refresh() } }) { Text("刷新") }
+                TextButton(enabled = !isLoading, onClick = { scope.launch { refresh(isManualRetry = true) } }) { Text("刷新") }
             }
         )
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp)) {
@@ -11199,7 +11551,7 @@ private fun ConnectTrustLevelSheet(onDismiss: () -> Unit) {
             if (!isLoading && current?.metrics.isNullOrEmpty()) {
                 LinDoStatePanel(LinDoMascotState.NetworkError,
                     detail = "暂未取得 Connect 统计",
-                    onRetry = { scope.launch { refresh() } })
+                    onRetry = { scope.launch { refresh(isManualRetry = true) } })
             }
             current?.metrics?.forEach { metric ->
                 Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
@@ -13408,12 +13760,15 @@ internal fun GlobalSearchModalSheet(
     val palette = LocalPalette.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
 
     var query by remember { mutableStateOf(initialQuery) }
     var order by remember { mutableStateOf<String?>(null) } // null=相关性, "latest"=最新, "likes"=最多赞
     var results by remember { mutableStateOf(initialResults) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isSearching by remember { mutableStateOf(false) }
     var currentPage by remember { mutableIntStateOf(1) }
     var hasMoreResults by remember { mutableStateOf(false) }
@@ -13424,23 +13779,30 @@ internal fun GlobalSearchModalSheet(
     val listState = rememberLazyListState()
 
     var submittedQuery by remember { mutableStateOf(initialQuery.trim()) }
-    fun performSearch(targetQuery: String = query) {
+    fun performSearch(targetQuery: String = query, isManualRetry: Boolean = false) {
         keyboardController?.hide()
         loadMoreJob?.cancel()
         isLoadingMore = false
         submittedQuery = targetQuery.trim()
         loadMoreError = false
+        if (isManualRetry || loadError != null) {
+            manualRecoveryRequested = true
+        }
         reloadToken++
     }
 
     fun loadMoreSearchResults() {
         val q = submittedQuery.trim()
         if (q.isBlank() || isSearching || isLoadingMore || !hasMoreResults) return
+        val retryingAfterError = loadMoreError
         val nextPage = currentPage + 1
         isLoadingMore = true
         loadMoreError = false
         loadMoreJob = searchScope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val pageResult = LinuxDoRepository.searchCommunityPage(q, order, page = nextPage)
                 val nextItems = pageResult.items
                 if (nextItems.isEmpty()) {
@@ -13490,16 +13852,25 @@ internal fun GlobalSearchModalSheet(
         loadMoreJob?.cancel()
         isLoadingMore = false
         loadMoreError = false
-        if (submittedQuery.isBlank()) return@LaunchedEffect
-        if (initialResults.isNotEmpty() && reloadToken == 0 && order == null && submittedQuery == initialQuery.trim()) {
+        if (submittedQuery.isBlank()) {
+            manualRecoveryRequested = false
             return@LaunchedEffect
         }
+        if (initialResults.isNotEmpty() && reloadToken == 0 && order == null && submittedQuery == initialQuery.trim()) {
+            manualRecoveryRequested = false
+            return@LaunchedEffect
+        }
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isSearching = true
         currentPage = 1
         hasMoreResults = false
         loadError = null
         results = emptyList()
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val firstPage = LinuxDoRepository.searchCommunityPage(submittedQuery, order, page = 1)
             results = firstPage.items
             hasMoreResults = firstPage.hasMore
@@ -13509,6 +13880,18 @@ internal fun GlobalSearchModalSheet(
             loadError = error.message ?: "搜索失败，请重试"
         } finally {
             isSearching = false
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (submittedQuery.isNotBlank() && !isSearching && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            } else if (loadMoreError && !isSearching && !isLoadingMore) {
+                loadMoreSearchResults()
+            }
         }
     }
 
@@ -13738,7 +14121,7 @@ internal fun GlobalSearchModalSheet(
                         LinDoStatePanel(
                             state = LinDoMascotState.NetworkError,
                             detail = loadError!!,
-                            onRetry = { performSearch() }
+                            onRetry = { performSearch(isManualRetry = true) }
                         )
                     }
                 }
@@ -13911,6 +14294,8 @@ private fun UserNotificationsSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var showMarkAllConfirm by remember { mutableStateOf(false) }
     var markingAll by remember { mutableStateOf(false) }
     var markAllError by remember { mutableStateOf<String?>(null) }
@@ -13922,16 +14307,21 @@ private fun UserNotificationsSheet(
     var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
     var filterTab by remember { mutableStateOf(0) } // 0=全部, 1=未读, 2=回复/@, 3=获赞
     var filterAutoFetches by remember(filterTab, reloadToken) { mutableIntStateOf(0) }
 
     fun loadMore() {
         if (isLoading || isLoadingMore || !hasMore) return
+        val retryingAfterError = loadMoreError
         isLoadingMore = true
         loadMoreError = false
         loadMoreJob = scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val nextBatch = LinuxDoRepository.fetchUserNotifications(offset = notifOffset)
                 val merged = (notifications + nextBatch).distinctBy { it.id }
                 val added = merged.size - notifications.size
@@ -13952,9 +14342,14 @@ private fun UserNotificationsSheet(
         loadMoreJob?.cancel()
         isLoadingMore = false
         loadMoreError = false
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val loaded = LinuxDoRepository.fetchUserNotifications(offset = 0)
             notifications = loaded
             notifOffset = loaded.size
@@ -13971,6 +14366,18 @@ private fun UserNotificationsSheet(
             loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            } else if (loadMoreError && !isLoading && !isLoadingMore) {
+                loadMore()
+            }
         }
     }
 
@@ -14005,7 +14412,10 @@ private fun UserNotificationsSheet(
                     canMarkAll = (notifications.any { !it.read } || globalUnreadCount > 0) && !markingAll,
                     enabled = !isLoading && !markingAll,
                     onMarkAll = { showMarkAllConfirm = true },
-                    onRefresh = { reloadToken++ }
+                    onRefresh = {
+                        manualRecoveryRequested = true
+                        reloadToken++
+                    }
                 )
             }
         )
@@ -14029,7 +14439,10 @@ private fun UserNotificationsSheet(
                 }
             } else {
                 if (loadError != null) {
-                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                    LinDoLoadFailure(loadError!!, onRetry = {
+                        manualRecoveryRequested = true
+                        reloadToken++
+                    })
                 }
 
                 LazyColumn(
@@ -14188,6 +14601,8 @@ private fun UserActivitiesSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     val filters = remember {
         listOf("全部动态" to null, "发布主帖" to "4", "我的回复" to "5", "送出的赞" to "1")
     }
@@ -14201,14 +14616,19 @@ private fun UserActivitiesSheet(
     var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
 
     fun loadMoreActivities() {
         if (isLoading || isLoadingMore || !hasMore) return
+        val retryingAfterError = loadMoreError
         isLoadingMore = true
         loadMoreError = false
         loadMoreJob = scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val nextBatch = LinuxDoRepository.fetchUserActivities(username, filterCode, offset = actOffset)
                 items = items + nextBatch
                 actOffset += nextBatch.size
@@ -14227,9 +14647,14 @@ private fun UserActivitiesSheet(
         loadMoreJob?.cancel()
         isLoadingMore = false
         loadMoreError = false
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val loaded = LinuxDoRepository.fetchUserActivities(username, filterCode, offset = 0)
             items = loaded
             actOffset = loaded.size
@@ -14243,6 +14668,18 @@ private fun UserActivitiesSheet(
         }
     }
 
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            } else if (loadMoreError && !isLoading && !isLoadingMore) {
+                loadMoreActivities()
+            }
+        }
+    }
+
     LinDoFullScreenPage(
         onBack = onDismiss,
         containerColor = palette.cardSurface
@@ -14251,7 +14688,10 @@ private fun UserActivitiesSheet(
             title = "我的活动与社区互动",
             onBack = onDismiss,
             trailingContent = {
-                IconButton(onClick = { reloadToken++ }) {
+                IconButton(onClick = {
+                    manualRecoveryRequested = true
+                    reloadToken++
+                }) {
                     Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
                 }
             }
@@ -14284,7 +14724,10 @@ private fun UserActivitiesSheet(
             ) {
                 if (loadError != null) {
                     item(key = "error") {
-                        LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                        LinDoLoadFailure(loadError!!, onRetry = {
+                            manualRecoveryRequested = true
+                            reloadToken++
+                        })
                     }
                 }
                 if (items.isEmpty() && loadError == null) {
@@ -14329,6 +14772,8 @@ private fun UserBookmarksSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var items by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var bookmarkPage by remember { mutableIntStateOf(0) }
     var hasMore by remember { mutableStateOf(true) }
@@ -14339,14 +14784,19 @@ private fun UserBookmarksSheet(
     var deleteError by remember { mutableStateOf<String?>(null) }
     var deletingIds by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
 
     fun loadMoreBookmarks() {
         if (isLoading || isLoadingMore || !hasMore) return
+        val retryingAfterError = loadMoreError
         isLoadingMore = true
         loadMoreError = false
         loadMoreJob = scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val nextPage = bookmarkPage + 1
                 val nextBatch = LinuxDoRepository.fetchUserBookmarks(username, page = nextPage)
                 val merged = (items + nextBatch).distinctBy { it.id }
@@ -14369,9 +14819,14 @@ private fun UserBookmarksSheet(
         isLoadingMore = false
         loadMoreError = false
         deleteError = null
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val loaded = LinuxDoRepository.fetchUserBookmarks(username, page = 0)
             items = loaded
             bookmarkPage = 0
@@ -14385,6 +14840,18 @@ private fun UserBookmarksSheet(
         }
     }
 
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            } else if (loadMoreError && !isLoading && !isLoadingMore) {
+                loadMoreBookmarks()
+            }
+        }
+    }
+
     LinDoFullScreenPage(
         onBack = onDismiss,
         containerColor = palette.cardSurface
@@ -14393,7 +14860,10 @@ private fun UserBookmarksSheet(
             title = "我的书签与收藏",
             onBack = onDismiss,
             trailingContent = {
-                IconButton(onClick = { reloadToken++ }) {
+                IconButton(onClick = {
+                    manualRecoveryRequested = true
+                    reloadToken++
+                }) {
                     Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
                 }
             }
@@ -14422,7 +14892,10 @@ private fun UserBookmarksSheet(
             ) {
                 if (loadError != null) {
                     item(key = "error") {
-                        LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                        LinDoLoadFailure(loadError!!, onRetry = {
+                            manualRecoveryRequested = true
+                            reloadToken++
+                        })
                     }
                 }
                 if (items.isEmpty() && loadError == null) {
@@ -14509,6 +14982,8 @@ internal fun UserPrivateMessagesSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     val openedDirectlyInComposer = !initialRecipient.isNullOrBlank() || initialDraft != null
     var pendingArchive by remember { mutableStateOf<TopicSummary?>(null) }
     var archiving by remember { mutableStateOf(false) }
@@ -14525,6 +15000,7 @@ internal fun UserPrivateMessagesSheet(
     var loadMorePmJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
 
     var recipient by remember(initialRecipient, initialDraft?.draftKey) {
@@ -14565,10 +15041,14 @@ internal fun UserPrivateMessagesSheet(
 
     fun loadMorePm() {
         if (tab == 2 || isLoading || isLoadingMorePm || !hasMorePm) return
+        val retryingAfterError = loadMorePmError
         isLoadingMorePm = true
         loadMorePmError = false
         loadMorePmJob = scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val effectiveUsername = username.ifBlank {
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
                 }
@@ -14593,11 +15073,19 @@ internal fun UserPrivateMessagesSheet(
         loadMorePmJob?.cancel()
         isLoadingMorePm = false
         loadMorePmError = false
-        if (tab == 2) return@LaunchedEffect
+        if (tab == 2) {
+            manualRecoveryRequested = false
+            return@LaunchedEffect
+        }
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         messages = emptyList()
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val effectiveUsername = username.ifBlank {
                 LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
             }
@@ -14611,6 +15099,18 @@ internal fun UserPrivateMessagesSheet(
             loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (tab != 2 && !isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            } else if (tab != 2 && loadMorePmError && !isLoading && !isLoadingMorePm) {
+                loadMorePm()
+            }
         }
     }
 
@@ -14792,7 +15292,10 @@ internal fun UserPrivateMessagesSheet(
                     }
                 } else {
                     if (loadError != null) {
-                        LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                        LinDoLoadFailure(loadError!!, onRetry = {
+                            manualRecoveryRequested = true
+                            reloadToken++
+                        })
                     }
                     LazyColumn(
                         modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -14912,6 +15415,8 @@ private fun PublicUserCardSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var cardProfile by remember(username) { mutableStateOf<UserFullProfileSummary?>(null) }
     var allActions by remember(username) { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var topicActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
@@ -14924,10 +15429,12 @@ private fun PublicUserCardSheet(
     var profileBadges by remember(username) { mutableStateOf<List<GrantedBadge>?>(null) }
     var profileBadgeError by remember(username) { mutableStateOf(false) }
     var retryProfileBadges by remember(username) { mutableIntStateOf(0) }
+    var manualRetryProfileBadges by remember(username) { mutableStateOf(false) }
     var activeTab by remember(username) { mutableIntStateOf(0) } // 0=全部动态, 1=主帖, 2=回复, 3=徽章
     var tabLoading by remember(username) { mutableStateOf(false) }
     var loadError by remember(username) { mutableStateOf<String?>(null) }
     var reloadToken by remember(username) { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember(username) { mutableStateOf(false) }
     var isLoading by remember(username) { mutableStateOf(true) }
     var showProfileStats by remember(username) { mutableStateOf(false) }
 
@@ -14939,11 +15446,15 @@ private fun PublicUserCardSheet(
             else -> false
         }
         if (isLoading || tabLoading || isLoadingMoreActions || !currentHasMore) return
+        val retryingAfterError = loadMoreActionsError
         isLoadingMoreActions = true
         loadMoreActionsError = false
         val targetTab = activeTab
         scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 when (targetTab) {
                     1 -> {
                         val cur = topicActions.orEmpty()
@@ -14974,9 +15485,14 @@ private fun PublicUserCardSheet(
     }
 
     LaunchedEffect(username, reloadToken) {
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             cardProfile = LinuxDoRepository.fetchPublicUserCard(username)
                 ?: throw do_.linux.lindo.core.network.ApiReadException(do_.linux.lindo.core.network.ApiFailureKind.Connection)
             val loadedAll = LinuxDoRepository.fetchUserActivities(username, offset = 0)
@@ -14993,8 +15509,13 @@ private fun PublicUserCardSheet(
 
     LaunchedEffect(username, activeTab, retryProfileBadges) {
         if (activeTab == 3 && profileBadges == null) {
+            val shouldPrepareBadges = manualRetryProfileBadges || profileBadgeError
+            manualRetryProfileBadges = false
             profileBadgeError = false
             try {
+                if (shouldPrepareBadges) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 profileBadges = LinuxDoRepository.fetchUserBadges(username)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
@@ -15007,6 +15528,8 @@ private fun PublicUserCardSheet(
                 val loadedTopics = LinuxDoRepository.fetchUserActivities(username, filter = "4", offset = 0)
                 topicActions = loadedTopics
                 hasMoreTopics = loadedTopics.size >= 20
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 topicActions = allActions.filter { it.actionType == 4 }
                 hasMoreTopics = false
@@ -15019,11 +15542,30 @@ private fun PublicUserCardSheet(
                 val loadedReplies = LinuxDoRepository.fetchUserActivities(username, filter = "5", offset = 0)
                 replyActions = loadedReplies
                 hasMoreReplies = loadedReplies.size >= 20
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 replyActions = allActions.filter { it.actionType == 5 }
                 hasMoreReplies = false
             } finally {
                 tabLoading = false
+            }
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            }
+            if (profileBadgeError && profileBadges == null) {
+                manualRetryProfileBadges = true
+                retryProfileBadges++
+            }
+            if (loadMoreActionsError && !isLoading && !tabLoading && !isLoadingMoreActions) {
+                loadMoreCardActions()
             }
         }
     }
@@ -15115,7 +15657,10 @@ private fun PublicUserCardSheet(
                 }
             } else if (loadError != null && cardProfile == null) {
                 item(key = "error") {
-                    LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                    LinDoLoadFailure(loadError!!, onRetry = {
+                        manualRecoveryRequested = true
+                        reloadToken++
+                    })
                 }
             }
 
@@ -15251,10 +15796,12 @@ private fun PublicUserCardSheet(
                 }
 
                 stickyHeader(key = "activity_tabs") {
+                    val distinctCardBadges = profileBadges?.distinctBy { it.id }?.size
+                        ?: p.badgeCount.coerceAtLeast(p.badges.distinctBy { it.id }.size)
                     Column(Modifier.fillMaxWidth().background(palette.cardSurface)) {
                         LinDoSectionTabs(
                             listOf("动态", "主帖 ${p.topicCount}", "回复 ${p.postCount}",
-                                "徽章 ${p.badgeCount.coerceAtLeast(p.badges.size)}"),
+                                "徽章 $distinctCardBadges"),
                             activeTab, fontSize = 13.sp
                         ) { activeTab = it }
                         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -15265,7 +15812,12 @@ private fun PublicUserCardSheet(
                 if (activeTab == 3) {
                     val ownedBadges = profileBadges
                     if (profileBadgeError) {
-                        item(key = "error_badges") { LinDoLoadFailure("徽章加载失败") { retryProfileBadges++ } }
+                        item(key = "error_badges") {
+                            LinDoLoadFailure("徽章加载失败") {
+                                manualRetryProfileBadges = true
+                                retryProfileBadges++
+                            }
+                        }
                     } else if (ownedBadges == null) {
                         item(key = "loading_badges") { LinDoLoadingIndicator(label = "加载徽章") }
                     } else if (ownedBadges.isEmpty()) {
@@ -15299,14 +15851,19 @@ private fun PublicUserCardSheet(
                                             text = badge.name,
                                             fontSize = 13.5.sp,
                                             fontWeight = FontWeight.SemiBold,
-                                            color = palette.inkPrimary
+                                            color = palette.inkPrimary,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
                                         )
                                         if (badge.count > 1) {
                                             Text(
                                                 text = "×${badge.count}",
                                                 fontSize = 11.2.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = tierColor
+                                                color = tierColor,
+                                                maxLines = 1,
+                                                softWrap = false
                                             )
                                         }
                                     }
@@ -15498,6 +16055,8 @@ private fun UserReadHistorySheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var items by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
     var historyPage by remember { mutableIntStateOf(0) }
     var hasMore by remember { mutableStateOf(true) }
@@ -15505,14 +16064,19 @@ private fun UserReadHistorySheet(
     var loadMoreError by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
 
     fun loadMoreHistory() {
         if (isLoading || isLoadingMore || !hasMore) return
+        val retryingAfterError = loadMoreError
         isLoadingMore = true
         loadMoreError = false
         scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val nextPage = historyPage + 1
                 val nextBatch = LinuxDoRepository.fetchReadHistoryTopics(page = nextPage)
                 val merged = (items + nextBatch).distinctBy { it.id }
@@ -15531,9 +16095,14 @@ private fun UserReadHistorySheet(
     }
 
     LaunchedEffect(Unit, reloadToken) {
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val loaded = LinuxDoRepository.fetchReadHistoryTopics(page = 0)
             items = loaded
             historyPage = 0
@@ -15547,6 +16116,18 @@ private fun UserReadHistorySheet(
         }
     }
 
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            } else if (loadMoreError && !isLoading && !isLoadingMore) {
+                loadMoreHistory()
+            }
+        }
+    }
+
     LinDoFullScreenPage(
         onBack = onDismiss,
         containerColor = palette.cardSurface
@@ -15555,7 +16136,10 @@ private fun UserReadHistorySheet(
             title = "阅读历史",
             onBack = onDismiss,
             trailingContent = {
-                IconButton(onClick = { reloadToken++ }) {
+                IconButton(onClick = {
+                    manualRecoveryRequested = true
+                    reloadToken++
+                }) {
                     Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
                 }
             }
@@ -15576,7 +16160,10 @@ private fun UserReadHistorySheet(
                 if (loadError != null) {
                     item(key = "error") {
                         Box(Modifier.padding(horizontal = 16.dp)) {
-                            LinDoLoadFailure(loadError!!, onRetry = { reloadToken++ })
+                            LinDoLoadFailure(loadError!!, onRetry = {
+                                manualRecoveryRequested = true
+                                reloadToken++
+                            })
                         }
                     }
                 }
@@ -15620,8 +16207,21 @@ private fun UserReadHistorySheet(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun UserCloudDraftsSheet(onDismiss: () -> Unit, onOpenDraftTopic: (CloudDraftItem) -> Unit) =
-    UserDraftsSheet(onDismiss, onOpenDraftTopic)
+private fun UserCloudDraftsSheet(onDismiss: () -> Unit, onOpenDraftTopic: (CloudDraftItem) -> Unit) {
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    var restoreRemountKey by remember { mutableIntStateOf(0) }
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            LinuxDoRepository.prepareForManualRecovery()
+            restoreRemountKey++
+        }
+    }
+    androidx.compose.runtime.key(restoreRemountKey) {
+        UserDraftsSheet(onDismiss, onOpenDraftTopic)
+    }
+}
 
 /**
  * 官方功能 12：原生个人资料编辑页面 (`GET /u/{username}.json` + `PUT /u/{username}.json`)
@@ -15636,6 +16236,8 @@ private fun EditProfileModalSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var displayName by remember { mutableStateOf(fullProfile?.displayName.orEmpty()) }
     var userTitle by remember { mutableStateOf(fullProfile?.title.orEmpty()) }
     var location by remember { mutableStateOf(fullProfile?.location.orEmpty()) }
@@ -15650,13 +16252,19 @@ private fun EditProfileModalSheet(
     var isLoading by remember { mutableStateOf(true) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(username, reloadToken) {
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val snap = LinuxDoRepository.fetchUserAccountPreferences(username)
                 ?: throw ApiReadException(ApiFailureKind.Connection)
             displayName = snap.displayName
@@ -15673,6 +16281,16 @@ private fun EditProfileModalSheet(
             loadError = error.message ?: "无法同步个人资料，为避免覆盖原有简介已暂停编辑"
         } finally {
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            }
         }
     }
 
@@ -15743,7 +16361,10 @@ private fun EditProfileModalSheet(
                 LinDoStatePanel(
                     state = LinDoMascotState.NetworkError,
                     detail = loadError!!,
-                    onRetry = { reloadToken++ }
+                    onRetry = {
+                        manualRecoveryRequested = true
+                        reloadToken++
+                    }
                 )
             }
         } else {
@@ -16046,6 +16667,8 @@ private fun UserFollowNetworkSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var activeTab by remember { mutableIntStateOf(0) } // 0=正在关注, 1=我的粉丝, 2=关注动态
     var users by remember { mutableStateOf<List<FollowUserEntry>>(emptyList()) }
     var feedItems by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
@@ -16059,15 +16682,21 @@ private fun UserFollowNetworkSheet(
     var hasMoreFeed by remember { mutableStateOf(false) }
     var feedPage by remember { mutableIntStateOf(0) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var loadMoreFeedJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     LaunchedEffect(username, activeTab, reloadToken) {
         loadMoreFeedJob?.cancel()
         isLoadingMoreFeed = false
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         loadMoreFeedError = false
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             if (activeTab == 2) {
                 feedPage = 0
                 val firstPage = LinuxDoRepository.fetchUserFollowFeed(username, page = 0)
@@ -16090,12 +16719,16 @@ private fun UserFollowNetworkSheet(
 
     fun loadMoreFeed() {
         if (isLoadingMoreFeed || !hasMoreFeed || isLoading || activeTab != 2) return
+        val retryingAfterError = loadMoreFeedError
         val nextPage = feedPage + 1
         isLoadingMoreFeed = true
         loadMoreFeedError = false
         loadMoreFeedJob?.cancel()
         loadMoreFeedJob = scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val more = LinuxDoRepository.fetchUserFollowFeed(username, page = nextPage)
                 if (more.isEmpty()) {
                     hasMoreFeed = false
@@ -16120,6 +16753,18 @@ private fun UserFollowNetworkSheet(
         }
     }
 
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            } else if (activeTab == 2 && loadMoreFeedError && !isLoading && !isLoadingMoreFeed) {
+                loadMoreFeed()
+            }
+        }
+    }
+
     LinDoFullScreenPage(
         onBack = onDismiss,
         containerColor = palette.cardSurface
@@ -16128,7 +16773,10 @@ private fun UserFollowNetworkSheet(
             title = "关注与粉丝",
             onBack = onDismiss,
             trailingContent = {
-                IconButton(onClick = { reloadToken++ }) {
+                IconButton(onClick = {
+                    manualRecoveryRequested = true
+                    reloadToken++
+                }) {
                     Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
                 }
             }
@@ -16163,7 +16811,10 @@ private fun UserFollowNetworkSheet(
                 LinDoStatePanel(
                     state = LinDoMascotState.NetworkError,
                     detail = loadError!!,
-                    onRetry = { reloadToken++ }
+                    onRetry = {
+                        manualRecoveryRequested = true
+                        reloadToken++
+                    }
                 )
             }
         } else if (activeTab == 2) {
@@ -16323,6 +16974,8 @@ private fun CommunityLeaderboardSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     val periods = remember {
         listOf("今日榜" to "daily", "本周榜" to "weekly", "本月榜" to "monthly", "总榜" to "all")
     }
@@ -16335,16 +16988,22 @@ private fun CommunityLeaderboardSheet(
     var hasMore by remember { mutableStateOf(false) }
     var currentPage by remember { mutableIntStateOf(0) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     LaunchedEffect(selectedPeriodIdx, reloadToken) {
         loadMoreJob?.cancel()
         isLoadingMore = false
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         loadMoreError = false
         currentPage = 0
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val periodKey = periods.getOrNull(selectedPeriodIdx)?.second ?: "weekly"
             val firstPage = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey, page = 0)
             entries = firstPage
@@ -16360,6 +17019,7 @@ private fun CommunityLeaderboardSheet(
 
     fun loadMoreLeaderboard() {
         if (isLoadingMore || !hasMore || isLoading) return
+        val retryingAfterError = loadMoreError
         val nextPage = currentPage + 1
         val periodKey = periods.getOrNull(selectedPeriodIdx)?.second ?: "weekly"
         isLoadingMore = true
@@ -16367,6 +17027,9 @@ private fun CommunityLeaderboardSheet(
         loadMoreJob?.cancel()
         loadMoreJob = scope.launch {
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val more = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey, page = nextPage)
                 if (more.isEmpty()) {
                     hasMore = false
@@ -16393,6 +17056,18 @@ private fun CommunityLeaderboardSheet(
         }
     }
 
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            } else if (loadMoreError && !isLoading && !isLoadingMore) {
+                loadMoreLeaderboard()
+            }
+        }
+    }
+
     LinDoFullScreenPage(
         onBack = onDismiss,
         containerColor = palette.cardSurface
@@ -16401,7 +17076,10 @@ private fun CommunityLeaderboardSheet(
             title = "社区积分与活跃榜",
             onBack = onDismiss,
             trailingContent = {
-                IconButton(onClick = { reloadToken++ }) {
+                IconButton(onClick = {
+                    manualRecoveryRequested = true
+                    reloadToken++
+                }) {
                     Icon(LinDoIcons.Refresh, "刷新", Modifier.size(19.dp), tint = palette.inkSecondary)
                 }
             }
@@ -16432,7 +17110,10 @@ private fun CommunityLeaderboardSheet(
                 LinDoStatePanel(
                     state = LinDoMascotState.NetworkError,
                     detail = loadError!!,
-                    onRetry = { reloadToken++ }
+                    onRetry = {
+                        manualRecoveryRequested = true
+                        reloadToken++
+                    }
                 )
             }
         } else {
@@ -16541,6 +17222,8 @@ private fun UserAccountPreferencesSheet(
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var snapshot by remember { mutableStateOf<UserAccountPreferencesSnapshot?>(null) }
     var hidePresence by remember { mutableStateOf(false) }
     var allowPm by remember { mutableStateOf(true) }
@@ -16548,12 +17231,18 @@ private fun UserAccountPreferencesSheet(
     var loadError by remember { mutableStateOf<String?>(null) }
     var toggleError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isSavingToggle by remember { mutableStateOf(false) }
 
     LaunchedEffect(username, reloadToken) {
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             val loaded = LinuxDoRepository.fetchUserAccountPreferences(username)
                 ?: throw ApiReadException(ApiFailureKind.Connection)
             snapshot = loaded
@@ -16565,6 +17254,16 @@ private fun UserAccountPreferencesSheet(
             loadError = error.message ?: "加载账号偏好失败"
         } finally {
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && snapshot == null && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            }
         }
     }
 
@@ -16624,7 +17323,10 @@ private fun UserAccountPreferencesSheet(
                 LinDoStatePanel(
                     state = LinDoMascotState.NetworkError,
                     detail = loadError!!,
-                    onRetry = { reloadToken++ }
+                    onRetry = {
+                        manualRecoveryRequested = true
+                        reloadToken++
+                    }
                 )
             }
         } else {
@@ -16779,16 +17481,24 @@ private fun CommunityAboutSheet(
     onInspectUser: (String) -> Unit
 ) {
     val palette = LocalPalette.current
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
     var aboutData by remember { mutableStateOf<CommunityAboutData?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var manualRecoveryRequested by remember { mutableStateOf(false) }
     var activeTeamTab by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(reloadToken) {
+        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
+        manualRecoveryRequested = false
         isLoading = true
         loadError = null
         try {
+            if (shouldPrepareRecovery) {
+                LinuxDoRepository.prepareForManualRecovery()
+            }
             aboutData = LinuxDoRepository.fetchCommunityAboutInfo()
                 ?: throw ApiReadException(ApiFailureKind.Connection)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -16797,6 +17507,16 @@ private fun CommunityAboutSheet(
             loadError = error.message ?: "加载社区信息失败"
         } finally {
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+            lastHandledNetRestoreVer = netRestoreVer
+            if (!isLoading && aboutData == null && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                manualRecoveryRequested = true
+                reloadToken++
+            }
         }
     }
 
@@ -16822,7 +17542,10 @@ private fun CommunityAboutSheet(
                 LinDoStatePanel(
                     state = LinDoMascotState.NetworkError,
                     detail = loadError!!,
-                    onRetry = { reloadToken++ }
+                    onRetry = {
+                        manualRecoveryRequested = true
+                        reloadToken++
+                    }
                 )
             }
         } else {
