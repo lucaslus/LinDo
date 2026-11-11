@@ -1,6 +1,7 @@
 package do_.linux.lindo.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -9,6 +10,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import coil3.disk.directory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -1418,11 +1420,25 @@ internal fun LinDoApp(
     systemAnimationsEnabled: Boolean = true,
     appIcon: LinDoAppIcon? = null,
     onApplyAppIcon: ((LinDoAppIcon) -> Boolean)? = null,
+    imageCacheDir: java.io.File? = null,
     addPlatformImageDecoders: coil3.ComponentRegistry.Builder.() -> Unit = {}
 ) {
     remember {
         coil3.SingletonImageLoader.setSafe { context ->
+            val diskDir = imageCacheDir
+                ?: java.io.File(System.getProperty("java.io.tmpdir"), "lindo_image_cache")
             coil3.ImageLoader.Builder(context)
+                .memoryCache {
+                    coil3.memory.MemoryCache.Builder()
+                        .maxSizePercent(context, 0.22)
+                        .build()
+                }
+                .diskCache {
+                    coil3.disk.DiskCache.Builder()
+                        .directory(diskDir)
+                        .maxSizeBytes(128L * 1024L * 1024L)
+                        .build()
+                }
                 .components {
                     add(coil3.network.ktor3.KtorNetworkFetcherFactory(httpClient = { LinuxDoRepository.imageHttpClient }))
                     add(coil3.svg.SvgDecoder.Factory())
@@ -1692,20 +1708,20 @@ internal fun LinDoApp(
         profileSyncJob?.cancel()
         profileSyncJob = scope.launch {
             if (background) {
-                delay(400L)
+                delay(650L)
             }
             val profile = LinuxDoRepository.fetchCurrentUserProfile(background = background)
             if (profile != null) {
                 fullUserProfile = profile
                 lastProfileSyncedAtMs = System.currentTimeMillis()
-                delay(1200L)
+                delay(2400L)
                 if (LinuxDoRepository.getCachedUserBadges(profile.username).isNullOrEmpty()) {
                     launch { runCatching { LinuxDoRepository.fetchUserBadges(profile.username) } }
                 }
             }
-            delay(1600L)
+            delay(2800L)
             launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
-            delay(2200L)
+            delay(3200L)
             launch { runCatching { LinuxDoRepository.syncSiteEmojis() } }
         }
     }
@@ -1925,7 +1941,7 @@ internal fun LinDoApp(
                 openWebPage("https://linux.do/session/otp/$otp")
                 return@LaunchedEffect
             }
-        } else if (!UserApiKeyAuthManager.getApiKey().isNullOrBlank() && UserApiKeyAuthManager.currentUser == null) {
+        } else if (UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.currentUser == null) {
             LinuxDoRepository.fetchCurrentUserProfile()?.let { profile ->
                 fullUserProfile = profile
                 UserApiKeyAuthManager.persistSessionQuietly()
@@ -1992,9 +2008,19 @@ internal fun LinDoApp(
     }
 
     fun closeWebPage() {
-        val wasEditingProfile = activeWebLoginUrl?.endsWith("/preferences/profile") == true
+        val closedUrl = activeWebLoginUrl
+        val wasEditingProfile = closedUrl?.endsWith("/preferences/profile") == true
+        val wasSiteHomeCheck = closedUrl == "https://linux.do/"
         activeWebLoginUrl = null
         if (wasEditingProfile) syncUserProfile()
+        if (wasSiteHomeCheck) {
+            if (feedError != null || topics.isEmpty()) {
+                loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+            }
+            if (activeTopicDetail?.loadError != null && activeTopicSummary != null) {
+                openTopic(activeTopicSummary!!, activeTargetPostNumber)
+            }
+        }
     }
 
     fun returnFromUnavailableTopic() {
@@ -2177,7 +2203,7 @@ internal fun LinDoApp(
         loadTopics(FeedSortFilter.LATEST, null)
         if (UserApiKeyAuthManager.isAuthorized()) {
             launch {
-                delay(600L)
+                delay(1500L)
                 LinuxDoRepository.syncSiteCategories()
             }
             syncUserProfile(background = true)
@@ -2527,6 +2553,8 @@ internal fun LinDoApp(
                                             onApplyPendingNewTopics = { applyPendingNewTopics() },
                                             onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true) },
                                             onLoadMore = { loadNextPageTopics() },
+                                            onClearLoadMoreError = { loadMoreError = false },
+                                            onOpenWebUrl = { openWebPage(it) },
                                             onSelectTopic = { openTopic(it) },
                                             onAvatarClick = { currentTab = MainTab.PROFILE }
                                         )
@@ -2751,6 +2779,8 @@ internal fun LinDoApp(
                                                 onApplyPendingNewTopics = { applyPendingNewTopics() },
                                                 onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true) },
                                                 onLoadMore = { loadNextPageTopics() },
+                                                onClearLoadMoreError = { loadMoreError = false },
+                                                onOpenWebUrl = { openWebPage(it) },
                                                 onSelectTopic = { openTopic(it) },
                                                 onAvatarClick = { currentTab = MainTab.PROFILE }
                                             )
@@ -3777,6 +3807,8 @@ internal fun CommunityHomeFeedPane(
     onApplyPendingNewTopics: () -> Unit = {},
     onRefresh: () -> Unit,
     onLoadMore: () -> Unit,
+    onClearLoadMoreError: () -> Unit = {},
+    onOpenWebUrl: (String) -> Unit = {},
     onSelectTopic: (TopicSummary) -> Unit,
     onAvatarClick: () -> Unit
 ) {
@@ -3853,7 +3885,22 @@ internal fun CommunityHomeFeedPane(
         }
     }
 
-    // 滚动触底自动加载下一页（一旦发生网络异常 loadMoreError=true 立即停止自动重试，仅允许手动点击重试）
+    // 当分页曾因瞬时网络抖动失败后，用户上滑离开底部再重新下滑时自动解除错误锁以平滑恢复加载（同时保留底部「重试」直点）
+    LaunchedEffect(listState, loadMoreError) {
+        if (!loadMoreError) return@LaunchedEffect
+        androidx.compose.runtime.snapshotFlow {
+            val info = listState.layoutInfo
+            val total = info.totalItemsCount
+            val lastIdx = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            total to lastIdx
+        }.collect { (total, lastIdx) ->
+            if (total > 6 && lastIdx < total - 4) {
+                onClearLoadMoreError()
+            }
+        }
+    }
+
+    // 滚动触底自动加载下一页（发生网络异常时暂停原地狂刷，点击「重试」或上滑后再下滑均可立即恢复）
     val shouldLoadMore by remember(isLoading, isLoadingMore, hasMoreTopics, loadMoreError, searchQuery) {
         derivedStateOf {
             if (isLoading || isLoadingMore || !hasMoreTopics || loadMoreError || searchQuery.isNotBlank()) {
@@ -4489,23 +4536,29 @@ internal fun CommunityHomeFeedPane(
                 } else if (topics.isEmpty() && !isLoading) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         if (errorMessage != null) {
-                            val needsLogin = !isAuthorized && (
+                            val needsSiteVerify = errorMessage.contains("站点验证")
+                            val needsLogin = !needsSiteVerify && !isAuthorized && (
                                 errorMessage.contains("登录") || errorMessage.contains("权限")
                             )
-                            val lacksTrustLevel = isAuthorized && (
+                            val lacksTrustLevel = !needsSiteVerify && isAuthorized && (
                                 errorMessage.contains("权限") || errorMessage.contains("等级")
                             )
                             LinDoStatePanel(
                                 LinDoMascotState.NetworkError,
                                 detail = errorMessage,
                                 onRetry = when {
+                                    needsSiteVerify -> ({ onOpenWebUrl("https://linux.do/") })
                                     needsLogin -> onRequestLogin
                                     lacksTrustLevel -> null
                                     else -> onRefresh
                                 },
-                                actionLabel = if (needsLogin) "去登录" else "重试",
-                                showActionIcon = !needsLogin,
-                                emphasizeAction = needsLogin,
+                                actionLabel = when {
+                                    needsSiteVerify -> "打开网页验证"
+                                    needsLogin -> "去登录"
+                                    else -> "重试"
+                                },
+                                showActionIcon = !needsLogin && !needsSiteVerify,
+                                emphasizeAction = needsLogin || needsSiteVerify,
                                 useIconArtwork = true
                             )
                         } else {
@@ -4550,6 +4603,23 @@ internal fun CommunityHomeFeedPane(
                                         val highestFloor = maxOf(pinned.highestPostNumber, pinned.postsCount, 1)
                                         val isPinnedUnread = (pinned.unseen || pinned.unreadPosts > 0) &&
                                             !LinuxDoRepository.isTopicConfirmedReadReactive(pinned.id, highestFloor)
+                                        var showPinnedDotSlot by remember(pinned.id) { mutableStateOf(isPinnedUnread) }
+                                        if (isPinnedUnread && !showPinnedDotSlot) {
+                                            showPinnedDotSlot = true
+                                        }
+                                        val pinnedDotAlpha by animateFloatAsState(
+                                            targetValue = if (isPinnedUnread) 1f else 0f,
+                                            animationSpec = tween(
+                                                durationMillis = if (enableAnimations) 850 else 0,
+                                                easing = FastOutSlowInEasing
+                                            ),
+                                            label = "pinnedUnreadDotAlpha"
+                                        )
+                                        LaunchedEffect(isPinnedUnread, pinnedDotAlpha) {
+                                            if (!isPinnedUnread && pinnedDotAlpha <= 0.02f) {
+                                                showPinnedDotSlot = false
+                                            }
+                                        }
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -4578,11 +4648,17 @@ internal fun CommunityHomeFeedPane(
                                                 overflow = TextOverflow.Ellipsis,
                                                 modifier = Modifier.weight(1f)
                                             )
-                                            if (isPinnedUnread) {
+                                            if (showPinnedDotSlot) {
                                                 Spacer(modifier = Modifier.width(6.dp))
                                                 Box(
                                                     modifier = Modifier
                                                         .size(6.dp)
+                                                        .graphicsLayer {
+                                                            alpha = pinnedDotAlpha
+                                                            val s = 0.85f + 0.15f * pinnedDotAlpha
+                                                            scaleX = s
+                                                            scaleY = s
+                                                        }
                                                         .clip(CircleShape)
                                                         .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
                                                 )
@@ -5140,11 +5216,28 @@ private fun CommunityTopicItem(
     val highestFloor = maxOf(topic.highestPostNumber, topic.postsCount, 1)
     val isTopicUnread = (topic.unseen || topic.unreadPosts > 0) &&
         !LinuxDoRepository.isTopicConfirmedReadReactive(topic.id, highestFloor)
+    var showUnreadDotSlot by remember(topic.id) { mutableStateOf(isTopicUnread) }
+    if (isTopicUnread && !showUnreadDotSlot) {
+        showUnreadDotSlot = true
+    }
+    val topicUnreadDotAlpha by animateFloatAsState(
+        targetValue = if (isTopicUnread) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = if (enableAnimations) 850 else 0,
+            easing = FastOutSlowInEasing
+        ),
+        label = "topicUnreadDotAlpha"
+    )
+    LaunchedEffect(isTopicUnread, topicUnreadDotAlpha) {
+        if (!isTopicUnread && topicUnreadDotAlpha <= 0.02f) {
+            showUnreadDotSlot = false
+        }
+    }
     val unreadDotColor = if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
-    val titleAnnotated = remember(topic.title, isTopicUnread) {
+    val titleAnnotated = remember(topic.title, showUnreadDotSlot) {
         buildAnnotatedString {
             append(topic.title)
-            if (isTopicUnread) {
+            if (showUnreadDotSlot) {
                 append("  ")
                 appendInlineContent("unread_dot", "●")
             }
@@ -5166,6 +5259,12 @@ private fun CommunityTopicItem(
                     Box(
                         modifier = Modifier
                             .size(7.5.dp)
+                            .graphicsLayer {
+                                alpha = topicUnreadDotAlpha
+                                val s = 0.85f + 0.15f * topicUnreadDotAlpha
+                                scaleX = s
+                                scaleY = s
+                            }
                             .clip(CircleShape)
                             .background(unreadDotColor)
                     )
@@ -5832,6 +5931,17 @@ internal fun CommunityTopicReaderPane(
 
     val latestFloorByPostId by androidx.compose.runtime.rememberUpdatedState(floorByPostId)
 
+    LaunchedEffect(summary.id, isAuthorized, readerListState, posts) {
+        if (!isAuthorized || !UserApiKeyAuthManager.isAuthorized() || posts.isEmpty()) return@LaunchedEffect
+        androidx.compose.runtime.snapshotFlow {
+            readerListState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
+                latestFloorByPostId[item.key as? Int]
+            }.toSet()
+        }.collect { visiblePostNums ->
+            ScreenTrackEngine.updateVisiblePosts(visiblePostNums, System.currentTimeMillis())
+        }
+    }
+
     LaunchedEffect(summary.id, isAuthorized) {
         if (!isAuthorized || !UserApiKeyAuthManager.isAuthorized()) return@LaunchedEffect
         ScreenTrackEngine.onTopicEntered(topicId = summary.id, initialVisiblePosts = emptySet())
@@ -5847,9 +5957,7 @@ internal fun CommunityTopicReaderPane(
             tickAccumulatorMs += 400L
             if (tickAccumulatorMs >= 1000L) {
                 tickAccumulatorMs = 0L
-                ScreenTrackEngine.tick(nowMs)?.let { batch ->
-                    ScreenTrackEngine.consolidateBatch(batch.topicId, batch.topicTimeMs, batch.timingsMs)
-                }
+                ScreenTrackEngine.tickAndEnqueue(nowMs)
             }
         }
     }
@@ -6362,24 +6470,27 @@ internal fun CommunityTopicReaderPane(
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
-                        val needsLogin = !UserApiKeyAuthManager.isAuthorized() && (
+                        val needsSiteVerify = detail.loadError.contains("站点验证")
+                        val needsLogin = !needsSiteVerify && !UserApiKeyAuthManager.isAuthorized() && (
                             detail.loadError.contains("登录") || detail.loadError.contains("权限") || detail.loadError.contains("私密")
                         )
                         LinDoStatePanel(
                             LinDoMascotState.NetworkError,
                             detail = detail.loadError,
                             onRetry = when {
+                                needsSiteVerify -> ({ onOpenWebUrl("https://linux.do/") })
                                 needsLogin -> onRequestLogin
                                 detail.unavailable -> onUnavailable
                                 else -> onRefresh
                             },
                             actionLabel = when {
+                                needsSiteVerify -> "打开网页验证"
                                 needsLogin -> "去登录"
                                 detail.unavailable -> "返回列表"
                                 else -> "重试"
                             },
-                            showActionIcon = !needsLogin && !detail.unavailable,
-                            emphasizeAction = needsLogin
+                            showActionIcon = !needsLogin && !detail.unavailable && !needsSiteVerify,
+                            emphasizeAction = needsLogin || needsSiteVerify
                         )
                     }
                 }
@@ -6424,9 +6535,10 @@ internal fun CommunityTopicReaderPane(
                 val repliedPost = postsByNumber[post.replyToPostNumber]
                 val childReplies = repliesByParent[post.postNumber].orEmpty()
                 val confirmedReadVer = ScreenTrackEngine.serverConfirmedReadVersion
-                val isFloorUnread = UserApiKeyAuthManager.isAuthorized() &&
+                val repoReadVer = LinuxDoRepository.readTopicsVersion
+                val isFloorUnread = isAuthorized &&
                     !post.isRead &&
-                    remember(summary.id, post.postNumber, confirmedReadVer) {
+                    remember(summary.id, post.postNumber, confirmedReadVer, repoReadVer) {
                         !ScreenTrackEngine.isPostConfirmedReadByServer(summary.id, post.postNumber) &&
                             (LinuxDoRepository.getServerConfirmedReadFloor(summary.id) ?: 0) < post.postNumber
                     }
@@ -7350,7 +7462,10 @@ internal fun CommunityPostFloor(
 
                         val unreadDotAlpha by animateFloatAsState(
                             targetValue = if (isUnread) 1f else 0f,
-                            animationSpec = tween(durationMillis = if (enableAnimations) 200 else 0),
+                            animationSpec = tween(
+                                durationMillis = if (enableAnimations) 850 else 0,
+                                easing = FastOutSlowInEasing
+                            ),
                             label = "unreadFloorDotAlpha"
                         )
                         Box(
@@ -7358,7 +7473,7 @@ internal fun CommunityPostFloor(
                                 .size(6.5.dp)
                                 .graphicsLayer {
                                     alpha = unreadDotAlpha
-                                    val scale = 0.65f + 0.35f * unreadDotAlpha
+                                    val scale = 0.88f + 0.12f * unreadDotAlpha
                                     scaleX = scale
                                     scaleY = scale
                                 }

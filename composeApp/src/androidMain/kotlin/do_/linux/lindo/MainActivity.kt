@@ -164,7 +164,9 @@ class MainActivity : ComponentActivity() {
     private var apiWebViewReady = CompletableDeferred<Boolean>()
     private val pendingHttpCallbacks = ConcurrentHashMap<String, CompletableDeferred<Pair<Int, String>>>()
     private val pendingBinaryCallbacks = ConcurrentHashMap<String, CompletableDeferred<Triple<Int, String, String>>>()
-    private val webViewBinarySemaphore = kotlinx.coroutines.sync.Semaphore(6)
+    // 严格控制同源 Chromium WebView 并发槽位（4 路 JSON API + 3 路图片桥接），避免打满单域名 6 连接上限导致请求排队超时或触发 429
+    private val webViewHttpSemaphore = kotlinx.coroutines.sync.Semaphore(4)
+    private val webViewBinarySemaphore = kotlinx.coroutines.sync.Semaphore(3)
     private var pendingMediaPickCallback: ((fileName: String, mimeType: String, bytes: ByteArray) -> Unit)? = null
     private var pendingWebFileChooserCallback: ValueCallback<Array<Uri>>? = null
 
@@ -564,6 +566,7 @@ class MainActivity : ComponentActivity() {
                     systemAnimationsEnabled = systemAnimationsEnabled,
                     appIcon = appIcon,
                     onApplyAppIcon = { iconManager.apply(appIcon, it) },
+                    imageCacheDir = java.io.File(cacheDir, "lindo_image_cache"),
                     addPlatformImageDecoders = {
                         if (android.os.Build.VERSION.SDK_INT >= 28) add(coil3.gif.AnimatedImageDecoder.Factory())
                         else add(coil3.gif.GifDecoder.Factory())
@@ -838,7 +841,6 @@ class MainActivity : ComponentActivity() {
 
         val reqId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Pair<Int, String>>()
-        pendingHttpCallbacks[reqId] = deferred
 
         val formBodyEncoded = if (!formParams.isNullOrEmpty()) {
             do_.linux.lindo.core.network.formEntries(formParams).joinToString("&") { (k, v) ->
@@ -862,7 +864,10 @@ class MainActivity : ComponentActivity() {
             }
         }.toString()
         val initialCachedCsrf = LinuxDoRepository.getCachedCsrfToken().orEmpty()
-        val preExecCookies = runCatching { CookieManager.getInstance().getCookie("https://linux.do") }.getOrNull().orEmpty()
+        val preExecCookies = runCatching {
+            val cm = CookieManager.getInstance()
+            ensureAuthCookiesInWebKit(cm, cm.getCookie("https://linux.do").orEmpty())
+        }.getOrNull().orEmpty()
         val currentCsrfOwner = csrfOwnerTag(preExecCookies)
 
         val jsCode = """
@@ -1019,16 +1024,18 @@ class MainActivity : ComponentActivity() {
             })();
         """.trimIndent()
 
-        withContext(Dispatchers.Main) {
-            val cm = CookieManager.getInstance()
-            val cookieStr = cm.getCookie("https://linux.do").orEmpty()
-            if (cookieStr.isNotBlank()) {
-                CookieSentinel.syncFromAuthoritativeBrowserCookieString(cookieStr)
-            }
-            activeWv.evaluateJavascript(jsCode, null)
-        }
-
+        webViewHttpSemaphore.acquire()
         val res = try {
+            pendingHttpCallbacks[reqId] = deferred
+            withContext(Dispatchers.Main) {
+                val cm = CookieManager.getInstance()
+                val cookieStr = ensureAuthCookiesInWebKit(cm, cm.getCookie("https://linux.do").orEmpty())
+                if (cookieStr.isNotBlank()) {
+                    CookieSentinel.syncFromAuthoritativeBrowserCookieString(cookieStr)
+                }
+                activeWv.evaluateJavascript(jsCode, null)
+            }
+
             val response = withTimeoutOrNull(if (isRead) 11_500L else 16_000L) {
                 deferred.await()
             }
@@ -1048,6 +1055,7 @@ class MainActivity : ComponentActivity() {
             response
         } finally {
             pendingHttpCallbacks.remove(reqId)
+            webViewHttpSemaphore.release()
         }
 
         return res
@@ -1076,7 +1084,7 @@ class MainActivity : ComponentActivity() {
         val jsCode = """
             (async function() {
                 const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 11000);
+                const timer = setTimeout(() => controller.abort(), 7000);
                 try {
                     const targetUrl = ${JSONObject.quote(url)};
                     let isSameOrigin = true;
@@ -1095,11 +1103,14 @@ class MainActivity : ComponentActivity() {
                                 cache: 'default',
                                 signal: controller.signal
                             });
+                            if (resp && (resp.ok || resp.status === 429 || resp.status === 404 || resp.status === 403)) {
+                                break;
+                            }
                             break;
                         } catch (e) {
                             if (attempt === 1) throw e;
                         }
-                        await new Promise(r => setTimeout(r, 400));
+                        await new Promise(r => setTimeout(r, 350));
                     }
                     if (!resp || !resp.ok) {
                         clearTimeout(timer);
@@ -1150,7 +1161,7 @@ class MainActivity : ComponentActivity() {
             withContext(Dispatchers.Main) {
                 activeWv.evaluateJavascript(jsCode, null)
             }
-            withTimeoutOrNull(12_000L) {
+            withTimeoutOrNull(8_000L) {
                 deferred.await()
             }
         } finally {
@@ -1446,12 +1457,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun ensureAuthCookiesInWebKit(cookieManager: CookieManager, currentWebKitCookies: String): String {
+        if (hasCookieNamed(currentWebKitCookies, "_t")) return currentWebKitCookies
+        val hasAuthorizedUser = UserApiKeyAuthManager.currentUser?.takeIf { it.username != "linuxdo_user" } != null
+        val winning = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+        val savedT = winning["_t"]?.value?.takeIf { it.isNotBlank() && it != "demo_session_token" } ?: return currentWebKitCookies
+        if (!hasAuthorizedUser && !UserApiKeyAuthManager.isAuthorized()) return currentWebKitCookies
+        cookieManager.setCookie("https://linux.do", "_t=$savedT; Path=/; Secure; HttpOnly; SameSite=Lax")
+        winning["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
+            cookieManager.setCookie("https://linux.do", "_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
+        }
+        cookieManager.flush()
+        return cookieManager.getCookie("https://linux.do").orEmpty()
+    }
+
     private fun persistSessionToDisk() {
         runCatching {
             val cookieManager = CookieManager.getInstance()
             cookieManager.flush()
-            val latestWebKitCookies = cookieManager.getCookie("https://linux.do").orEmpty()
-            CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestWebKitCookies)
+            val latestWebKitCookies = ensureAuthCookiesInWebKit(
+                cookieManager,
+                cookieManager.getCookie("https://linux.do").orEmpty()
+            )
+            if (latestWebKitCookies.isNotBlank()) {
+                CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestWebKitCookies)
+            }
 
             val editor = prefs.edit()
             val user = UserApiKeyAuthManager.currentUser?.takeIf { it.username != "linuxdo_user" }
@@ -1627,6 +1657,7 @@ private fun AndroidWebLoginModal(
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember { mutableStateOf(false) }
+    var postLoginProbeMisses by remember(initialUrl) { mutableStateOf(0) }
     var pageLoadError by remember { mutableStateOf<String?>(null) }
     var rendererGone by remember { mutableStateOf(false) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
@@ -1685,28 +1716,51 @@ private fun AndroidWebLoginModal(
         onLoginSuccess()
     }
 
+    fun completeWithValidatedSessionCookie(rawCookies: String) {
+        if (completed) return
+        val tVal = getCookieValue(rawCookies, "_t").takeUnless { it == "demo_session_token" }.orEmpty()
+        if (tVal.isEmpty()) return
+        completed = true
+        CookieManager.getInstance().flush()
+        CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
+        UserApiKeyAuthManager.persistSessionQuietly()
+        UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+        onLoginSuccess()
+    }
+
     fun tryExtractSessionAndComplete(webView: WebView?) {
         if (completed || webView == null) return
         val cookieManager = CookieManager.getInstance()
         val rawCookies = cookieManager.getCookie("https://linux.do").orEmpty()
-        if (rawCookies.isNotBlank()) {
-            CookieSentinel.syncFromAuthoritativeBrowserCookieString(rawCookies)
-        }
 
         // 若当前在 /session/otp/ 兑换页，仅在此路径下自动触发表单 POST 提交
         if (webView.url?.contains("/session/otp/") == true) {
             webView.evaluateJavascript(AUTO_SUBMIT_OTP_FORM_JS, null)
         }
 
-        // 非登录流（如应用广场、聊天、看板、AI 机器人、Connect/Credit/CDK/Lottery、偏好设置等内置容器模式）：
-        // 仅保持 Cookie 同步，不自动关闭窗口
+        // 非登录流（如应用广场、官网验证、Connect/Credit 等内置容器模式）：
+        // 同步最新 Cookie（如 cf_clearance），不自动关闭窗口
         if (!isLoginFlow) {
+            if (rawCookies.isNotBlank()) {
+                CookieSentinel.syncFromAuthoritativeBrowserCookieString(rawCookies)
+            }
             return
         }
 
-        // 在 /user-api-key/ 授权确认页（如 /user-api-key/new）绝不自动关闭弹窗，等待用户点击“授权”按钮触发回调！
-        val currentPath = runCatching { Uri.parse(webView.url ?: pendingUrl.orEmpty()).path.orEmpty() }.getOrDefault("")
-        if (currentPath.startsWith("/user-api-key/")) {
+        // 在登录表单、OTP 兑换或 /user-api-key/ 授权确认页绝不提前关闭弹窗，等待登录/授权跳回主站
+        val currentUri = runCatching { Uri.parse(webView.url ?: pendingUrl.orEmpty()) }.getOrNull()
+        val currentHost = currentUri?.host?.lowercase().orEmpty()
+        val currentPath = currentUri?.path.orEmpty()
+        if (currentHost != "linux.do" && !currentHost.endsWith(".linux.do")) {
+            return
+        }
+        if (currentPath.startsWith("/user-api-key/") ||
+            currentPath.startsWith("/login") ||
+            currentPath.startsWith("/session/otp/") ||
+            currentPath.startsWith("/session/sso") ||
+            currentPath.startsWith("/auth/")
+        ) {
+            postLoginProbeMisses = 0
             return
         }
 
@@ -1714,14 +1768,15 @@ private fun AndroidWebLoginModal(
         // 严禁向页面注入任何探测脚本或发起轮询请求，保持 `/login` 与 Cloudflare Turnstile 页面 100% 纯净零干扰！
         val currentTCookie = getCookieValue(rawCookies, "_t").takeUnless { it == "demo_session_token" }.orEmpty()
         if (currentTCookie.isEmpty()) {
+            postLoginProbeMisses = 0
             return
         }
-        // 若用户原本已登录（如打开 /login 完成安全验证或切换账号），在 `_t` 未更新前绝不秒关窗口！
+        // 若用户原本已登录（如打开 /login 切换账号），在 `_t` 未更新前绝不秒关窗口！
         if (wasAlreadyAuthorizedOnOpen && initialUrl.contains("/login") && currentTCookie == initialTCookie) {
             return
         }
 
-        // 已检测到 `_t` 会话 Cookie：先确认当前并非 Cloudflare 验证挑战页，再无副作用提取当前用户资料与 CSRF Token
+        // 已检测到 `_t` 会话 Cookie 且已离开 /login：先确认当前并非 Cloudflare 验证挑战页，再提取当前用户资料与 CSRF Token
         val probeJs = """
             (function() {
                 try {
@@ -1730,8 +1785,12 @@ private fun AndroidWebLoginModal(
                         document.querySelector('#challenge-running, #challenge-stage, .cf-turnstile, iframe[src*="challenges.cloudflare.com"]')) {
                         return '__CF_CHALLENGE__';
                     }
-                    if (window.location.pathname.indexOf('/login') === 0 ||
-                        window.location.pathname.indexOf('/user-api-key/') === 0) {
+                    var path = window.location.pathname || '';
+                    if (path.indexOf('/login') === 0 ||
+                        path.indexOf('/user-api-key/') === 0 ||
+                        path.indexOf('/session/otp/') === 0 ||
+                        path.indexOf('/session/sso') === 0 ||
+                        path.indexOf('/auth/') === 0) {
                         return '__ON_LOGIN_PATH__';
                     }
                     var metaCsrf = document.querySelector('meta[name="csrf-token"]');
@@ -1742,6 +1801,23 @@ private fun AndroidWebLoginModal(
                             if (csrfVal && !cachedU.__csrf) cachedU.__csrf = csrfVal;
                             return JSON.stringify(cachedU);
                         }
+                    }
+                    var container = (window.Discourse && window.Discourse.__container__) || null;
+                    var cuSvc = (container && typeof container.lookup === 'function')
+                        ? container.lookup('service:current-user')
+                        : null;
+                    var du = cuSvc || ((window.Discourse && Discourse.User && Discourse.User.current) ? Discourse.User.current() : null);
+                    if (du && du.username) {
+                        return JSON.stringify({
+                            id: du.id || 0,
+                            username: du.username || '',
+                            name: du.name || du.username || '',
+                            avatar_template: du.avatar_template || '',
+                            animated_avatar: du.animated_avatar || '',
+                            title: du.title || '',
+                            trust_level: typeof du.trust_level === 'number' ? du.trust_level : 1,
+                            __csrf: csrfVal
+                        });
                     }
                     var el = document.getElementById('data-preloaded');
                     if (el && el.dataset && el.dataset.preloaded) {
@@ -1754,20 +1830,8 @@ private fun AndroidWebLoginModal(
                             }
                         }
                     }
-                    if (window.Discourse && Discourse.User && Discourse.User.current) {
-                        var du = Discourse.User.current();
-                        if (du && du.username) {
-                            return JSON.stringify({
-                                id: du.id || 0,
-                                username: du.username || '',
-                                name: du.name || du.username || '',
-                                avatar_template: du.avatar_template || '',
-                                animated_avatar: du.animated_avatar || '',
-                                title: du.title || '',
-                                trust_level: typeof du.trust_level === 'number' ? du.trust_level : 1,
-                                __csrf: csrfVal
-                            });
-                        }
+                    if (csrfVal) {
+                        return '__CSRF_ONLY__:' + csrfVal;
                     }
                 } catch (e) {}
                 return '';
@@ -1779,9 +1843,10 @@ private fun AndroidWebLoginModal(
             if (completed) return@evaluateJavascript
             val decoded = decodeJsStringResult(rawJson)?.takeIf { it.isNotBlank() }
             if (decoded == "__CF_CHALLENGE__" || decoded == "__ON_LOGIN_PATH__") {
+                postLoginProbeMisses = 0
                 return@evaluateJavascript
             }
-            if (decoded != null) {
+            if (decoded != null && !decoded.startsWith("__CSRF_ONLY__:")) {
                 runCatching {
                     val obj = JSONObject(decoded)
                     val csrf = obj.optString("__csrf").trim()
@@ -1790,9 +1855,20 @@ private fun AndroidWebLoginModal(
                     }
                     completeWithUserObject(obj)
                 }
-            } else if (!completed && hasCookieNamed(rawCookies, "_t") && currentTCookie != initialTCookie) {
-                // 全新 `_t` Cookie 已落盘但 DOM 尚未渲染新用户资料：严禁携带旧账号 currentUser 直接关闭，
-                // 在同源上下文单飞请求 `/session/current.json` 确认新账号资料后再调用 completeWithUserObject！
+            } else if (!completed && hasCookieNamed(rawCookies, "_t")) {
+                if (decoded != null && decoded.startsWith("__CSRF_ONLY__:")) {
+                    val csrf = decoded.removePrefix("__CSRF_ONLY__:").trim()
+                    if (csrf.isNotEmpty()) {
+                        LinuxDoRepository.updateCsrfToken(csrf)
+                    }
+                }
+                postLoginProbeMisses += 1
+                // 若在主站已持有有效 `_t` 超过 3 次轮询但 SPA 尚未暴露用户对象，直接凭 `_t` 完成登录回跳并由后台补全资料，防止卡死在登录弹窗
+                if (!wasAlreadyAuthorizedOnOpen && postLoginProbeMisses >= 4) {
+                    completeWithValidatedSessionCookie(rawCookies)
+                    return@evaluateJavascript
+                }
+                // 在同源上下文单飞请求 `/session/current.json` 提取当前登录账号资料
                 webView.evaluateJavascript(
                     """
                     (function() {
@@ -1842,6 +1918,16 @@ private fun AndroidWebLoginModal(
 
     DisposableEffect(Unit) {
         onDispose {
+            if (!isLoginFlow) {
+                runCatching {
+                    val cm = CookieManager.getInstance()
+                    cm.flush()
+                    val latest = cm.getCookie("https://linux.do").orEmpty()
+                    if (latest.isNotBlank()) {
+                        CookieSentinel.syncFromAuthoritativeBrowserCookieString(latest)
+                    }
+                }
+            }
             webViewRef = null
         }
     }

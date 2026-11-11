@@ -235,51 +235,16 @@ object CookieSentinel {
     }
 
     /**
-     * 以系统 WebView `CookieManager.getCookie("https://linux.do")` 为权威源同步会话：
-     * 若服务端已吊销/清除 `_t` 或 `_forum_session`，同步从内存哨兵移除，绝不将已失效旧 Cookie 反写复活。
+     * 增量同步系统 WebView `CookieManager.getCookie("https://linux.do")` 中的最新凭证（如轮换后的 `_t`、`_forum_session` 及最新 `cf_clearance`）：
+     * 严禁在 `CookieManager` 瞬态返回空串（如渲染进程切换、SQLite 尚未加载完成）或瞬时漏读 HttpOnly Cookie 时误删内存 `_t` 导致自动退出登录；
+     * 显式退出与经服务端双次确认的会话失效均由 `clearAuthCookiesOnly()` 专门清理。
      */
     fun syncFromAuthoritativeBrowserCookieString(
         rawCookieHeader: String?,
         domain: String = "linux.do"
     ) {
-        val normalizedDomain = domain.trim().lowercase().trimStart('.')
-        var shouldClearStaleCookieUser = false
-        synchronized(this) {
-            val hadAuthCookie = resolveWinningCookies(targetHost = normalizedDomain)["_t"]?.value
-                ?.let { it.isNotBlank() && it != "demo_session_token" } == true
-            if (rawCookieHeader.isNullOrBlank()) {
-                val keysToRemove = store.keys.filter { matchesDomain(it, normalizedDomain) }
-                keysToRemove.forEach { store.remove(it) }
-            } else {
-                val presentNonBlankNames = HashSet<String>()
-                rawCookieHeader.split(";").forEach { segment ->
-                    val trimmed = segment.trim()
-                    val eqIdx = trimmed.indexOf('=')
-                    if (eqIdx > 0) {
-                        val name = trimmed.substring(0, eqIdx).trim()
-                        val value = trimmed.substring(eqIdx + 1).trim()
-                        if (name.isNotEmpty() && value.isNotEmpty()) {
-                            presentNonBlankNames.add(name)
-                        }
-                    }
-                }
-                ingestRawCookieString(rawCookieHeader, domain = domain, hostOnly = false)
-                val staleAuthKeys = store.keys.filter {
-                    it.name in setOf("_t", "_forum_session") &&
-                        it.name !in presentNonBlankNames &&
-                        matchesDomain(it, normalizedDomain)
-                }
-                staleAuthKeys.forEach { store.remove(it) }
-            }
-            val nowHasAuthCookie = resolveWinningCookies(targetHost = normalizedDomain)["_t"]?.value
-                ?.let { it.isNotBlank() && it != "demo_session_token" } == true
-            if (hadAuthCookie && !nowHasAuthCookie) {
-                shouldClearStaleCookieUser = true
-            }
-        }
-        if (shouldClearStaleCookieUser) {
-            UserApiKeyAuthManager.onBrowserAuthCookieEvicted()
-        }
+        if (rawCookieHeader.isNullOrBlank()) return
+        ingestRawCookieString(rawCookieHeader, domain = domain, hostOnly = false)
     }
 
     suspend fun <T> withSingleFlightRefresh(block: suspend () -> T): T {
@@ -583,13 +548,13 @@ object UserApiKeyAuthManager {
 
     /**
      * 生成对齐 Linux.do 服务端白名单的浏览器一键授权链接：
-     * - `scopes=read,write,one_time_password`（同时申请读写 User-Api-Key 与 OTP 一次性兑换令牌）
+     * - `scopes=one_time_password`（Linux.do 站点管理员禁用了第三方 `read,write` User-Api-Key 签发，仅开放 `one_time_password` 一次性兑换令牌）
      * - `auth_redirect=discourse://auth_redirect`（Discourse 官方白名单回跳协议）
-     * - `otp=true`（随回调返回一次性登录兑换令牌）
+     * - `otp=true`（随回调返回一次性登录兑换令牌，兑换后获得真实 `_t` 会话 Cookie）
      */
     fun generateAuthorizationUrl(
         applicationName: String = "Lindo",
-        scopes: String = "read,write,one_time_password"
+        scopes: String = "one_time_password"
     ): Pair<String, String> {
         val kpg = KeyPairGenerator.getInstance("RSA")
         kpg.initialize(2048)
@@ -623,7 +588,7 @@ object UserApiKeyAuthManager {
      * 启动系统浏览器进行一键授权
      */
     fun startBrowserOneClickAuth(): String {
-        val (url, _) = generateAuthorizationUrl(scopes = "read,write,one_time_password")
+        val (url, _) = generateAuthorizationUrl(scopes = "one_time_password")
         openExternalUrlLauncher?.invoke(url)
         return url
     }
@@ -1314,6 +1279,20 @@ object LinuxDoRepository {
     }
     private val inFlightBinaryFetches = java.util.concurrent.ConcurrentHashMap<String, Deferred<UserApiKeyAuthManager.BinaryHttpPayload?>>()
     private val binaryFetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val authVerifyScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lastAuthVerifyEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val inFlightForegroundApiCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    internal fun scheduleAuthVerificationIfNeeded() {
+        if (!UserApiKeyAuthManager.isAuthorized()) return
+        val now = System.currentTimeMillis()
+        val prev = lastAuthVerifyEpochMs.get()
+        if (now - prev in 0 until 8_000L) return
+        if (!lastAuthVerifyEpochMs.compareAndSet(prev, now)) return
+        authVerifyScope.launch {
+            runCatching { fetchCurrentUserProfile(background = true) }
+        }
+    }
 
     private fun getCachedImagePayload(url: String): UserApiKeyAuthManager.BinaryHttpPayload? = synchronized(imageByteCache) {
         imageByteCache[url]
@@ -1334,6 +1313,12 @@ object LinuxDoRepository {
         val deferred = inFlightBinaryFetches.computeIfAbsent(cleanUrl) {
             binaryFetchScope.async {
                 try {
+                    // 当前台 JSON API 正在执行时，图片桥接短暂礼让，确保首页列表与帖子详情优先占用同源连接池
+                    var yields = 0
+                    while (inFlightForegroundApiCount.get() > 0 && yields < 3) {
+                        yields++
+                        kotlinx.coroutines.delay(75L)
+                    }
                     val result = fetcher(cleanUrl)
                     if (result != null && result.status in 200..299 && result.bytes.isNotEmpty()) {
                         putCachedImagePayload(cleanUrl, result)
@@ -1352,12 +1337,18 @@ object LinuxDoRepository {
      * 1. 在已挂载同源 Chromium WebView 的平台（Android）上，针对 `linux.do` 域名的头像/表情/帖子图片请求，
      *    直接走同源 WebView 二进制桥接 (`webViewBinaryFetcher`)，复用 Chromium BoringSSL JA3/JA4 指纹与 `cf_clearance`、
      *    彻底杜绝 OkHttp (Java TLS) 被 Cloudflare 拦截返回 `429 cf-mitigated: challenge` 导致头像一直灰屏的问题！
-     * 2. 同时配合内存 LRU 字节缓存与 `Cache-Control: public, max-age=604800, immutable` 响应头，让 Coil 内存与磁盘缓存 100% 命中。
+     * 2. 同时扩容 OkHttp Dispatcher 并发上限，并配合内存 LRU 字节缓存与 Coil 磁盘缓存，消除滑动头像排队饥饿。
      */
     val imageHttpClient: HttpClient by lazy {
         HttpClient(OkHttp) {
             engine {
                 config {
+                    dispatcher(
+                        okhttp3.Dispatcher().apply {
+                            maxRequests = 32
+                            maxRequestsPerHost = 12
+                        }
+                    )
                     connectTimeout(8, TimeUnit.SECONDS)
                     readTimeout(12, TimeUnit.SECONDS)
                     addInterceptor { chain ->
@@ -1406,21 +1397,30 @@ object LinuxDoRepository {
                                         .body(payload.bytes.toResponseBody(mediaType))
                                         .build()
                                 }
-                                // 严格单栈隔离：已挂载同源 Chromium WebView 的平台严禁针对 linux.do 域名回落 Java TLS OkHttp，
-                                // 杜绝暴露裸 OkHttp 指纹或污染 WebView 会话。
-                                val failCode = payload?.status?.takeIf { it >= 400 } ?: 504
-                                val emptyType = "text/plain".toMediaTypeOrNull()
-                                return@addInterceptor okhttp3.Response.Builder()
-                                    .request(orig)
-                                    .protocol(okhttp3.Protocol.HTTP_2)
-                                    .code(failCode)
-                                    .message("Image bridge fetch failed")
-                                    .body(ByteArray(0).toResponseBody(emptyType))
-                                    .build()
+                                val path = orig.url.encodedPath
+                                val isPublicRedirectableAsset = path.startsWith("/letter_avatar_proxy/") ||
+                                    path.startsWith("/images/emoji/") ||
+                                    path.startsWith("/svg-sprite/")
+                                if (!isPublicRedirectableAsset || (payload != null && payload.status >= 400)) {
+                                    // 严格单栈隔离：已挂载同源 Chromium WebView 的平台严禁针对需鉴权/同源图片回落带 Cookie 的 OkHttp
+                                    val failCode = payload?.status?.takeIf { it >= 400 } ?: 504
+                                    val emptyType = "text/plain".toMediaTypeOrNull()
+                                    return@addInterceptor okhttp3.Response.Builder()
+                                        .request(orig)
+                                        .protocol(okhttp3.Protocol.HTTP_2)
+                                        .code(failCode)
+                                        .message("Image bridge fetch failed")
+                                        .body(ByteArray(0).toResponseBody(emptyType))
+                                        .build()
+                                }
                             }
                         }
 
                         val builder = orig.newBuilder().url(cleanUrl)
+                        if (UserApiKeyAuthManager.webViewBinaryFetcher != null && (host == "linux.do" || host.endsWith(".linux.do"))) {
+                            // 仅针对跨域重定向的纯公共静态资源（如 letter_avatar_proxy）在不携带任何 Cookie 的前提下兜底
+                            builder.removeHeader("Cookie")
+                        }
                         UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
                             builder.header("User-Agent", it)
                         }
@@ -1538,127 +1538,150 @@ object LinuxDoRepository {
             extraHeaders.forEach { (k, v) -> put(k, v) }
         }
 
-        suspend fun callWebView(): Pair<Int, String>? {
-            val executor = UserApiKeyAuthManager.webViewHttpExecutor ?: return null
-            return try {
-                executor(url, method, formParams, mergedHeaders)?.takeIf { it.first != 0 }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                null
-            }
+        val isForegroundRequest = mergedHeaders["Discourse-Background"] != "true"
+        if (isForegroundRequest) {
+            inFlightForegroundApiCount.incrementAndGet()
         }
-        // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
-        if (!method.equals("GET", true) && !method.equals("HEAD", true) && UserApiKeyAuthManager.webViewHttpExecutor != null) {
-            val writeResult = callWebView()
-            if (writeResult?.first == 429) noteRateLimitHit()
-            return@withContext writeResult?.takeIf {
-                preserveFailure || isSuccessfulApiResponse(it.first, it.second)
+        try {
+            suspend fun callWebView(): Pair<Int, String>? {
+                val executor = UserApiKeyAuthManager.webViewHttpExecutor ?: return null
+                return try {
+                    executor(url, method, formParams, mergedHeaders)?.takeIf { it.first != 0 }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
             }
-        }
+            // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
+            if (!method.equals("GET", true) && !method.equals("HEAD", true) && UserApiKeyAuthManager.webViewHttpExecutor != null) {
+                val writeResult = callWebView()
+                if (writeResult?.first == 429) noteRateLimitHit()
+                return@withContext writeResult?.takeIf {
+                    preserveFailure || isSuccessfulApiResponse(it.first, it.second)
+                }
+            }
 
-        // 只要平台已挂载同源 Chromium WebView 通道（Android），所有请求一律走 WebView BoringSSL 通道（内建无感重试），
-        // 严禁回落至缺少 cf_clearance 且为 Java TLS 指纹的 OkHttp sharedClient，彻底杜绝触发 Cloudflare 403 风控！
-        val isReadMethod = method.equals("GET", true) || method.equals("HEAD", true)
-        val maxReadAttempts = if (isReadMethod && mergedHeaders["Discourse-Background"] != "true") 2 else 1
-        var firstBrowserResult: Pair<Int, String>? = null
-        if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
-            firstBrowserResult = callWebView()
-            if (firstBrowserResult?.first == 429) noteRateLimitHit()
-            if (firstBrowserResult != null && isSuccessfulApiResponse(firstBrowserResult.first, firstBrowserResult.second)) {
-                if (mergedHeaders["Discourse-Background"] != "true") {
-                    UserPresenceService.recordSuccessfulForegroundRequest()
+            // 只要平台已挂载同源 Chromium WebView 通道（Android），所有请求一律走 WebView BoringSSL 通道，
+            // 对前台只读请求在瞬时网络抖动或非 Cloudflare 429/5xx 时退避重试一次，
+            // 同时严禁回落至缺少 cf_clearance 且为 Java TLS 指纹的 OkHttp sharedClient！
+            val isReadMethod = method.equals("GET", true) || method.equals("HEAD", true)
+            val maxReadAttempts = if (isReadMethod && isForegroundRequest) 2 else 1
+            var firstBrowserResult: Pair<Int, String>? = null
+            if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
+                for (attempt in 0 until maxReadAttempts) {
+                    val candidate = callWebView()
+                    if (candidate?.first == 429) noteRateLimitHit()
+                    if (candidate != null && isSuccessfulApiResponse(candidate.first, candidate.second)) {
+                        if (isForegroundRequest) {
+                            UserPresenceService.recordSuccessfulForegroundRequest()
+                        }
+                        return@withContext candidate
+                    }
+                    if (candidate != null) {
+                        firstBrowserResult = candidate
+                    }
+                    val retryable = candidate == null || (
+                        candidate.first in setOf(429, 500, 502, 503, 504) &&
+                            !looksLikeCloudflareChallenge(candidate.second)
+                    )
+                    if (!retryable || attempt >= maxReadAttempts - 1) break
+                    val backoffMs = if (candidate?.first == 429) 1_100L else 420L
+                    kotlinx.coroutines.delay(backoffMs)
                 }
-                return@withContext firstBrowserResult
+                return@withContext if (preserveFailure) firstBrowserResult else null
             }
-            return@withContext if (preserveFailure) firstBrowserResult else null
-        }
 
-        var lastResponse: Pair<Int, String>? = null
-        for (attempt in 0 until maxReadAttempts) {
-            try {
-                val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
-                fun currentSafeCookieHeader(): String = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
-                    .entries
-                    .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
-                    // 若当前平台存在 WebView，禁止将绑定了 Chromium TLS 指纹的 cf_clearance 放到 OkHttp 请求上发送，防止被 Cloudflare 判定指纹劫持而吊销
-                    .filterNot { UserApiKeyAuthManager.webViewHttpExecutor != null && it.key in cfTlsBoundCookies }
-                    .joinToString("; ") { "${it.key}=${it.value.value}" }
-                val requestHeaders = mergedHeaders.toMutableMap()
-                if (!hasWebCookie && !hasApiKey) {
-                    requestHeaders.remove("Discourse-Logged-In")
-                }
-                UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
-                    requestHeaders["User-Agent"] = it
-                }
-                val isMutation = !isReadMethod
-                if (isMutation && hasWebCookie && !requestHeaders.containsKey("X-CSRF-Token")) {
-                    fetchCsrfTokenViaSharedClient(forceRefresh = false)?.let { requestHeaders["X-CSRF-Token"] = it }
-                }
-                val cookieHeader = currentSafeCookieHeader()
-                if (cookieHeader.isNotEmpty()) requestHeaders["Cookie"] = cookieHeader
-                var response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
-                response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                    CookieSentinel.ingestRawCookieString(setCookie.substringBefore(';'), domain = "linux.do")
-                }
-                var status = response.status.value
-                var text = response.bodyAsText()
-                if (status == 429) noteRateLimitHit()
-                if (isMutation && status in setOf(403, 422) && text.contains("CSRF", ignoreCase = true) && hasWebCookie) {
-                    val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
-                    if (!freshCsrf.isNullOrBlank()) {
-                        requestHeaders["X-CSRF-Token"] = freshCsrf
-                        val updatedCookieHeader = currentSafeCookieHeader()
-                        if (updatedCookieHeader.isNotEmpty()) requestHeaders["Cookie"] = updatedCookieHeader
+            var lastResponse: Pair<Int, String>? = null
+            for (attempt in 0 until maxReadAttempts) {
+                try {
+                    val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
+                    fun currentSafeCookieHeader(): String = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+                        .entries
+                        .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
+                        // 若当前平台存在 WebView，禁止将绑定了 Chromium TLS 指纹的 cf_clearance 放到 OkHttp 请求上发送，防止被 Cloudflare 判定指纹劫持而吊销
+                        .filterNot { UserApiKeyAuthManager.webViewHttpExecutor != null && it.key in cfTlsBoundCookies }
+                        .joinToString("; ") { "${it.key}=${it.value.value}" }
+                    val requestHeaders = mergedHeaders.toMutableMap()
+                    if (!hasWebCookie && !hasApiKey) {
+                        requestHeaders.remove("Discourse-Logged-In")
+                    }
+                    UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
+                        requestHeaders["User-Agent"] = it
+                    }
+                    val isMutation = !isReadMethod
+                    if (isMutation && hasWebCookie && !requestHeaders.containsKey("X-CSRF-Token")) {
+                        fetchCsrfTokenViaSharedClient(forceRefresh = false)?.let { requestHeaders["X-CSRF-Token"] = it }
+                    }
+                    val cookieHeader = currentSafeCookieHeader()
+                    if (cookieHeader.isNotEmpty()) requestHeaders["Cookie"] = cookieHeader
+                    var response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+                    response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
+                        CookieSentinel.ingestRawCookieString(setCookie.substringBefore(';'), domain = "linux.do")
+                    }
+                    var status = response.status.value
+                    var text = response.bodyAsText()
+                    if (status == 429) noteRateLimitHit()
+                    if (isMutation && status in setOf(403, 422) && text.contains("CSRF", ignoreCase = true) && hasWebCookie) {
+                        val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
+                        if (!freshCsrf.isNullOrBlank()) {
+                            requestHeaders["X-CSRF-Token"] = freshCsrf
+                            val updatedCookieHeader = currentSafeCookieHeader()
+                            if (updatedCookieHeader.isNotEmpty()) requestHeaders["Cookie"] = updatedCookieHeader
+                            response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
+                            status = response.status.value
+                            text = response.bodyAsText()
+                        }
+                    }
+                    // 若携带 Discourse-Logged-In 头遭遇 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次
+                    if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In") && method.equals("GET", true)) {
+                        requestHeaders.remove("Discourse-Logged-In")
                         response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
                         status = response.status.value
                         text = response.bodyAsText()
                     }
+                    // 避免在已挂载 WebView 的平台上，用 OkHttp 缺少 cf_clearance 触发的 Cloudflare HTML 403 覆盖真实响应
+                    val trimmedBody = text.trimStart()
+                    val isHtmlChallenge403 = status == 403 &&
+                        UserApiKeyAuthManager.webViewHttpExecutor != null &&
+                        !trimmedBody.startsWith("{") && !trimmedBody.startsWith("[")
+                    if (!isHtmlChallenge403) {
+                        lastResponse = status to text
+                    }
+                    if (isSuccessfulApiResponse(status, text)) {
+                        if (isForegroundRequest) UserPresenceService.recordSuccessfulForegroundRequest()
+                        return@withContext status to text
+                    }
+                    if (status in listOf(404, 410) || (status == 403 && !isHtmlChallenge403)) {
+                        break
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // A read can safely fall back to the existing authenticated browser transport.
                 }
-                // 若携带 Discourse-Logged-In 头遭遇 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次
-                if (status == 403 && requestHeaders.containsKey("Discourse-Logged-In") && method.equals("GET", true)) {
-                    requestHeaders.remove("Discourse-Logged-In")
-                    response = executeApiRequest(sharedClient, url, method, formParams, requestHeaders)
-                    status = response.status.value
-                    text = response.bodyAsText()
+                if (attempt < maxReadAttempts - 1) {
+                    val backoffMs = if (lastResponse?.first == 429) 1200L else 350L * (attempt + 1)
+                    kotlinx.coroutines.delay(backoffMs)
                 }
-                // 避免在已挂载 WebView 的平台上，用 OkHttp 缺少 cf_clearance 触发的 Cloudflare HTML 403 覆盖真实响应
-                val trimmedBody = text.trimStart()
-                val isHtmlChallenge403 = status == 403 &&
-                    UserApiKeyAuthManager.webViewHttpExecutor != null &&
-                    !trimmedBody.startsWith("{") && !trimmedBody.startsWith("[")
-                if (!isHtmlChallenge403) {
-                    lastResponse = status to text
-                }
-                if (isSuccessfulApiResponse(status, text)) {
-                    if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
-                    return@withContext status to text
-                }
-                if (status in listOf(404, 410) || (status == 403 && !isHtmlChallenge403)) {
-                    break
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                // A read can safely fall back to the existing authenticated browser transport.
             }
-            if (attempt < maxReadAttempts - 1) {
-                val backoffMs = if (lastResponse?.first == 429) 1200L else 350L * (attempt + 1)
-                kotlinx.coroutines.delay(backoffMs)
+            val browserResult = firstBrowserResult ?: callWebView()
+            if (browserResult != null && isSuccessfulApiResponse(browserResult.first, browserResult.second)) {
+                if (isForegroundRequest) UserPresenceService.recordSuccessfulForegroundRequest()
+                return@withContext browserResult
             }
-        }
-        val browserResult = firstBrowserResult ?: callWebView()
-        if (browserResult != null && isSuccessfulApiResponse(browserResult.first, browserResult.second)) {
-            if (mergedHeaders["Discourse-Background"] != "true") UserPresenceService.recordSuccessfulForegroundRequest()
-            return@withContext browserResult
-        }
 
-        if (preserveFailure) {
-            val candidates = listOfNotNull(browserResult, lastResponse)
-            candidates.firstOrNull { it.second.trimStart().startsWith("{") || it.second.trimStart().startsWith("[") }
-                ?: candidates.firstOrNull()
-        } else {
-            null
+            if (preserveFailure) {
+                val candidates = listOfNotNull(browserResult, lastResponse)
+                candidates.firstOrNull { it.second.trimStart().startsWith("{") || it.second.trimStart().startsWith("[") }
+                    ?: candidates.firstOrNull()
+            } else {
+                null
+            }
+        } finally {
+            if (isForegroundRequest) {
+                inFlightForegroundApiCount.decrementAndGet()
+            }
         }
     }
 
@@ -2136,6 +2159,29 @@ object LinuxDoRepository {
         }
     }
 
+    private fun isConfirmedDiscourseUnauthenticatedSessionResponse(status: Int, rawBody: String): Boolean {
+        if (looksLikeCloudflareChallenge(rawBody)) return false
+        val trimmed = rawBody.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart()
+        if (!trimmed.startsWith("{")) return false
+        val root = runCatching { json.parseToJsonElement(trimmed) as? JsonObject }.getOrNull() ?: return false
+        val errorType = root["error_type"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
+        return when {
+            status == 401 -> root.containsKey("errors") || errorType == "not_logged_in" || errorType == "invalid_access"
+            status == 404 -> root.containsKey("errors") || errorType.isNotEmpty()
+            status == 403 -> errorType == "not_logged_in"
+            status in 200..299 -> {
+                if (!root.containsKey("current_user")) false
+                else {
+                    val cu = root["current_user"]
+                    cu == null || cu is JsonNull ||
+                        (cu as? JsonObject)?.get("username")?.jsonPrimitive?.contentOrNull
+                            ?.let { it.isBlank() || it == "linuxdo_user" } == true
+                }
+            }
+            else -> false
+        }
+    }
+
     /**
      * 实时同步当前登录用户的完整资料、真实信任等级 (`Lv.0` ~ `Lv.4`)、真实头像、简介与互动统计
      * 依次请求：
@@ -2148,54 +2194,55 @@ object LinuxDoRepository {
         val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         val cachedAccount = UserApiKeyAuthManager.currentUser
 
-        // 1. 探测 /session/current.json 获取最权威的当前登录态（严禁在 401/403/404 或 current_user=null 时回退到匿名 /u/{username}.json 维持僵尸登录态）
-        val sessionRes = executeHttp(
+        // 1. 探测 /session/current.json 获取最权威的当前登录态：
+        //    - 遇到网关 HTML 错误、Cloudflare 页面、429 限流或瞬时网络失败时保留现有登录态，绝不误踢用户；
+        //    - 若返回 Discourse 结构化未登录 JSON，先将内存哨兵 `_t` 回填至平台 CookieJar 并二次确认一次，
+        //      仅当连续两次均由服务端明确返回未登录 JSON 时才清除失效会话（且不回退匿名 /u/{username}.json）。
+        var sessionRes = executeHttp(
             url = "https://linux.do/session/current.json",
             extraHeaders = headers,
             preserveFailure = true
         ) ?: return@withContext UserApiKeyAuthManager.fullProfileCache
 
-        val sessionStatus = sessionRes.first
-        val sessionBody = sessionRes.second
-        val sessionTrimmed = sessionBody.trimStart()
-        val isCfChallenge = looksLikeCloudflareChallenge(sessionBody)
-
-        if (sessionStatus == 401 || sessionStatus == 404) {
-            UserApiKeyAuthManager.handleServerAuthInvalidated()
-            return@withContext null
-        }
-        if (sessionStatus == 403 && !isCfChallenge) {
-            val errorType = if (sessionTrimmed.startsWith("{")) {
-                runCatching {
-                    json.parseToJsonElement(sessionTrimmed).jsonObject["error_type"]?.jsonPrimitive?.contentOrNull
-                }.getOrNull()
-            } else null
-            if (errorType == "not_logged_in") {
-                UserApiKeyAuthManager.handleServerAuthInvalidated()
+        if (isConfirmedDiscourseUnauthenticatedSessionResponse(sessionRes.first, sessionRes.second)) {
+            val savedT = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
+                ?.takeIf { it.isNotBlank() && it != "demo_session_token" }
+            if (savedT != null) {
+                UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke("_t=$savedT; Path=/; Secure; HttpOnly; SameSite=Lax")
+            }
+            kotlinx.coroutines.delay(150L)
+            val confirmRes = executeHttp(
+                url = "https://linux.do/session/current.json",
+                extraHeaders = headers,
+                preserveFailure = true
+            ) ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+            if (isConfirmedDiscourseUnauthenticatedSessionResponse(confirmRes.first, confirmRes.second)) {
+                if (generation == UserApiKeyAuthManager.sessionGeneration) {
+                    UserApiKeyAuthManager.handleServerAuthInvalidated()
+                }
                 return@withContext null
             }
-            return@withContext UserApiKeyAuthManager.fullProfileCache
+            sessionRes = confirmRes
         }
+
+        val sessionStatus = sessionRes.first
+        val sessionBody = sessionRes.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)
+        val sessionTrimmed = sessionBody.trimStart()
+        val isCfChallenge = looksLikeCloudflareChallenge(sessionRes.second)
+
         if (sessionStatus !in 200..299 || isCfChallenge || !sessionTrimmed.startsWith("{")) {
             return@withContext UserApiKeyAuthManager.fullProfileCache
         }
 
         val sessionRoot = runCatching { json.parseToJsonElement(sessionTrimmed).jsonObject }.getOrNull()
             ?: return@withContext UserApiKeyAuthManager.fullProfileCache
-        val cuElement = sessionRoot["current_user"]
-        if (cuElement == null || cuElement is JsonNull) {
-            UserApiKeyAuthManager.handleServerAuthInvalidated()
-            return@withContext null
-        }
-        val cu = cuElement as? JsonObject ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+        val cu = sessionRoot["current_user"] as? JsonObject
+            ?: return@withContext UserApiKeyAuthManager.fullProfileCache
 
         var userId = cu["id"]?.jsonPrimitive?.intOrNull ?: (cachedAccount?.userId ?: 0)
         val currentUsername = cu["username"]?.jsonPrimitive?.contentOrNull?.takeIf {
             it.isNotBlank() && it != "linuxdo_user"
-        } ?: run {
-            UserApiKeyAuthManager.handleServerAuthInvalidated()
-            return@withContext null
-        }
+        } ?: return@withContext UserApiKeyAuthManager.fullProfileCache
         val sameCachedUser = cachedAccount?.username?.equals(currentUsername, ignoreCase = true) == true
         var displayName = cu["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             ?: (if (sameCachedUser) cachedAccount?.displayName else null)

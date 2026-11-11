@@ -18,11 +18,13 @@ import do_.linux.lindo.core.network.ApiFailureKind
 import do_.linux.lindo.core.network.ApiMutationException
 import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
+import do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX
 import do_.linux.lindo.core.network.CloudDraftItem
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import do_.linux.lindo.core.network.looksLikeCloudflareChallenge
 import do_.linux.lindo.core.network.readApiObject
 import do_.linux.lindo.core.render.DiscourseAstParser
 import do_.linux.lindo.core.render.MarkdownPreview
@@ -166,10 +168,10 @@ class Round3BugFixesRegressionTest {
     }
 
     // -------------------------------------------------------------------------
-    // H-02: Expired / revoked server session evicts auth without resurrection
+    // H-02: Confirmed revoked server session evicts auth, while transient glitches never kick user out
     // -------------------------------------------------------------------------
     @Test
-    fun h02_revokedServerSessionEvictsAuthWithoutResurrectingFromPublicProfile() = runTest {
+    fun h02_revokedServerSessionEvictsAuthWithoutResurrectingAndNeverFalseLogoutsOnGlitch() = runTest {
         UserApiKeyAuthManager.restorePersistedSession(
             profile = AuthenticatedUserProfile(userId = 7, username = "alice", displayName = "Alice"),
             apiKey = null,
@@ -178,9 +180,13 @@ class Round3BugFixesRegressionTest {
         assertTrue(UserApiKeyAuthManager.isAuthorized())
 
         var publicUserCalled = false
+        var sessionProbeCount = 0
         withMockHttp({ url, _, _, _ ->
             when {
-                url.contains("/session/current.json") -> 404 to """{"errors":["not logged in"]}"""
+                url.contains("/session/current.json") -> {
+                    sessionProbeCount++
+                    404 to """{"errors":["not logged in"]}"""
+                }
                 url.contains("/u/alice.json") -> {
                     publicUserCalled = true
                     200 to """{"user":{"id":7,"username":"alice","name":"Alice","trust_level":2}}"""
@@ -189,7 +195,8 @@ class Round3BugFixesRegressionTest {
             }
         }) {
             val profile = LinuxDoRepository.fetchCurrentUserProfile()
-            assertNull(profile, "404 on /session/current.json must never fall back to public /u/{username}.json")
+            assertNull(profile, "Confirmed 404 JSON on /session/current.json must never fall back to public /u/{username}.json")
+            assertEquals(2, sessionProbeCount, "Must double-check /session/current.json before destroying user session")
             assertFalse(publicUserCalled)
             assertFalse(UserApiKeyAuthManager.isAuthorized())
             assertNull(UserApiKeyAuthManager.currentUser)
@@ -197,34 +204,54 @@ class Round3BugFixesRegressionTest {
             assertFalse(CookieSentinel.resolveWinningCookies().containsKey("_t"))
         }
 
-        // Also verify 401 / 403 not_logged_in on readApiObject invalidates authorized session once,
-        // and does NOT loop when in Guest mode.
+        // Single transient 404 or HTML 404 gateway error MUST NOT kick a logged-in user back to login page!
         UserApiKeyAuthManager.onSessionAuthenticated(
             profile = AuthenticatedUserProfile(userId = 8, username = "bob", displayName = "Bob"),
             rawCookies = "_t=bob_token"
         )
-        assertTrue(UserApiKeyAuthManager.isAuthorized())
-        assertFailsWith<ApiReadException> {
-            readApiObject(403 to """{"errors":["您需要登录才能执行此操作"],"error_type":"not_logged_in"}""")
+        var bobProbe = 0
+        withMockHttp({ url, _, _, _ ->
+            when {
+                url.contains("/session/current.json") -> {
+                    bobProbe++
+                    if (bobProbe == 1) {
+                        404 to """{"errors":["transient cookie miss"]}"""
+                    } else {
+                        200 to """{"current_user":{"id":8,"username":"bob","name":"Bob","trust_level":2}}"""
+                    }
+                }
+                else -> 200 to """{"user":{"id":8,"username":"bob"},"user_summary":{}}"""
+            }
+        }) {
+            val recovered = LinuxDoRepository.fetchCurrentUserProfile()
+            assertNotNull(recovered, "Transient single 404 recovered on confirmation probe must keep user logged in")
+            assertTrue(UserApiKeyAuthManager.isAuthorized())
+            assertEquals("bob", UserApiKeyAuthManager.currentUser?.username)
         }
-        assertFalse(UserApiKeyAuthManager.isAuthorized(), "403 not_logged_in must invalidate stale client auth state")
 
+        // HTML 404 / CDN edge page MUST NEVER be treated as Discourse unauthenticated JSON
+        withMockHttp({ url, _, _, _ ->
+            if (url.contains("/session/current.json")) {
+                404 to "<html><body>404 Not Found (Edge Gateway)</body></html>"
+            } else 404 to ""
+        }) {
+            LinuxDoRepository.fetchCurrentUserProfile()
+            assertTrue(UserApiKeyAuthManager.isAuthorized(), "HTML gateway 404 must never log out user")
+        }
+
+        // Transient empty CookieManager snapshot (e.g. WebView renderer swap / onPause) MUST NOT wipe _t or user!
+        CookieSentinel.syncFromAuthoritativeBrowserCookieString("", domain = "linux.do")
+        assertTrue(CookieSentinel.resolveWinningCookies().containsKey("_t"))
+        assertTrue(UserApiKeyAuthManager.isAuthorized())
+
+        // Guest 401 must not trigger redundant logout callbacks
+        UserApiKeyAuthManager.logout()
         var guestLogoutTriggered = false
         UserApiKeyAuthManager.onAuthStateChanged = { guestLogoutTriggered = true }
         assertFailsWith<ApiReadException> {
             readApiObject(401 to """{"errors":["unauthenticated"]}""")
         }
         assertFalse(guestLogoutTriggered, "Guest 401 must not trigger redundant logout loops")
-
-        // Also verify authoritative empty CookieManager sync evicts _t & user
-        UserApiKeyAuthManager.onSessionAuthenticated(
-            profile = AuthenticatedUserProfile(userId = 9, username = "carol", displayName = "Carol"),
-            rawCookies = "_t=carol_token"
-        )
-        assertTrue(UserApiKeyAuthManager.isAuthorized())
-        CookieSentinel.syncFromAuthoritativeBrowserCookieString("", domain = "linux.do")
-        assertFalse(CookieSentinel.resolveWinningCookies().containsKey("_t"))
-        assertFalse(UserApiKeyAuthManager.isAuthorized())
     }
 
     // -------------------------------------------------------------------------
@@ -269,12 +296,16 @@ class Round3BugFixesRegressionTest {
     }
 
     // -------------------------------------------------------------------------
-    // H-04: Key-only User-Api-Key auth sets isAuthorized() & sends headers
+    // H-04: Browser auth uses Linux.do whitelisted `one_time_password` scope & key-only auth injects headers
     // -------------------------------------------------------------------------
     @Test
     fun h04_userApiKeyOnlyAuthIsAuthorizedAndInjectsHeadersEvenOverWebViewExecutor() = runTest {
         val (authUrl, _) = UserApiKeyAuthManager.generateAuthorizationUrl()
-        assertTrue(authUrl.contains("scopes=read,write,one_time_password"))
+        assertTrue(
+            authUrl.contains("scopes=one_time_password") && !authUrl.contains("read,write"),
+            "linux.do disables read/write User-Api-Key issuance; browser auth must strictly request scopes=one_time_password"
+        )
+        assertTrue(authUrl.contains("otp=true"))
 
         UserApiKeyAuthManager.setApiKey("live_user_api_key_xyz")
         assertNull(UserApiKeyAuthManager.currentUser)
@@ -1005,5 +1036,92 @@ class Round3BugFixesRegressionTest {
         assertTrue(abs(semiRed.green - 0f) < 0.01f)
         assertTrue(abs(semiRed.blue - 0f) < 0.01f)
         assertTrue(abs(semiRed.alpha - (0x80 / 255f)) < 0.01f, "CSS #RRGGBBAA must place trailing AA into alpha channel")
+    }
+
+    // -------------------------------------------------------------------------
+    // Round 4 Real-Device Defect Fixes: CF false-positive guard, WebView read retry, ScreenTrack 403 recovery
+    // -------------------------------------------------------------------------
+    @Test
+    fun r4_cloudflareChallengeDetectorAvoidsFalsePositivesOnDiscourseRateLimitHtml() = runTest {
+        val discourse429Html = """
+            <!DOCTYPE html>
+            <html><head><title>Too Many Requests - LINUX DO</title>
+            <meta name="discourse-theme" content="verify-turnstile-plugin">
+            </head><body><h1>您执行此操作的次数过多，请稍后再试。</h1></body></html>
+        """.trimIndent()
+        assertFalse(
+            looksLikeCloudflareChallenge(discourse429Html),
+            "Ordinary Discourse HTML 429 mentioning verify/turnstile must NOT be misclassified as Cloudflare site verification"
+        )
+        val err = assertFailsWith<ApiReadException> {
+            readApiObject(429 to discourse429Html)
+        }
+        assertEquals(ApiFailureKind.RateLimited, err.kind)
+
+        assertTrue(looksLikeCloudflareChallenge("${CF_MITIGATED_CHALLENGE_PREFIX}<html></html>"))
+        assertTrue(looksLikeCloudflareChallenge("<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><script>window._cf_chl_opt={};</script></body></html>"))
+    }
+
+    @Test
+    fun r4_foregroundWebViewReadsAutoRetryTransient429AndNetworkGlitches() = runTest {
+        var feedAttempts = 0
+        var detailAttempts = 0
+        withMockHttp({ url, _, _, _ ->
+            when {
+                url.contains("latest.json") -> {
+                    feedAttempts++
+                    if (feedAttempts == 1) {
+                        429 to "<html><body>Too Many Requests</body></html>"
+                    } else {
+                        200 to """{"users":[{"id":1,"username":"alice","avatar_template":"/a/{size}.png"}],"topic_list":{"topics":[{"id":88,"title":"自动重试恢复成功","category_id":4,"posters":[{"user_id":1}]}]}}"""
+                    }
+                }
+                url.contains("/t/88.json") -> {
+                    detailAttempts++
+                    if (detailAttempts == 1) {
+                        0 to ""
+                    } else {
+                        200 to """{"id":88,"title":"自动重试恢复成功","posts_count":1,"post_stream":{"stream":[1],"posts":[{"id":1,"post_number":1,"username":"alice","cooked":"<p>ok</p>"}]}}"""
+                    }
+                }
+                else -> 200 to "{}"
+            }
+        }) {
+            val topics = LinuxDoRepository.fetchTopics(path = "latest.json", page = 1)
+            assertEquals(2, feedAttempts)
+            assertEquals(1, topics.size)
+            assertEquals(88, topics.single().id)
+
+            val detail = LinuxDoRepository.fetchTopicDetail(88)
+            assertEquals(2, detailAttempts)
+            assertNull(detail.loadError)
+            assertEquals(1, detail.posts.size)
+        }
+    }
+
+    @Test
+    fun r4_screenTrackTickAndEnqueueRetriesTransient403AndConfirmsUnreadFloors() {
+        ScreenTrackEngine.resetForTest()
+        val v0 = ScreenTrackEngine.serverConfirmedReadVersion
+        ScreenTrackEngine.onTopicEntered(topicId = 555, initialVisiblePosts = setOf(1, 2, 3), nowMs = 1_000L)
+        val enqueued = ScreenTrackEngine.tickAndEnqueue(nowMs = 2_200L)
+        assertTrue(enqueued)
+        assertTrue(ScreenTrackEngine.hasPendingWork())
+
+        val firstBatch = ScreenTrackEngine.popNextSendableBatch(nowMs = 2_200L)
+        assertNotNull(firstBatch)
+        assertEquals(setOf(1, 2, 3), firstBatch.timingsMs.keys)
+
+        // Transient 403 (e.g. stale CSRF before refresh) must re-enqueue for retry, NOT permanently drop!
+        ScreenTrackEngine.onBatchSendResult(firstBatch, statusCode = 403, nowMs = 2_300L)
+        assertTrue(ScreenTrackEngine.hasPendingWork(), "403 on timings must retry after backoff rather than permanently dropping unread floors")
+        assertFalse(ScreenTrackEngine.isPostConfirmedReadByServer(555, 2))
+
+        val retryBatch = ScreenTrackEngine.popNextSendableBatch(nowMs = 8_000L)
+        assertNotNull(retryBatch)
+        ScreenTrackEngine.onBatchSendResult(retryBatch, statusCode = 200, nowMs = 8_100L)
+        assertTrue(ScreenTrackEngine.isPostConfirmedReadByServer(555, 2))
+        assertTrue(ScreenTrackEngine.isPostConfirmedReadByServer(555, 3))
+        assertTrue(ScreenTrackEngine.serverConfirmedReadVersion > v0)
     }
 }

@@ -14,7 +14,7 @@ internal class PostSubmissionUnconfirmed : IOException("发布结果暂未确认
 
 internal var onAuthenticationInvalidated: (() -> Unit)? = {
     if (UserApiKeyAuthManager.isAuthorized()) {
-        UserApiKeyAuthManager.handleServerAuthInvalidated()
+        LinuxDoRepository.scheduleAuthVerificationIfNeeded()
     }
 }
 
@@ -52,12 +52,13 @@ internal fun looksLikeCloudflareChallenge(rawBody: String?): Boolean {
     val trimmed = rawBody.trimStart()
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) return false
     val lower = trimmed.take(4096).lowercase()
-    return lower.contains("cf-mitigated") ||
-        lower.contains("_cf_chl_opt") ||
-        lower.contains("challenges.cloudflare.com") ||
+    return lower.contains("_cf_chl_opt") ||
         lower.contains("cdn-cgi/challenge-platform") ||
-        lower.contains("just a moment...") ||
-        (trimmed.startsWith("<") && (lower.contains("verify") || lower.contains("turnstile"))) ||
+        lower.contains("challenges.cloudflare.com") ||
+        lower.contains("id=\"challenge-running\"") ||
+        lower.contains("id=\"challenge-stage\"") ||
+        lower.contains("class=\"cf-turnstile\"") ||
+        lower.contains("<title>just a moment") ||
         (lower.contains("请稍候") && lower.contains("cloudflare"))
 }
 

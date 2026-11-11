@@ -69,7 +69,9 @@ class RichContentAndLoadingTest {
     }
     @Test fun invalidResponsesNeverBecomeSuccessfulEmptyResults() {
         val cases = listOf(null to ApiFailureKind.Connection, (0 to "") to ApiFailureKind.Connection,
-            (401 to "{}") to ApiFailureKind.Authentication, (403 to "<html>verify</html>") to ApiFailureKind.Verification,
+            (401 to "{}") to ApiFailureKind.Authentication,
+            (403 to "<html><title>Just a moment...</title></html>") to ApiFailureKind.Verification,
+            (403 to "<html>forbidden</html>") to ApiFailureKind.PermissionDenied,
             (429 to "{}") to ApiFailureKind.RateLimited, (503 to "{}") to ApiFailureKind.Server,
             (200 to "<html>challenge</html>") to ApiFailureKind.InvalidPayload,
             (200 to "{\"errors\":[\"failure\"]}") to ApiFailureKind.InvalidPayload)

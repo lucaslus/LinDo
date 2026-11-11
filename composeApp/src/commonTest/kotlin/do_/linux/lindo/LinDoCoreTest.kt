@@ -409,8 +409,13 @@ class LinDoCoreTest {
         assertTrue(strippedHeader.contains("_t=live_token"))
         kotlin.test.assertFalse(strippedHeader.contains("cf_clearance"))
 
-        // Authoritative browser cookie snapshot without _t must drop stale _t instead of resurrecting it
-        CookieSentinel.syncFromAuthoritativeBrowserCookieString("cf_clearance=cf_ok")
+        // Transient partial CookieManager snapshot (e.g. only cf_clearance during WebKit init) must preserve _t,
+        // while explicit clearAuthCookiesOnly() removes _t and keeps cf_clearance!
+        CookieSentinel.syncFromAuthoritativeBrowserCookieString("cf_clearance=cf_refreshed")
+        assertTrue(CookieSentinel.resolveWinningCookies().containsKey("_t"))
+        assertEquals("cf_refreshed", CookieSentinel.resolveWinningCookies()["cf_clearance"]?.value)
+
+        CookieSentinel.clearAuthCookiesOnly()
         kotlin.test.assertFalse(CookieSentinel.resolveWinningCookies().containsKey("_t"))
         assertTrue(CookieSentinel.resolveWinningCookies().containsKey("cf_clearance"))
         CookieSentinel.clearAll()

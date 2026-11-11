@@ -228,7 +228,7 @@ fun SmartAvatar(
                     )
                 }
 
-                if (hasAnimated) {
+                if (hasAnimated && (staticLoaded || staticUrl.isEmpty())) {
                     AsyncImage(
                         model = animatedUrl,
                         contentDescription = "$username animated avatar",
