@@ -18,6 +18,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -32,7 +34,9 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,10 +46,13 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -98,6 +105,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -125,6 +133,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
@@ -667,6 +678,7 @@ private fun LinearPulseLoadingFooter(
     hasMore: Boolean,
     loadedCount: Int,
     isError: Boolean = false,
+    autoLoadWhenVisible: Boolean = true,
     loadingText: String = "加载中",
     moreText: String = "加载更多",
     errorText: String = "网络异常",
@@ -676,8 +688,9 @@ private fun LinearPulseLoadingFooter(
 ) {
     val palette = LocalPalette.current
     val currentOnLoadMore by androidx.compose.runtime.rememberUpdatedState(onLoadMore)
-    LaunchedEffect(hasMore, isLoadingMore, isError, loadedCount) {
-        if (hasMore && !isLoadingMore && !isError && loadedCount > 0) {
+    LaunchedEffect(autoLoadWhenVisible, hasMore, isLoadingMore, isError, loadedCount) {
+        if (autoLoadWhenVisible && hasMore && !isLoadingMore && !isError && loadedCount > 0) {
+            delay(160L)
             currentOnLoadMore()
         }
     }
@@ -1403,14 +1416,22 @@ internal fun GoogleAccountRingAvatar(
     strokeWidth: Dp = 0.5.dp,
     onClick: (() -> Unit)? = null,
     animatedAvatar: String? = null,
+    primaryGroupName: String? = null,
     flair: FlairInfo? = null
 ) {
     val resolvedUsername = username.trim().ifBlank { letter.trim().ifBlank { "L" } }
     Box(Modifier.size(avatarSize).let {
         if (onClick != null) it.clickable(onClick = onClick) else it
     }, contentAlignment = Alignment.Center) {
-        SmartAvatar(username = resolvedUsername, avatarTemplate = avatarUrl, animatedAvatar = animatedAvatar,
-            size = avatarSize, flair = flair, enableAnimations = LocalLinDoAnimations.current)
+        SmartAvatar(
+            username = resolvedUsername,
+            avatarTemplate = avatarUrl,
+            animatedAvatar = animatedAvatar,
+            primaryGroupName = primaryGroupName,
+            size = avatarSize,
+            flair = flair,
+            enableAnimations = LocalLinDoAnimations.current
+        )
     }
 }
 
@@ -1501,6 +1522,18 @@ internal fun LinDoApp(
         )
     }
 
+    var splitFraction by remember {
+        mutableFloatStateOf(clampSplitPaneFraction(UserApiKeyAuthManager.uiSplitFraction))
+    }
+    fun updateSplitFraction(newFraction: Float, persist: Boolean = true) {
+        val clamped = clampSplitPaneFraction(newFraction)
+        splitFraction = clamped
+        if (persist) {
+            UserApiKeyAuthManager.updateSplitFractionPref(clamped)
+        }
+    }
+    var isWideLayout by remember { mutableStateOf(false) }
+
     var currentTab by remember { mutableStateOf(MainTab.HOME) }
     var selectedCategoryId by remember { mutableStateOf<Int?>(null) }
     var selectedTag by remember { mutableStateOf<String?>(null) }
@@ -1516,6 +1549,7 @@ internal fun LinDoApp(
     var isLoadingTopics by remember { mutableStateOf(true) }
     var isLoadingMoreTopics by remember { mutableStateOf(false) }
     var loadMoreError by remember { mutableStateOf(false) }
+    var loadMoreErrorMessage by remember { mutableStateOf("网络异常") }
     var feedError by remember { mutableStateOf<String?>(null) }
     var refreshUpToDateNotice by remember { mutableStateOf(false) }
     var loadTopicsJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
@@ -1563,6 +1597,7 @@ internal fun LinDoApp(
 
     // 认证状态与真实个人资料状态
     var authVersion by remember { mutableStateOf(0) }
+    var networkRestoreVersion by remember { mutableIntStateOf(0) }
     var wasAuthorized by remember { mutableStateOf(UserApiKeyAuthManager.isAuthorized()) }
     var isGuestMode by remember { mutableStateOf(false) }
     var activeWebLoginUrl by remember { mutableStateOf<String?>(null) }
@@ -1716,13 +1751,13 @@ internal fun LinDoApp(
                 lastProfileSyncedAtMs = System.currentTimeMillis()
                 delay(2400L)
                 if (LinuxDoRepository.getCachedUserBadges(profile.username).isNullOrEmpty()) {
-                    launch { runCatching { LinuxDoRepository.fetchUserBadges(profile.username) } }
+                    launch { runCatching { LinuxDoRepository.fetchUserBadges(profile.username, background = true) } }
                 }
             }
             delay(2800L)
-            launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
+            launch { runCatching { LinuxDoRepository.fetchAllSiteBadges(background = true) } }
             delay(3200L)
-            launch { runCatching { LinuxDoRepository.syncSiteEmojis() } }
+            launch { runCatching { LinuxDoRepository.syncSiteEmojis(background = true) } }
         }
     }
 
@@ -1751,22 +1786,29 @@ internal fun LinDoApp(
         loadMoreJob?.cancel()
         loadTopicsJob?.cancel()
         feedGeneration++
+        val hadPreviousError = feedError != null || loadMoreError
         loadTopicsJob = scope.launch {
             val previousTopId = topics.firstOrNull()?.id
             val previousTopPostsCount = topics.firstOrNull()?.postsCount
             isLoadingTopics = true
             isLoadingMoreTopics = false
             loadMoreError = false
+            loadMoreErrorMessage = "网络异常"
             feedError = null
             if (!isManualRefresh) {
                 refreshUpToDateNotice = false
             }
             pendingNewTopics = emptyList()
             pendingNewCount = 0
-            currentPage = 0
-            hasMoreTopics = true
+            if (topics.isEmpty() || !isManualRefresh) {
+                currentPage = 0
+                hasMoreTopics = true
+            }
             try {
-                val fetched = kotlinx.coroutines.withTimeoutOrNull(24_000L) {
+                if (isManualRefresh || hadPreviousError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
+                val fetched = kotlinx.coroutines.withTimeoutOrNull(34_000L) {
                     LinuxDoRepository.fetchTopics(
                         path = sort.apiPath,
                         categoryId = categoryId,
@@ -1775,6 +1817,7 @@ internal fun LinDoApp(
                         topPeriod = if (sort == FeedSortFilter.TOP) topPeriod.apiPeriod else null
                     )
                 } ?: throw ApiReadException(ApiFailureKind.Connection)
+                currentPage = 0
                 if (fetched.isNotEmpty()) {
                     val isUnchanged = isManualRefresh &&
                         previousTopId != null &&
@@ -1801,9 +1844,11 @@ internal fun LinDoApp(
                 val errMsg = (error as? ApiReadException)?.message ?: "加载失败"
                 if (!isManualRefresh || topics.isEmpty()) {
                     topics = emptyList()
+                    currentPage = 0
                     feedError = errMsg
                     hasMoreTopics = false
                 } else {
+                    // 手动下拉刷新失败时保留已加载列表与真实 currentPage，避免后续下滑分页误拿旧页判空锁死 hasMoreTopics
                     feedError = errMsg
                 }
             } finally {
@@ -1815,10 +1860,18 @@ internal fun LinDoApp(
     fun loadNextPageTopics() {
         if (searchQuery.isNotBlank()) return
         if (isLoadingTopics || isLoadingMoreTopics || !hasMoreTopics) return
+        val retryingAfterError = loadMoreError
+        if (retryingAfterError && loadMoreErrorMessage.contains("站点验证")) {
+            openWebPage("https://linux.do/")
+            return
+        }
         loadMoreJob = scope.launch {
             isLoadingMoreTopics = true
             loadMoreError = false
             try {
+                if (retryingAfterError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val nextPage = currentPage + 1
                 val more = LinuxDoRepository.fetchTopics(
                     path = currentSort.apiPath,
@@ -1843,7 +1896,8 @@ internal fun LinDoApp(
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Throwable) {
+            } catch (err: Throwable) {
+                loadMoreErrorMessage = (err as? ApiReadException)?.message?.takeIf { it.isNotBlank() } ?: "网络异常"
                 loadMoreError = true
             } finally {
                 isLoadingMoreTopics = false
@@ -1879,8 +1933,9 @@ internal fun LinDoApp(
         }
     }
 
-    fun openTopic(topic: TopicSummary, targetPostNumber: Int? = null) {
+    fun openTopic(topic: TopicSummary, targetPostNumber: Int? = null, isManualRetry: Boolean = false) {
         if (topic.id <= 0) return
+        val hadDetailError = activeTopicSummary?.id == topic.id && activeTopicDetail?.loadError != null
         detailLoadJob?.cancel()
         // Dismiss any full-screen overlay sheets so the Topic Reader is never hidden underneath (C5)
         dismissCoveringSheets()
@@ -1892,6 +1947,9 @@ internal fun LinDoApp(
         detailLoadJob = scope.launch {
             isLoadingDetail = true
             try {
+                if (isManualRetry || hadDetailError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val result = LinuxDoRepository.fetchTopicDetail(
                     topicId = topic.id,
                     summaryFallback = topic,
@@ -1927,8 +1985,40 @@ internal fun LinDoApp(
             prevCallback?.invoke()
             authVersion++
         }
+        val prevNetRestore = UserApiKeyAuthManager.onNetworkRestored
+        UserApiKeyAuthManager.onNetworkRestored = {
+            prevNetRestore?.invoke()
+            networkRestoreVersion++
+        }
         onDispose {
             UserApiKeyAuthManager.onAuthStateChanged = prevCallback
+            UserApiKeyAuthManager.onNetworkRestored = prevNetRestore
+        }
+    }
+
+    LaunchedEffect(networkRestoreVersion) {
+        if (networkRestoreVersion == 0) return@LaunchedEffect
+        if (loadMoreError && isTransientRecoverableLoadError(loadMoreErrorMessage)) {
+            loadMoreError = false
+            loadMoreErrorMessage = "网络异常"
+        }
+        if ((isAuthorized || isGuestMode) && !isLoadingTopics && isTransientRecoverableLoadError(feedError)) {
+            if (topics.isEmpty()) {
+                loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+            } else {
+                feedError = null
+                loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+            }
+        }
+        val currentSummary = activeTopicSummary
+        val currentDetailErr = activeTopicDetail?.loadError
+        if ((isAuthorized || isGuestMode) &&
+            currentSummary != null &&
+            !isLoadingDetail &&
+            activeTopicDetail?.posts.isNullOrEmpty() &&
+            isTransientRecoverableLoadError(currentDetailErr)
+        ) {
+            openTopic(currentSummary, activeTargetPostNumber, isManualRetry = true)
         }
     }
 
@@ -2010,15 +2100,21 @@ internal fun LinDoApp(
     fun closeWebPage() {
         val closedUrl = activeWebLoginUrl
         val wasEditingProfile = closedUrl?.endsWith("/preferences/profile") == true
-        val wasSiteHomeCheck = closedUrl == "https://linux.do/"
+        val wasSiteHomeCheck = closedUrl != null && (
+            closedUrl == "https://linux.do/" || closedUrl == "https://linux.do"
+        )
         activeWebLoginUrl = null
         if (wasEditingProfile) syncUserProfile()
         if (wasSiteHomeCheck) {
             if (feedError != null || topics.isEmpty()) {
                 loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
             }
+            if (loadMoreError) {
+                loadMoreError = false
+                loadNextPageTopics()
+            }
             if (activeTopicDetail?.loadError != null && activeTopicSummary != null) {
-                openTopic(activeTopicSummary!!, activeTargetPostNumber)
+                openTopic(activeTopicSummary!!, activeTargetPostNumber, isManualRetry = true)
             }
         }
     }
@@ -2225,8 +2321,8 @@ internal fun LinDoApp(
     }
 
     // 实时新帖子推送检测（LIST-024：在首页静默检测是否有新发布或新回复的话题，有则在顶部弹出「查看 N 条新帖子动态」提示条）
-    LaunchedEffect(currentTab, mobileShowingDetail, currentSort, selectedCategoryId, selectedTag, currentTopPeriod) {
-        while (currentTab == MainTab.HOME && !mobileShowingDetail) {
+    LaunchedEffect(currentTab, mobileShowingDetail, isWideLayout, currentSort, selectedCategoryId, selectedTag, currentTopPeriod) {
+        while (currentTab == MainTab.HOME && (!mobileShowingDetail || isWideLayout)) {
             delay(45_000L)
             if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) continue
             if (!isLoadingTopics && !isLoadingMoreTopics && topics.isNotEmpty() && searchQuery.isBlank()) {
@@ -2284,7 +2380,7 @@ internal fun LinDoApp(
             showAboutSheet ||
             showConnectSheet ||
             showAuthSheet ||
-            mobileShowingDetail ||
+            (mobileShowingDetail && !isWideLayout) ||
             currentTab != MainTab.HOME
         BackNavigationBridge.canGoBack = canIntercept
         BackNavigationBridge.onBack = {
@@ -2380,7 +2476,7 @@ internal fun LinDoApp(
                     showAuthSheet = false
                     true
                 }
-                mobileShowingDetail -> {
+                mobileShowingDetail && !isWideLayout -> {
                     mobileShowingDetail = false
                     true
                 }
@@ -2436,7 +2532,11 @@ internal fun LinDoApp(
                 color = palette.canvas
             ) {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                    val isDesktop = maxWidth >= 840.dp
+                    val isDesktop = shouldUseWideSplitLayout(maxWidth.value, maxHeight.value)
+                    val isCompactWideRail = maxWidth < 760.dp
+                    SideEffect {
+                        isWideLayout = isDesktop
+                    }
                     LaunchedEffect(isDesktop, isAuthorized, isGuestMode, topics.isNotEmpty()) {
                         if (!isDesktop || (!isAuthorized && !isGuestMode) || activeTopicSummary != null) return@LaunchedEffect
                         val first = topics.firstOrNull { !it.pinned } ?: topics.firstOrNull() ?: return@LaunchedEffect
@@ -2445,9 +2545,9 @@ internal fun LinDoApp(
                             isLoadingDetail = true
                             try {
                                 val loaded = LinuxDoRepository.fetchTopicDetail(first.id, first, trackVisit = false)
-                                if (activeTopicSummary?.id == first.id && !mobileShowingDetail) activeTopicDetail = loaded
+                                if (activeTopicSummary?.id == first.id) activeTopicDetail = loaded
                             } finally {
-                                if (activeTopicSummary?.id == first.id && !mobileShowingDetail) isLoadingDetail = false
+                                if (activeTopicSummary?.id == first.id) isLoadingDetail = false
                             }
                         }
                     }
@@ -2484,107 +2584,181 @@ internal fun LinDoApp(
                                 currentTab = currentTab,
                                 isDarkTheme = isDarkTheme,
                                 unreadCount = fullUserProfile?.unreadNotifications ?: 0,
+                                compactWidth = isCompactWideRail,
                                 onSelectTab = { currentTab = it },
+                                onPublishClick = {
+                                    if (isAuthorized) {
+                                        pendingNewTopicDraft = null
+                                        showCreateTopicSheet = true
+                                    } else {
+                                        openWebPage("https://linux.do/login")
+                                    }
+                                },
                                 onToggleTheme = { updateThemePref(!isDarkTheme) }
                             )
 
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                                    .windowInsetsPadding(
+                                        WindowInsets.systemBars
+                                            .union(WindowInsets.displayCutout)
+                                            .only(WindowInsetsSides.End)
+                                    )
+                            ) {
                             when (currentTab) {
                                 MainTab.HOME -> {
-                                    Box(
-                                        modifier = Modifier
-                                            .width(420.dp)
-                                            .fillMaxHeight()
-                                    ) {
-                                        CommunityHomeFeedPane(
-                                            topics = displayedTopics,
-                                            listState = feedListState,
-                                            selectedTopicId = activeTopicSummary?.id,
-                                            selectedCategoryId = selectedCategoryId,
-                                            selectedTag = selectedTag,
-                                            currentSort = currentSort,
-                                            currentTopPeriod = currentTopPeriod,
-                                            searchQuery = searchQuery,
-                                            isLoading = isLoadingTopics,
-                                            isLoadingMore = isLoadingMoreTopics,
-                                            hasMoreTopics = hasMoreTopics,
-                                            loadMoreError = loadMoreError,
-                                            errorMessage = feedError,
-                                            refreshUpToDateNotice = refreshUpToDateNotice,
-                                            pendingNewCount = pendingNewCount,
-                                            enableAnimations = enableAnimations,
-                                            fontScale = fontScale,
-                                            isCompactFeed = isCompactFeed,
-                                            isAuthorized = isAuthorized,
-                                            currentUser = currentUser,
-                                            unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
-                                            onRequestLogin = {
-                                                openWebPage("https://linux.do/login")
-                                            },
-                                            onSearchChange = { searchQuery = it },
-                                            onOpenGlobalSearch = { showGlobalSearchSheet = true },
-                                            onOpenCreateTopic = {
-                                                if (isAuthorized) {
-                                                    pendingNewTopicDraft = null
-                                                    showCreateTopicSheet = true
-                                                } else openWebPage("https://linux.do/login")
-                                            },
-                                            onOpenNotifications = {
-                                                currentTab = MainTab.MESSAGES
-                                            },
-                                            onToggleCompactMode = {
-                                                updateCompactFeedMode(!isCompactFeed)
-                                            },
-                                            onSelectCategory = { catId ->
-                                                selectedCategoryId = catId
-                                                loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
-                                            },
-                                            onSelectTag = { tag ->
-                                                selectedTag = tag
-                                                loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
-                                            },
-                                            onSelectSort = { sort ->
-                                                currentSort = sort
-                                                loadTopics(sort, selectedCategoryId, selectedTag, currentTopPeriod)
-                                            },
-                                            onSelectTopPeriod = { period ->
-                                                currentTopPeriod = period
-                                                loadTopics(FeedSortFilter.TOP, selectedCategoryId, selectedTag, period)
-                                            },
-                                            onApplyPendingNewTopics = { applyPendingNewTopics() },
-                                            onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true) },
-                                            onLoadMore = { loadNextPageTopics() },
-                                            onClearLoadMoreError = { loadMoreError = false },
-                                            onOpenWebUrl = { openWebPage(it) },
-                                            onSelectTopic = { openTopic(it) },
-                                            onAvatarClick = { currentTab = MainTab.PROFILE }
-                                        )
-                                    }
+                                    var isDraggingSplitter by remember { mutableStateOf(false) }
+                                    val splitDensity = LocalDensity.current
 
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .fillMaxHeight()
+                                    BoxWithConstraints(
+                                        modifier = Modifier.fillMaxSize()
                                     ) {
-                                        CommunityTopicReaderPane(
-                                            summary = activeTopicSummary,
-                                            detail = activeTopicDetail,
-                                            targetPostNumber = activeTargetPostNumber,
-                                            targetFloorJumpNonce = targetFloorJumpNonce,
-                                            isAuthorized = isAuthorized,
-                                            initialReplyDraft = pendingReplyDraft,
-                                            onConsumeReplyDraft = { pendingReplyDraft = null },
-                                            isLoading = isLoadingDetail,
-                                            enableAnimations = enableAnimations,
-                                            showBackButton = false,
-                                            onBack = {},
-                                            onRefresh = { activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) } },
-                                            onUnavailable = ::returnFromUnavailableTopic,
-                                            onDetailUpdated = ::syncUpdatedTopicDetail,
-                                            onInspectBadge = { inspectedBadge = it },
-                                            onInspectUser = { inspectedUsername = it },
-                                            onSelectTag = { tag -> selectTagExternally(tag) },
-                                            onOpenWebUrl = { openSmartUrl(it) },
-                                            onRequestLogin = { openWebPage("https://linux.do/login") }
+                                        val paneContainerWidthDp = maxWidth.value
+                                        val leftPaneWidthDp = computeSplitPaneLeftWidthDp(
+                                            availableContentWidthDp = paneContainerWidthDp,
+                                            fraction = splitFraction
+                                        )
+                                        val leftPaneWidth = leftPaneWidthDp.dp
+
+                                        Row(modifier = Modifier.fillMaxSize()) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(leftPaneWidth)
+                                                    .fillMaxHeight()
+                                            ) {
+                                                CommunityHomeFeedPane(
+                                                    topics = displayedTopics,
+                                                    listState = feedListState,
+                                                    selectedTopicId = activeTopicSummary?.id,
+                                                    selectedCategoryId = selectedCategoryId,
+                                                    selectedTag = selectedTag,
+                                                    currentSort = currentSort,
+                                                    currentTopPeriod = currentTopPeriod,
+                                                    searchQuery = searchQuery,
+                                                    isLoading = isLoadingTopics,
+                                                    isLoadingMore = isLoadingMoreTopics,
+                                                    hasMoreTopics = hasMoreTopics,
+                                                    loadMoreError = loadMoreError,
+                                                    loadMoreErrorMessage = loadMoreErrorMessage,
+                                                    reserveBottomNavSpace = false,
+                                                    errorMessage = feedError,
+                                                    refreshUpToDateNotice = refreshUpToDateNotice,
+                                                    pendingNewCount = pendingNewCount,
+                                                    enableAnimations = enableAnimations,
+                                                    fontScale = fontScale,
+                                                    isCompactFeed = isCompactFeed,
+                                                    isAuthorized = isAuthorized,
+                                                    currentUser = currentUser,
+                                                    unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
+                                                    onRequestLogin = {
+                                                        openWebPage("https://linux.do/login")
+                                                    },
+                                                    onSearchChange = { searchQuery = it },
+                                                    onOpenGlobalSearch = { showGlobalSearchSheet = true },
+                                                    onOpenCreateTopic = {
+                                                        if (isAuthorized) {
+                                                            pendingNewTopicDraft = null
+                                                            showCreateTopicSheet = true
+                                                        } else openWebPage("https://linux.do/login")
+                                                    },
+                                                    onOpenNotifications = {
+                                                        currentTab = MainTab.MESSAGES
+                                                    },
+                                                    onToggleCompactMode = {
+                                                        updateCompactFeedMode(!isCompactFeed)
+                                                    },
+                                                    onSelectCategory = { catId ->
+                                                        selectedCategoryId = catId
+                                                        loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
+                                                    },
+                                                    onSelectTag = { tag ->
+                                                        selectedTag = tag
+                                                        loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
+                                                    },
+                                                    onSelectSort = { sort ->
+                                                        currentSort = sort
+                                                        loadTopics(sort, selectedCategoryId, selectedTag, currentTopPeriod)
+                                                    },
+                                                    onSelectTopPeriod = { period ->
+                                                        currentTopPeriod = period
+                                                        loadTopics(FeedSortFilter.TOP, selectedCategoryId, selectedTag, period)
+                                                    },
+                                                    onApplyPendingNewTopics = { applyPendingNewTopics() },
+                                                    onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true) },
+                                                    onLoadMore = { loadNextPageTopics() },
+                                                    onClearLoadMoreError = { loadMoreError = false },
+                                                    onOpenWebUrl = { openWebPage(it) },
+                                                    onSelectTopic = { openTopic(it) },
+                                                    onAvatarClick = { currentTab = MainTab.PROFILE }
+                                                )
+                                            }
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(if (isDraggingSplitter) 1.5.dp else 1.dp)
+                                                    .fillMaxHeight()
+                                                    .background(
+                                                        if (isDraggingSplitter) palette.tabIndicatorColor.copy(alpha = 0.85f)
+                                                        else palette.hairline
+                                                    )
+                                            )
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .fillMaxHeight()
+                                            ) {
+                                                CommunityTopicReaderPane(
+                                                    summary = activeTopicSummary,
+                                                    detail = activeTopicDetail,
+                                                    targetPostNumber = activeTargetPostNumber,
+                                                    targetFloorJumpNonce = targetFloorJumpNonce,
+                                                    isAuthorized = isAuthorized,
+                                                    initialReplyDraft = pendingReplyDraft,
+                                                    onConsumeReplyDraft = { pendingReplyDraft = null },
+                                                    isLoading = isLoadingDetail,
+                                                    enableAnimations = enableAnimations,
+                                                    showBackButton = false,
+                                                    onBack = {},
+                                                    onRefresh = { activeTopicSummary?.let { openTopic(it, activeTargetPostNumber, isManualRetry = true) } },
+                                                    onUnavailable = ::returnFromUnavailableTopic,
+                                                    onDetailUpdated = ::syncUpdatedTopicDetail,
+                                                    onInspectBadge = { inspectedBadge = it },
+                                                    onInspectUser = { inspectedUsername = it },
+                                                    onSelectTag = { tag -> selectTagExternally(tag) },
+                                                    onOpenWebUrl = { openSmartUrl(it) },
+                                                    onRequestLogin = { openWebPage("https://linux.do/login") }
+                                                )
+                                            }
+                                        }
+
+                                        LinDoResizableSplitHandleOverlay(
+                                            seamOffsetX = leftPaneWidth,
+                                            isActiveDrag = isDraggingSplitter,
+                                            onDragStart = { isDraggingSplitter = true },
+                                            onDragDeltaPx = { deltaPx ->
+                                                val deltaDp = with(splitDensity) { deltaPx.toDp().value }
+                                                val currentActualLeftDp = computeSplitPaneLeftWidthDp(
+                                                    availableContentWidthDp = paneContainerWidthDp,
+                                                    fraction = splitFraction
+                                                )
+                                                val nextFraction = computeUpdatedSplitFractionAfterDrag(
+                                                    availableContentWidthDp = paneContainerWidthDp,
+                                                    currentLeftWidthDp = currentActualLeftDp,
+                                                    dragDeltaDp = deltaDp
+                                                )
+                                                updateSplitFraction(nextFraction, persist = false)
+                                            },
+                                            onDragEnd = {
+                                                isDraggingSplitter = false
+                                                UserApiKeyAuthManager.updateSplitFractionPref(splitFraction)
+                                            },
+                                            onDoubleTapReset = {
+                                                isDraggingSplitter = false
+                                                updateSplitFraction(DEFAULT_SPLIT_PANE_FRACTION, persist = true)
+                                            }
                                         )
                                     }
                                 }
@@ -2689,9 +2863,19 @@ internal fun LinDoApp(
                                     )
                                 }
                             }
+                            }
                         }
                     } else {
-                        // 移动端布局（沉浸式全屏阅读或底部 5-Tab 理想型社区导航栏）
+                        // 移动端布局（直板机竖屏 / 双折叠外屏：沉浸式全屏阅读或底部 5-Tab 理想型社区导航栏，自动避让左右挖孔与手势安全区）
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .windowInsetsPadding(
+                                    WindowInsets.systemBars
+                                        .union(WindowInsets.displayCutout)
+                                        .only(WindowInsetsSides.Horizontal)
+                                )
+                        ) {
                         if (mobileShowingDetail && activeTopicSummary != null) {
                             CommunityTopicReaderPane(
                                 summary = activeTopicSummary,
@@ -2705,7 +2889,7 @@ internal fun LinDoApp(
                                 enableAnimations = enableAnimations,
                                 showBackButton = true,
                                 onBack = { mobileShowingDetail = false },
-                                onRefresh = { activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) } },
+                                onRefresh = { activeTopicSummary?.let { openTopic(it, activeTargetPostNumber, isManualRetry = true) } },
                                 onUnavailable = ::returnFromUnavailableTopic,
                                 onDetailUpdated = ::syncUpdatedTopicDetail,
                                 onInspectBadge = { inspectedBadge = it },
@@ -2734,6 +2918,7 @@ internal fun LinDoApp(
                                                 isLoadingMore = isLoadingMoreTopics,
                                                 hasMoreTopics = hasMoreTopics,
                                                 loadMoreError = loadMoreError,
+                                                loadMoreErrorMessage = loadMoreErrorMessage,
                                                 errorMessage = feedError,
                                                 refreshUpToDateNotice = refreshUpToDateNotice,
                                                 pendingNewCount = pendingNewCount,
@@ -2899,6 +3084,7 @@ internal fun LinDoApp(
                                     modifier = Modifier.align(Alignment.BottomCenter)
                                 )
                             }
+                        }
                         }
                     }
                 }
@@ -3325,139 +3511,357 @@ internal fun LinDoApp(
     }
 }
 
+internal const val DEFAULT_SPLIT_PANE_FRACTION = 0.42f
+internal const val MIN_SPLIT_PANE_FRACTION = 0.28f
+internal const val MAX_SPLIT_PANE_FRACTION = 0.62f
+internal const val MIN_LEFT_PANE_WIDTH_DP = 280f
+internal const val MIN_RIGHT_PANE_WIDTH_DP = 320f
+internal const val FOLDABLE_COMPACT_MIN_LEFT_PANE_WIDTH_DP = 248f
+internal const val FOLDABLE_COMPACT_MIN_RIGHT_PANE_WIDTH_DP = 284f
+internal const val DUAL_FOLD_INNER_MIN_WIDTH_DP = 640f
+internal const val DUAL_FOLD_INNER_MIN_HEIGHT_DP = 480f
+
 /**
- * 桌面端 Google Material 3 Navigation Rail
+ * 安卓直板机 + 安卓双折叠屏自适应布局判定：
+ * 1. 直板机竖屏（~360–440dp）与双折叠闭合外屏（~344–430dp）：单栏沉浸式移动布局；
+ * 2. 双折叠展开内屏（竖屏 ~670–760dp × 765–860dp、横屏 ~765–880dp × 670–760dp）与宽屏横屏（>= 840dp）：主从双栏可调宽布局；
+ * 3. 双折叠分屏多任务半屏（< 640dp）：自动平滑切回单栏移动布局。
+ */
+internal fun shouldUseWideSplitLayout(widthDp: Float, heightDp: Float): Boolean {
+    return widthDp >= 840f || (widthDp >= DUAL_FOLD_INNER_MIN_WIDTH_DP && heightDp >= DUAL_FOLD_INNER_MIN_HEIGHT_DP)
+}
+
+/**
+ * 识别可在网络恢复后自动重刷的瞬态异常文案（排除站点验证、未登录、无权限、404 已删帖等确定性状态）
+ */
+internal fun isTransientRecoverableLoadError(err: String?): Boolean {
+    if (err.isNullOrBlank()) return false
+    if (err.contains("站点验证") ||
+        err.contains("登录") ||
+        err.contains("权限") ||
+        err.contains("等级") ||
+        err.contains("已不可用") ||
+        err.contains("私密")
+    ) {
+        return false
+    }
+    return err.contains("网络") ||
+        err.contains("连接") ||
+        err.contains("频繁") ||
+        err.contains("暂时不可用") ||
+        err.contains("加载失败") ||
+        err.contains("不完整") ||
+        err.contains("超时") ||
+        err.contains("稍后")
+}
+
+internal fun clampSplitPaneFraction(raw: Float): Float {
+    if (raw.isNaN() || raw.isInfinite()) return DEFAULT_SPLIT_PANE_FRACTION
+    return raw.coerceIn(MIN_SPLIT_PANE_FRACTION, MAX_SPLIT_PANE_FRACTION)
+}
+
+internal fun computeSplitPaneBoundsDp(availableContentWidthDp: Float): Pair<Float, Float> {
+    val isCompactFoldableInner = availableContentWidthDp < 700f
+    val baseMinLeft = if (isCompactFoldableInner) FOLDABLE_COMPACT_MIN_LEFT_PANE_WIDTH_DP else MIN_LEFT_PANE_WIDTH_DP
+    val baseMinRight = if (isCompactFoldableInner) FOLDABLE_COMPACT_MIN_RIGHT_PANE_WIDTH_DP else MIN_RIGHT_PANE_WIDTH_DP
+    val usable = (availableContentWidthDp - 1f).coerceAtLeast(baseMinLeft)
+    val minLeft = minOf(baseMinLeft, usable * 0.45f)
+    val maxLeft = (usable - baseMinRight).coerceAtLeast(minLeft)
+    return minLeft to maxLeft
+}
+
+internal fun computeSplitPaneLeftWidthDp(availableContentWidthDp: Float, fraction: Float): Float {
+    val (minLeft, maxLeft) = computeSplitPaneBoundsDp(availableContentWidthDp)
+    val usable = (availableContentWidthDp - 1f).coerceAtLeast(minLeft)
+    val desired = usable * clampSplitPaneFraction(fraction)
+    return desired.coerceIn(minLeft, maxLeft)
+}
+
+internal fun computeUpdatedSplitFractionAfterDrag(
+    availableContentWidthDp: Float,
+    currentLeftWidthDp: Float,
+    dragDeltaDp: Float
+): Float {
+    val (minLeft, maxLeft) = computeSplitPaneBoundsDp(availableContentWidthDp)
+    val usable = (availableContentWidthDp - 1f).coerceAtLeast(minLeft)
+    if (usable <= 0f) return DEFAULT_SPLIT_PANE_FRACTION
+    val nextLeft = (currentLeftWidthDp + dragDeltaDp).coerceIn(minLeft, maxLeft)
+    return clampSplitPaneFraction(nextLeft / usable)
+}
+
+/**
+ * 宽屏主从双栏居中跨缝调宽手柄：
+ * - 零布局缝隙（左右面板与 1.dp 细分割线严丝合缝贴合，不破坏顶栏与分割线连续感）；
+ * - 提供 24.dp 宽的跨缝触控拖拽热区（手机横屏手指极易按住拖动，支持双击秒回默认黄金比例）；
+ * - 中央仅保留一枚 4.dp × 34.dp 的克制胶囊手柄，拖拽时高亮为主题指示色。
+ */
+@Composable
+private fun LinDoResizableSplitHandleOverlay(
+    seamOffsetX: Dp,
+    isActiveDrag: Boolean,
+    onDragStart: () -> Unit,
+    onDragDeltaPx: (Float) -> Unit,
+    onDragEnd: () -> Unit,
+    onDoubleTapReset: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalPalette.current
+    val hitWidth = 24.dp
+    val currentOnDragStart by rememberUpdatedState(onDragStart)
+    val currentOnDragDeltaPx by rememberUpdatedState(onDragDeltaPx)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
+    val currentOnDoubleTapReset by rememberUpdatedState(onDoubleTapReset)
+
+    val pillFill = if (isActiveDrag) {
+        palette.tabIndicatorColor
+    } else {
+        palette.inkTertiary.copy(alpha = if (palette.isDark) 0.56f else 0.40f)
+    }
+
+    Box(
+        modifier = modifier
+            .offset(x = seamOffsetX - (hitWidth / 2) + 0.5.dp)
+            .width(hitWidth)
+            .fillMaxHeight()
+            .pointerHoverIcon(PointerIcon.Hand)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = { currentOnDoubleTapReset() }
+                )
+            }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragStart = { currentOnDragStart() },
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        currentOnDragDeltaPx(dragAmount)
+                    },
+                    onDragEnd = { currentOnDragEnd() },
+                    onDragCancel = { currentOnDragEnd() }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .width(if (isActiveDrag) 5.dp else 4.dp)
+                .height(if (isActiveDrag) 44.dp else 34.dp)
+                .clip(RoundedCornerShape(99.dp))
+                .background(palette.cardSurface.copy(alpha = 0.92f))
+                .border(
+                    width = 0.5.dp,
+                    color = if (isActiveDrag) palette.tabIndicatorColor else palette.hairline,
+                    shape = RoundedCornerShape(99.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(if (isActiveDrag) 3.dp else 2.dp)
+                    .height(if (isActiveDrag) 28.dp else 20.dp)
+                    .clip(RoundedCornerShape(99.dp))
+                    .background(pillFill)
+            )
+        }
+    }
+}
+
+/**
+ * 宽屏 / 横屏自适应侧边导航栏（兼容平板桌面高屏与手机横屏紧凑高度，自动避让状态栏与挖孔区域）
  */
 @Composable
 private fun DesktopSideRail(
     currentTab: MainTab,
     isDarkTheme: Boolean,
     unreadCount: Int = 0,
+    compactWidth: Boolean = false,
     onSelectTab: (MainTab) -> Unit,
+    onPublishClick: () -> Unit = {},
     onToggleTheme: () -> Unit
 ) {
     val palette = LocalPalette.current
+    val leftTabs = listOf(MainTab.HOME, MainTab.DISCOVER)
+    val rightTabs = listOf(MainTab.MESSAGES, MainTab.PROFILE)
 
-    Column(
+    Row(
         modifier = Modifier
-            .width(76.dp)
             .fillMaxHeight()
             .background(palette.navBarSurface)
-            .padding(vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .windowInsetsPadding(
+                WindowInsets.systemBars
+                    .union(WindowInsets.displayCutout)
+                    .only(WindowInsetsSides.Vertical + WindowInsetsSides.Start)
+            )
     ) {
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(palette.cardSurface),
-            contentAlignment = Alignment.Center
+                .width(if (compactWidth) 64.dp else 72.dp)
+                .fillMaxHeight()
         ) {
-            GeminiSparkleIcon(size = 20.dp)
-        }
+            val isCompactHeight = maxHeight < 500.dp
+            val itemVerticalPad = if (isCompactHeight) 5.dp else 9.dp
 
-        Spacer(modifier = Modifier.height(28.dp))
-
-        MainTab.entries.forEach { tab ->
-            val selected = currentTab == tab
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { onSelectTab(tab) }
-                    .padding(vertical = 10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Box(
+            @Composable
+            fun RailTabItem(tab: MainTab) {
+                val selected = currentTab == tab
+                Column(
                     modifier = Modifier
-                        .width(56.dp)
-                        .height(32.dp)
+                        .fillMaxWidth()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { onSelectTab(tab) }
+                        .padding(vertical = itemVerticalPad),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Box(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(if (selected) palette.activeChipBg else Color.Transparent),
-                        contentAlignment = Alignment.Center
+                            .width(52.dp)
+                            .height(30.dp)
                     ) {
-                        if (tab == MainTab.HOME) {
-                            Image(
-                                painter = painterResource(Res.drawable.lindo_brand_mark),
-                                contentDescription = tab.title,
-                                modifier = Modifier.size(23.dp),
-                                alpha = if (selected) 1f else 0.75f,
-                                contentScale = ContentScale.Fit
-                            )
-                        } else {
-                            Icon(
-                                imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                contentDescription = tab.title,
-                                modifier = Modifier.size(21.dp),
-                                tint = if (selected) palette.activeChipText else palette.inkSecondary
-                            )
-                        }
-                    }
-                    if (tab == MainTab.MESSAGES && unreadCount > 0) {
-                        val badgeText = if (unreadCount > 99) "99+" else unreadCount.toString()
-                        val isSingleDigit = badgeText.length == 1
                         Box(
                             modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .offset(x = if (isSingleDigit) (-4).dp else 0.dp, y = (-3).dp)
-                                .then(
-                                    if (isSingleDigit) {
-                                        Modifier.size(15.dp)
-                                    } else {
-                                        Modifier
-                                            .height(15.dp)
-                                            .widthIn(min = 19.dp)
-                                    }
-                                )
-                                .clip(CircleShape)
-                                .background(palette.logoDoColor)
-                                .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(15.dp))
+                                .background(if (selected) palette.activeChipBg else Color.Transparent),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = badgeText,
-                                fontSize = 9.sp,
-                                lineHeight = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (palette.themeOption == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                            if (tab == MainTab.HOME) {
+                                Image(
+                                    painter = painterResource(Res.drawable.lindo_brand_mark),
+                                    contentDescription = tab.title,
+                                    modifier = Modifier.size(22.dp),
+                                    alpha = if (selected) 1f else 0.75f,
+                                    contentScale = ContentScale.Fit
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                    contentDescription = tab.title,
+                                    modifier = Modifier.size(20.dp),
+                                    tint = if (selected) palette.activeChipText else palette.inkSecondary
+                                )
+                            }
+                        }
+                        if (tab == MainTab.MESSAGES && unreadCount > 0) {
+                            val badgeText = if (unreadCount > 99) "99+" else unreadCount.toString()
+                            val isSingleDigit = badgeText.length == 1
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .offset(x = if (isSingleDigit) (-3).dp else 0.dp, y = (-3).dp)
+                                    .then(
+                                        if (isSingleDigit) {
+                                            Modifier.size(15.dp)
+                                        } else {
+                                            Modifier
+                                                .height(15.dp)
+                                                .widthIn(min = 19.dp)
+                                        }
+                                    )
+                                    .clip(CircleShape)
+                                    .background(palette.logoDoColor)
+                                    .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = badgeText,
+                                    fontSize = 9.sp,
+                                    lineHeight = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (palette.themeOption == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = tab.title,
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        color = if (selected) palette.inkPrimary else palette.inkSecondary,
+                        maxLines = 1
+                    )
                 }
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = tab.title,
-                    fontSize = 11.5.sp,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                    color = if (selected) palette.inkPrimary else palette.inkSecondary
-                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = if (isCompactHeight) 8.dp else 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = if (isCompactHeight) Arrangement.SpaceBetween else Arrangement.Top
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    leftTabs.forEach { tab -> RailTabItem(tab) }
+
+                    // 中间「+ 发布」入口（对齐竖屏底栏的无底块极简主题色加号）
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { onPublishClick() }
+                            .padding(vertical = itemVerticalPad),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(52.dp)
+                                .height(30.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = LinDoIcons.Plus,
+                                contentDescription = "发布新话题",
+                                modifier = Modifier.size(21.dp),
+                                tint = palette.logoDoColor
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = "发布",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.logoDoColor,
+                            maxLines = 1
+                        )
+                    }
+
+                    rightTabs.forEach { tab -> RailTabItem(tab) }
+                }
+
+                if (!isCompactHeight) {
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .clickable { onToggleTheme() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isDarkTheme) LinDoIcons.Sun else LinDoIcons.Moon,
+                        contentDescription = "深色模式",
+                        modifier = Modifier.size(18.5.dp),
+                        tint = palette.inkSecondary
+                    )
+                }
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f))
-
         Box(
             modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .clickable { onToggleTheme() },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = if (isDarkTheme) LinDoIcons.Sun else LinDoIcons.Moon,
-                contentDescription = "深色模式",
-                modifier = Modifier.size(19.dp),
-                tint = palette.inkSecondary
-            )
-        }
+                .width(0.5.dp)
+                .fillMaxHeight()
+                .background(palette.hairline)
+        )
     }
 }
 
@@ -3785,6 +4189,8 @@ internal fun CommunityHomeFeedPane(
     isLoadingMore: Boolean = false,
     hasMoreTopics: Boolean = true,
     loadMoreError: Boolean = false,
+    loadMoreErrorMessage: String = "网络异常",
+    reserveBottomNavSpace: Boolean = true,
     errorMessage: String?,
     refreshUpToDateNotice: Boolean = false,
     pendingNewCount: Int = 0,
@@ -3860,12 +4266,15 @@ internal fun CommunityHomeFeedPane(
                 available: Offset,
                 source: NestedScrollSource
             ): Offset {
+                val atTop = topics.isEmpty() || (
+                    listState.firstVisibleItemIndex == 0 &&
+                        listState.firstVisibleItemScrollOffset == 0
+                )
                 if (source == NestedScrollSource.UserInput &&
                     available.y > 0f &&
                     consumed.y == 0f &&
                     !isLoading &&
-                    listState.firstVisibleItemIndex == 0 &&
-                    listState.firstVisibleItemScrollOffset == 0
+                    atTop
                 ) {
                     pullDownPx = (pullDownPx + available.y * 0.45f).coerceAtMost(maxPullPx)
                     return Offset(0f, available.y)
@@ -4534,7 +4943,13 @@ internal fun CommunityHomeFeedPane(
                 if (isLoading && topics.isEmpty()) {
                     LinearShimmerTopicSkeletonList(useIconArtwork = true)
                 } else if (topics.isEmpty() && !isLoading) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    // 空态与异常态容器同样挂载 verticalScroll，确保全屏「网络异常」时手指下拉刷新 100% 灵敏可用
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState()),
+                        contentAlignment = Alignment.Center
+                    ) {
                         if (errorMessage != null) {
                             val needsSiteVerify = errorMessage.contains("站点验证")
                             val needsLogin = !needsSiteVerify && !isAuthorized && (
@@ -4573,18 +4988,22 @@ internal fun CommunityHomeFeedPane(
                             .background(feedContainerBg),
                         contentPadding = PaddingValues(
                             top = 2.dp,
-                            bottom = 128.dp
+                            bottom = if (reserveBottomNavSpace) 128.dp else 32.dp
                         )
                     ) {
                         if (errorMessage != null && !isLoading) {
                             item(key = "feed_inline_error_banner", contentType = "error_banner") {
+                                val inlineSiteVerify = errorMessage.contains("站点验证")
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .background(palette.cardSurface)
                                         .padding(horizontal = 16.dp, vertical = 8.dp)
                                 ) {
-                                    LinDoLoadFailure(errorMessage, onRetry = onRefresh)
+                                    LinDoLoadFailure(
+                                        message = errorMessage,
+                                        onRetry = if (inlineSiteVerify) ({ onOpenWebUrl("https://linux.do/") }) else onRefresh
+                                    )
                                 }
                                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                             }
@@ -4706,6 +5125,8 @@ internal fun CommunityHomeFeedPane(
                                     hasMore = hasMoreTopics && searchQuery.isBlank(),
                                     loadedCount = regularTopics.size,
                                     isError = loadMoreError,
+                                    autoLoadWhenVisible = false,
+                                    errorText = loadMoreErrorMessage,
                                     useIconArtwork = true,
                                     onLoadMore = onLoadMore
                                 )
@@ -5832,10 +6253,14 @@ internal fun CommunityTopicReaderPane(
         val currentDetail = detail ?: return
         val candidateIds = if (earlier) previousPostIds else afterTailPostIds
         if (changingReaderFilter || isLoadingMorePosts || isLoadingGapPosts || candidateIds.isEmpty()) return
+        val retryingAfterFloorError = loadMorePostsError
         scope.launch {
             isLoadingMorePosts = true
             loadMorePostsError = false
             try {
+                if (retryingAfterFloorError) {
+                    LinuxDoRepository.prepareForManualRecovery()
+                }
                 val batchIds = if (earlier) candidateIds.takeLast(batchSize) else candidateIds.take(batchSize)
                 val knownAuthorBadges = currentDetail.posts.associate { it.userId to it.authorBadges }
                 val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds, knownAuthorBadges)
@@ -6622,6 +7047,7 @@ internal fun CommunityTopicReaderPane(
                         hasMore = afterTailPostIds.isNotEmpty(),
                         loadedCount = posts.size,
                         isError = loadMorePostsError,
+                        autoLoadWhenVisible = false,
                         loadingText = "正在同步后续楼层 (${posts.size}/$totalFloorCount)",
                         moreText = "加载后续楼层",
                         errorText = "楼层加载失败",
@@ -9669,6 +10095,7 @@ internal fun CommunityProfileScreen(
                                 username = displayUsername.ifBlank { displayName.ifBlank { "L" } },
                                 avatarUrl = avatarUrl,
                                 animatedAvatar = fullProfile?.animatedAvatar ?: currentUser?.animatedAvatar,
+                                primaryGroupName = fullProfile?.primaryGroupName,
                                 flair = fullProfile?.flair,
                                 avatarSize = 52.dp,
                                 onClick = onOpenEditProfile
@@ -14644,6 +15071,7 @@ private fun PublicUserCardSheet(
                         username = username,
                         avatarUrl = p?.avatarTemplate,
                         animatedAvatar = p?.animatedAvatar,
+                        primaryGroupName = p?.primaryGroupName,
                         flair = p?.flair,
                         avatarSize = 58.dp,
                         strokeWidth = 2.2.dp
@@ -15337,6 +15765,7 @@ private fun EditProfileModalSheet(
                         username = username.ifBlank { displayName.ifBlank { "L" } },
                         avatarUrl = fullProfile?.avatarTemplate,
                         animatedAvatar = fullProfile?.animatedAvatar,
+                        primaryGroupName = fullProfile?.primaryGroupName,
                         flair = fullProfile?.flair,
                         avatarSize = 56.dp,
                         strokeWidth = 2.dp

@@ -36,13 +36,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.LinearGradientShader
 import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.ShaderBrush
@@ -91,14 +94,18 @@ fun SmartAvatar(
     enableAnimations: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    // 统一缩略图尺寸档位（常规 <=52dp 统一使用 120px，大尺寸个人主页使用 240px），
-    // 确保首页、帖子正文、被回复条、楼中楼、小火箭与通知中心 100% 共享同一 URL 与内存/磁盘缓存！
-    val thumbnailSize = if (size <= 52.dp) 120 else 240
+    // 统一收敛至 Discourse 官方预生成尺寸档位（常规 <=60dp 统一使用 144px，超大图使用 288px），
+    // 确保首页、帖子正文、个人主页、用户名片、小火箭与通知中心 100% 共享同一 CDN URL 与内存/磁盘缓存，零 302 重定向！
+    val thumbnailSize = if (size <= 60.dp) 144 else 288
     val motionEnabled = enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused
 
+    var cachedVisual by remember(username) {
+        mutableStateOf(LinuxDoRepository.getCachedUserVisualMeta(username))
+    }
     var effectiveTemplate by remember(username, avatarTemplate) {
         mutableStateOf(
             avatarTemplate?.takeIf { it.isNotBlank() }
+                ?: cachedVisual?.avatarTemplate?.takeIf { it.isNotBlank() }
                 ?: LinuxDoRepository.getCachedUserAvatar(username).orEmpty()
         )
     }
@@ -107,30 +114,48 @@ fun SmartAvatar(
             val clean = username.trim().removePrefix("@")
             if (clean.isNotEmpty() && clean != "L" && !clean.startsWith("user_")) {
                 val resolved = LinuxDoRepository.resolveUserAvatarTemplate(clean)
+                cachedVisual = LinuxDoRepository.getCachedUserVisualMeta(clean)
                 if (!resolved.isNullOrBlank()) {
                     effectiveTemplate = resolved
                 }
             }
+        } else if (cachedVisual == null) {
+            cachedVisual = LinuxDoRepository.getCachedUserVisualMeta(username)
         }
     }
+
+    val effectivePrimaryGroup = primaryGroupName?.takeIf { it.isNotBlank() } ?: cachedVisual?.primaryGroupName
+    val effectiveAnimatedRaw = animatedAvatar?.takeIf { it.isNotBlank() } ?: cachedVisual?.animatedAvatar
 
     val staticUrl = remember(effectiveTemplate, thumbnailSize) {
         LinuxDoSiteRules.resolveStaticAvatarUrl(effectiveTemplate, sizePx = thumbnailSize)
     }
-    val animatedUrl = remember(animatedAvatar, motionEnabled) {
-        if (motionEnabled) LinuxDoSiteRules.resolveAnimatedAvatarUrl(animatedAvatar) else null
+    val animatedUrl = remember(effectiveAnimatedRaw, motionEnabled) {
+        if (motionEnabled) LinuxDoSiteRules.resolveAnimatedAvatarUrl(effectiveAnimatedRaw) else null
     }
     val isSquare = remember(username, staticUrl) {
         LinuxDoSiteRules.isSquareAvatar(username, staticUrl)
     }
     val shape: Shape = if (isSquare) RoundedCornerShape(percent = 10) else CircleShape
-    val glowColor = remember(username, primaryGroupName) { LinuxDoSiteRules.matchAvatarGlowColor(username, primaryGroupName) }
-    val glowAlpha = if (glowColor != null && motionEnabled) {
+    val glowColor = remember(username, effectivePrimaryGroup, staticUrl) {
+        LinuxDoSiteRules.matchAvatarGlowColor(username, effectivePrimaryGroup, staticUrl)
+    }
+    val isBlueGlow = glowColor == Color(0xFF00AEFF)
+    // 对齐官方 common_theme_138 `@keyframes pulse`：冰蓝 3s 往返 (单程 1500ms)、鎏金 5s 往返 (单程 2500ms)，列表滚动禁用动效时保留静态光晕
+    val pulseProgress = if (glowColor != null && motionEnabled) {
         val pulse = rememberInfiniteTransition(label = "official_avatar_glow")
-        pulse.animateFloat(0.18f, 0.42f,
-            animationSpec = infiniteRepeatable(tween(if (isSquare) 3000 else 5000), RepeatMode.Reverse),
-            label = "glow_alpha")
-    } else rememberUpdatedState(0.25f)
+        pulse.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = if (isBlueGlow) 1500 else 2500, easing = officialTitleEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "glow_pulse"
+        )
+    } else {
+        rememberUpdatedState(0.72f)
+    }
 
     val hasAnimated = !animatedUrl.isNullOrBlank()
     val palette = LocalPalette.current
@@ -163,20 +188,57 @@ fun SmartAvatar(
             if (staticUrl.isEmpty()) {
                 null
             } else {
+                // 指定 Size.ORIGINAL：1) 无需等待 Compose 布局测量即可在组合阶段立即并发发起请求；
+                // 2) 防止小尺寸组件（如 16.5dp 助力胶囊）把缓存降采样成模糊小图后污染大尺寸头像渲染。
                 ImageRequest.Builder(platformContext)
                     .data(fetchUrl)
+                    .size(coil3.size.Size.ORIGINAL)
                     .memoryCacheKey(staticUrl)
                     .diskCacheKey(staticUrl)
                     .build()
             }
         }
 
+        val glowOpacity = if (glowColor != null) 0.5f + 0.5f * pulseProgress.value else 0f
+        val borderStrokeColor = if (glowColor != null) {
+            glowColor.copy(alpha = (0.58f * glowOpacity).coerceIn(0.25f, 0.72f))
+        } else {
+            palette.hairline
+        }
+        val borderStrokeWidth = if (glowColor != null && size >= 24.dp) 1.dp else 0.5.dp
+
         Box(
             modifier = modifier.size(size).then(
-                if (glowColor == null || !motionEnabled) Modifier else Modifier.drawWithCache {
-                    val radius = this.size.minDimension * 0.8f
-                    val brush = Brush.radialGradient(listOf(glowColor, glowColor.copy(alpha = 0f)), radius = radius)
-                    onDrawBehind { drawCircle(brush, radius = radius, alpha = glowAlpha.value) }
+                if (glowColor == null) {
+                    Modifier
+                } else {
+                    Modifier.drawBehind {
+                        val p = pulseProgress.value
+                        val opacity = 0.5f + 0.5f * p
+                        val scale = 0.95f + 0.05f * p
+                        val minDim = this.size.minDimension
+                        val maxSpread = (minDim * 0.20f).coerceIn(3.dp.toPx(), 8.dp.toPx())
+                        val baseCorner = minDim * 0.10f
+                        for (layer in 5 downTo 1) {
+                            val t = layer / 5f
+                            val spread = maxSpread * t * scale
+                            val alpha = (0.048f + (1f - t) * 0.068f) * opacity
+                            if (isSquare) {
+                                drawRoundRect(
+                                    color = glowColor.copy(alpha = alpha),
+                                    topLeft = Offset(-spread, -spread),
+                                    size = Size(this.size.width + spread * 2f, this.size.height + spread * 2f),
+                                    cornerRadius = CornerRadius(baseCorner + spread, baseCorner + spread)
+                                )
+                            } else {
+                                drawCircle(
+                                    color = glowColor.copy(alpha = alpha),
+                                    radius = minDim * 0.5f + spread,
+                                    center = center
+                                )
+                            }
+                        }
+                    }
                 }
             ),
             contentAlignment = Alignment.Center
@@ -186,8 +248,8 @@ fun SmartAvatar(
                     .fillMaxSize()
                     .clip(shape)
                     .border(
-                        width = 0.5.dp,
-                        color = palette.hairline,
+                        width = borderStrokeWidth,
+                        color = borderStrokeColor,
                         shape = shape
                     ),
                 contentAlignment = Alignment.Center
@@ -206,6 +268,7 @@ fun SmartAvatar(
                         model = requestModel,
                         contentDescription = username,
                         contentScale = ContentScale.Crop,
+                        filterQuality = FilterQuality.Medium,
                         onLoading = {
                             if (!isLoadedAvatarUrl(staticUrl)) {
                                 staticLoaded = false
@@ -233,6 +296,7 @@ fun SmartAvatar(
                         model = animatedUrl,
                         contentDescription = "$username animated avatar",
                         contentScale = ContentScale.Crop,
+                        filterQuality = FilterQuality.Medium,
                         onLoading = { animatedReady = false },
                         onSuccess = { animatedReady = true },
                         onError = { animatedReady = false },
@@ -244,16 +308,19 @@ fun SmartAvatar(
             }
 
             if (flair != null && flair.hasFlair && size >= 28.dp) {
-                val flairBg = remember(flair.bgColorHex) {
-                    LinuxDoSiteRules.parseHexColor(flair.bgColorHex, fallback = Color.Transparent)
+                // 对齐官方 d-avatar-flair.scss 比例（45px 头像配 20px 角标 ≈ 43%），避免过大角标遮挡头像主体
+                val flairSize = when {
+                    size >= 68.dp -> 28.dp
+                    size >= 50.dp -> 21.dp
+                    size >= 38.dp -> 18.dp
+                    else -> 15.dp
                 }
-                val hasFlairBg = flairBg.alpha > 0f
                 FlairBadgeOverlay(
                     flair = flair,
-                    badgeSize = if (size >= 64.dp) 40.dp else if (!hasFlairBg) 20.dp else 24.dp,
+                    badgeSize = flairSize,
                     modifier = Modifier.align(Alignment.BottomEnd).offset(
-                        x = if (size >= 64.dp) 4.dp else if (!hasFlairBg) 6.dp else 8.dp,
-                        y = if (!hasFlairBg) 0.dp else 2.dp
+                        x = if (size >= 50.dp) 3.dp else 4.dp,
+                        y = 2.dp
                     )
                 )
             }
@@ -532,7 +599,7 @@ private fun forgetLoadedAvatarUrl(url: String) {
     }
 }
 
-private val avatarThumbnailSizes = intArrayOf(45, 60, 90, 120, 180, 240)
+private val avatarThumbnailSizes = intArrayOf(24, 48, 96, 144, 288)
 
 private val officialTitleColors = listOf(
     Color.Magenta, Color.Cyan, Color.Yellow, Color.Magenta, Color.Cyan

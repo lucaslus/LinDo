@@ -129,6 +129,8 @@ fun LinDoBrandWordmark(
                     letterSpacing = 0.2.sp,
                     color = brandSecondary(isDark),
                     maxLines = 1,
+                    softWrap = false,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     modifier = Modifier.alignByBaseline()
                 )
             }

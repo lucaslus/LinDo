@@ -245,18 +245,19 @@ class LinDoCoreTest {
     fun binaryImageFetcherUsesWebViewBridgeAndCachesBytes() = runTest {
         val prev = UserApiKeyAuthManager.webViewBinaryFetcher
         var calls = 0
+        val uploadUrl = "https://linux.do/uploads/default/original/3X/9/9/tester_99_2.png"
         try {
             UserApiKeyAuthManager.webViewBinaryFetcher = { url ->
                 calls++
-                assertEquals("https://linux.do/user_avatar/linux.do/tester/120/99_2.png", url)
+                assertEquals(uploadUrl, url)
                 UserApiKeyAuthManager.BinaryHttpPayload(
                     status = 200,
                     contentType = "image/png",
                     bytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)
                 )
             }
-            val resp1 = LinuxDoRepository.imageHttpClient.get("https://linux.do/user_avatar/linux.do/tester/120/99_2.png")
-            val resp2 = LinuxDoRepository.imageHttpClient.get("https://linux.do/user_avatar/linux.do/tester/120/99_2.png?_r=1")
+            val resp1 = LinuxDoRepository.imageHttpClient.get(uploadUrl)
+            val resp2 = LinuxDoRepository.imageHttpClient.get("$uploadUrl?_r=1")
             assertEquals(200, resp1.status.value)
             assertEquals(200, resp2.status.value)
             assertEquals(1, calls)

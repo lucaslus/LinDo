@@ -471,10 +471,14 @@ data class UserNotificationItem(
     val createdAtText: String,
     val topicId: Int = 0,
     val postNumber: Int = 1,
+    val originalPostId: Int = 0,
     val slug: String = "",
     val title: String,
     val actingUsername: String = "",
     val actingAvatarTemplate: String? = null,
+    val actingPrimaryGroupName: String? = null,
+    val actingAnimatedAvatar: String? = null,
+    val actingFlair: FlairInfo = FlairInfo(),
     val excerpt: String = "",
     val count: Int = 0,
     val badgeId: Int = 0,
@@ -531,9 +535,16 @@ data class UserNotificationItem(
             32 -> "在聊天中提及群组"
             33 -> "在聊天中引用了你"
             34 -> "指派了话题给你"
-            36, 800 -> "关注了你"
+            36 -> if (topicId > 0) "发布了关注分类的新帖" else "关注了你"
             37, 801 -> "发布了新话题"
-            38, 802 -> "发表了新回复"
+            38 -> "发表了新回复"
+            43, 803 -> "助力了你的帖子"
+            800 -> "关注了你"
+            802 -> when {
+                count > 1 && actorUsername != null -> "等发表了 $count 条新回复"
+                count > 1 -> "发表了 $count 条新回复"
+                else -> "发表了新回复"
+            }
             else -> if (topicId > 0) "参与了话题互动" else "社区动态"
         }
 

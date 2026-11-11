@@ -329,13 +329,19 @@ object UserApiKeyAuthManager {
     @Volatile
     var uiCompactFeed: Boolean = false
 
+    @Volatile
+    var uiSplitFraction: Float = 0.42f
+
     var onAuthStateChanged: (() -> Unit)? = null
+    var onNetworkRestored: (() -> Unit)? = null
+    var onPrepareManualRecovery: (suspend () -> Unit)? = null
     var openExternalUrlLauncher: ((String) -> Unit)? = null
     var onLogoutPlatformClear: (() -> Unit)? = null
     var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
     var onPersistPendingKey: ((String?, String?) -> Unit)? = null
     var onPersistUiPrefs: ((Float, Boolean, Boolean) -> Unit)? = null
     var onPersistThemeAndDensity: ((String, Boolean) -> Unit)? = null
+    var onPersistSplitFraction: ((Float) -> Unit)? = null
     var onPersistReadTopics: ((String) -> Unit)? = null
     var onSyncCookieToPlatform: ((String) -> Unit)? = null
 
@@ -350,6 +356,17 @@ object UserApiKeyAuthManager {
         uiThemeAccent = themeAccent
         uiCompactFeed = compactFeed
         onPersistThemeAndDensity?.invoke(themeAccent, compactFeed)
+    }
+
+    fun updateSplitFractionPref(fraction: Float) {
+        val safe = if (fraction.isNaN() || fraction.isInfinite()) 0.42f else fraction.coerceIn(0.28f, 0.62f)
+        uiSplitFraction = safe
+        onPersistSplitFraction?.invoke(safe)
+    }
+
+    fun notifyNetworkRestored() {
+        LinuxDoRepository.clearTransientRateLimit()
+        onNetworkRestored?.invoke()
     }
     data class BinaryHttpPayload(
         val status: Int,
@@ -1274,7 +1291,7 @@ object LinuxDoRepository {
 
     private val imageByteCache = object : LinkedHashMap<String, UserApiKeyAuthManager.BinaryHttpPayload>(128, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, UserApiKeyAuthManager.BinaryHttpPayload>?): Boolean {
-            return size > 320
+            return size > 512
         }
     }
     private val inFlightBinaryFetches = java.util.concurrent.ConcurrentHashMap<String, Deferred<UserApiKeyAuthManager.BinaryHttpPayload?>>()
@@ -1313,12 +1330,6 @@ object LinuxDoRepository {
         val deferred = inFlightBinaryFetches.computeIfAbsent(cleanUrl) {
             binaryFetchScope.async {
                 try {
-                    // 当前台 JSON API 正在执行时，图片桥接短暂礼让，确保首页列表与帖子详情优先占用同源连接池
-                    var yields = 0
-                    while (inFlightForegroundApiCount.get() > 0 && yields < 3) {
-                        yields++
-                        kotlinx.coroutines.delay(75L)
-                    }
                     val result = fetcher(cleanUrl)
                     if (result != null && result.status in 200..299 && result.bytes.isNotEmpty()) {
                         putCachedImagePayload(cleanUrl, result)
@@ -1345,17 +1356,16 @@ object LinuxDoRepository {
                 config {
                     dispatcher(
                         okhttp3.Dispatcher().apply {
-                            maxRequests = 32
-                            maxRequestsPerHost = 12
+                            maxRequests = 64
+                            maxRequestsPerHost = 32
                         }
                     )
                     connectTimeout(8, TimeUnit.SECONDS)
                     readTimeout(12, TimeUnit.SECONDS)
                     addInterceptor { chain ->
                         val orig = chain.request()
-                        val host = orig.url.host.lowercase()
                         val rawUrl = orig.url.toString()
-                        val cleanUrl = rawUrl
+                        val strippedUrl = rawUrl
                             .replace(Regex("([?&])_r=\\d+(&?)")) { match ->
                                 val prefix = match.groupValues[1]
                                 val suffix = match.groupValues[2]
@@ -1366,6 +1376,22 @@ object LinuxDoRepository {
                                 }
                             }
                             .trimEnd('?', '&')
+                        // 将遗留落入主站域名的静态头像请求（/user_avatar/linux.do/ 与 /letter_avatar_proxy/）统一分流至官方静态边缘 CDN，
+                        // 既免除 WebView Base64 桥接开销，又避免主站高并发图片请求触发 Cloudflare WAF 速率挑战
+                        val cleanUrl = if (
+                            strippedUrl.startsWith("https://linux.do/user_avatar/linux.do/") ||
+                            strippedUrl.startsWith("http://linux.do/user_avatar/linux.do/") ||
+                            strippedUrl.startsWith("https://linux.do/letter_avatar_proxy/") ||
+                            strippedUrl.startsWith("http://linux.do/letter_avatar_proxy/")
+                        ) {
+                            do_.linux.lindo.core.site.LinuxDoSiteRules.resolveStaticAvatarUrl(strippedUrl, 144)
+                        } else {
+                            strippedUrl
+                        }
+                        val host = runCatching { java.net.URI(cleanUrl).host?.lowercase() }
+                            .getOrNull()
+                            ?.takeIf { it.isNotBlank() }
+                            ?: orig.url.host.lowercase()
 
                         if (host == "linux.do" || host.endsWith(".linux.do")) {
                             getCachedImagePayload(cleanUrl)?.let { cached ->
@@ -1397,30 +1423,21 @@ object LinuxDoRepository {
                                         .body(payload.bytes.toResponseBody(mediaType))
                                         .build()
                                 }
-                                val path = orig.url.encodedPath
-                                val isPublicRedirectableAsset = path.startsWith("/letter_avatar_proxy/") ||
-                                    path.startsWith("/images/emoji/") ||
-                                    path.startsWith("/svg-sprite/")
-                                if (!isPublicRedirectableAsset || (payload != null && payload.status >= 400)) {
-                                    // 严格单栈隔离：已挂载同源 Chromium WebView 的平台严禁针对需鉴权/同源图片回落带 Cookie 的 OkHttp
-                                    val failCode = payload?.status?.takeIf { it >= 400 } ?: 504
-                                    val emptyType = "text/plain".toMediaTypeOrNull()
-                                    return@addInterceptor okhttp3.Response.Builder()
-                                        .request(orig)
-                                        .protocol(okhttp3.Protocol.HTTP_2)
-                                        .code(failCode)
-                                        .message("Image bridge fetch failed")
-                                        .body(ByteArray(0).toResponseBody(emptyType))
-                                        .build()
-                                }
+                                // 100% 单栈指纹隔离：在已挂载 Chromium WebView 的平台上，任何 linux.do 主站及子域请求严禁回落至 Java TLS 指纹的 OkHttp，
+                                // 彻底杜绝「同一出口 IP 同时出现 BoringSSL 与 Java TLS + Chrome UA」触发 Cloudflare 站点验证！
+                                val failCode = payload?.status?.takeIf { it >= 400 } ?: 504
+                                val emptyType = "text/plain".toMediaTypeOrNull()
+                                return@addInterceptor okhttp3.Response.Builder()
+                                    .request(orig)
+                                    .protocol(okhttp3.Protocol.HTTP_2)
+                                    .code(failCode)
+                                    .message("Image bridge fetch failed")
+                                    .body(ByteArray(0).toResponseBody(emptyType))
+                                    .build()
                             }
                         }
 
                         val builder = orig.newBuilder().url(cleanUrl)
-                        if (UserApiKeyAuthManager.webViewBinaryFetcher != null && (host == "linux.do" || host.endsWith(".linux.do"))) {
-                            // 仅针对跨域重定向的纯公共静态资源（如 letter_avatar_proxy）在不携带任何 Cookie 的前提下兜底
-                            builder.removeHeader("Cookie")
-                        }
                         UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
                             builder.header("User-Agent", it)
                         }
@@ -1495,6 +1512,25 @@ object LinuxDoRepository {
 
     internal fun isRateLimitedNow(): Boolean =
         System.currentTimeMillis() < rateLimitedUntilMs.get()
+
+    internal fun clearTransientRateLimit() {
+        rateLimitedUntilMs.set(0L)
+    }
+
+    /**
+     * 用户主动下拉刷新或点击「重试」前的自愈预备：
+     * 1. 立即清零瞬态 429 冷却窗口；
+     * 2. 触发底层传输通道活性自检与坏死连接池重建（如 Android 常驻 WebView 桥接挂起或 VPN 切网后 H2/QUIC 僵尸连接）。
+     */
+    suspend fun prepareForManualRecovery() {
+        clearTransientRateLimit()
+        try {
+            UserApiKeyAuthManager.onPrepareManualRecovery?.invoke()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+        }
+    }
 
     internal fun markForegroundPriority(durationMs: Long = 2_200L) {
         val until = System.currentTimeMillis() + durationMs
@@ -1574,6 +1610,7 @@ object LinuxDoRepository {
                     if (candidate?.first == 429) noteRateLimitHit()
                     if (candidate != null && isSuccessfulApiResponse(candidate.first, candidate.second)) {
                         if (isForegroundRequest) {
+                            rateLimitedUntilMs.set(0L)
                             UserPresenceService.recordSuccessfulForegroundRequest()
                         }
                         return@withContext candidate
@@ -1586,7 +1623,15 @@ object LinuxDoRepository {
                             !looksLikeCloudflareChallenge(candidate.second)
                     )
                     if (!retryable || attempt >= maxReadAttempts - 1) break
-                    val backoffMs = if (candidate?.first == 429) 1_100L else 420L
+                    if (candidate == null) {
+                        try {
+                            UserApiKeyAuthManager.onPrepareManualRecovery?.invoke()
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    val backoffMs = if (candidate?.first == 429) 1_200L else 320L
                     kotlinx.coroutines.delay(backoffMs)
                 }
                 return@withContext if (preserveFailure) firstBrowserResult else null
@@ -1649,7 +1694,10 @@ object LinuxDoRepository {
                         lastResponse = status to text
                     }
                     if (isSuccessfulApiResponse(status, text)) {
-                        if (isForegroundRequest) UserPresenceService.recordSuccessfulForegroundRequest()
+                        if (isForegroundRequest) {
+                            rateLimitedUntilMs.set(0L)
+                            UserPresenceService.recordSuccessfulForegroundRequest()
+                        }
                         return@withContext status to text
                     }
                     if (status in listOf(404, 410) || (status == 403 && !isHtmlChallenge403)) {
@@ -1826,8 +1874,16 @@ object LinuxDoRepository {
                 admin = userObj?.get("admin")?.jsonPrimitive?.booleanOrNull ?: false,
                 moderator = userObj?.get("moderator")?.jsonPrimitive?.booleanOrNull ?: false
             )
+            cacheTopicUserVisuals(poster)
 
             val postNumber = pObj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
+            val rawPostId = pObj["id"]?.jsonPrimitive?.intOrNull ?: 0
+            if (rawPostId > 0) {
+                putBounded(postAuthorCache, rawPostId, poster)
+            }
+            if (postNumber <= 1 && tid > 0) {
+                putBounded(topicOpCache, tid, poster)
+            }
             val rawPostsCount = topicObj?.get("posts_count")?.jsonPrimitive?.intOrNull
                 ?: postNumber.coerceAtLeast(1)
             val rawHighest = maxOf(
@@ -1988,7 +2044,7 @@ object LinuxDoRepository {
                 if (cat != null && !cat.isVerifiedFromServer && syncedCategoriesSessionGen != UserApiKeyAuthManager.sessionGeneration) {
                     val origParent = cat.parentId
                     val origSubLabel = cat.subLabel
-                    runCatching { syncSiteCategories() }
+                    runCatching { syncSiteCategories(background = false) }
                     cat = findCategoryById(categoryId)
                         ?: origParent?.let { pid ->
                             subCategoriesByParentId[pid]?.firstOrNull { it.subLabel == origSubLabel }
@@ -2651,12 +2707,14 @@ object LinuxDoRepository {
                 val dataObj = obj["data"] as? JsonObject
                 val tpl = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("original_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     ?: return@forEach
                 val candidateNames = listOfNotNull(
                     dataObj?.get("original_username")?.jsonPrimitive?.contentOrNull,
                     dataObj?.get("username")?.jsonPrimitive?.contentOrNull,
                     dataObj?.get("display_username")?.jsonPrimitive?.contentOrNull,
-                    obj["acting_user_name"]?.jsonPrimitive?.contentOrNull
+                    obj["acting_user_name"]?.jsonPrimitive?.contentOrNull,
+                    LinuxDoSiteRules.extractUsernameFromAvatarUrl(tpl)
                 )
                 candidateNames.firstOrNull { name ->
                     val trimmed = name.trim()
@@ -2675,6 +2733,10 @@ object LinuxDoRepository {
                 val postNumber = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
                 val slug = obj["slug"]?.jsonPrimitive?.contentOrNull ?: ""
                 val dataObj = obj["data"] as? JsonObject
+                val originalPostId = dataObj?.get("original_post_id")?.jsonPrimitive?.intOrNull ?: 0
+                val rawActingTpl = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: dataObj?.get("original_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 val rawDisplayUsername = dataObj?.get("display_username")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
                 val consolidatedMatch = rawDisplayUsername?.let { consolidatedCountExtractRegex.find(it) }
                 val parsedConsolidatedCount = consolidatedMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
@@ -2688,10 +2750,20 @@ object LinuxDoRepository {
                 val badgeName = dataObj?.get("badge_name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                 val chatChannelId = dataObj?.get("chat_channel_id")?.jsonPrimitive?.intOrNull ?: 0
                 val nonConsolidatedDisplayUsername = rawDisplayUsername?.takeIf { consolidatedMatch == null }
+                val cachedPostAuthor = when {
+                    nType in setOf(17, 36, 801, 802) && originalPostId > 0 -> postAuthorCache[originalPostId]
+                    else -> null
+                } ?: when {
+                    nType in setOf(17, 801) && topicId > 0 -> topicOpCache[topicId]
+                    nType == 36 && topicId > 0 && postNumber <= 1 -> topicOpCache[topicId]
+                    else -> null
+                }
                 val primaryActor = nonConsolidatedDisplayUsername
                     ?: dataObj?.get("original_username")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() && !consolidatedCountExtractRegex.matches(it) }
                     ?: dataObj?.get("username")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() && !consolidatedCountExtractRegex.matches(it) }
                     ?: dataObj?.get("mentioned_by_username")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+                    ?: LinuxDoSiteRules.extractUsernameFromAvatarUrl(rawActingTpl)?.takeIf { !consolidatedCountExtractRegex.matches(it) }
+                    ?: cachedPostAuthor?.username?.takeIf { it.isNotBlank() && it != "linuxdo" }
                     ?: obj["acting_user_name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() && !consolidatedCountExtractRegex.matches(it) }
                     ?: "系统"
                 val secondActor = dataObj?.get("username2")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf {
@@ -2730,9 +2802,9 @@ object LinuxDoRepository {
                     else -> ""
                 }
                 val primaryActorUsername = primaryActor.takeIf { it != "系统" }
-                val actingAvatarTemplate = obj["acting_user_avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                    ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                    ?: dataObj?.get("original_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val cachedVisual = primaryActorUsername?.let { getCachedUserVisualMeta(it) }
+                val actingAvatarTemplate = rawActingTpl
+                    ?: cachedPostAuthor?.avatarTemplate?.takeIf { it.isNotBlank() }
                     ?: primaryActorUsername?.let { getCachedUserAvatar(it) }
                 if (!primaryActorUsername.isNullOrBlank() && !actingAvatarTemplate.isNullOrBlank()) {
                     cacheUserAvatar(primaryActorUsername, actingAvatarTemplate)
@@ -2745,10 +2817,14 @@ object LinuxDoRepository {
                     createdAtText = createdAt,
                     topicId = topicId,
                     postNumber = postNumber,
+                    originalPostId = originalPostId,
                     slug = slug,
                     title = title,
                     actingUsername = actor,
                     actingAvatarTemplate = actingAvatarTemplate,
+                    actingPrimaryGroupName = cachedPostAuthor?.primaryGroupName ?: cachedVisual?.primaryGroupName,
+                    actingAnimatedAvatar = cachedPostAuthor?.animatedAvatar ?: cachedVisual?.animatedAvatar,
+                    actingFlair = cachedPostAuthor?.flair?.takeIf { it.hasFlair } ?: cachedVisual?.flair ?: FlairInfo(),
                     excerpt = excerpt,
                     count = count,
                     badgeId = badgeId,
@@ -2865,20 +2941,24 @@ object LinuxDoRepository {
     /**
      * 从 Discourse `/site.json` 同步动态版块目录与各版块真实的 `topic_template`（服务端配置的发帖模板）
      */
-    suspend fun syncSiteCategories(force: Boolean = false): List<LinuxDoCategoryMeta> = withContext(Dispatchers.IO) {
+    suspend fun syncSiteCategories(
+        force: Boolean = false,
+        background: Boolean = !force
+    ): List<LinuxDoCategoryMeta> = withContext(Dispatchers.IO) {
         val currentGen = UserApiKeyAuthManager.sessionGeneration
         val now = System.currentTimeMillis()
         val ttlMs = 24L * 60L * 60L * 1000L
         if (!force && syncedCategoriesSessionGen == currentGen && now - categoriesLastSyncedAtMs in 0 until ttlMs) {
             return@withContext categories
         }
+        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         siteCategoriesSyncMutex.withLock {
             val recheckGen = UserApiKeyAuthManager.sessionGeneration
             val recheckNow = System.currentTimeMillis()
             if (!force && syncedCategoriesSessionGen == recheckGen && recheckNow - categoriesLastSyncedAtMs in 0 until ttlMs) {
                 return@withLock categories
             }
-            val res = executeHttp("https://linux.do/site.json", method = "GET")
+            val res = executeHttp("https://linux.do/site.json", method = "GET", extraHeaders = headers)
             if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
                 try {
                     val root = json.parseToJsonElement(res.second).jsonObject
@@ -3011,10 +3091,13 @@ object LinuxDoRepository {
             val catId = tObj?.get("category_id")?.jsonPrimitive?.intOrNull ?: 4
             val (catName, catColor) = resolveCategoryMeta(catId)
             val blurb = cleanSearchSnippet(pObj["blurb"]?.jsonPrimitive?.contentOrNull)
+            val pUsername = pObj["username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo"
             val rawTpl = pObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
+            if (rawTpl.isNotBlank()) {
+                cacheUserAvatar(pUsername, rawTpl)
+            }
             val avatarUrl = if (rawTpl.isNotBlank()) {
-                if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "96")
-                else "https://linux.do${rawTpl.replace("{size}", "96")}"
+                LinuxDoSiteRules.resolveStaticAvatarUrl(rawTpl, 120)
             } else ""
             seenTopicPostKeys.add("${tid}_$postNum")
             seenTopicPostKeys.add("${tid}_1")
@@ -3024,7 +3107,7 @@ object LinuxDoRepository {
                     postNumber = postNum,
                     title = title,
                     blurb = blurb,
-                    username = pObj["username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo",
+                    username = pUsername,
                     avatarTemplate = avatarUrl,
                     createdAtText = formatRelativeTime(pObj["created_at"]?.jsonPrimitive?.contentOrNull),
                     categoryName = catName,
@@ -3645,8 +3728,7 @@ object LinuxDoRepository {
                     displayName = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: clean
                     val rawTpl = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
                     if (rawTpl.isNotBlank()) {
-                        avatarUrl = if (rawTpl.startsWith("http")) rawTpl.replace("{size}", "240")
-                        else "https://linux.do${rawTpl.replace("{size}", "240")}"
+                        avatarUrl = LinuxDoSiteRules.resolveStaticAvatarUrl(rawTpl, 120)
                     }
                     animatedAvatar = uObj["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1
@@ -3659,6 +3741,13 @@ object LinuxDoRepository {
                     badgeCount = uObj["badge_count"]?.jsonPrimitive?.intOrNull ?: 0
                     topBadges = BadgeInjector.readFeaturedBadges(root, uObj)
                     flair = parseFlair(uObj)
+                    cacheUserVisualMeta(
+                        username = clean,
+                        avatarTemplate = rawTpl,
+                        animatedAvatar = animatedAvatar,
+                        primaryGroupName = primaryGroupName,
+                        flair = flair
+                    )
                     location = uObj["location"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                     websiteUrl = uObj["website"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                     websiteName = (uObj["website_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
@@ -3879,16 +3968,29 @@ object LinuxDoRepository {
     /**
      * 获取指定用户的完整已获徽章列表 (`GET /user-badges/{username}.json?grouped=true`)
      */
-    suspend fun fetchUserBadges(username: String): List<GrantedBadge> = withContext(Dispatchers.IO) {
+    suspend fun fetchUserBadges(
+        username: String,
+        background: Boolean = false
+    ): List<GrantedBadge> = withContext(Dispatchers.IO) {
         val clean = username.trim().removePrefix("@")
         if (clean.isBlank()) return@withContext emptyList()
         val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
-        val primaryRes = executeHttp("https://linux.do/user-badges/$encoded.json?grouped=true", method = "GET", preserveFailure = true)
+        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
+        val primaryRes = executeHttp(
+            url = "https://linux.do/user-badges/$encoded.json?grouped=true",
+            method = "GET",
+            extraHeaders = headers,
+            preserveFailure = true
+        )
         val effectiveRes = if (primaryRes != null && isSuccessfulApiResponse(primaryRes.first, primaryRes.second)) {
             primaryRes
         } else {
-            executeHttp("https://linux.do/user_badges.json?username=$encoded&grouped=true", method = "GET", preserveFailure = true)
-                ?: primaryRes
+            executeHttp(
+                url = "https://linux.do/user_badges.json?username=$encoded&grouped=true",
+                method = "GET",
+                extraHeaders = headers,
+                preserveFailure = true
+            ) ?: primaryRes
         }
         try {
             val root = readApiObject(effectiveRes)
@@ -3927,16 +4029,27 @@ object LinuxDoRepository {
     }
 
     /** Loads the visible catalog in LinuxDo's badge-group order. */
-    suspend fun fetchAllSiteBadges(force: Boolean = false): List<GrantedBadge> = withContext(Dispatchers.IO) {
+    suspend fun fetchAllSiteBadges(
+        force: Boolean = false,
+        background: Boolean = false
+    ): List<GrantedBadge> = withContext(Dispatchers.IO) {
         val ttlMs = 24L * 60L * 60L * 1000L
         if (!force && cachedSiteBadges.isNotEmpty() && System.currentTimeMillis() - badgesLastSyncedAtMs in 0 until ttlMs) {
             return@withContext cachedSiteBadges
         }
+        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         siteBadgesSyncMutex.withLock {
             if (!force && cachedSiteBadges.isNotEmpty() && System.currentTimeMillis() - badgesLastSyncedAtMs in 0 until ttlMs) {
                 return@withLock cachedSiteBadges
             }
-            val root = readApiObject(executeHttp("https://linux.do/badges.json", method = "GET", preserveFailure = true))
+            val root = readApiObject(
+                executeHttp(
+                    url = "https://linux.do/badges.json",
+                    method = "GET",
+                    extraHeaders = headers,
+                    preserveFailure = true
+                )
+            )
             val groups = (root["badge_groupings"] as? JsonArray).orEmpty()
                 .mapNotNull { it as? JsonObject }
                 .associateBy { it["id"]?.jsonPrimitive?.intOrNull }
@@ -4117,6 +4230,30 @@ object LinuxDoRepository {
 
         val cakedateRaw = pObj["user_cakedate"]?.jsonPrimitive?.contentOrNull
         val birthdateRaw = pObj["user_birthdate"]?.jsonPrimitive?.contentOrNull
+        val parsedFlair = parseFlair(pObj)
+        val postAuthorTopicUser = TopicUser(
+            id = userId,
+            username = username,
+            name = displayName,
+            avatarTemplate = avatarTemplate,
+            animatedAvatar = animatedAvatar,
+            primaryGroupName = primaryGroupName,
+            flairName = parsedFlair.name,
+            flairUrl = parsedFlair.url,
+            flairBgColor = parsedFlair.bgColorHex,
+            flairColor = parsedFlair.fgColorHex,
+            flairGroupId = parsedFlair.groupId,
+            trustLevel = trustLevel,
+            admin = admin,
+            moderator = moderator
+        )
+        cacheTopicUserVisuals(postAuthorTopicUser)
+        if (pid > 0) {
+            putBounded(postAuthorCache, pid, postAuthorTopicUser)
+        }
+        if (postNumber == 1 && resolvedTopicId > 0) {
+            putBounded(topicOpCache, resolvedTopicId, postAuthorTopicUser)
+        }
 
         return PostItemModel(
             id = pid,
@@ -4139,7 +4276,7 @@ object LinuxDoRepository {
             isTodayBirthday = isTodayDateMonthDay(birthdateRaw, requirePreviousYear = false),
             iosDeviceName = iosDeviceName,
             userStatus = userStatus,
-            flair = parseFlair(pObj),
+            flair = parsedFlair,
             badgesGranted = grantedBadges,
             authorBadges = authorBadges[userId].orEmpty(),
             createdAtText = formatRelativeTime(createdAtIso),
@@ -4242,8 +4379,7 @@ object LinuxDoRepository {
             val id = uObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
             val uname = uObj["username"]?.jsonPrimitive?.contentOrNull ?: "user_$id"
             val avatarTpl = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
-            cacheUserAvatar(uname, avatarTpl)
-            usersMap[id] = TopicUser(
+            val topicUser = TopicUser(
                 id = id,
                 username = uname,
                 name = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
@@ -4254,10 +4390,13 @@ object LinuxDoRepository {
                 flairUrl = uObj["flair_url"]?.jsonPrimitive?.contentOrNull,
                 flairBgColor = uObj["flair_bg_color"]?.jsonPrimitive?.contentOrNull,
                 flairColor = uObj["flair_color"]?.jsonPrimitive?.contentOrNull,
+                flairGroupId = uObj["flair_group_id"]?.jsonPrimitive?.intOrNull,
                 trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1,
                 admin = uObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false,
                 moderator = uObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false
             )
+            cacheTopicUserVisuals(topicUser)
+            usersMap[id] = topicUser
         }
 
         val topicsArray = (root["topic_list"] as? JsonObject)?.get("topics") as? JsonArray ?: return emptyList()
@@ -4281,6 +4420,9 @@ object LinuxDoRepository {
                 id = 0,
                 username = tObj["last_poster_username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo"
             )
+            if (id > 0 && op.username != "linuxdo") {
+                putBounded(topicOpCache, id, op)
+            }
             val categoryId = tObj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
             val (catName, catColor) = resolveCategoryMeta(categoryId)
             val tags = parseTagsArray(tObj["tags"] as? JsonArray)
@@ -4348,39 +4490,104 @@ object LinuxDoRepository {
         }
     }
 
+    data class UserVisualMeta(
+        val avatarTemplate: String = "",
+        val animatedAvatar: String? = null,
+        val primaryGroupName: String? = null,
+        val flair: FlairInfo = FlairInfo()
+    )
+
     private val userAvatarCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val userVisualCache = java.util.concurrent.ConcurrentHashMap<String, UserVisualMeta>()
+    private val topicOpCache = java.util.concurrent.ConcurrentHashMap<Int, TopicUser>()
+    private val postAuthorCache = java.util.concurrent.ConcurrentHashMap<Int, TopicUser>()
     private val inFlightAvatarJobs = java.util.concurrent.ConcurrentHashMap<String, Deferred<String?>>()
+    private val inFlightNotificationActorJobs = java.util.concurrent.ConcurrentHashMap<String, Deferred<TopicUser?>>()
+    // 独立的轻量头像/作者元数据解析并发信号量（与后台帖子摘要爬取完全隔离，消除排队饥饿）
+    private val avatarResolveSemaphore = Semaphore(6)
+
+    internal fun clearAvatarAndActorCachesForTest() {
+        userAvatarCache.clear()
+        userVisualCache.clear()
+        topicOpCache.clear()
+        postAuthorCache.clear()
+        rateLimitedUntilMs.set(0L)
+    }
 
     fun cacheUserAvatar(username: String?, avatarTemplate: String?) {
-        val cleanName = username?.trim()?.lowercase()?.takeIf {
-            it.isNotEmpty() && it != "系统" && !consolidatedCountExtractRegex.matches(it)
+        val cleanName = username?.trim()?.removePrefix("@")?.lowercase()?.takeIf {
+            it.isNotEmpty() && it != "系统" && it != "linuxdo" && !consolidatedCountExtractRegex.matches(it)
         } ?: return
         val cleanTpl = avatarTemplate?.trim()?.takeIf { it.isNotEmpty() } ?: return
         putBounded(userAvatarCache, cleanName, cleanTpl)
+        val prev = userVisualCache[cleanName]
+        if (prev == null || prev.avatarTemplate != cleanTpl) {
+            putBounded(userVisualCache, cleanName, (prev ?: UserVisualMeta()).copy(avatarTemplate = cleanTpl))
+        }
+    }
+
+    fun cacheUserVisualMeta(
+        username: String?,
+        avatarTemplate: String? = null,
+        animatedAvatar: String? = null,
+        primaryGroupName: String? = null,
+        flair: FlairInfo = FlairInfo()
+    ) {
+        val cleanName = username?.trim()?.removePrefix("@")?.lowercase()?.takeIf {
+            it.isNotEmpty() && it != "系统" && it != "linuxdo" && !consolidatedCountExtractRegex.matches(it)
+        } ?: return
+        val cleanTpl = avatarTemplate?.trim()?.takeIf { it.isNotEmpty() }
+        if (cleanTpl != null) {
+            putBounded(userAvatarCache, cleanName, cleanTpl)
+        }
+        val prev = userVisualCache[cleanName]
+        val merged = UserVisualMeta(
+            avatarTemplate = cleanTpl ?: prev?.avatarTemplate.orEmpty(),
+            animatedAvatar = animatedAvatar?.trim()?.takeIf { it.isNotEmpty() } ?: prev?.animatedAvatar,
+            primaryGroupName = primaryGroupName?.trim()?.takeIf { it.isNotEmpty() } ?: prev?.primaryGroupName,
+            flair = if (flair.hasFlair) flair else (prev?.flair ?: FlairInfo())
+        )
+        if (merged.avatarTemplate.isNotEmpty() || merged.animatedAvatar != null || merged.primaryGroupName != null || merged.flair.hasFlair) {
+            putBounded(userVisualCache, cleanName, merged)
+        }
+    }
+
+    private fun cacheTopicUserVisuals(user: TopicUser) {
+        cacheUserVisualMeta(
+            username = user.username,
+            avatarTemplate = user.avatarTemplate,
+            animatedAvatar = user.animatedAvatar,
+            primaryGroupName = user.primaryGroupName,
+            flair = user.flair
+        )
     }
 
     fun getCachedUserAvatar(username: String): String? {
-        val key = username.trim().lowercase().takeIf { it.isNotEmpty() } ?: return null
+        val key = username.trim().removePrefix("@").lowercase().takeIf { it.isNotEmpty() } ?: return null
         return userAvatarCache[key]?.takeIf { it.isNotBlank() }
     }
 
+    fun getCachedUserVisualMeta(username: String): UserVisualMeta? {
+        val key = username.trim().removePrefix("@").lowercase().takeIf { it.isNotEmpty() } ?: return null
+        return userVisualCache[key]
+    }
+
     suspend fun resolveUserAvatarTemplate(username: String): String? = withContext(Dispatchers.IO) {
-        val clean = username.trim().takeIf {
-            it.isNotEmpty() && it != "系统" && !consolidatedCountExtractRegex.matches(it)
+        val clean = username.trim().removePrefix("@").takeIf {
+            it.isNotEmpty() && it != "系统" && it != "linuxdo" && !consolidatedCountExtractRegex.matches(it)
         } ?: return@withContext null
         getCachedUserAvatar(clean)?.let { return@withContext it }
-        if (isRateLimitedNow()) return@withContext null
         val key = clean.lowercase()
         inFlightAvatarJobs[key]?.let { existing ->
             if (existing.isActive || existing.isCompleted) return@withContext existing.await()
         }
         val deferred = excerptPrefetchScope.async {
             try {
-                excerptFetchSemaphore.withPermit {
+                avatarResolveSemaphore.withPermit {
                     getCachedUserAvatar(clean)?.let { return@withPermit it }
-                    if (isRateLimitedNow()) return@withPermit null
-                    if (isForegroundPriorityActive()) {
-                        kotlinx.coroutines.delay(250L)
+                    val cooldownRemain = (rateLimitedUntilMs.get() - System.currentTimeMillis()).coerceAtMost(3_000L)
+                    if (cooldownRemain > 0L) {
+                        kotlinx.coroutines.delay(cooldownRemain)
                     }
                     val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
                     val bgHeaders = mapOf("Discourse-Background" to "true")
@@ -4388,14 +4595,20 @@ object LinuxDoRepository {
                         ?: executeHttp("https://linux.do/u/$encoded.json", method = "GET", extraHeaders = bgHeaders)
                     val body = res?.second
                     if (res != null && res.first in 200..299 && body != null && body.trimStart().startsWith("{")) {
-                        val tpl = runCatching {
+                        val parsed = runCatching {
                             val root = json.parseToJsonElement(body).jsonObject
                             val uObj = (root["user"] as? JsonObject) ?: root
-                            uObj["avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                            val tpl = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                            val anim = uObj["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                            val group = uObj["primary_group_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                            val fl = parseFlair(uObj)
+                            if (!tpl.isNullOrBlank() || anim != null || group != null || fl.hasFlair) {
+                                cacheUserVisualMeta(clean, tpl, anim, group, fl)
+                            }
+                            tpl
                         }.getOrNull()
-                        if (!tpl.isNullOrBlank()) {
-                            cacheUserAvatar(clean, tpl)
-                            return@withPermit tpl
+                        if (!parsed.isNullOrBlank()) {
+                            return@withPermit parsed
                         }
                     }
                     null
@@ -4405,6 +4618,119 @@ object LinuxDoRepository {
             }
         }
         val prev = inFlightAvatarJobs.putIfAbsent(key, deferred)
+        if (prev != null && (prev.isActive || prev.isCompleted)) {
+            deferred.cancel()
+            return@withContext prev.await()
+        }
+        deferred.await()
+    }
+
+    /**
+     * 补全被 Discourse `discourse-follow` 插件合并覆盖了 `display_username`（如 `"2 个回复"`）且缺失 `acting_user` 的话题/关注通知作者信息。
+     */
+    suspend fun resolveNotificationActor(item: UserNotificationItem): TopicUser? = withContext(Dispatchers.IO) {
+        if (item.actorUsername != null) return@withContext null
+        if (item.notificationType !in setOf(17, 36, 801, 802)) return@withContext null
+        if (item.originalPostId <= 0 && item.topicId <= 0) return@withContext null
+
+        if (item.originalPostId > 0) {
+            postAuthorCache[item.originalPostId]?.let { return@withContext it }
+        }
+        if (item.topicId > 0 && (item.notificationType in setOf(17, 801) || item.postNumber <= 1)) {
+            topicOpCache[item.topicId]?.let { return@withContext it }
+        }
+
+        val jobKey = if (item.originalPostId > 0) {
+            "post:${item.originalPostId}"
+        } else {
+            "topic:${item.topicId}:${item.postNumber.coerceAtLeast(1)}"
+        }
+        inFlightNotificationActorJobs[jobKey]?.let { existing ->
+            if (existing.isActive || existing.isCompleted) return@withContext existing.await()
+        }
+        val deferred = excerptPrefetchScope.async {
+            try {
+                avatarResolveSemaphore.withPermit {
+                    if (item.originalPostId > 0) {
+                        postAuthorCache[item.originalPostId]?.let { return@withPermit it }
+                    }
+                    if (item.topicId > 0 && (item.notificationType in setOf(17, 801) || item.postNumber <= 1)) {
+                        topicOpCache[item.topicId]?.let { return@withPermit it }
+                    }
+                    val cooldownRemain = (rateLimitedUntilMs.get() - System.currentTimeMillis()).coerceAtMost(3_000L)
+                    if (cooldownRemain > 0L) {
+                        kotlinx.coroutines.delay(cooldownRemain)
+                    }
+                    val bgHeaders = mapOf("Discourse-Background" to "true")
+
+                    if (item.originalPostId > 0) {
+                        val pRes = executeHttp(
+                            "https://linux.do/posts/${item.originalPostId}.json",
+                            method = "GET",
+                            extraHeaders = bgHeaders
+                        )
+                        val pBody = pRes?.second
+                        if (pRes != null && pRes.first in 200..299 && pBody != null && pBody.trimStart().startsWith("{")) {
+                            val resolved = runCatching {
+                                val root = json.parseToJsonElement(pBody).jsonObject
+                                val pObj = (root["post"] as? JsonObject) ?: root
+                                parseSinglePostObject(pObj, item.topicId)
+                                postAuthorCache[item.originalPostId]
+                            }.getOrNull()
+                            if (resolved != null && resolved.username.isNotBlank() && !resolved.username.startsWith("user_")) {
+                                if (item.notificationType in setOf(17, 801) && item.topicId > 0) {
+                                    putBounded(topicOpCache, item.topicId, resolved)
+                                }
+                                return@withPermit resolved
+                            }
+                        }
+                    }
+
+                    if (item.topicId > 0) {
+                        val targetFloor = if (item.notificationType in setOf(17, 801)) 1 else item.postNumber.coerceAtLeast(1)
+                        val tRes = executeHttp(
+                            "https://linux.do/t/${item.topicId}/$targetFloor.json",
+                            method = "GET",
+                            extraHeaders = bgHeaders
+                        )
+                        val tBody = tRes?.second
+                        if (tRes != null && tRes.first in 200..299 && tBody != null && tBody.trimStart().startsWith("{")) {
+                            val resolved = runCatching {
+                                val root = json.parseToJsonElement(tBody).jsonObject
+                                val createdBy = (root["details"] as? JsonObject)?.get("created_by") as? JsonObject
+                                val postsArr = (root["post_stream"] as? JsonObject)?.get("posts") as? JsonArray
+                                val targetPostObj = postsArr?.mapNotNull { it as? JsonObject }?.firstOrNull {
+                                    it["post_number"]?.jsonPrimitive?.intOrNull == targetFloor
+                                } ?: (postsArr?.firstOrNull() as? JsonObject)
+                                if (targetPostObj != null) {
+                                    val parsed = parseSinglePostObject(targetPostObj, item.topicId)
+                                    parsed?.let { postAuthorCache[it.id] }
+                                } else if (createdBy != null && targetFloor == 1) {
+                                    val uname = createdBy["username"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                                    val tpl = createdBy["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                    if (uname.isNotEmpty()) {
+                                        TopicUser(
+                                            id = createdBy["id"]?.jsonPrimitive?.intOrNull ?: 0,
+                                            username = uname,
+                                            name = createdBy["name"]?.jsonPrimitive?.contentOrNull,
+                                            avatarTemplate = tpl
+                                        ).also {
+                                            cacheTopicUserVisuals(it)
+                                            putBounded(topicOpCache, item.topicId, it)
+                                        }
+                                    } else null
+                                } else null
+                            }.getOrNull()
+                            if (resolved != null) return@withPermit resolved
+                        }
+                    }
+                    null
+                }
+            } finally {
+                inFlightNotificationActorJobs.remove(jobKey)
+            }
+        }
+        val prev = inFlightNotificationActorJobs.putIfAbsent(jobKey, deferred)
         if (prev != null && (prev.isActive || prev.isCompleted)) {
             deferred.cancel()
             return@withContext prev.await()
@@ -4997,10 +5323,11 @@ object LinuxDoRepository {
                 val username = obj["username"]?.jsonPrimitive?.contentOrNull ?: return@forEach
                 val name = obj["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 val rawTpl = obj["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                val avatarUrl = if (rawTpl.startsWith("http")) {
-                    rawTpl.replace("{size}", "96")
-                } else if (rawTpl.isNotBlank()) {
-                    "https://linux.do${rawTpl.replace("{size}", "96")}"
+                if (rawTpl.isNotBlank()) {
+                    cacheUserAvatar(username, rawTpl)
+                }
+                val avatarUrl = if (rawTpl.isNotBlank()) {
+                    LinuxDoSiteRules.resolveStaticAvatarUrl(rawTpl, 120)
                 } else ""
                 results.add(
                     MentionCandidate(
@@ -5245,18 +5572,23 @@ object LinuxDoRepository {
     /**
      * 动态同步站点全量自定义表情包 (`GET /emojis.json`)，将飞书、B站、贴吧等官方分组注入 `LinuxDoEmojiCatalog`
      */
-    suspend fun syncSiteEmojis(force: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+    suspend fun syncSiteEmojis(
+        force: Boolean = false,
+        background: Boolean = !force
+    ): Boolean = withContext(Dispatchers.IO) {
         val ttlMs = 24L * 60L * 60L * 1000L
         if (!force && LinuxDoEmojiCatalog.hasSyncedServerEmojis() && System.currentTimeMillis() - emojisLastSyncedAtMs in 0 until ttlMs) {
             return@withContext true
         }
+        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         siteEmojisSyncMutex.withLock {
             if (!force && LinuxDoEmojiCatalog.hasSyncedServerEmojis() && System.currentTimeMillis() - emojisLastSyncedAtMs in 0 until ttlMs) {
                 return@withLock true
             }
             val res = executeHttp(
                 url = "https://linux.do/emojis.json",
-                method = "GET"
+                method = "GET",
+                extraHeaders = headers
             ) ?: return@withLock false
             if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withLock false
             try {
@@ -5539,11 +5871,17 @@ object LinuxDoRepository {
                 val dname = obj["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
                 val tpl = obj["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 val avatarUrl = if (tpl.isNotBlank()) {
-                    val sized = tpl.replace("{size}", "120")
-                    if (sized.startsWith("http")) sized else "https://linux.do$sized"
+                    LinuxDoSiteRules.resolveStaticAvatarUrl(tpl, 120)
                 } else ""
                 val animRaw = obj["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                val animatedAvatar = animRaw?.let { if (it.startsWith("http")) it else "https://linux.do$it" }
+                val animatedAvatar = animRaw?.let { LinuxDoSiteRules.resolveAnimatedAvatarUrl(it) }
+                cacheUserVisualMeta(
+                    username = uname,
+                    avatarTemplate = tpl,
+                    animatedAvatar = animatedAvatar,
+                    primaryGroupName = obj["primary_group_name"]?.jsonPrimitive?.contentOrNull,
+                    flair = parseFlair(obj)
+                )
                 val isFollowing = viewingOwnFollowing ||
                     (uname.lowercase() in myFollowingSet) ||
                     (obj["is_following"]?.jsonPrimitive?.booleanOrNull == true)
@@ -5689,9 +6027,15 @@ object LinuxDoRepository {
             val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
             val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val avatarUrl = if (tpl.isNotBlank()) {
-                val sized = tpl.replace("{size}", "120")
-                if (sized.startsWith("http")) sized else "https://linux.do$sized"
+                LinuxDoSiteRules.resolveStaticAvatarUrl(tpl, 120)
             } else ""
+            cacheUserVisualMeta(
+                username = uname,
+                avatarTemplate = tpl,
+                animatedAvatar = u["animated_avatar"]?.jsonPrimitive?.contentOrNull,
+                primaryGroupName = u["primary_group_name"]?.jsonPrimitive?.contentOrNull,
+                flair = parseFlair(u)
+            )
             val likesReceived = obj["likes_received"]?.jsonPrimitive?.intOrNull ?: 0
             val likesGiven = obj["likes_given"]?.jsonPrimitive?.intOrNull ?: 0
             val postCount = obj["post_count"]?.jsonPrimitive?.intOrNull ?: 0
@@ -5733,9 +6077,15 @@ object LinuxDoRepository {
             val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
             val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val avatarUrl = if (tpl.isNotBlank()) {
-                val sized = tpl.replace("{size}", "120")
-                if (sized.startsWith("http")) sized else "https://linux.do$sized"
+                LinuxDoSiteRules.resolveStaticAvatarUrl(tpl, 120)
             } else ""
+            cacheUserVisualMeta(
+                username = uname,
+                avatarTemplate = tpl,
+                animatedAvatar = u["animated_avatar"]?.jsonPrimitive?.contentOrNull,
+                primaryGroupName = u["primary_group_name"]?.jsonPrimitive?.contentOrNull,
+                flair = parseFlair(u)
+            )
             val animRaw = u["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             return FollowUserEntry(
                 id = uid,

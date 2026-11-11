@@ -32,7 +32,19 @@ import do_.linux.lindo.core.render.PostBlockNode
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.FeedSortFilter
+import do_.linux.lindo.ui.DEFAULT_SPLIT_PANE_FRACTION
+import do_.linux.lindo.ui.MAX_SPLIT_PANE_FRACTION
+import do_.linux.lindo.ui.MIN_LEFT_PANE_WIDTH_DP
+import do_.linux.lindo.ui.MIN_RIGHT_PANE_WIDTH_DP
+import do_.linux.lindo.ui.MIN_SPLIT_PANE_FRACTION
 import do_.linux.lindo.ui.buildWorkbenchPollBbCode
+import do_.linux.lindo.ui.clampSplitPaneFraction
+import do_.linux.lindo.ui.computeSplitPaneBoundsDp
+import do_.linux.lindo.ui.computeSplitPaneLeftWidthDp
+import do_.linux.lindo.ui.computeUpdatedSplitFractionAfterDrag
+import do_.linux.lindo.ui.isTransientRecoverableLoadError
+import do_.linux.lindo.ui.shouldUseWideSplitLayout
+import io.ktor.client.request.get
 import do_.linux.lindo.ui.components.LinDoIcons
 import do_.linux.lindo.ui.insertSnippetAtCursorWithMentionBoundary
 import do_.linux.lindo.ui.mergeCloudAndLocalDraftLists
@@ -1123,5 +1135,433 @@ class Round3BugFixesRegressionTest {
         assertTrue(ScreenTrackEngine.isPostConfirmedReadByServer(555, 2))
         assertTrue(ScreenTrackEngine.isPostConfirmedReadByServer(555, 3))
         assertTrue(ScreenTrackEngine.serverConfirmedReadVersion > v0)
+    }
+
+    // -------------------------------------------------------------------------
+    // Round 5 Avatar Speed, Consolidated Follow Notifications & Official Glow Alignment
+    // -------------------------------------------------------------------------
+    @Test
+    fun r5_consolidatedFollowNotificationsResolveNeoAuthorWithoutTouchingGroupedReplies() = runTest {
+        LinuxDoRepository.clearAvatarAndActorCachesForTest()
+        var postLookupCount = 0
+        withMockHttp({ url, _, _, _ ->
+            when {
+                url.contains("latest.json") -> {
+                    200 to """
+                        {
+                          "users": [
+                            {
+                              "id": 1,
+                              "username": "neo",
+                              "name": "Neo",
+                              "avatar_template": "/user_avatar/linux.do/neo/{size}/136369_2.png",
+                              "primary_group_name": "admins"
+                            }
+                          ],
+                          "topic_list": {
+                            "topics": [
+                              {
+                                "id": 7702,
+                                "title": "大 Vibe coding 时代，勇敢的人先站上舞台",
+                                "category_id": 4,
+                                "posters": [{"description": "Original Poster", "user_id": 1}]
+                              }
+                            ]
+                          }
+                        }
+                    """.trimIndent()
+                }
+                url.contains("/posts/99001.json") -> {
+                    postLookupCount++
+                    200 to """
+                        {
+                          "id": 99001,
+                          "topic_id": 7701,
+                          "post_number": 1,
+                          "username": "neo",
+                          "name": "Neo",
+                          "avatar_template": "/user_avatar/linux.do/neo/{size}/136369_2.png",
+                          "primary_group_name": "admins",
+                          "cooked": "<p>Version 1.0.5 Build 6</p>"
+                        }
+                    """.trimIndent()
+                }
+                url.contains("/notifications.json") -> {
+                    200 to """
+                        {
+                          "notifications": [
+                            {
+                              "id": 501,
+                              "notification_type": 801,
+                              "read": true,
+                              "created_at": "2026-11-11T09:00:00Z",
+                              "topic_id": 7701,
+                              "post_number": 1,
+                              "fancy_title": "Version 1.0.5 Build 6",
+                              "data": {
+                                "topic_title": "Version 1.0.5 Build 6",
+                                "original_post_id": 99001,
+                                "original_post_type": 1,
+                                "display_username": "2 个回复"
+                              }
+                            },
+                            {
+                              "id": 502,
+                              "notification_type": 801,
+                              "read": true,
+                              "created_at": "2026-11-11T08:00:00Z",
+                              "topic_id": 7702,
+                              "post_number": 1,
+                              "fancy_title": "大 Vibe coding 时代，勇敢的人先站上舞台",
+                              "data": {
+                                "topic_title": "大 Vibe coding 时代，勇敢的人先站上舞台",
+                                "original_post_id": 99002,
+                                "original_post_type": 1,
+                                "display_username": "3 个回复"
+                              }
+                            },
+                            {
+                              "id": 503,
+                              "notification_type": 802,
+                              "read": false,
+                              "created_at": "2026-11-11T07:00:00Z",
+                              "topic_id": 7703,
+                              "post_number": 5,
+                              "acting_user_avatar_template": "/user_avatar/linux.do/neo/48/136369_2.png",
+                              "data": {
+                                "topic_title": "集中讨论帖",
+                                "original_post_id": 99003,
+                                "display_username": "2 个回复"
+                              }
+                            },
+                            {
+                              "id": 504,
+                              "notification_type": 2,
+                              "read": false,
+                              "created_at": "2026-11-11T06:00:00Z",
+                              "topic_id": 7704,
+                              "post_number": 10,
+                              "data": {
+                                "topic_title": "我的提问帖",
+                                "display_username": "3 条回复"
+                              }
+                            }
+                          ]
+                        }
+                    """.trimIndent()
+                }
+                else -> 404 to "{}"
+            }
+        }) {
+            // Seed topic 7702 into topicOpCache via normal feed load
+            LinuxDoRepository.fetchTopics(path = "latest.json", page = 0)
+
+            val list = LinuxDoRepository.fetchUserNotifications()
+            assertEquals(4, list.size)
+
+            // 501: Cold consolidated 801 -> resolved asynchronously via /posts/99001.json
+            val n501 = list[0]
+            assertEquals(99001, n501.originalPostId)
+            assertNull(n501.actorUsername)
+            val resolved501 = assertNotNull(LinuxDoRepository.resolveNotificationActor(n501))
+            assertEquals("neo", resolved501.username)
+            assertEquals("/user_avatar/linux.do/neo/{size}/136369_2.png", resolved501.avatarTemplate)
+            assertEquals(1, postLookupCount)
+
+            // 502: Warm topicOpCache consolidated 801 -> resolved synchronously in 0ms without extra HTTP call!
+            val n502 = list[1]
+            assertEquals("neo", n502.actorUsername)
+            assertEquals("/user_avatar/linux.do/neo/{size}/136369_2.png", n502.actingAvatarTemplate)
+            assertEquals("发布了新话题", n502.typeLabel)
+            assertEquals(1, postLookupCount)
+
+            // 503: Consolidated 802 with avatar path -> extracts "neo" directly from avatar URL
+            val n503 = list[2]
+            assertEquals("neo", n503.actorUsername)
+            assertEquals("等发表了 2 条新回复", n503.typeLabel)
+
+            // 504: Grouped reply to own post (type=2) -> must NOT resolve post_number as actor!
+            val n504 = list[3]
+            assertNull(n504.actorUsername)
+            assertEquals("收到 3 条回复", n504.typeLabel)
+            assertNull(LinuxDoRepository.resolveNotificationActor(n504))
+        }
+    }
+
+    @Test
+    fun r5_avatarCdnNormalizationValidDiscourseSizesAndOfficialGlowAlignment() {
+        // Valid Discourse avatar_sizes snapping (eliminates 302 redirects on 120 / 240)
+        assertEquals(144, LinuxDoSiteRules.normalizeAvatarSize(120))
+        assertEquals(144, LinuxDoSiteRules.normalizeAvatarSize(144))
+        assertEquals(288, LinuxDoSiteRules.normalizeAvatarSize(240))
+
+        // Unified static avatar CDN URL across {size}, /48/, /96/, /240/, and relative/absolute forms
+        val expectedNeo144 = "https://cdn.ldstatic.com/user_avatar/linux.do/neo/144/136369_2.png"
+        assertEquals(expectedNeo144, LinuxDoSiteRules.resolveStaticAvatarUrl("/user_avatar/linux.do/neo/{size}/136369_2.png", 120))
+        assertEquals(expectedNeo144, LinuxDoSiteRules.resolveStaticAvatarUrl("/user_avatar/linux.do/neo/48/136369_2.png", 144))
+        assertEquals(expectedNeo144, LinuxDoSiteRules.resolveStaticAvatarUrl("https://linux.do/user_avatar/linux.do/neo/240/136369_2.png", 144))
+        assertEquals(expectedNeo144, LinuxDoSiteRules.resolveStaticAvatarUrl("https://cdn.ldstatic.com/user_avatar/linux.do/neo/96/136369_2.png", 144))
+
+        // Direct Discourse letter_avatar_proxy -> avatars.discourse-cdn.com (eliminates CORS redirect failure)
+        val expectedLetter144 = "https://avatars.discourse-cdn.com/v4/letter/v/90ced4/144.png"
+        assertEquals(expectedLetter144, LinuxDoSiteRules.resolveStaticAvatarUrl("/letter_avatar_proxy/v4/letter/v/90ced4/{size}.png", 120))
+        assertEquals(expectedLetter144, LinuxDoSiteRules.resolveStaticAvatarUrl("https://linux.do/letter_avatar_proxy/v4/letter/v/90ced4/48.png", 144))
+        assertEquals(expectedLetter144, LinuxDoSiteRules.resolveStaticAvatarUrl(expectedLetter144, 144))
+
+        // Official common_theme_138 glow & square rules
+        val blueGlow = Color(0xFF00AEFF)
+        val goldGlow = Color(0xFFF5BF03)
+        assertTrue(LinuxDoSiteRules.isSquareAvatar("neo"))
+        assertTrue(LinuxDoSiteRules.isSquareAvatar("@NEO"))
+        assertEquals(blueGlow, LinuxDoSiteRules.matchAvatarGlowColor("@neo", null))
+        assertEquals(blueGlow, LinuxDoSiteRules.matchAvatarGlowColor(null, null, expectedNeo144))
+
+        val circularBlueUsers = listOf(
+            "kevin", "delph1s", "King-Huiwen-of-Qin", "NullUser", "DOS.DO", "Musifei", "SMNET", "syokatu"
+        )
+        for (uname in circularBlueUsers) {
+            assertFalse(LinuxDoSiteRules.isSquareAvatar(uname), "$uname must stay circular (50%)")
+            assertEquals(blueGlow, LinuxDoSiteRules.matchAvatarGlowColor(uname, null), "$uname must receive official #00AEFF glow")
+        }
+        assertEquals(goldGlow, LinuxDoSiteRules.matchAvatarGlowColor("seller", "g-merchant"))
+        assertEquals(goldGlow, LinuxDoSiteRules.matchAvatarGlowColor("seller2", "g-merchant2"))
+        assertNull(LinuxDoSiteRules.matchAvatarGlowColor("normal_user", "trust_level_3"))
+    }
+
+    @Test
+    fun r6_wideScreenSplitPaneResizingClampingZeroDeadZoneAndPersistence() {
+        // 1. Safe clamping against out-of-bounds and NaN/Infinity
+        assertEquals(DEFAULT_SPLIT_PANE_FRACTION, clampSplitPaneFraction(Float.NaN))
+        assertEquals(DEFAULT_SPLIT_PANE_FRACTION, clampSplitPaneFraction(Float.POSITIVE_INFINITY))
+        assertEquals(MIN_SPLIT_PANE_FRACTION, clampSplitPaneFraction(0.05f))
+        assertEquals(MAX_SPLIT_PANE_FRACTION, clampSplitPaneFraction(0.95f))
+
+        // 2. Phone landscape (~816dp available content width after side rail):
+        //    Respects MIN_LEFT_PANE_WIDTH_DP (280dp) and MIN_RIGHT_PANE_WIDTH_DP (320dp)
+        val phoneContentDp = 816f
+        val phoneDefaultLeft = computeSplitPaneLeftWidthDp(phoneContentDp, DEFAULT_SPLIT_PANE_FRACTION)
+        assertTrue(phoneDefaultLeft in 340f..345f, "Expected ~342.3dp on phone landscape, got $phoneDefaultLeft")
+
+        val phoneMinLeft = computeSplitPaneLeftWidthDp(phoneContentDp, 0.10f)
+        assertEquals(MIN_LEFT_PANE_WIDTH_DP, phoneMinLeft)
+
+        val phoneMaxLeft = computeSplitPaneLeftWidthDp(phoneContentDp, 0.90f)
+        assertEquals(phoneContentDp - 1f - MIN_RIGHT_PANE_WIDTH_DP, phoneMaxLeft)
+
+        // 3. Zero dead-zone when dragging back from clamped edge
+        val reversedFromMaxFraction = computeUpdatedSplitFractionAfterDrag(
+            availableContentWidthDp = phoneContentDp,
+            currentLeftWidthDp = phoneMaxLeft,
+            dragDeltaDp = -40f
+        )
+        val reversedLeft = computeSplitPaneLeftWidthDp(phoneContentDp, reversedFromMaxFraction)
+        assertTrue(reversedLeft < phoneMaxLeft - 38f, "Dragging left from max bound must respond immediately without dead-zone")
+
+        // 4. Desktop/tablet wide screen (~1280dp available content width)
+        val desktopContentDp = 1280f
+        val desktopLeft50 = computeSplitPaneLeftWidthDp(desktopContentDp, 0.50f)
+        assertTrue(desktopLeft50 in 638f..641f)
+
+        // 5. Persistence hook in UserApiKeyAuthManager
+        val prevPersist = UserApiKeyAuthManager.onPersistSplitFraction
+        val prevFraction = UserApiKeyAuthManager.uiSplitFraction
+        var persistedValue: Float? = null
+        try {
+            UserApiKeyAuthManager.onPersistSplitFraction = { persistedValue = it }
+            UserApiKeyAuthManager.updateSplitFractionPref(0.51f)
+            assertEquals(0.51f, UserApiKeyAuthManager.uiSplitFraction)
+            assertEquals(0.51f, persistedValue)
+
+            UserApiKeyAuthManager.updateSplitFractionPref(0.99f)
+            assertEquals(MAX_SPLIT_PANE_FRACTION, UserApiKeyAuthManager.uiSplitFraction)
+            assertEquals(MAX_SPLIT_PANE_FRACTION, persistedValue)
+        } finally {
+            UserApiKeyAuthManager.onPersistSplitFraction = prevPersist
+            UserApiKeyAuthManager.uiSplitFraction = prevFraction
+        }
+    }
+
+    @Test
+    fun r6_backgroundSyncIsolationForegroundRetryAndNetworkRestoreRecovery() = runTest {
+        val observedRequests = mutableListOf<Pair<String, Boolean>>()
+        var latestAttemptCount = 0
+        withMockHttp({ url, _, _, headers ->
+            val isBg = headers["Discourse-Background"] == "true"
+            synchronized(observedRequests) {
+                observedRequests.add(url to isBg)
+            }
+            when {
+                url.contains("/site.json") -> 200 to """{"categories":[]}"""
+                url.contains("/emojis.json") -> 200 to """{"default":[{"name":"smile","url":"/images/emoji/twitter/smile.png"}]}"""
+                url.contains("/badges.json") -> 200 to """{"badges":[],"badge_groupings":[]}"""
+                url.contains("/user-badges/") -> 200 to """{"user_badges":[],"badges":[],"badge_types":[]}"""
+                url.contains("/latest.json") -> {
+                    latestAttemptCount++
+                    if (latestAttemptCount == 1) {
+                        // Simulate transient VPN/5G drop on attempt 0
+                        0 to ""
+                    } else {
+                        200 to """
+                            {
+                              "users":[{"id":1,"username":"neo","avatar_template":"/user_avatar/linux.do/neo/{size}/136369_2.png"}],
+                              "topic_list":{"topics":[{"id":9901,"title":"Resilient Topic","posts_count":5,"highest_post_number":5,"posters":[{"description":"Original Poster","user_id":1}]}]}
+                            }
+                        """.trimIndent()
+                    }
+                }
+                url.contains("/429_probe.json") -> 429 to """{"errors":["Slow down"]}"""
+                else -> 404 to """{"errors":["not found"]}"""
+            }
+        }) {
+            // 1. Background sync endpoints must carry Discourse-Background: true so Android isolates them in background semaphore
+            LinuxDoRepository.syncSiteCategories(force = true, background = true)
+            LinuxDoRepository.syncSiteEmojis(force = true, background = true)
+            LinuxDoRepository.fetchAllSiteBadges(force = true, background = true)
+            LinuxDoRepository.fetchUserBadges("neo_bg_probe", background = true)
+
+            val bgByPath = synchronized(observedRequests) { observedRequests.toList() }
+            assertTrue(bgByPath.any { it.first.contains("/site.json") && it.second }, "syncSiteCategories must mark Discourse-Background=true")
+            assertTrue(bgByPath.any { it.first.contains("/emojis.json") && it.second }, "syncSiteEmojis must mark Discourse-Background=true")
+            assertTrue(bgByPath.any { it.first.contains("/badges.json") && it.second }, "fetchAllSiteBadges(background=true) must mark Discourse-Background=true")
+            assertTrue(bgByPath.any { it.first.contains("/user-badges/") && it.second }, "fetchUserBadges(background=true) must mark Discourse-Background=true")
+
+            // 2. Foreground fetchTopics must automatically retry transient connection drop (status 0) and succeed without throwing NetworkError
+            val topics = LinuxDoRepository.fetchTopics(path = FeedSortFilter.LATEST.apiPath, categoryId = null, page = 0)
+            assertEquals(2, latestAttemptCount, "Foreground read must retry once after transient drop")
+            assertEquals(1, topics.size)
+            assertEquals(9901, topics.first().id)
+
+            // 3. Network restore signal clears transient rate limit lock and notifies UI listener
+            runCatching {
+                LinuxDoRepository.fetchTopics(path = "/429_probe.json", categoryId = null, page = 0)
+            }
+            assertTrue(LinuxDoRepository.isRateLimitedNow())
+            var restoreCount = 0
+            val prevRestore = UserApiKeyAuthManager.onNetworkRestored
+            try {
+                UserApiKeyAuthManager.onNetworkRestored = { restoreCount++ }
+                UserApiKeyAuthManager.notifyNetworkRestored()
+                assertFalse(LinuxDoRepository.isRateLimitedNow(), "notifyNetworkRestored must clear transient rate limit cooldown")
+                assertEquals(1, restoreCount)
+            } finally {
+                UserApiKeyAuthManager.onNetworkRestored = prevRestore
+            }
+        }
+    }
+
+    @Test
+    fun r7_barPhoneAndDualFoldLayoutAdaptationAndSplitDragBounds() {
+        // 1. Android bar phones portrait -> Single-column mobile layout
+        assertFalse(shouldUseWideSplitLayout(widthDp = 360f, heightDp = 800f))
+        assertFalse(shouldUseWideSplitLayout(widthDp = 393f, heightDp = 873f))
+        assertFalse(shouldUseWideSplitLayout(widthDp = 412f, heightDp = 915f))
+
+        // 2. Android dual-fold folded cover screens -> Single-column mobile layout
+        assertFalse(shouldUseWideSplitLayout(widthDp = 344f, heightDp = 832f)) // Galaxy Z Fold cover
+        assertFalse(shouldUseWideSplitLayout(widthDp = 390f, heightDp = 844f)) // Mate X / Find N cover
+
+        // 3. Android dual-fold unfolded inner screens (BOTH portrait ~673-760dp and landscape ~765-880dp) -> Dual-pane master-detail
+        assertTrue(shouldUseWideSplitLayout(widthDp = 673f, heightDp = 829f))  // Galaxy Z Fold unfolded portrait
+        assertTrue(shouldUseWideSplitLayout(widthDp = 712f, heightDp = 765f))  // Find N / OnePlus Open unfolded portrait
+        assertTrue(shouldUseWideSplitLayout(widthDp = 736f, heightDp = 816f))  // Mate X / vivo X Fold unfolded portrait
+        assertTrue(shouldUseWideSplitLayout(widthDp = 829f, heightDp = 673f))  // Dual-fold unfolded landscape
+
+        // 4. Dual-fold split-screen multi-window half-pane -> Single-column mobile layout
+        assertFalse(shouldUseWideSplitLayout(widthDp = 356f, heightDp = 829f))
+
+        // 5. Dual-fold portrait inner screen (~673dp - 64dp compact rail = 609dp content width) must have smooth drag range >= 70dp
+        val zFoldContentDp = 609f
+        val (minLeft, maxLeft) = computeSplitPaneBoundsDp(zFoldContentDp)
+        assertTrue(maxLeft - minLeft >= 70f, "Dual-fold portrait inner screen must provide >=70dp drag range, got ${maxLeft - minLeft}")
+        val defaultLeft = computeSplitPaneLeftWidthDp(zFoldContentDp, DEFAULT_SPLIT_PANE_FRACTION)
+        assertTrue(defaultLeft in minLeft..maxLeft)
+        val draggedFraction = computeUpdatedSplitFractionAfterDrag(zFoldContentDp, defaultLeft, 36f)
+        val afterDragLeft = computeSplitPaneLeftWidthDp(zFoldContentDp, draggedFraction)
+        assertTrue(afterDragLeft > defaultLeft + 30f)
+    }
+
+    @Test
+    fun r7_transientErrorClassificationAndSelfHealingManualRecovery() = runTest {
+        // 1. Every transient ApiFailureKind message must be recognized for automatic & manual recovery
+        assertTrue(isTransientRecoverableLoadError(ApiReadException(ApiFailureKind.Connection).message))
+        assertTrue(isTransientRecoverableLoadError(ApiReadException(ApiFailureKind.RateLimited).message))
+        assertTrue(isTransientRecoverableLoadError(ApiReadException(ApiFailureKind.Server).message))
+        assertTrue(isTransientRecoverableLoadError(ApiReadException(ApiFailureKind.InvalidPayload).message))
+        assertTrue(isTransientRecoverableLoadError("网络异常"))
+        assertTrue(isTransientRecoverableLoadError("加载失败"))
+        assertTrue(isTransientRecoverableLoadError("请求太频繁，请稍后再试"))
+
+        // 2. Deterministic auth / permission / Cloudflare verification / 404 errors must NOT loop-retry blindly
+        assertFalse(isTransientRecoverableLoadError(ApiReadException(ApiFailureKind.Verification).message))
+        assertFalse(isTransientRecoverableLoadError("需要完成站点验证"))
+        assertFalse(isTransientRecoverableLoadError(ApiReadException(ApiFailureKind.Authentication).message))
+        assertFalse(isTransientRecoverableLoadError(ApiReadException(ApiFailureKind.PermissionDenied).message))
+        assertFalse(isTransientRecoverableLoadError("当前信任等级暂无权访问该版块"))
+        assertFalse(isTransientRecoverableLoadError("这篇话题已不可用"))
+        assertFalse(isTransientRecoverableLoadError(null))
+
+        // 3. Poisoned transport self-heals via onPrepareManualRecovery between attempt 0 (status 0) and attempt 1 (status 200)
+        var transportPoisoned = true
+        var recoveryCalls = 0
+        val prevRecovery = UserApiKeyAuthManager.onPrepareManualRecovery
+        try {
+            UserApiKeyAuthManager.onPrepareManualRecovery = {
+                recoveryCalls++
+                transportPoisoned = false
+            }
+            withMockHttp({ url, _, _, _ ->
+                if (url.contains("/latest.json")) {
+                    if (transportPoisoned) {
+                        0 to ""
+                    } else {
+                        200 to """
+                            {
+                              "users":[{"id":1,"username":"neo","avatar_template":"/user_avatar/linux.do/neo/{size}/136369_2.png"}],
+                              "topic_list":{"topics":[{"id":9902,"title":"Recovered After Poisoned Bridge","posts_count":2,"highest_post_number":2,"posters":[{"description":"Original Poster","user_id":1}]}]}
+                            }
+                        """.trimIndent()
+                    }
+                } else if (url.contains("/429_seed.json")) {
+                    429 to """{"errors":["Slow down"]}"""
+                } else {
+                    404 to """{"errors":["not found"]}"""
+                }
+            }) {
+                val recoveredTopics = LinuxDoRepository.fetchTopics(path = FeedSortFilter.LATEST.apiPath, categoryId = null, page = 0)
+                assertEquals(1, recoveryCalls, "Transport failure on attempt 0 must invoke onPrepareManualRecovery before attempt 1")
+                assertEquals(1, recoveredTopics.size)
+                assertEquals(9902, recoveredTopics.first().id)
+
+                // Manual refresh preparation also clears transient 429 cooldown and invokes transport health check
+                runCatching { LinuxDoRepository.fetchTopics(path = "/429_seed.json", categoryId = null, page = 0) }
+                assertTrue(LinuxDoRepository.isRateLimitedNow())
+                LinuxDoRepository.prepareForManualRecovery()
+                assertFalse(LinuxDoRepository.isRateLimitedNow())
+                assertEquals(2, recoveryCalls)
+            }
+        } finally {
+            UserApiKeyAuthManager.onPrepareManualRecovery = prevRecovery
+        }
+    }
+
+    @Test
+    fun r7_linuxDoImagesNeverLeakToOkHttpWhenWebViewBinaryBridgeMounted() = runTest {
+        val prevBinary = UserApiKeyAuthManager.webViewBinaryFetcher
+        var bridgeCalls = 0
+        try {
+            // Simulate WebView binary bridge timeout returning null for a linux.do emoji/upload asset
+            UserApiKeyAuthManager.webViewBinaryFetcher = {
+                bridgeCalls++
+                null
+            }
+            val resp = LinuxDoRepository.imageHttpClient.get(
+                "https://linux.do/images/emoji/twitter/rocket.png?v=12&_r=12345"
+            )
+            // Must immediately return synthetic 504 from interceptor rather than dialing linux.do with OkHttp Java TLS + Chrome UA
+            assertEquals(504, resp.status.value)
+            assertEquals(1, bridgeCalls)
+        } finally {
+            UserApiKeyAuthManager.webViewBinaryFetcher = prevBinary
+        }
     }
 }

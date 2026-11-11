@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.model.TopicUser
 import do_.linux.lindo.core.model.UserNotificationItem
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.ui.components.LinDoIcons
@@ -73,9 +74,40 @@ internal fun LinDoNotificationRow(
     onInspectUser: ((String) -> Unit)? = null
 ) {
     val palette = LocalPalette.current
-    val actor = item.actorUsername
-    val initialAvatarTemplate = remember(actor, item.actingAvatarTemplate) {
-        item.actingAvatarTemplate?.takeIf { it.isNotBlank() }
+    val canResolvePostAuthor = item.actorUsername == null &&
+        item.notificationType in setOf(17, 36, 801, 802) &&
+        (item.originalPostId > 0 || item.topicId > 0)
+    var resolvedActorUser by remember(item.id, item.actingUsername) {
+        mutableStateOf<TopicUser?>(null)
+    }
+    var postAuthorResolveDone by remember(item.id, canResolvePostAuthor) {
+        mutableStateOf(!canResolvePostAuthor)
+    }
+    if (canResolvePostAuthor && !postAuthorResolveDone) {
+        LaunchedEffect(item.id) {
+            resolvedActorUser = LinuxDoRepository.resolveNotificationActor(item)
+            postAuthorResolveDone = true
+        }
+    }
+
+    val effectiveItem = remember(item, resolvedActorUser) {
+        val u = resolvedActorUser
+        if (u != null && u.username.isNotBlank()) {
+            item.copy(
+                actingUsername = u.username,
+                actingAvatarTemplate = u.avatarTemplate.takeIf { it.isNotBlank() } ?: item.actingAvatarTemplate,
+                actingPrimaryGroupName = u.primaryGroupName ?: item.actingPrimaryGroupName,
+                actingAnimatedAvatar = u.animatedAvatar ?: item.actingAnimatedAvatar,
+                actingFlair = if (u.flair.hasFlair) u.flair else item.actingFlair
+            )
+        } else {
+            item
+        }
+    }
+
+    val actor = effectiveItem.actorUsername
+    val initialAvatarTemplate = remember(actor, effectiveItem.actingAvatarTemplate) {
+        effectiveItem.actingAvatarTemplate?.takeIf { it.isNotBlank() }
             ?: actor?.let { LinuxDoRepository.getCachedUserAvatar(it) }
     }
     var resolvedAvatarTemplate by remember(actor, initialAvatarTemplate) {
@@ -93,10 +125,10 @@ internal fun LinDoNotificationRow(
             avatarResolveDone = true
         }
     }
-    val activity = remember(item, actor, palette.inkPrimary) {
+    val activity = remember(effectiveItem, actor, palette.inkPrimary) {
         buildAnnotatedString {
             if (actor != null) {
-                val displayActor = item.actingUsername
+                val displayActor = effectiveItem.actingUsername
                     .takeUnless { UserNotificationItem.CONSOLIDATED_NOTIFICATION_ACTOR_REGEX.matches(it.trim()) }
                     ?: actor
                 withStyle(SpanStyle(color = palette.inkPrimary, fontWeight = FontWeight.SemiBold)) {
@@ -104,16 +136,16 @@ internal fun LinDoNotificationRow(
                 }
                 append(" ")
             }
-            append(item.typeLabel)
+            append(effectiveItem.typeLabel)
         }
     }
-    val title = item.title
-    val excerpt = item.excerpt.takeUnless { it.isBlank() || it.equals(title, ignoreCase = true) }
+    val title = effectiveItem.title
+    val excerpt = effectiveItem.excerpt.takeUnless { it.isBlank() || it.equals(title, ignoreCase = true) }
 
     Row(
         modifier = Modifier.fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .semantics { stateDescription = if (item.read) "已读" else "未读" }
+            .semantics { stateDescription = if (effectiveItem.read) "已读" else "未读" }
             .padding(start = 12.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.Top
@@ -130,12 +162,21 @@ internal fun LinDoNotificationRow(
                 SmartAvatar(
                     username = actor,
                     avatarTemplate = resolvedAvatarTemplate,
+                    animatedAvatar = effectiveItem.actingAnimatedAvatar,
+                    primaryGroupName = effectiveItem.actingPrimaryGroupName,
+                    size = 36.dp,
+                    enableAnimations = false
+                )
+            } else if (!postAuthorResolveDone) {
+                SmartAvatar(
+                    username = "L",
+                    avatarTemplate = null,
                     animatedAvatar = null,
                     size = 36.dp,
                     enableAnimations = false
                 )
             } else {
-                val icon = resolveNotificationIcon(item)
+                val icon = resolveNotificationIcon(effectiveItem)
                 Box(
                     modifier = Modifier
                         .size(36.dp)
