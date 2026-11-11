@@ -1,5 +1,6 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -30,9 +31,10 @@ import org.jetbrains.compose.resources.painterResource
 
 private val BrandGold = Color(0xFFF6B73C)
 private val BrandInk = Color(0xFF342820)
-private fun brandCanvas(dark: Boolean) = if (dark) Color(0xFF191815) else Color(0xFFFFFCF7)
-private fun brandText(dark: Boolean) = if (dark) Color(0xFFF5F0E8) else BrandInk
-private fun brandSecondary(dark: Boolean) = if (dark) Color(0xFFB8AFA2) else Color(0xFF746C61)
+private fun brandCanvas(dark: Boolean) = if (dark) Color(0xFF0A0B0E) else Color(0xFFFFFFFF)
+private fun brandText(dark: Boolean) = if (dark) Color(0xFFF3F4F6) else Color(0xFF1A1B1E)
+private fun brandSecondary(dark: Boolean) = if (dark) Color(0xFF9CA3AF) else Color(0xFF5C626E)
+private fun brandBorder(dark: Boolean) = if (dark) Color(0xFF262A33) else Color(0xFFE3E6ED)
 
 /** The exact same vector paths are used by SVG, Compose and Android adaptive icons. */
 @Composable
@@ -46,19 +48,36 @@ internal fun LinDoGlassAppIcon(tileSize: Dp = 84.dp, isCircle: Boolean = false, 
 }
 
 /**
- * Lindo 经典 Linux.do 双色品牌字标 (`Lin` + `do`)，字距舒展、克制耐看
+ * Lindo 经典 Linux.do 双色品牌字标 (`Lin` + `do`)，字距舒展、`do` 随全局主题色实时联动
  */
 @Composable
 fun LindoColorWordmarkText(
-    isDark: Boolean = false,
+    isDark: Boolean = LocalPalette.current.isDark,
     fontSizeSp: Float = 22f,
+    linColor: Color? = null,
+    doColor: Color? = null,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalPalette.current
+    val resolvedLinColor = linColor ?: if (palette.isDark == isDark) {
+        palette.inkPrimary
+    } else if (isDark) {
+        Color(0xFFF3F4F6)
+    } else {
+        Color(0xFF1A1B1E)
+    }
+    val resolvedDoColor = doColor ?: if (palette.isDark == isDark) {
+        palette.logoDoColor
+    } else if (isDark) {
+        Color(0xFFF6B73C)
+    } else {
+        Color(0xFFF0A020)
+    }
     val styled = buildAnnotatedString {
-        withStyle(SpanStyle(color = if (isDark) Color(0xFFF8FAFC) else Color(0xFF201D19))) {
+        withStyle(SpanStyle(color = resolvedLinColor)) {
             append("Lin")
         }
-        withStyle(SpanStyle(color = if (isDark) Color(0xFFF6B73C) else Color(0xFFF0A020))) {
+        withStyle(SpanStyle(color = resolvedDoColor)) {
             append("do")
         }
     }
@@ -123,24 +142,26 @@ internal fun LinDoWelcomeScreen(
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
     onToggleDark: () -> Unit,
-    onOpenAppIcon: (() -> Unit)? = null
+    onOpenAppIcon: (() -> Unit)? = null,
+    onGuestBrowse: (() -> Unit)? = null
 ) {
     BoxWithConstraints(Modifier.fillMaxSize().background(brandCanvas(isDark))
         .windowInsetsPadding(WindowInsets.statusBars).windowInsetsPadding(WindowInsets.navigationBars)) {
         val artwork = LocalLinDoAppIcon.current?.artwork
         val heroSize = if (artwork == null) {
-            if (maxHeight < 660.dp) 212.dp else 264.dp
+            if (maxHeight < 680.dp) 172.dp else 220.dp
         } else {
-            if (maxHeight < 660.dp) 176.dp else 212.dp
+            if (maxHeight < 680.dp) 148.dp else 188.dp
         }
+        val actionShape = RoundedCornerShape(16.dp)
         Column(Modifier.align(Alignment.Center).widthIn(max = 440.dp).fillMaxSize()
             .padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 16.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
                 LinDoBrandWordmark(isDark = isDark, modifier = Modifier.weight(1f))
                 if (onOpenAppIcon != null) {
                     IconButton(onClick = onOpenAppIcon, modifier = Modifier.size(48.dp)) {
-                        Icon(LinDoIcons.Image, contentDescription = "应用图标",
-                            tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
+                        Icon(LinDoIcons.AppsGrid, contentDescription = "应用图标",
+                            tint = brandSecondary(isDark), modifier = Modifier.size(20.dp))
                     }
                 }
                 IconButton(onClick = onToggleDark, modifier = Modifier.size(48.dp)) {
@@ -150,7 +171,7 @@ internal fun LinDoWelcomeScreen(
                 }
             }
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 20.dp),
+                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
                     if (artwork != null) {
                         LinDoIconArtworkImage(artwork, Modifier.size(heroSize))
@@ -158,29 +179,73 @@ internal fun LinDoWelcomeScreen(
                         Image(painterResource(Res.drawable.lindo_mascot_welcome), "零度娘向你挥手",
                             Modifier.size(heroSize), contentScale = ContentScale.Fit)
                     }
-                    Spacer(Modifier.height(20.dp))
+                    Spacer(Modifier.height(18.dp))
                     Text("你好，佬友。", fontSize = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp,
                         color = brandText(isDark), textAlign = TextAlign.Center, lineHeight = 36.sp)
-                    Spacer(Modifier.height(10.dp))
-                    Text("欢迎来到 Lindo · 连接 LINUX DO，发现有趣的讨论。", fontSize = 14.sp, lineHeight = 23.sp,
+                    Spacer(Modifier.height(8.dp))
+                    Text("欢迎来到 Lindo · 连接 LINUX DO，发现有趣的讨论。", fontSize = 14.sp, lineHeight = 22.sp,
                         color = brandSecondary(isDark), textAlign = TextAlign.Center)
                 }
             }
-            Button(onClick = onPrimaryWebLogin, modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = BrandGold, contentColor = BrandInk),
-                shape = RoundedCornerShape(18.dp), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)) {
-                Text("使用 LINUX DO 登录", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(12.dp))
-                Icon(LinDoIcons.ArrowRight, contentDescription = null, modifier = Modifier.size(19.dp))
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onPrimaryWebLogin,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandGold, contentColor = BrandInk),
+                    shape = actionShape,
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)
+                ) {
+                    Text("使用 LINUX DO 登录", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(10.dp))
+                    Icon(LinDoIcons.ArrowRight, contentDescription = null, modifier = Modifier.size(18.dp))
+                }
+                OutlinedButton(
+                    onClick = onBrowserOneClickAuth,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                    shape = actionShape,
+                    border = BorderStroke(1.dp, brandBorder(isDark)),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = brandText(isDark)
+                    ),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
+                ) {
+                    Icon(
+                        LinDoIcons.Globe,
+                        contentDescription = null,
+                        tint = brandSecondary(isDark),
+                        modifier = Modifier.size(17.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("系统浏览器授权", fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                }
+                if (onGuestBrowse != null) {
+                    OutlinedButton(
+                        onClick = onGuestBrowse,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                        shape = actionShape,
+                        border = BorderStroke(1.dp, brandBorder(isDark)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = brandText(isDark)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
+                    ) {
+                        Icon(
+                            LinDoIcons.Eye,
+                            contentDescription = null,
+                            tint = brandSecondary(isDark),
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("以游客模式浏览", fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
             }
-            Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onBrowserOneClickAuth, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                colors = ButtonDefaults.textButtonColors(contentColor = brandSecondary(isDark))) {
-                Icon(LinDoIcons.ExternalLink, contentDescription = null, modifier = Modifier.size(15.dp))
-                Spacer(Modifier.width(7.dp))
-                Text("使用系统浏览器授权", fontSize = 13.sp)
-            }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
             Text("LINUX DO 第三方客户端", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                 fontSize = 10.sp, letterSpacing = 0.7.sp, color = brandSecondary(isDark))
         }

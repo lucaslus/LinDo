@@ -19,6 +19,10 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import do_.linux.lindo.core.network.ComposerTagChoices
 import do_.linux.lindo.core.network.ComposerTagOption
 import do_.linux.lindo.core.network.LinuxDoCategoryMeta
+import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
 
@@ -43,6 +48,7 @@ internal fun ComposerCategoryPicker(
     selectedId: Int?,
     enabled: Boolean,
     onSelect: (LinuxDoCategoryMeta) -> Unit,
+    onFocusSelectParent: ((LinuxDoCategoryMeta) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -54,6 +60,44 @@ internal fun ComposerCategoryPicker(
         containerColor = palette.cardSurface,
         contentColor = palette.inkPrimary
     ) {
+        ComposerCategoryPickerContent(
+            categories = categories,
+            selectedId = selectedId,
+            enabled = enabled,
+            onSelect = onSelect,
+            onFocusSelectParent = onFocusSelectParent,
+            onDismiss = onDismiss
+        )
+    }
+}
+
+@Composable
+internal fun ComposerCategoryPickerContent(
+    categories: List<LinuxDoCategoryMeta>,
+    selectedId: Int?,
+    enabled: Boolean,
+    onSelect: (LinuxDoCategoryMeta) -> Unit,
+    onFocusSelectParent: ((LinuxDoCategoryMeta) -> Unit)? = null,
+    onDismiss: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val catalogVersion = LinuxDoRepository.categoryCatalogVersion
+    val postableCategories = remember(categories, catalogVersion) {
+        categories.filter { it.id > 0 && (it.isVerifiedFromServer || !it.readRestricted) }
+            .ifEmpty { categories.filter { it.id > 0 } }
+    }
+    val initialParentId = remember(selectedId, postableCategories, catalogVersion) {
+        LinuxDoRepository.resolveParentCategoryId(selectedId) ?: postableCategories.firstOrNull()?.id
+    }
+    var focusedParentId by remember(initialParentId) { mutableStateOf(initialParentId) }
+    val focusedParent = remember(focusedParentId, postableCategories, catalogVersion) {
+        postableCategories.firstOrNull { it.id == focusedParentId } ?: postableCategories.firstOrNull()
+    }
+    val focusedSubCategories = remember(focusedParent?.id, catalogVersion) {
+        focusedParent?.id?.let { LinuxDoRepository.getPostableSubCategoriesForParent(it) }.orEmpty()
+    }
+
+    LinDoScaledPopupContent {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -91,12 +135,106 @@ internal fun ComposerCategoryPicker(
             }
 
             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-            Spacer(modifier = Modifier.height(6.dp))
+
+            // 二级子版块 / 信任等级单行内联选择条（与发现页版块设计统一，无灰底教学框）
+            if (focusedParent != null && focusedSubCategories.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 2.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Text(
+                        text = "${focusedParent.name}：",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkSecondary,
+                        maxLines = 1
+                    )
+                    val parentSelected = selectedId == focusedParent.id
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .clickable(enabled = enabled) { onSelect(focusedParent) }
+                            .padding(vertical = 2.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            if (focusedParent.readRestricted) {
+                                Icon(
+                                    imageVector = LinDoIcons.FaLock,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(10.dp),
+                                    tint = if (parentSelected) palette.activeChipText else palette.inkTertiary
+                                )
+                            }
+                            Text(
+                                text = "主版块",
+                                fontSize = 12.5.sp,
+                                fontWeight = if (parentSelected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (parentSelected) palette.activeChipText else palette.inkPrimary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Box(
+                            modifier = Modifier
+                                .width(14.dp)
+                                .height(2.dp)
+                                .clip(CircleShape)
+                                .background(if (parentSelected) palette.tabIndicatorColor else androidx.compose.ui.graphics.Color.Transparent)
+                        )
+                    }
+
+                    focusedSubCategories.forEach { subCat ->
+                        val subSelected = selectedId == subCat.id
+                        val subLabel = subCat.subLabel ?: subCat.name.substringAfter(",", subCat.name).trim()
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clickable(enabled = enabled) { onSelect(subCat) }
+                                .padding(vertical = 2.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                if (subCat.readRestricted || subCat.trustLevel != null) {
+                                    Icon(
+                                        imageVector = LinDoIcons.FaLock,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(10.dp),
+                                        tint = if (subSelected) palette.activeChipText else palette.inkTertiary
+                                    )
+                                }
+                                Text(
+                                    text = subLabel,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = if (subSelected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (subSelected) palette.activeChipText else palette.inkPrimary
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Box(
+                                modifier = Modifier
+                                    .width(14.dp)
+                                    .height(2.dp)
+                                    .clip(CircleShape)
+                                    .background(if (subSelected) palette.tabIndicatorColor else androidx.compose.ui.graphics.Color.Transparent)
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+            }
 
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val minimumCellWidth = 148 * LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val columns = (maxWidth.value / minimumCellWidth).toInt().coerceIn(2, 3)
-                val categoryRows = categories.chunked(columns)
+                val categoryRows = postableCategories.chunked(columns)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -110,7 +248,9 @@ internal fun ComposerCategoryPicker(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             group.forEachIndexed { colIdx, category ->
-                                val selected = selectedId == category.id
+                                val subCats = LinuxDoRepository.getPostableSubCategoriesForParent(category.id)
+                                val activeSubOfThisParent = subCats.firstOrNull { it.id == selectedId }
+                                val selected = selectedId == category.id || activeSubOfThisParent != null
                                 val dotColor = LinuxDoSiteRules.parseHexColor(category.colorHex)
                                 val (catIcon, officialColor, isRestricted) = resolveOfficialCategoryVisual(
                                     categoryName = category.name,
@@ -122,12 +262,18 @@ internal fun ComposerCategoryPicker(
                                     modifier = Modifier
                                         .weight(1f)
                                         .heightIn(min = 46.dp)
-                                        .background(
-                                            if (selected) palette.brandGold.copy(alpha = 0.10f)
-                                            else palette.cardSurface
-                                        )
+                                        .background(palette.cardSurface)
                                         .selectable(selected, enabled = enabled, role = Role.RadioButton) {
-                                            onSelect(category)
+                                            if (subCats.isNotEmpty() && focusedParentId != category.id) {
+                                                focusedParentId = category.id
+                                                if (onFocusSelectParent != null) {
+                                                    onFocusSelectParent(category)
+                                                } else {
+                                                    onSelect(category)
+                                                }
+                                            } else {
+                                                onSelect(category)
+                                            }
                                         }
                                         .padding(horizontal = 10.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -149,19 +295,46 @@ internal fun ComposerCategoryPicker(
                                     }
                                     Text(
                                         text = category.name,
-                                        color = if (selected) palette.brandGold else palette.inkPrimary,
+                                        color = if (selected) palette.activeChipText else palette.inkPrimary,
                                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                                         fontSize = 13.5.sp,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f)
                                     )
-                                    if (selected) {
+                                    if (activeSubOfThisParent != null) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = LinDoIcons.FaLock,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(9.5.dp),
+                                                tint = palette.activeChipText
+                                            )
+                                            Text(
+                                                text = activeSubOfThisParent.subLabel ?: "Lv",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = palette.activeChipText
+                                            )
+                                        }
+                                    } else if (subCats.isNotEmpty()) {
+                                        val lvs = subCats.mapNotNull { it.trustLevel }.sorted()
+                                        val hint = if (lvs.size >= 2) "Lv${lvs.first()}-${lvs.last()}" else "Lv"
+                                        Text(
+                                            text = hint,
+                                            fontSize = 10.5.sp,
+                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                            color = if (selected) palette.activeChipText else palette.inkTertiary
+                                        )
+                                    } else if (selectedId == category.id) {
                                         Icon(
                                             imageVector = LinDoIcons.Check,
                                             contentDescription = "已选中",
                                             modifier = Modifier.size(15.dp),
-                                            tint = palette.brandGold
+                                            tint = palette.activeChipText
                                         )
                                     }
                                 }
@@ -217,6 +390,7 @@ internal fun ComposerTagPicker(
         containerColor = palette.cardSurface,
         contentColor = palette.inkPrimary
     ) {
+        LinDoScaledPopupContent {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -545,6 +719,7 @@ internal fun ComposerTagPicker(
                     }
                 }
             }
+        }
         }
     }
 }

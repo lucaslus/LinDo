@@ -6,12 +6,21 @@ import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.GrantedBadge
+import do_.linux.lindo.core.model.PostItemModel
+import do_.linux.lindo.core.model.afterTailUnloadedStreamIds
+import do_.linux.lindo.core.model.decodeDiscourseHtmlSnippet
+import do_.linux.lindo.core.model.middleGapStreamIdsBetween
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.CookieVariant
+import do_.linux.lindo.core.network.LinuxDoRepository
+import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.render.DiscourseAstParser
 import do_.linux.lindo.core.render.PostBlockNode
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
+import io.ktor.client.request.get
+import io.ktor.client.statement.readRawBytes
+import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
@@ -224,5 +233,269 @@ class LinDoCoreTest {
         assertEquals(146, grant.id)
         assertEquals(2, grant.count)
         assertTrue(grant.isFirstTimeGrant)
+
+        val trustBadge = badge(
+            """{"id":1,"name":"基本用户","description":"<a href=\"https://blog.discourse.org/2018/06/understanding-discourse-trust-levels/\">已授予</a>所有基本社区功能"}"""
+        )
+        assertEquals("已授予所有基本社区功能", trustBadge.description)
+        assertEquals("已授予所有基本社区功能", trustBadge.plainDescription)
+    }
+
+    @Test
+    fun binaryImageFetcherUsesWebViewBridgeAndCachesBytes() = runTest {
+        val prev = UserApiKeyAuthManager.webViewBinaryFetcher
+        var calls = 0
+        try {
+            UserApiKeyAuthManager.webViewBinaryFetcher = { url ->
+                calls++
+                assertEquals("https://linux.do/user_avatar/linux.do/tester/120/99_2.png", url)
+                UserApiKeyAuthManager.BinaryHttpPayload(
+                    status = 200,
+                    contentType = "image/png",
+                    bytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)
+                )
+            }
+            val resp1 = LinuxDoRepository.imageHttpClient.get("https://linux.do/user_avatar/linux.do/tester/120/99_2.png")
+            val resp2 = LinuxDoRepository.imageHttpClient.get("https://linux.do/user_avatar/linux.do/tester/120/99_2.png?_r=1")
+            assertEquals(200, resp1.status.value)
+            assertEquals(200, resp2.status.value)
+            assertEquals(1, calls)
+            assertEquals(4, resp1.readRawBytes().size)
+            assertEquals(4, resp2.readRawBytes().size)
+        } finally {
+            UserApiKeyAuthManager.webViewBinaryFetcher = prev
+        }
+    }
+
+    @Test
+    fun emojiPickerGroupsUseDistinctOfficialIconsAndNeverSparklePrefix() {
+        LinuxDoEmojiCatalog.registerDynamicServerEmojis(
+            linkedMapOf(
+                "smileys_&_emotion" to listOf("grinning" to "/images/emoji/twemoji/grinning.png"),
+                "people_&_body" to listOf("wave" to "/images/emoji/twemoji/wave.png"),
+                "animals_&_nature" to listOf("bear" to "/images/emoji/twemoji/bear.png"),
+                "food_&_drink" to listOf("hamburger" to "/images/emoji/twemoji/hamburger.png"),
+                "feishu" to listOf("feishu_001" to "/uploads/default/original/feishu_001.png"),
+                "bilibili" to listOf("bili_057" to "/uploads/default/original/bili_057.png"),
+                "tieba" to listOf("tieba_087" to "/uploads/default/original/tieba_087.png")
+            )
+        )
+        val groups = LinuxDoEmojiCatalog.getPickerGroups()
+        assertTrue(groups.none { it.labelZh.contains("✨") })
+        val iconKeysByLabel = groups.associate { it.labelZh to it.iconKey }
+        assertEquals("feishu", iconKeysByLabel["飞书"])
+        assertEquals("bilibili", iconKeysByLabel["B站"])
+        assertEquals("tieba", iconKeysByLabel["贴吧"])
+        assertEquals("smileys", iconKeysByLabel["笑脸"])
+        assertEquals("people", iconKeysByLabel["人物与手势"])
+        assertEquals("animals", iconKeysByLabel["动物与自然"])
+        assertEquals("food", iconKeysByLabel["食物与饮品"])
+    }
+
+    @Test
+    fun categoryHierarchySupportsLv1Lv2Lv3SubCategories() {
+        val welfareSubs = LinuxDoRepository.getSubCategoriesForParent(36)
+        assertEquals(listOf("Lv1", "Lv2", "Lv3"), welfareSubs.map { it.subLabel })
+        val lv2 = LinuxDoRepository.findCategoryById(68)
+        assertNotNull(lv2)
+        assertEquals(36, lv2.parentId)
+        assertEquals(36, LinuxDoRepository.resolveParentCategoryId(68))
+        val resourceSubs = LinuxDoRepository.getSubCategoriesForParent(14)
+        assertTrue(resourceSubs.any { it.subLabel == "网盘" })
+        assertTrue(resourceSubs.any { it.subLabel == "Lv1" })
+        assertEquals("福利羊毛 · Lv2", lv2.displayName)
+    }
+
+    @Test
+    fun decodeDiscourseHtmlSnippetDecodesNumericHexNamedEntitiesAndEmojis() {
+        val raw = """It&#39;s &ldquo;Lindo&rdquo; &#x2014; <a href="https://linux.do">社区</a> <img class="emoji" alt=":tieba_087:"> &amp; more"""
+        val decoded = decodeDiscourseHtmlSnippet(raw)
+        assertEquals("""It's “Lindo” — 社区 :tieba_087: & more""", decoded)
+    }
+
+    @Test
+    fun topicStreamTailAndMiddleGapPreventJumpCascade() {
+        val streamIds = (1..600).toList()
+        fun stubPost(id: Int) = PostItemModel(
+            id = id,
+            postNumber = id,
+            userId = 1,
+            username = "tester",
+            displayName = "Tester",
+            avatarTemplate = "",
+            createdAtText = "1h",
+            cookedHtml = "<p>$id</p>"
+        )
+        val loadedPosts = listOf(stubPost(1), stubPost(2), stubPost(499), stubPost(500))
+        val loadedIds = loadedPosts.map { it.id }.toSet()
+
+        val afterTail = afterTailUnloadedStreamIds(streamIds, loadedPosts, loadedIds)
+        assertEquals((501..600).toList(), afterTail)
+
+        val gapBetween2And499 = middleGapStreamIdsBetween(streamIds, upperPostId = 2, lowerPostId = 499, loadedIds = loadedIds)
+        assertEquals((3..498).toList(), gapBetween2And499)
+
+        val noGap = middleGapStreamIdsBetween(streamIds, upperPostId = 499, lowerPostId = 500, loadedIds = loadedIds)
+        assertEquals(emptyList(), noGap)
+    }
+
+    @Test
+    fun skinToneAndGrinningTwemojiUrlsAreValid() {
+        assertEquals(
+            "https://linux.do/images/emoji/twemoji/wave/2.png?v=12",
+            LinuxDoEmojiCatalog.resolveReactionImageUrl("wave:t2")
+        )
+        assertEquals(
+            "https://linux.do/images/emoji/twemoji/grinning.png?v=12",
+            LinuxDoEmojiCatalog.resolveReactionImageUrl("Grinning")
+        )
+        kotlin.test.assertFalse(LinuxDoEmojiCatalog.isCustomImageEmoji("wave:t2"))
+        kotlin.test.assertNotNull(LinuxDoEmojiCatalog.shortcodeToUnicode(":wave:t2:"))
+    }
+
+    @Test
+    fun binaryImageFetcherPreservesAdjacentQueryParamsWhenStrippingRetryParam() = runTest {
+        val prev = UserApiKeyAuthManager.webViewBinaryFetcher
+        val seenUrls = mutableListOf<String>()
+        try {
+            UserApiKeyAuthManager.webViewBinaryFetcher = { url ->
+                seenUrls += url
+                UserApiKeyAuthManager.BinaryHttpPayload(
+                    status = 200,
+                    contentType = "image/png",
+                    bytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)
+                )
+            }
+            val resp = LinuxDoRepository.imageHttpClient.get("https://linux.do/uploads/default/1.png?size=120&_r=2&v=15")
+            assertEquals(200, resp.status.value)
+            assertEquals(listOf("https://linux.do/uploads/default/1.png?size=120&v=15"), seenUrls)
+        } finally {
+            UserApiKeyAuthManager.webViewBinaryFetcher = prev
+        }
+    }
+
+    @Test
+    fun api403DistinguishesPermissionDeniedAuthAndCloudflareChallenge() {
+        val permErr = kotlin.test.assertFailsWith<do_.linux.lindo.core.network.ApiReadException> {
+            do_.linux.lindo.core.network.readApiObject(
+                403 to """{"errors":["当前信任等级不足以查看该话题"],"error_type":"invalid_access"}"""
+            )
+        }
+        assertEquals(do_.linux.lindo.core.network.ApiFailureKind.PermissionDenied, permErr.kind)
+        assertEquals("当前信任等级不足以查看该话题", permErr.message)
+
+        val authErr = kotlin.test.assertFailsWith<do_.linux.lindo.core.network.ApiReadException> {
+            do_.linux.lindo.core.network.readApiObject(
+                403 to """{"errors":["需要登录"],"error_type":"not_logged_in"}"""
+            )
+        }
+        assertEquals(do_.linux.lindo.core.network.ApiFailureKind.Authentication, authErr.kind)
+
+        val cfErr = kotlin.test.assertFailsWith<do_.linux.lindo.core.network.ApiReadException> {
+            do_.linux.lindo.core.network.readApiObject(
+                403 to "${do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX}<!DOCTYPE html><title>Just a moment...</title>"
+            )
+        }
+        assertEquals(do_.linux.lindo.core.network.ApiFailureKind.Verification, cfErr.kind)
+    }
+
+    @Test
+    fun cookieSentinelRemovesRevokedAuthCookieAndStripsCfCookiesForNonWebView() {
+        CookieSentinel.clearAll()
+        CookieSentinel.ingestRawCookieString("_t=live_token; _forum_session=sess1; cf_clearance=cf_ok")
+        assertTrue(CookieSentinel.resolveWinningCookies().containsKey("_t"))
+
+        val strippedHeader = CookieSentinel.buildCookieHeader(includeCloudflareCookies = false)
+        assertTrue(strippedHeader.contains("_t=live_token"))
+        kotlin.test.assertFalse(strippedHeader.contains("cf_clearance"))
+
+        // Authoritative browser cookie snapshot without _t must drop stale _t instead of resurrecting it
+        CookieSentinel.syncFromAuthoritativeBrowserCookieString("cf_clearance=cf_ok")
+        kotlin.test.assertFalse(CookieSentinel.resolveWinningCookies().containsKey("_t"))
+        assertTrue(CookieSentinel.resolveWinningCookies().containsKey("cf_clearance"))
+        CookieSentinel.clearAll()
+    }
+
+    @Test
+    fun unreadDotOnlyClearsAfterServerConfirmsHighestFloor() = runTest {
+        val prevHttp = UserApiKeyAuthManager.webViewHttpExecutor
+        LinuxDoRepository.clearReadTopics()
+        CookieSentinel.clearAll()
+        CookieSentinel.ingestRawCookieString("_t=valid_test_session")
+        val confirmedEvents = mutableListOf<Pair<Int, Int>>()
+        val prevListener = LinuxDoRepository.onTopicReadFloorConfirmed
+        LinuxDoRepository.onTopicReadFloorConfirmed = { tid, floor -> confirmedEvents += tid to floor }
+        try {
+            var timingsStatus = 500
+            UserApiKeyAuthManager.webViewHttpExecutor = { url, method, _, _ ->
+                when {
+                    url.contains("/t/9001.json") && method == "GET" -> 200 to """
+                        {
+                          "id": 9001,
+                          "title": "Server Sync Unread Test",
+                          "posts_count": 10,
+                          "highest_post_number": 10,
+                          "last_read_post_number": 3,
+                          "post_stream": {
+                            "stream": [1,2,3,4,5,6,7,8,9,10],
+                            "posts": [{"id": 101, "post_number": 1, "username": "alice", "cooked": "<p>Hi</p>"}]
+                          }
+                        }
+                    """.trimIndent()
+                    url.contains("/topics/timings") && method == "POST" -> timingsStatus to "{}"
+                    else -> 404 to "{}"
+                }
+            }
+
+            // 1. Opening topic syncs server's last_read_post_number = 3 (still < 10 -> NOT fully read!)
+            val detail = LinuxDoRepository.fetchTopicDetail(9001)
+            assertEquals(3, detail.lastReadPostNumber)
+            assertEquals(3, LinuxDoRepository.getServerConfirmedReadFloor(9001))
+            kotlin.test.assertFalse(LinuxDoRepository.isTopicRead(9001, highestPostNumber = 10))
+
+            // 2. Failed timings POST (500) must NOT mark floor 10 as read
+            val batch10 = do_.linux.lindo.core.connect.ConsolidatedTimingBatch(9001, 2000, mutableMapOf(10 to 2000))
+            assertEquals(500, LinuxDoRepository.sendTopicTimings(batch10))
+            assertEquals(3, LinuxDoRepository.getServerConfirmedReadFloor(9001))
+            kotlin.test.assertFalse(LinuxDoRepository.isTopicRead(9001, highestPostNumber = 10))
+
+            // 3. Confirmed 200 OK timings POST for floor 10 marks topic fully read
+            timingsStatus = 200
+            assertEquals(200, LinuxDoRepository.sendTopicTimings(batch10))
+            assertEquals(10, LinuxDoRepository.getServerConfirmedReadFloor(9001))
+            assertTrue(LinuxDoRepository.isTopicRead(9001, highestPostNumber = 10))
+            assertTrue(confirmedEvents.contains(9001 to 10))
+        } finally {
+            LinuxDoRepository.onTopicReadFloorConfirmed = prevListener
+            UserApiKeyAuthManager.webViewHttpExecutor = prevHttp
+            LinuxDoRepository.clearReadTopics()
+            CookieSentinel.clearAll()
+        }
+    }
+
+    @Test
+    fun markdownPreviewPreservesTimestampsAndBoostAllows16thEmoji() {
+        val html = do_.linux.lindo.core.render.MarkdownPreview.render("构建时间 09:13:45 完成")
+        assertTrue(html.contains("09:13:45"))
+        kotlin.test.assertFalse(html.contains("<img"))
+
+        val stats15 = do_.linux.lindo.core.model.BoostInputStats.compute("123456789012345")
+        assertEquals(15, stats15.visibleLength)
+        assertTrue(stats15.canAddEmoji)
+
+        val blocks = do_.linux.lindo.core.render.DiscourseAstParser.parseCookedHtml(
+            "<details><summary>展开详情</summary><p>隐藏正文内容</p></details>"
+        )
+        val detailsBlock = blocks.filterIsInstance<do_.linux.lindo.core.render.PostBlockNode.DetailsSpoilerBlock>().firstOrNull()
+        assertNotNull(detailsBlock)
+        assertEquals("展开详情", detailsBlock.title)
+        assertEquals("隐藏正文内容", detailsBlock.innerText)
+
+        val escapedBadge = do_.linux.lindo.core.model.GrantedBadge(
+            id = 1,
+            name = "基本用户",
+            description = "&lt;a href=&quot;https://blog.discourse.org/2018/06/understanding-discourse-trust-levels&quot;&gt;已授予&lt;/a&gt;所有基本社区功能"
+        )
+        assertEquals("已授予所有基本社区功能", escapedBadge.plainDescription)
     }
 }

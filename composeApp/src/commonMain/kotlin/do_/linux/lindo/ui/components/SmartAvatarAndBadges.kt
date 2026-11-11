@@ -25,7 +25,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -58,10 +60,14 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import coil3.compose.LocalPlatformContext
+import coil3.request.ImageRequest
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
 import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
+import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.site.LinuxDoSiteRules
+import kotlinx.coroutines.delay
 
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.allDrawableResources
@@ -85,11 +91,31 @@ fun SmartAvatar(
     enableAnimations: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val requestedPixels = with(LocalDensity.current) { size.roundToPx() }
-    val thumbnailSize = avatarThumbnailSizes.firstOrNull { it >= requestedPixels } ?: 240
+    // 统一缩略图尺寸档位（常规 <=52dp 统一使用 120px，大尺寸个人主页使用 240px），
+    // 确保首页、帖子正文、被回复条、楼中楼、小火箭与通知中心 100% 共享同一 URL 与内存/磁盘缓存！
+    val thumbnailSize = if (size <= 52.dp) 120 else 240
     val motionEnabled = enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused
-    val staticUrl = remember(avatarTemplate, thumbnailSize) {
-        LinuxDoSiteRules.resolveStaticAvatarUrl(avatarTemplate, sizePx = thumbnailSize)
+
+    var effectiveTemplate by remember(username, avatarTemplate) {
+        mutableStateOf(
+            avatarTemplate?.takeIf { it.isNotBlank() }
+                ?: LinuxDoRepository.getCachedUserAvatar(username).orEmpty()
+        )
+    }
+    LaunchedEffect(username, effectiveTemplate) {
+        if (effectiveTemplate.isBlank()) {
+            val clean = username.trim().removePrefix("@")
+            if (clean.isNotEmpty() && clean != "L" && !clean.startsWith("user_")) {
+                val resolved = LinuxDoRepository.resolveUserAvatarTemplate(clean)
+                if (!resolved.isNullOrBlank()) {
+                    effectiveTemplate = resolved
+                }
+            }
+        }
+    }
+
+    val staticUrl = remember(effectiveTemplate, thumbnailSize) {
+        LinuxDoSiteRules.resolveStaticAvatarUrl(effectiveTemplate, sizePx = thumbnailSize)
     }
     val animatedUrl = remember(animatedAvatar, motionEnabled) {
         if (motionEnabled) LinuxDoSiteRules.resolveAnimatedAvatarUrl(animatedAvatar) else null
@@ -108,10 +134,41 @@ fun SmartAvatar(
 
     val hasAnimated = !animatedUrl.isNullOrBlank()
     val palette = LocalPalette.current
+    val platformContext = LocalPlatformContext.current
     androidx.compose.runtime.key(username, staticUrl, animatedUrl) {
         var animatedReady by remember { mutableStateOf(false) }
         var staticLoaded by remember {
-            mutableStateOf(staticUrl.isNotEmpty() && staticUrl in loadedStaticAvatarUrls)
+            mutableStateOf(staticUrl.isNotEmpty() && isLoadedAvatarUrl(staticUrl))
+        }
+        var retryAttempt by remember { mutableIntStateOf(0) }
+        var failedAttempt by remember { mutableIntStateOf(-1) }
+
+        LaunchedEffect(failedAttempt, staticLoaded) {
+            if (!staticLoaded && failedAttempt in 0..2) {
+                delay(900L * (failedAttempt + 1))
+                if (!staticLoaded) {
+                    retryAttempt = failedAttempt + 1
+                }
+            }
+        }
+
+        val fetchUrl = remember(staticUrl, retryAttempt) {
+            if (retryAttempt == 0 || staticUrl.isEmpty()) {
+                staticUrl
+            } else {
+                "$staticUrl${if ('?' in staticUrl) '&' else '?'}_r=$retryAttempt"
+            }
+        }
+        val requestModel = remember(platformContext, staticUrl, fetchUrl) {
+            if (staticUrl.isEmpty()) {
+                null
+            } else {
+                ImageRequest.Builder(platformContext)
+                    .data(fetchUrl)
+                    .memoryCacheKey(staticUrl)
+                    .diskCacheKey(staticUrl)
+                    .build()
+            }
         }
 
         Box(
@@ -139,17 +196,18 @@ fun SmartAvatar(
                     AvatarSkeletonPlaceholder(
                         isDark = palette.isDark,
                         baseTint = palette.inkSecondary,
+                        animate = motionEnabled && failedAttempt < 2,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
 
-                if (!animatedReady && staticUrl.isNotEmpty()) {
+                if (!animatedReady && requestModel != null) {
                     AsyncImage(
-                        model = staticUrl,
+                        model = requestModel,
                         contentDescription = username,
                         contentScale = ContentScale.Crop,
                         onLoading = {
-                            if (staticUrl !in loadedStaticAvatarUrls) {
+                            if (!isLoadedAvatarUrl(staticUrl)) {
                                 staticLoaded = false
                             }
                         },
@@ -158,8 +216,11 @@ fun SmartAvatar(
                             if (!staticLoaded) staticLoaded = true
                         },
                         onError = {
-                            loadedStaticAvatarUrls.remove(staticUrl)
+                            forgetLoadedAvatarUrl(staticUrl)
                             staticLoaded = false
+                            if (retryAttempt <= 2) {
+                                failedAttempt = retryAttempt
+                            }
                         },
                         modifier = Modifier
                             .fillMaxSize()
@@ -183,12 +244,16 @@ fun SmartAvatar(
             }
 
             if (flair != null && flair.hasFlair && size >= 28.dp) {
+                val flairBg = remember(flair.bgColorHex) {
+                    LinuxDoSiteRules.parseHexColor(flair.bgColorHex, fallback = Color.Transparent)
+                }
+                val hasFlairBg = flairBg.alpha > 0f
                 FlairBadgeOverlay(
                     flair = flair,
-                    badgeSize = if (size >= 64.dp) 40.dp else if (flair.bgColorHex.isNullOrBlank()) 20.dp else 24.dp,
+                    badgeSize = if (size >= 64.dp) 40.dp else if (!hasFlairBg) 20.dp else 24.dp,
                     modifier = Modifier.align(Alignment.BottomEnd).offset(
-                        x = if (size >= 64.dp) 4.dp else if (flair.bgColorHex.isNullOrBlank()) 6.dp else 8.dp,
-                        y = if (flair.bgColorHex.isNullOrBlank()) 0.dp else 2.dp
+                        x = if (size >= 64.dp) 4.dp else if (!hasFlairBg) 6.dp else 8.dp,
+                        y = if (!hasFlairBg) 0.dp else 2.dp
                     )
                 )
             }
@@ -207,12 +272,12 @@ fun FlairBadgeOverlay(
     val url = remember(raw) {
         if (isImage) LinuxDoSiteRules.resolveUrl(raw) else UniversalBadgeEngine.iconUrl(raw)
     } ?: return
-    val hasBackground = !flair.bgColorHex.isNullOrBlank()
     val background = remember(flair.bgColorHex) {
         LinuxDoSiteRules.parseHexColor(flair.bgColorHex, fallback = Color.Transparent)
     }
+    val hasBackground = background.alpha > 0f
     val foreground = LinuxDoSiteRules.parseHexColor(
-        flair.fgColorHex, fallback = MaterialTheme.colorScheme.onSurface
+        flair.fgColorHex, fallback = LocalPalette.current.inkPrimary
     )
     val scale = when {
         isImage && hasBackground -> 0.75f
@@ -243,9 +308,9 @@ fun UserTitleTag(
     merchantGroupTitle: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val isDark = LocalLinDoDarkTheme.current
+    val palette = LocalPalette.current
     val isHolographic = remember(title) { LinuxDoSiteRules.isHolographicTitle(title) }
-    val neutral = if (isDark) Color(0xFF909090) else Color(0xFF919191)
+    val neutral = palette.inkSecondary
     if (isHolographic && animatePostTitle != null) {
         val animate = animatePostTitle && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused
         val phase = if (animate) {
@@ -354,6 +419,7 @@ fun UniversalBadgeChip(
     onClick: ((GrantedBadge) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalPalette.current
     val tierColor = UniversalBadgeEngine.badgeTierColor(badge.badgeType)
     val shape = RoundedCornerShape(6.dp)
 
@@ -365,12 +431,12 @@ fun UniversalBadgeChip(
                 if (onClick != null) mod.clickable { onClick(badge) } else mod
             }
             .background(
-                color = MaterialTheme.colorScheme.surface,
+                color = palette.cardSurface,
                 shape = shape
             )
             .border(
                 width = 0.6.dp,
-                color = MaterialTheme.colorScheme.outlineVariant,
+                color = palette.hairline,
                 shape = shape
             )
             .padding(
@@ -382,7 +448,7 @@ fun UniversalBadgeChip(
         Spacer(modifier = Modifier.width(4.dp))
         Text(
             text = badge.name,
-            color = MaterialTheme.colorScheme.onSurface,
+            color = palette.inkPrimary,
             fontSize = if (compact) 11.sp else 12.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
@@ -405,8 +471,14 @@ fun UniversalBadgeChip(
 private fun AvatarSkeletonPlaceholder(
     isDark: Boolean,
     baseTint: Color,
+    animate: Boolean = true,
     modifier: Modifier = Modifier
 ) {
+    val baseAlpha = if (isDark) 0.08f else 0.06f
+    if (!animate) {
+        Box(modifier = modifier.background(baseTint.copy(alpha = baseAlpha)))
+        return
+    }
     val transition = rememberInfiniteTransition(label = "avatarSkeleton")
     val pulsePhase by transition.animateFloat(
         initialValue = 0.25f,
@@ -417,7 +489,6 @@ private fun AvatarSkeletonPlaceholder(
         ),
         label = "avatarSkeletonPhase"
     )
-    val baseAlpha = if (isDark) 0.08f else 0.06f
     val peakAlpha = if (isDark) 0.17f else 0.13f
     val lowColor = baseTint.copy(alpha = baseAlpha)
     val highColor = baseTint.copy(alpha = baseAlpha + (peakAlpha - baseAlpha) * pulsePhase)
@@ -438,13 +509,27 @@ private fun AvatarSkeletonPlaceholder(
 
 private val loadedStaticAvatarUrls = LinkedHashSet<String>()
 
+private fun isLoadedAvatarUrl(url: String): Boolean {
+    if (url.isEmpty()) return false
+    return synchronized(loadedStaticAvatarUrls) { url in loadedStaticAvatarUrls }
+}
+
 private fun rememberLoadedAvatarUrl(url: String) {
     if (url.isEmpty()) return
-    if (loadedStaticAvatarUrls.size >= 1024 && url !in loadedStaticAvatarUrls) {
-        val oldest = loadedStaticAvatarUrls.firstOrNull()
-        if (oldest != null) loadedStaticAvatarUrls.remove(oldest)
+    synchronized(loadedStaticAvatarUrls) {
+        if (loadedStaticAvatarUrls.size >= 1024 && url !in loadedStaticAvatarUrls) {
+            val oldest = loadedStaticAvatarUrls.firstOrNull()
+            if (oldest != null) loadedStaticAvatarUrls.remove(oldest)
+        }
+        loadedStaticAvatarUrls.add(url)
     }
-    loadedStaticAvatarUrls.add(url)
+}
+
+private fun forgetLoadedAvatarUrl(url: String) {
+    if (url.isEmpty()) return
+    synchronized(loadedStaticAvatarUrls) {
+        loadedStaticAvatarUrls.remove(url)
+    }
 }
 
 private val avatarThumbnailSizes = intArrayOf(45, 60, 90, 120, 180, 240)

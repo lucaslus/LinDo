@@ -56,25 +56,72 @@ data class GrantedBadge(
     val badgeType: BadgeType get() = BadgeType.fromId(badgeTypeId)
 
     val plainDescription: String
-        get() = description
-            .replace(Regex("<[^>]+>"), "")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&")
-            .trim()
-            .ifEmpty { name }
+        get() = sanitizeBadgeHtmlText(description).ifEmpty { name }
 
     val plainLongDescription: String
-        get() = longDescription
-            .replace(Regex("<[^>]+>"), "")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&")
+        get() = sanitizeBadgeHtmlText(longDescription)
+}
+
+internal fun sanitizeBadgeHtmlText(raw: String): String {
+    if (raw.isBlank()) return ""
+    val unescaped = if ('&' in raw) {
+        runCatching { org.jsoup.parser.Parser.unescapeEntities(raw, false) }.getOrDefault(raw)
+    } else {
+        raw
+    }
+    return decodeDiscourseHtmlSnippet(unescaped)
+        .replace(Regex("<[a-zA-Z/][^>]*$"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+}
+
+/**
+ * 统一将 Discourse 返回的 HTML 片段（如 `bio_excerpt`、`fancy_title`、`excerpt`、徽章描述等）
+ * 安全转换为纯文本：保留行内表情语义、正确处理换行标签，并解码全部命名及十/十六进制 HTML 实体。
+ */
+fun decodeDiscourseHtmlSnippet(raw: String, preserveLineBreaks: Boolean = false): String {
+    if (raw.isBlank()) return ""
+    if ('<' !in raw && '&' !in raw) {
+        return if (preserveLineBreaks) raw.trim() else raw.replace(Regex("\\s+"), " ").trim()
+    }
+    return runCatching {
+        val doc = org.jsoup.Jsoup.parseBodyFragment(raw)
+        doc.outputSettings().prettyPrint(false)
+        doc.select("img").forEach { img ->
+            val alt = img.attr("alt").trim().ifEmpty { img.attr("title").trim() }
+            val isEmoji = img.hasClass("emoji") || (alt.startsWith(":") && alt.endsWith(":"))
+            if (isEmoji && alt.isNotEmpty()) {
+                val resolved = if (alt.startsWith(":") && alt.endsWith(":")) {
+                    do_.linux.lindo.core.site.LinuxDoEmojiCatalog.shortcodeToUnicode(alt) ?: alt
+                } else {
+                    alt
+                }
+                img.replaceWith(org.jsoup.nodes.TextNode(resolved))
+            } else {
+                img.remove()
+            }
+        }
+        val sep = if (preserveLineBreaks) "\n" else " "
+        doc.select("br").forEach { it.replaceWith(org.jsoup.nodes.TextNode(sep)) }
+        doc.select("p, div, li, blockquote, h1, h2, h3, h4, h5, h6, tr").forEach { el ->
+            if (el.nextSibling() != null) el.append(sep)
+        }
+        val text = doc.body().wholeText()
+        if (preserveLineBreaks) {
+            text
+                .replace("\r\n", "\n")
+                .lines()
+                .joinToString("\n") { it.replace(Regex("[ \\t\\x0B\\f]+"), " ").trim() }
+                .replace(Regex("\n{3,}"), "\n\n")
+                .trim()
+        } else {
+            text.replace(Regex("\\s+"), " ").trim()
+        }
+    }.getOrElse {
+        org.jsoup.parser.Parser.unescapeEntities(raw.replace(Regex("<[^>]+>"), " "), false)
+            .replace(Regex("\\s+"), " ")
             .trim()
+    }
 }
 
 /**
@@ -144,6 +191,7 @@ data class TopicSummary(
     @SerialName("fancy_title") val fancyTitle: String = "",
     val slug: String = "",
     @SerialName("posts_count") val postsCount: Int = 1,
+    @SerialName("highest_post_number") val highestPostNumber: Int = postsCount,
     @SerialName("reply_count") val replyCount: Int = 0,
     val views: Int = 0,
     @SerialName("like_count") val likeCount: Int = 0,
@@ -209,10 +257,7 @@ data class BoostInputStats(
     val maxEmojiCount: Int = MAX_BOOST_EMOJI_COUNT
 ) {
     val canAddEmoji: Boolean
-        get() {
-            val spaceNeeded = if (visibleLength > 0) 2 else 1
-            return visibleLength + spaceNeeded <= maxVisibleLength && emojiCount < maxEmojiCount
-        }
+        get() = visibleLength + 1 <= maxVisibleLength && emojiCount < maxEmojiCount
 
     val isWithinLimit: Boolean
         get() = visibleLength <= maxVisibleLength && emojiCount <= maxEmojiCount
@@ -235,7 +280,7 @@ data class BoostInputStats(
     companion object {
         const val MAX_BOOST_VISIBLE_LENGTH = 16
         const val MAX_BOOST_EMOJI_COUNT = 5
-        private val shortcodeRegex = Regex(":[a-zA-Z0-9_+-]+(?::t\\d)?:")
+        private val shortcodeRegex = Regex("(?<![a-zA-Z0-9:]):[a-zA-Z0-9_+-]{2,36}(?::t\\d)?:(?![a-zA-Z0-9:])")
 
         fun compute(raw: String): BoostInputStats {
             val trimmed = raw.trim()
@@ -360,7 +405,11 @@ data class TopicDetailModel(
     val loadError: String? = null,
     val originalPosterUsername: String? = null,
     val highestPostNumber: Int? = null,
-    val unavailable: Boolean = false
+    val lastReadPostNumber: Int? = null,
+    val notificationLevel: Int = 1,
+    val unavailable: Boolean = false,
+    val canEditTopic: Boolean = false,
+    val categoryId: Int = 4
 )
 
 /**
@@ -394,6 +443,7 @@ data class UserFullProfileSummary(
     val lastSeenText: String = "",
     val location: String = "",
     val websiteName: String = "",
+    val websiteUrl: String = "",
     val statusText: String = "",
     val solvedCount: Int = 0,
     val badges: List<GrantedBadge> = emptyList(),
@@ -538,6 +588,44 @@ data class CommunitySearchResult(
     val postsCount: Int = 1
 )
 
+typealias SearchHitItem = CommunitySearchResult
+
+/**
+ * 全站搜索分页结果（携带 Discourse `grouped_search_result.more_full_page_results` 权威分页标记）
+ */
+@Immutable
+@Serializable
+data class SearchPageResult(
+    val items: List<CommunitySearchResult>,
+    val hasMore: Boolean
+)
+
+/**
+ * 站内私信发送结果状态：区分直接送达、进入审核队列 (`enqueued`) 与失败
+ */
+@Serializable
+enum class PrivateMessageSendOutcome {
+    SENT,
+    ENQUEUED,
+    FAILED
+}
+
+@Immutable
+@Serializable
+data class PrivateMessageSendResult(
+    val topicId: Int? = null,
+    val enqueued: Boolean = false,
+    val errorMessage: String? = null,
+    val outcome: PrivateMessageSendOutcome = when {
+        enqueued -> PrivateMessageSendOutcome.ENQUEUED
+        topicId != null && topicId > 0 && errorMessage == null -> PrivateMessageSendOutcome.SENT
+        else -> PrivateMessageSendOutcome.FAILED
+    }
+) {
+    val isSuccess: Boolean
+        get() = outcome == PrivateMessageSendOutcome.SENT || outcome == PrivateMessageSendOutcome.ENQUEUED
+}
+
 /** Resolves Discourse badge records without inferring awards from titles or device metadata. */
 object BadgeInjector {
     private val knownBadgesById = java.util.concurrent.ConcurrentHashMap<Int, GrantedBadge>()
@@ -617,11 +705,17 @@ object BadgeInjector {
             ?: ""
         val rawIcon = target["icon"]?.jsonPrimitive?.contentOrNull
             ?: known?.icon
+        val rawDescription = sanitizeBadgeHtmlText(
+            target["description"]?.jsonPrimitive?.contentOrNull ?: known?.description ?: ""
+        )
+        val rawLongDescription = sanitizeBadgeHtmlText(
+            target["long_description"]?.jsonPrimitive?.contentOrNull ?: known?.longDescription ?: ""
+        )
         val badge = GrantedBadge(
             id = if (resolvedId != 0) resolvedId else (known?.id ?: 0),
             name = rawName,
-            description = target["description"]?.jsonPrimitive?.contentOrNull ?: known?.description ?: "",
-            longDescription = target["long_description"]?.jsonPrimitive?.contentOrNull ?: known?.longDescription ?: "",
+            description = rawDescription,
+            longDescription = rawLongDescription,
             badgeTypeId = target["badge_type_id"]?.jsonPrimitive?.intOrNull ?: known?.badgeTypeId ?: 3,
             icon = if ("icon" in target) target["icon"]?.jsonPrimitive?.contentOrNull else rawIcon,
             imageUrl = when {

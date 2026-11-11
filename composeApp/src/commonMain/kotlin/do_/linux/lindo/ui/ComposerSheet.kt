@@ -35,7 +35,15 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-internal data class ComposerPublished(val post: PostItemModel? = null, val topicId: Int = 0, val title: String = "")
+internal typealias TopicPost = PostItemModel
+
+internal data class ComposerPublished(
+    val topicId: Int? = null,
+    val title: String? = null,
+    val post: TopicPost? = null,
+    val updatedCategoryId: Int? = null,
+    val updatedTags: List<String>? = null
+)
 
 private const val COMPOSER_TAG_LIMIT = 5
 
@@ -64,10 +72,12 @@ internal fun LinDoConfirmDialog(
     val visibleError = error?.takeIf { !busy && it.isNotBlank() }
     val body: (@Composable () -> Unit)? = if (detail == null && visibleError == null) null else {
         {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                detail?.let { Text(it, color = palette.inkSecondary, fontSize = 14.sp, lineHeight = 20.sp) }
-                visibleError?.let {
-                    Text(it, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = errorColor, fontSize = 13.sp, lineHeight = 18.sp)
+            LinDoScaledPopupContent {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    detail?.let { Text(it, color = palette.inkSecondary, fontSize = 14.sp, lineHeight = 20.sp) }
+                    visibleError?.let {
+                        Text(it, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = errorColor, fontSize = 13.sp, lineHeight = 18.sp)
+                    }
                 }
             }
         }
@@ -75,28 +85,34 @@ internal fun LinDoConfirmDialog(
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         containerColor = palette.cardSurface,
-        title = { LinDoDialogTitle(title) },
+        title = { LinDoScaledPopupContent { LinDoDialogTitle(title) } },
         text = body,
         confirmButton = {
-            TextButton(
-                enabled = !busy,
-                onClick = onConfirm,
-                colors = ButtonDefaults.textButtonColors(
-                    contentColor = if (destructive) errorColor else palette.inkPrimary,
-                    disabledContentColor = palette.inkSecondary
-                )
-            ) {
-                if (busy) LinDoBusyButtonLabel(true, "处理中", confirmLabel, LocalContentColor.current)
-                else Text(confirmLabel, fontWeight = FontWeight.SemiBold)
+            LinDoScaledPopupContent {
+                TextButton(
+                    enabled = !busy,
+                    onClick = onConfirm,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = if (destructive) errorColor else palette.activeChipText,
+                        disabledContentColor = palette.inkSecondary
+                    )
+                ) {
+                    if (busy) LinDoBusyButtonLabel(true, "处理中", confirmLabel, LocalContentColor.current)
+                    else Text(confirmLabel, fontWeight = FontWeight.SemiBold)
+                }
             }
         },
         dismissButton = {
-            if (!busy) alternateAction?.invoke()
-            TextButton(
-                enabled = !busy,
-                onClick = onDismiss,
-                colors = ButtonDefaults.textButtonColors(contentColor = palette.inkSecondary)
-            ) { Text(dismissLabel) }
+            LinDoScaledPopupContent {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (!busy) alternateAction?.invoke()
+                    TextButton(
+                        enabled = !busy,
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.textButtonColors(contentColor = palette.inkSecondary)
+                    ) { Text(dismissLabel) }
+                }
+            }
         }
     )
 }
@@ -125,50 +141,64 @@ internal fun ComposerSheet(
     initialRaw: String = "",
     initialCategoryId: Int = 4,
     initialDraft: CloudDraftItem? = null,
+    initialTags: List<String> = emptyList(),
+    canEditTopicMeta: Boolean = false,
     onDismiss: () -> Unit,
     onPublished: (ComposerPublished) -> Unit
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
+    val ownerScopeKey = accountUsername ?: UserApiKeyAuthManager.currentUser?.username.orEmpty()
     val key = when (action) {
         ComposerAction.NEW_TOPIC -> "new_topic"
         ComposerAction.REPLY -> "topic_$topicId"
         ComposerAction.EDIT -> initialDraft?.draftKey ?: "edit_post_${post?.id}"
     }
-    var draft by remember(key) { mutableStateOf(ComposerDraft("", key, action)) }
-    var session by remember(key) { mutableStateOf<ComposerDraftSession?>(null) }
-    var originalRaw by remember(key) { mutableStateOf("") }
-    var prepared by remember(key) { mutableStateOf(false) }
-    var prepareError by remember(key) { mutableStateOf<String?>(null) }
-    var prepareRetry by remember(key) { mutableIntStateOf(0) }
-    var submitting by remember(key) { mutableStateOf(false) }
-    var uploading by remember(key) { mutableStateOf(false) }
-    var draftSyncFailed by remember(key) { mutableStateOf(false) }
-    var submitError by remember(key) { mutableStateOf<String?>(null) }
-    var pendingReview by remember(key) { mutableStateOf(false) }
-    var unconfirmedDraft by remember(key) { mutableStateOf<ComposerDraft?>(null) }
-    var confirmResubmit by remember(key) { mutableStateOf(false) }
-    var showExit by remember(key) { mutableStateOf(false) }
-    var showDiscard by remember(key) { mutableStateOf(false) }
-    var discardError by remember(key) { mutableStateOf<String?>(null) }
-    var showCost by remember(key) { mutableStateOf(false) }
-    var syncRetry by remember(key) { mutableIntStateOf(0) }
-    var tagChoices by remember(key, draft.categoryId) { mutableStateOf(ComposerTagChoices(emptyList())) }
-    var accumulatedTagOptions by remember(key, draft.categoryId) { mutableStateOf<List<do_.linux.lindo.core.network.ComposerTagOption>>(emptyList()) }
-    var tagIds by remember(key, draft.categoryId) { mutableStateOf<Map<String, Int>>(emptyMap()) }
-    var tagQuery by remember(key, draft.categoryId) { mutableStateOf("") }
-    var tagsLoading by remember(key, draft.categoryId) { mutableStateOf(false) }
-    var tagsError by remember { mutableStateOf<String?>(null) }
-    var tagRetry by remember { mutableIntStateOf(0) }
-    var appliedTemplate by remember(key) { mutableStateOf<String?>(null) }
+    val stateKey = "$ownerScopeKey:$key"
+    var draft by remember(stateKey) { mutableStateOf(ComposerDraft("", key, action)) }
+    var session by remember(stateKey) { mutableStateOf<ComposerDraftSession?>(null) }
+    var originalRaw by remember(stateKey) { mutableStateOf("") }
+    var originalTitle by remember(stateKey) { mutableStateOf(topicTitle) }
+    var originalCategoryId by remember(stateKey) { mutableStateOf<Int?>(initialCategoryId) }
+    var originalTags by remember(stateKey) { mutableStateOf(initialTags) }
+    var conflictRemoteDraft by remember(stateKey) { mutableStateOf<CloudDraftItem?>(null) }
+    var prepared by remember(stateKey) { mutableStateOf(false) }
+    var prepareError by remember(stateKey) { mutableStateOf<String?>(null) }
+    var prepareRetry by remember(stateKey) { mutableIntStateOf(0) }
+    var submitting by remember(stateKey) { mutableStateOf(false) }
+    var uploading by remember(stateKey) { mutableStateOf(false) }
+    var draftSyncFailed by remember(stateKey) { mutableStateOf(false) }
+    var submitError by remember(stateKey) { mutableStateOf<String?>(null) }
+    var pendingReview by remember(stateKey) { mutableStateOf(false) }
+    var unconfirmedDraft by remember(stateKey) { mutableStateOf<ComposerDraft?>(null) }
+    var confirmResubmit by remember(stateKey) { mutableStateOf(false) }
+    var showExit by remember(stateKey) { mutableStateOf(false) }
+    var discardError by remember(stateKey) { mutableStateOf<String?>(null) }
+    var showCost by remember(stateKey) { mutableStateOf(false) }
+    var syncRetry by remember(stateKey) { mutableIntStateOf(0) }
+    var tagChoices by remember(stateKey, draft.categoryId) { mutableStateOf(ComposerTagChoices(emptyList())) }
+    var accumulatedTagOptions by remember(stateKey, draft.categoryId) { mutableStateOf<List<do_.linux.lindo.core.network.ComposerTagOption>>(emptyList()) }
+    var tagIds by remember(stateKey, draft.categoryId) { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    var tagQuery by remember(stateKey, draft.categoryId) { mutableStateOf("") }
+    var tagsLoading by remember(stateKey, draft.categoryId) { mutableStateOf(action == ComposerAction.NEW_TOPIC || canEditTopicMeta) }
+    var tagsError by remember(stateKey, draft.categoryId) { mutableStateOf<String?>(null) }
+    var tagRetry by remember(stateKey, draft.categoryId) { mutableIntStateOf(0) }
+    var appliedTemplate by remember(stateKey) { mutableStateOf<String?>(null) }
 
-    var replyContextExpanded by remember(key) { mutableStateOf(false) }
-    var viewMode by remember(key) { mutableStateOf(WorkbenchViewMode.SOURCE) }
-    var keyboardBeforePreview by remember(key) { mutableStateOf(false) }
+    var replyContextExpanded by remember(stateKey) { mutableStateOf(false) }
+    var viewMode by remember(stateKey) { mutableStateOf(WorkbenchViewMode.SOURCE) }
+    var keyboardBeforePreview by remember(stateKey) { mutableStateOf(false) }
     val imeVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
-    var showCategoryPicker by remember(key) { mutableStateOf(false) }
-    var showTagPicker by remember(key) { mutableStateOf(false) }
+    var showCategoryPicker by remember(stateKey) { mutableStateOf(false) }
+    var showTagPicker by remember(stateKey) { mutableStateOf(false) }
+
+    val categoryCatalogVer = LinuxDoRepository.categoryCatalogVersion
+    val isEditingTopicOp = action == ComposerAction.EDIT &&
+        (draft.postNumber ?: post?.postNumber) == 1 &&
+        canEditTopicMeta &&
+        (draft.topicId ?: topicId ?: 0) > 0
+    val hasTopicMetaControls = action == ComposerAction.NEW_TOPIC || isEditingTopicOp
 
     val busy = submitting || uploading || pendingReview
     val isUntouchedTemplate = action == ComposerAction.NEW_TOPIC &&
@@ -177,7 +207,17 @@ internal fun ComposerSheet(
         draft.title.isBlank() &&
         draft.tags.isEmpty()
     val hasChanges = prepared && !isUntouchedTemplate &&
-        if (action == ComposerAction.EDIT) draft.raw != originalRaw else draft.hasContent
+        if (action == ComposerAction.EDIT) {
+            draft.raw != originalRaw || (
+                isEditingTopicOp && (
+                    draft.title.trim() != originalTitle.trim() ||
+                        draft.categoryId != originalCategoryId ||
+                        draft.tags != originalTags
+                    )
+                )
+        } else {
+            draft.hasContent
+        }
 
     fun update(next: ComposerDraft) {
         if (submitting || !prepared) return
@@ -197,10 +237,20 @@ internal fun ComposerSheet(
             viewMode = WorkbenchViewMode.SOURCE
             return
         }
-        if (hasChanges) showExit = true else onDismiss()
+        if (hasChanges) {
+            showExit = true
+        } else {
+            if (action == ComposerAction.EDIT && session?.existsOnServer == true) {
+                val closingSession = session
+                LinuxDoRepository.launchDetachedDraftOp {
+                    runCatching { closingSession?.discard() }
+                }
+            }
+            onDismiss()
+        }
     }
 
-    LaunchedEffect(key, prepareRetry) {
+    LaunchedEffect(stateKey, replyToPostNumber, initialRaw, prepareRetry) {
         prepared = false
         prepareError = null
         try {
@@ -213,16 +263,46 @@ internal fun ComposerSheet(
                     ?: throw ApiMutationException("暂时无法读取原文，请重试后编辑")
             } else null
             originalRaw = sourcePost?.raw ?: ""
-            val seed = ComposerDraft(owner, key, action,
+            originalTitle = topicTitle
+            originalCategoryId = initialCategoryId
+            originalTags = initialTags
+            val seed = ComposerDraft(
+                owner = owner,
+                key = key,
+                action = action,
                 raw = initialDraft?.raw ?: if (action == ComposerAction.EDIT) originalRaw else initialRaw,
-                title = if (action == ComposerAction.NEW_TOPIC) initialDraft?.title?.takeUnless { it.startsWith("未命名") }.orEmpty() else topicTitle,
+                title = if (action == ComposerAction.NEW_TOPIC) {
+                    initialDraft?.title?.takeUnless { it.startsWith("未命名") }.orEmpty()
+                } else {
+                    initialDraft?.title?.takeUnless {
+                        it.isBlank() || it == "帖子编辑草稿" || it.endsWith("· 编辑草稿")
+                    } ?: topicTitle
+                },
                 categoryId = initialDraft?.categoryId ?: initialCategoryId,
-                tags = initialDraft?.tags.orEmpty(), topicId = topicId?.takeIf { it > 0 } ?: sourcePost?.topicId?.takeIf { it > 0 } ?: initialDraft?.topicId?.takeIf { it > 0 },
-                postId = editingId, postNumber = post?.postNumber ?: sourcePost?.postNumber,
+                tags = if (initialDraft != null) initialDraft.tags else initialTags,
+                topicId = topicId?.takeIf { it > 0 } ?: sourcePost?.topicId?.takeIf { it > 0 } ?: initialDraft?.topicId?.takeIf { it > 0 },
+                postId = editingId,
+                postNumber = post?.postNumber ?: sourcePost?.postNumber,
                 replyToPostNumber = initialDraft?.replyToPostNumber ?: replyToPostNumber,
-                replyToUsername = replyToUsername, sequence = initialDraft?.sequence?.takeIf { initialDraft.sequenceKnown })
+                replyToUsername = replyToUsername,
+                sequence = initialDraft?.sequence?.takeIf { initialDraft.sequenceKnown },
+                recipients = initialDraft?.recipients.orEmpty()
+            )
             val local = LocalComposerDrafts.get(owner, key)
-            draft = (local ?: seed).let { base ->
+            val chosenBase = if (
+                local != null &&
+                initialDraft != null &&
+                initialDraft.sequenceKnown &&
+                local.sequence != null &&
+                (initialDraft.sequence > local.sequence ||
+                    (initialDraft.sequence == local.sequence && initialDraft.raw.trim() != local.raw.trim()))
+            ) {
+                LocalComposerDrafts.remove(owner, key)
+                seed
+            } else {
+                local ?: seed
+            }
+            draft = chosenBase.let { base ->
                 if (action == ComposerAction.REPLY) {
                     val quote = initialRaw.trimEnd()
                     val mergedRaw = when {
@@ -239,24 +319,74 @@ internal fun ComposerSheet(
                     base.copy(postNumber = seed.postNumber ?: base.postNumber)
                 } else base
             }
-            session = ComposerDraftSession(draft)
+            val activeSession = ComposerDraftSession(
+                draft,
+                initialExistsOnServer = initialDraft?.sequenceKnown == true
+            )
+            session = activeSession
+            if (initialDraft == null || !initialDraft.sequenceKnown) {
+                val remoteConflict = runCatching {
+                    activeSession.prepareWithRemote(
+                        untouchedBaselineRaw = if (action == ComposerAction.EDIT) originalRaw else appliedTemplate
+                    )
+                }.getOrNull()
+                draft = activeSession.current
+                conflictRemoteDraft = remoteConflict
+            } else {
+                conflictRemoteDraft = null
+            }
             prepared = true
-            if (draft.hasContent && (action != ComposerAction.EDIT || draft.raw != originalRaw)) session?.update(draft)
+            val isUntouchedOnOpen = action == ComposerAction.NEW_TOPIC &&
+                appliedTemplate != null &&
+                draft.raw.trim() == appliedTemplate!!.trim() &&
+                draft.title.isBlank() &&
+                draft.tags.isEmpty()
+            val editMetaChangedOnOpen = action == ComposerAction.EDIT &&
+                (draft.postNumber ?: post?.postNumber) == 1 &&
+                canEditTopicMeta &&
+                (draft.topicId ?: topicId ?: 0) > 0 &&
+                (draft.title.trim() != originalTitle.trim() ||
+                    draft.categoryId != originalCategoryId ||
+                    draft.tags != originalTags)
+            if (
+                conflictRemoteDraft == null &&
+                !isUntouchedOnOpen &&
+                draft.hasContent &&
+                (action != ComposerAction.EDIT || draft.raw != originalRaw || editMetaChangedOnOpen)
+            ) {
+                activeSession.update(draft)
+            }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) { prepareError = error.message ?: "暂时无法打开编辑器，请重试" }
     }
 
-    LaunchedEffect(draft, prepared, syncRetry) {
-        if (!prepared || !hasChanges) return@LaunchedEffect
+    LaunchedEffect(prepared, draft.categoryId, categoryCatalogVer) {
+        if (!prepared || action != ComposerAction.NEW_TOPIC) return@LaunchedEffect
+        if (LinuxDoRepository.findCategoryById(draft.categoryId) == null) {
+            val fallback = LinuxDoRepository.categories.firstOrNull {
+                it.id > 0 && (it.isVerifiedFromServer || !it.readRestricted)
+            } ?: LinuxDoRepository.categories.firstOrNull()
+            if (fallback != null && draft.categoryId != fallback.id) {
+                draft = draft.copy(categoryId = fallback.id)
+                if (draft.hasContent && !isUntouchedTemplate && conflictRemoteDraft == null) {
+                    session?.update(draft)
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(draft, prepared, syncRetry, conflictRemoteDraft) {
+        if (!prepared || !hasChanges || isUntouchedTemplate || conflictRemoteDraft != null) return@LaunchedEffect
         delay(1200)
+        if (!hasChanges || isUntouchedTemplate || conflictRemoteDraft != null) return@LaunchedEffect
         try {
             draftSyncFailed = session?.sync() != true
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { draftSyncFailed = true }
     }
 
-    LaunchedEffect(draft.categoryId, draft.tags, tagQuery, tagRetry, prepared) {
-        if (!prepared || action != ComposerAction.NEW_TOPIC) return@LaunchedEffect
+    LaunchedEffect(draft.categoryId, draft.tags, tagQuery, tagRetry, prepared, hasTopicMetaControls) {
+        if (!prepared || !hasTopicMetaControls) return@LaunchedEffect
         val hadExistingOptions = accumulatedTagOptions.isNotEmpty()
         if (!hadExistingOptions) {
             tagsLoading = true
@@ -301,7 +431,7 @@ internal fun ComposerSheet(
         val category = draft.categoryId ?: return@LaunchedEffect
         val canReplaceWithTemplate = draft.raw.isBlank() || (appliedTemplate != null && draft.raw.trim() == appliedTemplate!!.trim())
         if (!canReplaceWithTemplate) return@LaunchedEffect
-        val template = LinuxDoRepository.fetchCategoryTopicTemplate(category).orEmpty()
+        val template = runCatching { LinuxDoRepository.fetchCategoryTopicTemplate(category) }.getOrNull().orEmpty()
         if (draft.categoryId == category && (draft.raw.isBlank() || (appliedTemplate != null && draft.raw.trim() == appliedTemplate!!.trim()))) {
             appliedTemplate = template.takeIf { it.isNotBlank() }
             draft = draft.copy(raw = template, updatedAt = System.currentTimeMillis())
@@ -309,18 +439,24 @@ internal fun ComposerSheet(
     }
 
     val titleRemaining = LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH - draft.title.trim().length
-    val titleValidation = if (prepared && action == ComposerAction.NEW_TOPIC && titleRemaining > 0) {
+    val titleValidation = if (prepared && hasTopicMetaControls && titleRemaining > 0) {
         "标题还差 $titleRemaining 个字"
     } else null
     val bodyRemaining = LinuxDoSiteRules.MIN_POST_RAW_LENGTH - draft.raw.trim().length
     val bodyValidation = when {
         !prepared -> null
         bodyRemaining > 0 -> "还差 $bodyRemaining 个字"
-        action == ComposerAction.EDIT && !hasChanges -> "内容尚未修改"
         else -> null
     }
-    val focusBodyInitially = remember(prepared) { action != ComposerAction.NEW_TOPIC || draft.title.isNotBlank() }
-    val canSubmit = prepared && !busy && titleValidation == null && bodyValidation == null
+    val focusBodyInitially = remember(prepared) { !hasTopicMetaControls || draft.title.isNotBlank() }
+    val tagValidationOk = !hasTopicMetaControls || (
+        !tagsLoading &&
+            tagChoices.requiredGroup == null &&
+            tagChoices.forbiddenMessage == null
+        )
+    val canSubmit = prepared && !busy && titleValidation == null && bodyValidation == null &&
+        tagValidationOk &&
+        (action != ComposerAction.EDIT || hasChanges)
 
     fun submit(allowResubmit: Boolean = false) {
         if (!canSubmit || submitting) return
@@ -342,7 +478,12 @@ internal fun ComposerSheet(
                             snapshot.title, snapshot.raw, snapshot.categoryId ?: initialCategoryId, snapshot.tags, snapshot.key
                         )) {
                             is PostSubmission.Published -> PostSubmission.Published(
-                                ComposerPublished(topicId = submission.value, title = snapshot.title.trim())
+                                ComposerPublished(
+                                    topicId = submission.value,
+                                    title = snapshot.title.trim(),
+                                    updatedCategoryId = snapshot.categoryId ?: initialCategoryId,
+                                    updatedTags = snapshot.tags
+                                )
                             )
                             PostSubmission.PendingReview -> PostSubmission.PendingReview
                         }
@@ -351,14 +492,61 @@ internal fun ComposerSheet(
                             snapshot.raw, snapshot.replyToPostNumber, snapshot.key
                         )) {
                             is PostSubmission.Published -> PostSubmission.Published(
-                                ComposerPublished(post = submission.value.copy(raw = snapshot.raw))
+                                ComposerPublished(
+                                    topicId = snapshot.topicId,
+                                    post = submission.value.copy(raw = snapshot.raw)
+                                )
                             )
                             PostSubmission.PendingReview -> PostSubmission.PendingReview
                         }
-                        ComposerAction.EDIT -> LinuxDoRepository.updatePost(
-                            snapshot.postId ?: throw ApiMutationException("帖子信息不完整，请重新打开"), snapshot.raw
-                        )?.let { PostSubmission.Published(ComposerPublished(post = it.copy(raw = snapshot.raw, topicId = snapshot.topicId ?: 0))) }
-                            ?: throw PostSubmissionUnconfirmed()
+                        ComposerAction.EDIT -> {
+                            val resolvedTopicId = snapshot.topicId ?: topicId
+                            val editingOp = isEditingTopicOp && (resolvedTopicId ?: 0) > 0
+                            val metaChanged = editingOp && (
+                                snapshot.title.trim() != originalTitle.trim() ||
+                                    snapshot.categoryId != originalCategoryId ||
+                                    snapshot.tags != originalTags
+                                )
+                            if (metaChanged) {
+                                val metaOk = LinuxDoRepository.updateTopicMetadata(
+                                    resolvedTopicId!!,
+                                    snapshot.title.trim(),
+                                    snapshot.categoryId,
+                                    snapshot.tags
+                                )
+                                if (!metaOk) {
+                                    throw ApiMutationException("话题标题或分类更新失败，请重试")
+                                }
+                                originalTitle = snapshot.title.trim()
+                                originalCategoryId = snapshot.categoryId
+                                originalTags = snapshot.tags
+                            }
+                            if (!editingOp || snapshot.raw != originalRaw) {
+                                val updatedPost = LinuxDoRepository.updatePost(
+                                    snapshot.postId ?: throw ApiMutationException("帖子信息不完整，请重新打开"),
+                                    snapshot.raw
+                                ) ?: throw PostSubmissionUnconfirmed()
+                                PostSubmission.Published(
+                                    ComposerPublished(
+                                        topicId = resolvedTopicId,
+                                        title = if (editingOp) snapshot.title.trim() else null,
+                                        post = updatedPost.copy(raw = snapshot.raw, topicId = resolvedTopicId ?: 0),
+                                        updatedCategoryId = if (editingOp) snapshot.categoryId else null,
+                                        updatedTags = if (editingOp) snapshot.tags else null
+                                    )
+                                )
+                            } else {
+                                PostSubmission.Published(
+                                    ComposerPublished(
+                                        topicId = resolvedTopicId,
+                                        title = snapshot.title.trim(),
+                                        post = post,
+                                        updatedCategoryId = snapshot.categoryId,
+                                        updatedTags = snapshot.tags
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
                 when (result) {
@@ -382,11 +570,12 @@ internal fun ComposerSheet(
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            val headerTitle = when (action) {
-                ComposerAction.NEW_TOPIC -> "新话题"
-                ComposerAction.EDIT -> draft.postNumber?.takeIf { it > 1 }
+            val headerTitle = when {
+                action == ComposerAction.NEW_TOPIC -> "新话题"
+                isEditingTopicOp -> "编辑话题"
+                action == ComposerAction.EDIT -> draft.postNumber?.takeIf { it > 1 }
                     ?.let { "编辑回复 · $it 楼" } ?: "编辑帖子"
-                ComposerAction.REPLY -> if (draft.replyToPostNumber == null) "回复话题" else "回复"
+                else -> if (draft.replyToPostNumber == null) "回复话题" else "回复"
             }
             Row(
                 modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(end = 12.dp),
@@ -471,8 +660,12 @@ internal fun ComposerSheet(
                             ) {
                                 if (floor != null && name != null) {
                                     GoogleAccountRingAvatar(
-                                        letter = name, avatarUrl = replyToAvatarUrl,
-                                        animatedAvatar = replyToAnimatedAvatar, avatarSize = 25.dp, strokeWidth = 0.dp
+                                        letter = name,
+                                        username = draft.replyToUsername ?: name,
+                                        avatarUrl = replyToAvatarUrl,
+                                        animatedAvatar = replyToAnimatedAvatar,
+                                        avatarSize = 25.dp,
+                                        strokeWidth = 0.dp
                                     )
                                 }
                                 Column(Modifier.weight(1f)) {
@@ -506,9 +699,14 @@ internal fun ComposerSheet(
                         }
                     }
 
-                    if (action == ComposerAction.NEW_TOPIC) {
-                        val activeCat = LinuxDoRepository.categories.firstOrNull { it.id == draft.categoryId }
-                            ?: LinuxDoRepository.categories.firstOrNull()
+                    if (hasTopicMetaControls) {
+                        val activeCat = remember(draft.categoryId, categoryCatalogVer) {
+                            LinuxDoRepository.findCategoryById(draft.categoryId)
+                                ?: LinuxDoRepository.categories.firstOrNull {
+                                    it.id > 0 && (it.isVerifiedFromServer || !it.readRestricted)
+                                }
+                                ?: LinuxDoRepository.categories.firstOrNull()
+                        }
                         val catFallbackColor = remember(activeCat?.colorHex) {
                             LinuxDoSiteRules.parseHexColor(activeCat?.colorHex ?: "0E76BD")
                         }
@@ -567,7 +765,7 @@ internal fun ComposerSheet(
                                     )
                                 }
                                 Text(
-                                    text = activeCat?.name ?: "选择版块",
+                                    text = activeCat?.displayName ?: "选择版块",
                                     fontSize = 13.5.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = palette.inkPrimary
@@ -659,6 +857,27 @@ internal fun ComposerSheet(
                             }
                         }
 
+                        val tagHintMessage = tagChoices.forbiddenMessage
+                            ?: tagChoices.requiredGroup?.let { "需选标签：$it" }
+                        if (tagHintMessage != null) {
+                            Text(
+                                text = tagHintMessage,
+                                fontSize = 11.8.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.brandGold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !busy) {
+                                        keyboard?.hide()
+                                        showCategoryPicker = false
+                                        showTagPicker = true
+                                    }
+                                    .padding(start = 16.dp, end = 16.dp, bottom = 6.dp)
+                            )
+                        }
+
                         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
                         if (showCategoryPicker) {
@@ -673,6 +892,13 @@ internal fun ComposerSheet(
                                         else update(next)
                                     }
                                     showCategoryPicker = false
+                                },
+                                onFocusSelectParent = { category ->
+                                    if (draft.categoryId != category.id) {
+                                        val next = draft.copy(categoryId = category.id, tags = emptyList())
+                                        if (isUntouchedTemplate) draft = next.copy(updatedAt = System.currentTimeMillis())
+                                        else update(next)
+                                    }
                                 },
                                 onDismiss = { showCategoryPicker = false }
                             )
@@ -726,6 +952,53 @@ internal fun ComposerSheet(
                         )
                     }
 
+                    conflictRemoteDraft?.let { remote ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(palette.subtleSurface)
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "检测到其他设备上的云端草稿",
+                                modifier = Modifier.weight(1f),
+                                color = palette.inkPrimary,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            TextButton(
+                                enabled = !busy,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                onClick = {
+                                    session?.let { active ->
+                                        draft = active.acceptRemoteDraft(remote)
+                                    }
+                                    conflictRemoteDraft = null
+                                }
+                            ) {
+                                Text("使用云端", color = palette.activeChipText, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            TextButton(
+                                enabled = !busy,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                onClick = {
+                                    session?.let { active ->
+                                        active.update(draft)
+                                        draft = active.keepLocalOverRemote(remote.sequence)
+                                    }
+                                    conflictRemoteDraft = null
+                                }
+                            ) {
+                                Text("保留本机", color = palette.inkSecondary, fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+                        HorizontalDivider(color = palette.hairline, thickness = 0.5.dp)
+                    }
+
                     if (draftSyncFailed && submitError == null && !busy) {
                         LinDoLoadFailure("草稿已存本机 · 云端同步失败") { syncRetry++ }
                     }
@@ -761,8 +1034,12 @@ internal fun ComposerSheet(
     if (pendingReview) {
         AlertDialog(
             onDismissRequest = onDismiss,
-            title = { LinDoDialogTitle("已提交审核") },
-            confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+            title = { LinDoScaledPopupContent { LinDoDialogTitle("已提交审核") } },
+            confirmButton = {
+                LinDoScaledPopupContent {
+                    TextButton(onClick = onDismiss) { Text("完成", color = palette.activeChipText) }
+                }
+            },
             containerColor = palette.cardSurface
         )
     }
@@ -773,39 +1050,40 @@ internal fun ComposerSheet(
         onConfirm = { confirmResubmit = false; submit(allowResubmit = true) }
     )
     if (showExit) LinDoConfirmDialog(
-        title = "要退出编辑吗？",
-        confirmLabel = "保存并退出",
-        dismissLabel = "继续编辑",
-        alternateAction = {
-            TextButton(onClick = { showExit = false; discardError = null; showDiscard = true }) {
-                Text("丢弃草稿", color = MaterialTheme.colorScheme.error)
-            }
-        },
-        onDismiss = { showExit = false },
-        onConfirm = { session?.update(draft); onDismiss() }
-    )
-    if (showDiscard) LinDoConfirmDialog(
-        title = "要丢弃这份草稿吗？",
-        confirmLabel = "丢弃",
+        title = "保存草稿？",
+        confirmLabel = "保存",
+        dismissLabel = "取消",
         busy = submitting,
         error = discardError,
-        destructive = true,
-        onDismiss = { showDiscard = false },
-        onConfirm = {
-            if (submitting) return@LinDoConfirmDialog
-            submitting = true
-            scope.launch {
-                try {
-                    if (session?.discard() == true) onDismiss() else discardError = "草稿已更新，请重新打开后核对"
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
-                    discardError = error.message ?: "丢弃失败"
-                } finally {
-                    submitting = false
+        alternateAction = {
+            TextButton(
+                onClick = {
+                    if (submitting) return@TextButton
+                    discardError = null
+                    submitting = true
+                    scope.launch {
+                        try {
+                            if (session?.discard() == true) {
+                                showExit = false
+                                onDismiss()
+                            } else {
+                                discardError = "草稿已更新，请重新打开后核对"
+                            }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            discardError = error.message ?: "丢弃失败"
+                        } finally {
+                            submitting = false
+                        }
+                    }
                 }
+            ) {
+                Text("不保存", color = MaterialTheme.colorScheme.error)
             }
-        }
+        },
+        onDismiss = { if (!submitting) { showExit = false; discardError = null } },
+        onConfirm = { session?.update(draft); session?.syncInBackground(); showExit = false; onDismiss() }
     )
     if (showCost) LinDoConfirmDialog(
         title = "要发布这个抽奖话题吗？",

@@ -26,16 +26,35 @@ object MarkdownPreview {
         // Indented code must also remain literal when it contains Discourse-looking syntax.
         source = Regex("(?m)^(?:(?: {4}|\\t)[^\\n]*(?:\\n|$))+").replace(source) { protect(it.value) }
         fun attr(value: String) = Element("span").attr("data-value", value).outerHtml().substringAfter("data-value=\"").substringBefore('"')
-        source = Regex("\\[details(?:=\"?([^\\]\"]*)\"?)?]([\\s\\S]*?)\\[/details]", RegexOption.IGNORE_CASE).replace(source) {
-            "\n<details><summary>${org.jsoup.nodes.Entities.escape(it.groupValues[1].ifBlank { "展开内容" })}</summary>\n\n${it.groupValues[2]}\n\n</details>\n"
+        val detailsRegex = Regex("\\[details(?:=\"?([^\\]\"]*)\"?)?]((?:(?!\\[details\\b)[\\s\\S])*?)\\[/details]", RegexOption.IGNORE_CASE)
+        for (depth in 0 until 8) {
+            val next = detailsRegex.replace(source) {
+                "\n<details><summary>${org.jsoup.nodes.Entities.escape(it.groupValues[1].ifBlank { "展开内容" })}</summary>\n\n${it.groupValues[2]}\n\n</details>\n"
+            }
+            if (next == source) break
+            source = next
         }
-        source = Regex("\\[spoiler]([\\s\\S]*?)\\[/spoiler]", RegexOption.IGNORE_CASE).replace(source) {
-            "<span class=\"spoiler\">${it.groupValues[1]}</span>"
+        val spoilerRegex = Regex("\\[spoiler]((?:(?!\\[spoiler])[\\s\\S])*?)\\[/spoiler]", RegexOption.IGNORE_CASE)
+        for (depth in 0 until 8) {
+            val next = spoilerRegex.replace(source) {
+                "<span class=\"spoiler\">${it.groupValues[1]}</span>"
+            }
+            if (next == source) break
+            source = next
         }
-        source = Regex("\\[quote(?:=\"([^\"]*)\")?]([\\s\\S]*?)\\[/quote]", RegexOption.IGNORE_CASE).replace(source) {
-            val parts = it.groupValues[1].split(',').map(String::trim)
-            val user = parts.firstOrNull().orEmpty()
-            "\n<aside class=\"quote\" data-username=\"${attr(user)}\"><blockquote>\n\n${it.groupValues[2]}\n\n</blockquote></aside>\n"
+        val quoteRegex = Regex("\\[quote(?:=\"?([^\\]\"]*)\"?)?]((?:(?!\\[quote(?:=|]))[\\s\\S])*?)\\[/quote]", RegexOption.IGNORE_CASE)
+        for (depth in 0 until 8) {
+            val next = quoteRegex.replace(source) {
+                val parts = it.groupValues[1].split(',').map(String::trim)
+                val user = parts.firstOrNull().orEmpty()
+                val postAttr = parts.firstOrNull { p -> p.startsWith("post:", ignoreCase = true) }
+                    ?.substringAfter(':')?.trim()?.toIntOrNull()?.let { n -> " data-post=\"$n\"" }.orEmpty()
+                val topicAttr = parts.firstOrNull { p -> p.startsWith("topic:", ignoreCase = true) }
+                    ?.substringAfter(':')?.trim()?.toIntOrNull()?.let { n -> " data-topic=\"$n\"" }.orEmpty()
+                "\n<aside class=\"quote\" data-username=\"${attr(user)}\"$postAttr$topicAttr><blockquote>\n\n${it.groupValues[2]}\n\n</blockquote></aside>\n"
+            }
+            if (next == source) break
+            source = next
         }
         source = Regex("\\[poll[^\\]]*]([\\s\\S]*?)\\[/poll]", RegexOption.IGNORE_CASE).replace(source) {
             val lines = it.groupValues[1].lines().map(String::trim)
@@ -64,10 +83,13 @@ object MarkdownPreview {
             } }
         }
         collect(body)
-        val shortcode = Regex(":([a-zA-Z0-9_+-]{2,36}):")
+        val shortcode = Regex("(?<![a-zA-Z0-9:]):([a-zA-Z0-9_+-]{2,36}(?::t[2-6])?):(?![a-zA-Z0-9:])")
         for (node in textNodes) {
             val text = node.wholeText
-            val matches = shortcode.findAll(text).toList()
+            val matches = shortcode.findAll(text).filter { m ->
+                val rawCode = m.groupValues[1]
+                LinuxDoEmojiCatalog.shortcodeToUnicode(rawCode) != null || LinuxDoEmojiCatalog.isCustomImageEmoji(rawCode)
+            }.toList()
             if (matches.isEmpty()) continue
             var offset = 0
             for (match in matches) {

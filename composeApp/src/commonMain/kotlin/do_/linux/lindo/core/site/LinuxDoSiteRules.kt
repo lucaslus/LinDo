@@ -91,15 +91,18 @@ object LinuxDoSiteRules {
     }
 
     /**
-     * 解析十六进制颜色字符串（支持 3位 / 6位 / 8位 hex）
+     * 解析十六进制颜色字符串（支持 transparent / 3位 / 4位 / 6位 / CSS 8位 #RRGGBBAA）
      */
     fun parseHexColor(hexStr: String?, fallback: Color = Color(0xFF0088CC)): Color {
         if (hexStr.isNullOrBlank()) return fallback
-        val clean = hexStr.trim().removePrefix("#")
+        val trimmed = hexStr.trim()
+        if (trimmed.equals("transparent", ignoreCase = true)) return Color.Transparent
+        val clean = trimmed.removePrefix("#")
         val normalized = when (clean.length) {
             3 -> "FF${clean[0]}${clean[0]}${clean[1]}${clean[1]}${clean[2]}${clean[2]}"
+            4 -> "${clean[3]}${clean[3]}${clean[0]}${clean[0]}${clean[1]}${clean[1]}${clean[2]}${clean[2]}"
             6 -> "FF$clean"
-            8 -> clean
+            8 -> clean.substring(6, 8) + clean.substring(0, 6)
             else -> return fallback
         }
         return normalized.toLongOrNull(16)?.let { Color(it) } ?: fallback

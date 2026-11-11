@@ -101,8 +101,10 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -151,13 +153,17 @@ import do_.linux.lindo.core.model.BoostInputStats
 import do_.linux.lindo.core.model.CommunitySearchResult
 import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
+import do_.linux.lindo.core.model.afterTailUnloadedStreamIds
+import do_.linux.lindo.core.model.decodeDiscourseHtmlSnippet
 import do_.linux.lindo.core.model.mergeTopicPosts
+import do_.linux.lindo.core.model.middleGapStreamIdsBetween
 import do_.linux.lindo.core.model.previousUnloadedStreamIds
 import do_.linux.lindo.core.model.remainingUnloadedStreamIds
 import do_.linux.lindo.core.model.resolveJumpPostIndex
 import do_.linux.lindo.core.model.PostBoostItem
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.PostReactionItem
+import do_.linux.lindo.core.model.PrivateMessageSendOutcome
 import do_.linux.lindo.core.model.TopicDetailModel
 import do_.linux.lindo.core.model.TopicSummary
 import do_.linux.lindo.core.model.TopicUser
@@ -397,35 +403,98 @@ private val DarkPalette = buildLinDoPalette(isDark = true, option = BrandThemeOp
 
 internal val LocalPalette = staticCompositionLocalOf { LightPalette }
 
-private val LightMaterialScheme = lightColorScheme(
-    primary = LightPalette.accent,
-    onPrimary = Color.White,
-    primaryContainer = LightPalette.tonalPill,
-    onPrimaryContainer = LightPalette.onTonalPill,
-    background = LightPalette.canvas,
-    onBackground = LightPalette.inkPrimary,
-    surface = LightPalette.cardSurface,
-    onSurface = LightPalette.inkPrimary,
-    surfaceVariant = LightPalette.subtleSurface,
-    onSurfaceVariant = LightPalette.inkSecondary,
-    outlineVariant = LightPalette.hairline
-)
+internal fun buildMaterialSchemeFromPalette(palette: LinDoThemePalette) = if (palette.isDark) {
+    darkColorScheme(
+        primary = palette.brandGold,
+        onPrimary = Color(0xFF101217),
+        primaryContainer = palette.tonalPill,
+        onPrimaryContainer = palette.onTonalPill,
+        background = palette.canvas,
+        onBackground = palette.inkPrimary,
+        surface = palette.cardSurface,
+        onSurface = palette.inkPrimary,
+        surfaceVariant = palette.subtleSurface,
+        onSurfaceVariant = palette.inkSecondary,
+        outlineVariant = palette.hairline
+    )
+} else {
+    lightColorScheme(
+        primary = palette.brandGold,
+        onPrimary = Color.White,
+        primaryContainer = palette.tonalPill,
+        onPrimaryContainer = palette.onTonalPill,
+        background = palette.canvas,
+        onBackground = palette.inkPrimary,
+        surface = palette.cardSurface,
+        onSurface = palette.inkPrimary,
+        surfaceVariant = palette.subtleSurface,
+        onSurfaceVariant = palette.inkSecondary,
+        outlineVariant = palette.hairline
+    )
+}
 
-internal val DarkMaterialScheme = darkColorScheme(
-    primary = DarkPalette.accent,
-    onPrimary = Color(0xFF09090B),
-    primaryContainer = DarkPalette.tonalPill,
-    onPrimaryContainer = DarkPalette.onTonalPill,
-    background = DarkPalette.canvas,
-    onBackground = DarkPalette.inkPrimary,
-    surface = DarkPalette.cardSurface,
-    onSurface = DarkPalette.inkPrimary,
-    surfaceVariant = DarkPalette.subtleSurface,
-    onSurfaceVariant = DarkPalette.inkSecondary,
-    outlineVariant = DarkPalette.hairline
-)
+internal val DarkMaterialScheme = buildMaterialSchemeFromPalette(DarkPalette)
 
 private val LocalFontScale = staticCompositionLocalOf { 0.92f }
+internal val LocalTargetFontScale = staticCompositionLocalOf { 0.92f }
+
+@Composable
+internal fun LinDoScaledPopupContent(content: @Composable () -> Unit) {
+    val current = LocalDensity.current
+    val targetFontScale = LocalTargetFontScale.current
+    val adjusted = remember(current.density, targetFontScale) {
+        Density(density = current.density, fontScale = targetFontScale)
+    }
+    CompositionLocalProvider(LocalDensity provides adjusted, content = content)
+}
+
+@Composable
+internal fun LinDoPrimaryButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    busy: Boolean = false,
+    busyLabel: String = label,
+    leadingIcon: ImageVector? = null
+) {
+    val palette = LocalPalette.current
+    val active = enabled && !busy
+    val bg = if (active || busy) palette.publishBtnBg else palette.subtleSurface
+    val fg = if (active || busy) palette.publishBtnContent else palette.inkTertiary.copy(alpha = 0.55f)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(46.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(bg)
+            .clickable(enabled = active, onClick = onClick)
+            .padding(horizontal = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        if (busy) {
+            LinDoBusyButtonLabel(busy = true, busyLabel = busyLabel, label = label, color = fg)
+        } else {
+            if (leadingIcon != null) {
+                Icon(
+                    imageVector = leadingIcon,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = fg
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Text(
+                text = label,
+                fontSize = 14.5.sp,
+                fontWeight = FontWeight.Bold,
+                color = fg,
+                maxLines = 1
+            )
+        }
+    }
+}
 
 internal enum class MainTab(
     val title: String,
@@ -443,7 +512,7 @@ internal enum class FeedSortFilter(val label: String, val apiPath: String) {
     TOP("热门", "top.json"),
     NEW("新帖", "new.json"),
     UNREAD("未读", "unread.json"),
-    READ("关注", "read.json")
+    FOLLOW("关注", "follow.json")
 }
 
 internal enum class TopPeriodFilter(val label: String, val apiPeriod: String) {
@@ -452,6 +521,131 @@ internal enum class TopPeriodFilter(val label: String, val apiPeriod: String) {
     MONTHLY("本月", "monthly"),
     YEARLY("今年", "yearly"),
     ALL("全部", "all")
+}
+
+private val smartUrlTopicRegex = Regex(
+    """^https?://(?:www\.)?linux\.do/t/(?:[^/?#]+/)?(\d+)(?:/(\d+|last))?/?(?:[?#].*)?$""",
+    RegexOption.IGNORE_CASE
+)
+private val workbenchHeadingPrefixRegex = Regex("^#{1,6} $")
+private val workbenchExistingHeadingRegex = Regex("^#{1,6} ")
+private val workbenchMentionTailRegex = Regex("(^|\\s)(@[\\p{L}\\p{N}_-]*)$")
+private val workbenchProtectedPanguRegex = Regex(
+    "```[\\s\\S]*?```|`[^`\\n]+`|!?\\[[^\\]]*\\]\\([^)]*\\)|<https?://[^>]+>|https?://\\S+|@[\\p{L}\\p{N}_-]+"
+)
+private val workbenchPanguPlaceholderRegex = Regex("\uE000(\\d+)\uE001")
+
+internal fun stripWebOneQueryParam(rawUrl: String): Pair<Boolean, String> {
+    val trimmed = rawUrl.trim()
+    val hashIdx = trimmed.indexOf('#')
+    val beforeHash = if (hashIdx >= 0) trimmed.substring(0, hashIdx) else trimmed
+    val fragment = if (hashIdx >= 0) trimmed.substring(hashIdx) else ""
+    val qIdx = beforeHash.indexOf('?')
+    if (qIdx < 0) return false to trimmed
+    val base = beforeHash.substring(0, qIdx)
+    val queryParams = beforeHash.substring(qIdx + 1).split('&').filter { it.isNotBlank() }
+    if (queryParams.none { it.equals("web=1", ignoreCase = true) }) {
+        return false to trimmed
+    }
+    val remaining = queryParams.filterNot { it.equals("web=1", ignoreCase = true) }
+    val cleaned = buildString {
+        append(base)
+        if (remaining.isNotEmpty()) {
+            append('?')
+            append(remaining.joinToString("&"))
+        }
+        append(fragment)
+    }
+    return true to cleaned
+}
+
+internal fun parseSmartTopicUrlTarget(url: String): Pair<Int, Int?>? {
+    val topicMatch = smartUrlTopicRegex.find(url.trim()) ?: return null
+    val tid = topicMatch.groupValues[1].toIntOrNull()?.takeIf { it > 0 } ?: return null
+    val rawPostSeg = topicMatch.groupValues.getOrNull(2).orEmpty()
+    val pnum = if (rawPostSeg.equals("last", ignoreCase = true)) 999_999 else rawPostSeg.toIntOrNull()
+    return tid to pnum
+}
+
+internal fun toggleMarkdownLinePrefix(text: String, cursorPos: Int, prefix: String): Pair<String, Int> {
+    val pos = cursorPos.coerceIn(0, text.length)
+    val lineStart = if (pos == 0) 0 else text.lastIndexOf('\n', pos - 1) + 1
+    val lineEnd = text.indexOf('\n', pos).let { if (it == -1) text.length else it }
+    val currentLine = text.substring(lineStart, lineEnd)
+    val updatedLine = if (workbenchHeadingPrefixRegex.matches(prefix)) {
+        if (currentLine.startsWith(prefix)) {
+            currentLine.removePrefix(prefix)
+        } else {
+            "$prefix${currentLine.replaceFirst(workbenchExistingHeadingRegex, "")}"
+        }
+    } else if (currentLine.startsWith(prefix)) {
+        currentLine.removePrefix(prefix)
+    } else {
+        "$prefix$currentLine"
+    }
+    val newText = text.replaceRange(lineStart, lineEnd, updatedLine)
+    val newCursor = (lineStart + updatedLine.length).coerceIn(0, newText.length)
+    return newText to newCursor
+}
+
+internal fun insertSnippetAtCursorWithMentionBoundary(
+    text: String,
+    selectionMin: Int,
+    selectionMax: Int,
+    snippet: String,
+    replaceMention: Boolean
+): Pair<String, Int> {
+    val cursor = selectionMin.coerceIn(0, text.length)
+    val mentionMatch = if (replaceMention) workbenchMentionTailRegex.find(text.substring(0, cursor)) else null
+    val start = mentionMatch?.groups?.get(2)?.range?.first ?: cursor
+    val end = selectionMax.coerceIn(0, text.length).coerceAtLeast(start)
+    val newText = text.replaceRange(start, end, snippet)
+    val newCursor = (start + snippet.length).coerceIn(0, newText.length)
+    return newText to newCursor
+}
+
+internal fun optimizePanguSpacingText(raw: String): String {
+    if (raw.isBlank()) return raw
+    val placeholders = mutableListOf<String>()
+    val masked = workbenchProtectedPanguRegex.replace(raw) { match ->
+        val idx = placeholders.size
+        placeholders.add(match.value)
+        "\uE000${idx}\uE001"
+    }
+    val spaced = masked
+        .replace(Regex("([\\u4e00-\\u9fa5])([A-Za-z0-9])"), "$1 $2")
+        .replace(Regex("([A-Za-z0-9])([\\u4e00-\\u9fa5])"), "$1 $2")
+    return workbenchPanguPlaceholderRegex.replace(spaced) { match ->
+        placeholders.getOrElse(match.groupValues[1].toInt()) { match.value }
+    }
+}
+
+internal fun buildWorkbenchPollBbCode(
+    pollType: String,
+    pollResults: String,
+    pollPublic: Boolean,
+    pollTitle: String,
+    options: List<String>,
+    numMin: Int = 1,
+    numMax: Int = 10,
+    numStep: Int = 1
+): String? {
+    val headerLine = if (pollTitle.isNotBlank()) "# ${pollTitle.trim()}\n" else ""
+    return if (pollType == "number") {
+        val pubAttr = if (pollPublic) " public=true" else ""
+        "\n[poll type=number results=$pollResults min=$numMin max=$numMax step=$numStep$pubAttr]\n$headerLine[/poll]\n"
+    } else {
+        val cleanOpts = options.map { it.trim() }.filter { it.isNotEmpty() }
+        if (cleanOpts.size < 2) return null
+        val extraAttrs = buildString {
+            append(" type=$pollType results=$pollResults")
+            if (pollType == "multiple") append(" min=1 max=${cleanOpts.size}")
+            if (pollPublic) append(" public=true")
+            append(" chartType=bar")
+        }
+        val optLines = cleanOpts.joinToString("\n") { "- $it" }
+        "\n[poll$extraAttrs]\n$headerLine$optLines\n[/poll]\n"
+    }
 }
 
 /**
@@ -582,13 +776,28 @@ private fun LinearShimmerTopicSkeletonList(useIconArtwork: Boolean = false) {
 }
 
 object BackNavigationBridge {
-    private val interceptors = mutableListOf<() -> Unit>()
+    private val interceptors = androidx.compose.runtime.mutableStateListOf<() -> Unit>()
+    val hasActiveInterceptors: Boolean
+        get() = interceptors.isNotEmpty()
     var canGoBack: Boolean = false
     var onBack: (() -> Boolean)? = null
 
     fun pushInterceptor(handler: () -> Unit): () -> Unit {
         interceptors.add(handler)
         return { interceptors.remove(handler) }
+    }
+
+    @Composable
+    fun Handler(enabled: Boolean = true, onBack: () -> Unit) {
+        val latestOnBack by rememberUpdatedState(onBack)
+        DisposableEffect(enabled) {
+            if (!enabled) {
+                onDispose { }
+            } else {
+                val remove = pushInterceptor { latestOnBack() }
+                onDispose { remove() }
+            }
+        }
     }
 
     fun dispatchBack(): Boolean {
@@ -812,6 +1021,9 @@ internal fun LinDoCategoryLabel(
     dotSize: Dp = 13.dp
 ) {
     val palette = LocalPalette.current
+    val normalizedName = remember(name) {
+        name.replace(Regex(",\\s*"), " · ").trim()
+    }
     val (categoryIcon, officialColor, isRestricted) = remember(name, dotColor) {
         resolveOfficialCategoryVisual(name, fallbackColor = dotColor)
     }
@@ -836,7 +1048,7 @@ internal fun LinDoCategoryLabel(
             )
         }
         Text(
-            text = name,
+            text = normalizedName,
             fontSize = 12.5.sp,
             lineHeight = 14.sp,
             fontWeight = FontWeight.Normal,
@@ -1183,6 +1395,7 @@ private fun GeminiSparkleIcon(
 @Composable
 internal fun GoogleAccountRingAvatar(
     letter: String = "L",
+    username: String = letter,
     avatarUrl: String? = null,
     avatarSize: Dp = 76.dp,
     strokeWidth: Dp = 0.5.dp,
@@ -1190,10 +1403,11 @@ internal fun GoogleAccountRingAvatar(
     animatedAvatar: String? = null,
     flair: FlairInfo? = null
 ) {
+    val resolvedUsername = username.trim().ifBlank { letter.trim().ifBlank { "L" } }
     Box(Modifier.size(avatarSize).let {
         if (onClick != null) it.clickable(onClick = onClick) else it
     }, contentAlignment = Alignment.Center) {
-        SmartAvatar(username = letter, avatarTemplate = avatarUrl, animatedAvatar = animatedAvatar,
+        SmartAvatar(username = resolvedUsername, avatarTemplate = avatarUrl, animatedAvatar = animatedAvatar,
             size = avatarSize, flair = flair, enableAnimations = LocalLinDoAnimations.current)
     }
 }
@@ -1206,14 +1420,17 @@ internal fun LinDoApp(
     onApplyAppIcon: ((LinDoAppIcon) -> Boolean)? = null,
     addPlatformImageDecoders: coil3.ComponentRegistry.Builder.() -> Unit = {}
 ) {
-    coil3.compose.setSingletonImageLoaderFactory { context ->
-        coil3.ImageLoader.Builder(context)
-            .components {
-                add(coil3.network.ktor3.KtorNetworkFetcherFactory(httpClient = { LinuxDoRepository.imageHttpClient }))
-                add(coil3.svg.SvgDecoder.Factory())
-                addPlatformImageDecoders()
-            }
-            .build()
+    remember {
+        coil3.SingletonImageLoader.setSafe { context ->
+            coil3.ImageLoader.Builder(context)
+                .components {
+                    add(coil3.network.ktor3.KtorNetworkFetcherFactory(httpClient = { LinuxDoRepository.imageHttpClient }))
+                    add(coil3.svg.SvgDecoder.Factory())
+                    addPlatformImageDecoders()
+                }
+                .build()
+        }
+        true
     }
     var isDarkTheme by remember { mutableStateOf(UserApiKeyAuthManager.uiDarkTheme) }
     LaunchedEffect(isDarkTheme) { onThemeChanged(isDarkTheme) }
@@ -1287,10 +1504,13 @@ internal fun LinDoApp(
     var refreshUpToDateNotice by remember { mutableStateOf(false) }
     var loadTopicsJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var detailLoadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var feedGeneration by remember { mutableIntStateOf(0) }
 
     var activeTopicSummary by remember { mutableStateOf<TopicSummary?>(null) }
     var activeTopicDetail by remember { mutableStateOf<TopicDetailModel?>(null) }
     var activeTargetPostNumber by remember { mutableStateOf<Int?>(null) }
+    var targetFloorJumpNonce by remember { mutableIntStateOf(0) }
     var pendingReplyDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
     var pendingNewTopicDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
     var pendingEditDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
@@ -1315,6 +1535,7 @@ internal fun LinDoApp(
     var showCloudDraftsSheet by remember { mutableStateOf(false) }
     var showPrivateMessagesSheet by remember { mutableStateOf(false) }
     var pmInitialRecipient by remember { mutableStateOf<String?>(null) }
+    var pmInitialDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
     var showEditProfileSheet by remember { mutableStateOf(false) }
     var showFollowSheet by remember { mutableStateOf(false) }
     var showLeaderboardSheet by remember { mutableStateOf(false) }
@@ -1327,6 +1548,7 @@ internal fun LinDoApp(
     // 认证状态与真实个人资料状态
     var authVersion by remember { mutableStateOf(0) }
     var wasAuthorized by remember { mutableStateOf(UserApiKeyAuthManager.isAuthorized()) }
+    var isGuestMode by remember { mutableStateOf(false) }
     var activeWebLoginUrl by remember { mutableStateOf<String?>(null) }
     var fullUserProfile by remember { mutableStateOf<UserFullProfileSummary?>(UserApiKeyAuthManager.fullProfileCache) }
 
@@ -1335,59 +1557,151 @@ internal fun LinDoApp(
 
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val locallyReadTopicPosts = remember {
+    val serverConfirmedTopicFloors = remember {
         androidx.compose.runtime.mutableStateMapOf<Int, Int>().apply {
             putAll(LinuxDoRepository.getReadTopicSnapshot())
         }
     }
 
-    fun normalizeReadTopics(list: List<TopicSummary>): List<TopicSummary> =
-        list.map { item ->
-            val seenPosts = locallyReadTopicPosts[item.id]
-                ?: if (LinuxDoRepository.isTopicRead(item.id)) item.postsCount else null
-            if (seenPosts != null && (item.unseen || item.unreadPosts > 0)) {
-                item.copy(unseen = false, unreadPosts = 0)
-            } else {
-                item
-            }
-        }
-
-    fun markTopicReadLocally(topicId: Int, seenPostsCount: Int, syncServer: Boolean = false) {
-        if (topicId <= 0) return
-        val effectiveCount = maxOf(locallyReadTopicPosts[topicId] ?: 0, seenPostsCount, 1)
-        LinuxDoRepository.markTopicRead(topicId, effectiveCount)
-        locallyReadTopicPosts[topicId] = effectiveCount
-        if (syncServer) {
-            val timings = LinkedHashMap<Int, Int>().apply {
-                put(1, 1000)
-                if (effectiveCount > 1) {
-                    put(effectiveCount, 1000)
-                }
-            }
-            // 仅将已读批次入队到 ScreenTrackEngine，由后台 2s 轮询器在话题详情加载完成后平稳上报，避免点击瞬间与 fetchTopicDetail 并发抢占连接触发 429
-            ScreenTrackEngine.consolidateBatch(topicId, 1000, timings)
-        }
-        topics = topics.map {
-            if (it.id == topicId) it.copy(unseen = false, unreadPosts = 0, postsCount = maxOf(it.postsCount, seenPostsCount)) else it
-        }
-        discoverHotTopics = discoverHotTopics.map {
-            if (it.id == topicId) it.copy(unseen = false, unreadPosts = 0, postsCount = maxOf(it.postsCount, seenPostsCount)) else it
-        }
-        pendingNewTopics = pendingNewTopics.map {
-            if (it.id == topicId) it.copy(unseen = false, unreadPosts = 0, postsCount = maxOf(it.postsCount, seenPostsCount)) else it
+    fun openWebPage(url: String) {
+        if (PlatformWebLoginHost.webLoginRenderer != null) {
+            activeWebLoginUrl = url
+        } else {
+            UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
         }
     }
 
-    fun syncUserProfile(background: Boolean = false) {
-        scope.launch {
+    fun dismissCoveringSheets() {
+        showGlobalSearchSheet = false
+        showNotificationsSheet = false
+        showActivitiesSheet = false
+        showBookmarksSheet = false
+        showReadHistorySheet = false
+        showCloudDraftsSheet = false
+        showFollowSheet = false
+        showLeaderboardSheet = false
+        showAboutSheet = false
+        showConnectSheet = false
+        showBadgesCenterSheet = false
+        showPrivateMessagesSheet = false
+        pmInitialRecipient = null
+        pmInitialDraft = null
+        inspectedUsername = null
+        inspectedBadge = null
+    }
+
+    fun applyConfirmedFloorToSummary(item: TopicSummary, confirmedFloor: Int?): TopicSummary {
+        if (confirmedFloor == null || confirmedFloor <= 0) return item
+        val highest = maxOf(item.highestPostNumber, item.postsCount, 1)
+        val remainingUnread = if (item.unreadPosts > 0) {
+            minOf(item.unreadPosts, (highest - confirmedFloor).coerceAtLeast(0))
+        } else {
+            0
+        }
+        val nextUnseen = if (confirmedFloor >= 1) false else item.unseen
+        return if (nextUnseen != item.unseen || remainingUnread != item.unreadPosts) {
+            item.copy(unseen = nextUnseen, unreadPosts = remainingUnread)
+        } else {
+            item
+        }
+    }
+
+    fun normalizeReadTopics(list: List<TopicSummary>): List<TopicSummary> =
+        list.map { item ->
+            val confirmed = serverConfirmedTopicFloors[item.id]
+                ?: LinuxDoRepository.getServerConfirmedReadFloor(item.id)
+            applyConfirmedFloorToSummary(item, confirmed)
+        }
+
+    DisposableEffect(Unit) {
+        val prevFloorListener = LinuxDoRepository.onTopicReadFloorConfirmed
+        LinuxDoRepository.onTopicReadFloorConfirmed = { topicId, confirmedFloor ->
+            prevFloorListener?.invoke(topicId, confirmedFloor)
+            scope.launch {
+                val updatedFloor = maxOf(serverConfirmedTopicFloors[topicId] ?: 0, confirmedFloor)
+                serverConfirmedTopicFloors[topicId] = updatedFloor
+                topics = topics.map {
+                    if (it.id == topicId) applyConfirmedFloorToSummary(it, updatedFloor) else it
+                }
+                discoverHotTopics = discoverHotTopics.map {
+                    if (it.id == topicId) applyConfirmedFloorToSummary(it, updatedFloor) else it
+                }
+                pendingNewTopics = pendingNewTopics.map {
+                    if (it.id == topicId) applyConfirmedFloorToSummary(it, updatedFloor) else it
+                }
+                activeTopicSummary?.takeIf { it.id == topicId }?.let { current ->
+                    activeTopicSummary = applyConfirmedFloorToSummary(current, updatedFloor)
+                }
+            }
+        }
+        onDispose {
+            LinuxDoRepository.onTopicReadFloorConfirmed = prevFloorListener
+        }
+    }
+
+    var profileSyncJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var lastProfileSyncedAtMs by remember { mutableStateOf(0L) }
+
+    fun resetSessionUiState() {
+        loadTopicsJob?.cancel()
+        loadMoreJob?.cancel()
+        detailLoadJob?.cancel()
+        profileSyncJob?.cancel()
+        feedGeneration++
+        isLoadingTopics = false
+        isLoadingMoreTopics = false
+        isLoadingDetail = false
+        feedError = null
+        loadMoreError = false
+        currentPage = 0
+        hasMoreTopics = true
+        pendingNewTopics = emptyList()
+        pendingNewCount = 0
+        fullUserProfile = null
+        lastProfileSyncedAtMs = 0L
+        serverConfirmedTopicFloors.clear()
+        ScreenTrackEngine.resetSessionState()
+        showAccountPreferencesSheet = false
+        showEditProfileSheet = false
+        showPrivateMessagesSheet = false
+        pmInitialRecipient = null
+        pmInitialDraft = null
+        showBookmarksSheet = false
+        showCloudDraftsSheet = false
+        showActivitiesSheet = false
+        showNotificationsSheet = false
+        showReadHistorySheet = false
+        showFollowSheet = false
+        showBadgesCenterSheet = false
+        badgesCenterUsername = null
+        showConnectSheet = false
+        showAuthSheet = false
+        showCreateTopicSheet = false
+        pendingNewTopicDraft = null
+        pendingReplyDraft = null
+        pendingEditDraft = null
+        inspectedUsername = null
+        inspectedBadge = null
+    }
+
+    fun syncUserProfile(background: Boolean = false, force: Boolean = false) {
+        if (!UserApiKeyAuthManager.isAuthorized()) return
+        val now = System.currentTimeMillis()
+        if (!force && profileSyncJob?.isActive == true) return
+        if (!force && background && fullUserProfile != null && now - lastProfileSyncedAtMs in 0 until 90_000L) return
+        profileSyncJob?.cancel()
+        profileSyncJob = scope.launch {
             if (background) {
                 delay(400L)
             }
             val profile = LinuxDoRepository.fetchCurrentUserProfile(background = background)
             if (profile != null) {
                 fullUserProfile = profile
+                lastProfileSyncedAtMs = System.currentTimeMillis()
                 delay(1200L)
-                launch { runCatching { LinuxDoRepository.fetchUserBadges(profile.username) } }
+                if (LinuxDoRepository.getCachedUserBadges(profile.username).isNullOrEmpty()) {
+                    launch { runCatching { LinuxDoRepository.fetchUserBadges(profile.username) } }
+                }
             }
             delay(1600L)
             launch { runCatching { LinuxDoRepository.fetchAllSiteBadges() } }
@@ -1398,10 +1712,11 @@ internal fun LinDoApp(
 
     fun applyPendingNewTopics() {
         if (pendingNewTopics.isNotEmpty()) {
+            feedGeneration++
             topics = normalizeReadTopics(pendingNewTopics)
             pendingNewTopics = emptyList()
             pendingNewCount = 0
-            currentPage = 0
+            if (currentPage < 0) currentPage = 0
             hasMoreTopics = true
             scope.launch {
                 feedListState.animateScrollToItem(0)
@@ -1419,6 +1734,7 @@ internal fun LinDoApp(
     ) {
         loadMoreJob?.cancel()
         loadTopicsJob?.cancel()
+        feedGeneration++
         loadTopicsJob = scope.launch {
             val previousTopId = topics.firstOrNull()?.id
             val previousTopPostsCount = topics.firstOrNull()?.postsCount
@@ -1466,9 +1782,13 @@ internal fun LinDoApp(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (error: Exception) {
-                if (topics.isEmpty()) {
-                    feedError = (error as? ApiReadException)?.message ?: "加载失败"
+                val errMsg = (error as? ApiReadException)?.message ?: "加载失败"
+                if (!isManualRefresh || topics.isEmpty()) {
+                    topics = emptyList()
+                    feedError = errMsg
                     hasMoreTopics = false
+                } else {
+                    feedError = errMsg
                 }
             } finally {
                 if (isActive) isLoadingTopics = false
@@ -1477,6 +1797,7 @@ internal fun LinDoApp(
     }
 
     fun loadNextPageTopics() {
+        if (searchQuery.isNotBlank()) return
         if (isLoadingTopics || isLoadingMoreTopics || !hasMoreTopics) return
         loadMoreJob = scope.launch {
             isLoadingMoreTopics = true
@@ -1514,6 +1835,76 @@ internal fun LinDoApp(
         }
     }
 
+    fun syncUpdatedTopicDetail(updated: TopicDetailModel) {
+        if (activeTopicSummary?.id == updated.id) {
+            activeTopicDetail = updated
+            activeTopicSummary = activeTopicSummary?.let { cur ->
+                cur.copy(
+                    title = updated.title.ifBlank { cur.title },
+                    categoryId = updated.categoryId.takeIf { it > 0 } ?: cur.categoryId,
+                    categoryName = updated.categoryName.ifBlank { cur.categoryName },
+                    categoryColorHex = updated.categoryColorHex.ifBlank { cur.categoryColorHex },
+                    tags = updated.tags,
+                    postsCount = maxOf(cur.postsCount, updated.postsCount)
+                )
+            }
+        }
+        topics = topics.map { item ->
+            if (item.id == updated.id) {
+                item.copy(
+                    title = updated.title.ifBlank { item.title },
+                    categoryId = updated.categoryId.takeIf { it > 0 } ?: item.categoryId,
+                    categoryName = updated.categoryName.ifBlank { item.categoryName },
+                    categoryColorHex = updated.categoryColorHex.ifBlank { item.categoryColorHex },
+                    tags = updated.tags,
+                    postsCount = maxOf(item.postsCount, updated.postsCount)
+                )
+            } else item
+        }
+    }
+
+    fun openTopic(topic: TopicSummary, targetPostNumber: Int? = null) {
+        if (topic.id <= 0) return
+        detailLoadJob?.cancel()
+        // Dismiss any full-screen overlay sheets so the Topic Reader is never hidden underneath (C5)
+        dismissCoveringSheets()
+        targetFloorJumpNonce++
+        activeTopicDetail = null
+        activeTopicSummary = topic
+        activeTargetPostNumber = targetPostNumber
+        mobileShowingDetail = true
+        detailLoadJob = scope.launch {
+            isLoadingDetail = true
+            try {
+                val result = LinuxDoRepository.fetchTopicDetail(
+                    topicId = topic.id,
+                    summaryFallback = topic,
+                    targetPostNumber = targetPostNumber
+                )
+                val loaded = if (result.unavailable && targetPostNumber != null && targetPostNumber > 1) {
+                    LinuxDoRepository.fetchTopicDetail(topic.id, topic)
+                } else result
+                if (!loaded.unavailable) {
+                    val refreshedHighest = maxOf(
+                        topic.highestPostNumber,
+                        loaded.highestPostNumber ?: 0,
+                        loaded.postsCount
+                    )
+                    if (refreshedHighest > topic.highestPostNumber) {
+                        topics = topics.map {
+                            if (it.id == topic.id) it.copy(postsCount = maxOf(it.postsCount, loaded.postsCount), highestPostNumber = refreshedHighest) else it
+                        }
+                    }
+                }
+                if (activeTopicSummary?.id == topic.id) activeTopicDetail = loaded
+            } finally {
+                if (kotlinx.coroutines.currentCoroutineContext().isActive && activeTopicSummary?.id == topic.id) {
+                    isLoadingDetail = false
+                }
+            }
+        }
+    }
+
     DisposableEffect(Unit) {
         val prevCallback = UserApiKeyAuthManager.onAuthStateChanged
         UserApiKeyAuthManager.onAuthStateChanged = {
@@ -1531,18 +1922,42 @@ internal fun LinDoApp(
             // 优先在后台静默兑换 OTP 令牌，免弹 WebView 页面以避免二次触发 Cloudflare Turnstile 验证
             val redeemed = LinuxDoRepository.redeemOtpSilently(otp)
             if (!redeemed) {
-                activeWebLoginUrl = "https://linux.do/session/otp/$otp"
+                openWebPage("https://linux.do/session/otp/$otp")
                 return@LaunchedEffect
+            }
+        } else if (!UserApiKeyAuthManager.getApiKey().isNullOrBlank() && UserApiKeyAuthManager.currentUser == null) {
+            LinuxDoRepository.fetchCurrentUserProfile()?.let { profile ->
+                fullUserProfile = profile
+                UserApiKeyAuthManager.persistSessionQuietly()
             }
         }
         val nowAuth = UserApiKeyAuthManager.isAuthorized()
         if (nowAuth && !wasAuthorized) {
             wasAuthorized = true
+            isGuestMode = false
             activeWebLoginUrl = null
             showAuthSheet = false
             loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
-            syncUserProfile()
+            syncUserProfile(force = true)
+            activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) }
+        } else if (!nowAuth && wasAuthorized) {
+            wasAuthorized = false
+            resetSessionUiState()
+            if (currentSort !in setOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)) {
+                currentSort = FeedSortFilter.LATEST
+            }
+            topics = emptyList()
+            activeTopicDetail = null
+            activeTopicSummary = null
+            activeTargetPostNumber = null
+            mobileShowingDetail = false
+            if (isGuestMode) {
+                loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
+            }
         } else {
+            if (!nowAuth && currentSort !in setOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)) {
+                currentSort = FeedSortFilter.LATEST
+            }
             wasAuthorized = nowAuth
         }
     }
@@ -1572,7 +1987,7 @@ internal fun LinDoApp(
         if (isAuthorized) {
             showEditProfileSheet = true
         } else {
-            activeWebLoginUrl = "https://linux.do/login"
+            openWebPage("https://linux.do/login")
         }
     }
 
@@ -1580,37 +1995,6 @@ internal fun LinDoApp(
         val wasEditingProfile = activeWebLoginUrl?.endsWith("/preferences/profile") == true
         activeWebLoginUrl = null
         if (wasEditingProfile) syncUserProfile()
-    }
-
-    var detailLoadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    fun openTopic(topic: TopicSummary, targetPostNumber: Int? = null) {
-        if (topic.id <= 0) return
-        detailLoadJob?.cancel()
-        val clearedTopic = topic.copy(unseen = false, unreadPosts = 0)
-        markTopicReadLocally(topic.id, topic.postsCount, syncServer = true)
-        activeTopicDetail = null
-        activeTopicSummary = clearedTopic
-        activeTargetPostNumber = targetPostNumber
-        mobileShowingDetail = true
-        detailLoadJob = scope.launch {
-            isLoadingDetail = true
-            try {
-                val result = LinuxDoRepository.fetchTopicDetail(
-                    topicId = topic.id,
-                    summaryFallback = clearedTopic,
-                    targetPostNumber = targetPostNumber
-                )
-                val loaded = if (result.unavailable && targetPostNumber != null && targetPostNumber > 1) {
-                    LinuxDoRepository.fetchTopicDetail(topic.id, clearedTopic)
-                } else result
-                if (!loaded.unavailable) {
-                    markTopicReadLocally(topic.id, maxOf(topic.postsCount, loaded.postsCount))
-                }
-                if (activeTopicSummary?.id == topic.id) activeTopicDetail = loaded
-            } finally {
-                if (activeTopicSummary?.id == topic.id) isLoadingDetail = false
-            }
-        }
     }
 
     fun returnFromUnavailableTopic() {
@@ -1628,19 +2012,27 @@ internal fun LinDoApp(
     fun openTopicById(
         topicId: Int,
         fallbackTitle: String = "话题 #$topicId",
-        targetPostNumber: Int? = null
+        targetPostNumber: Int? = null,
+        categoryId: Int? = null,
+        categoryName: String = "",
+        categoryColorHex: String = ""
     ) {
         if (topicId <= 0) return
+        val catMeta = LinuxDoRepository.findCategoryById(categoryId)
+        val resolvedCatId = catMeta?.id ?: categoryId ?: 0
+        val resolvedCatName = categoryName.ifBlank { catMeta?.displayName.orEmpty() }
+        val resolvedCatColor = categoryColorHex.ifBlank { catMeta?.colorHex ?: "808281" }
+        val safePostsCount = if (targetPostNumber != null && targetPostNumber < 999_999) maxOf(1, targetPostNumber) else 1
         val existing = topics.firstOrNull { it.id == topicId } ?: TopicSummary(
             id = topicId,
             title = fallbackTitle,
-            postsCount = maxOf(1, targetPostNumber ?: 1),
+            postsCount = safePostsCount,
             replyCount = 0,
             views = 0,
             likeCount = 0,
-            categoryId = 4,
-            categoryName = "技术讨论",
-            categoryColorHex = "0E76BD",
+            categoryId = resolvedCatId,
+            categoryName = resolvedCatName,
+            categoryColorHex = resolvedCatColor,
             tags = emptyList(),
             lastPostedAt = "",
             originalPoster = TopicUser(id = 0, username = "linuxdo")
@@ -1648,25 +2040,40 @@ internal fun LinDoApp(
         openTopic(existing, targetPostNumber)
     }
 
+    fun selectCategoryExternally(cid: Int?) {
+        dismissCoveringSheets()
+        selectedCategoryId = cid
+        selectedTag = null
+        searchQuery = ""
+        mobileShowingDetail = false
+        currentTab = MainTab.HOME
+        loadTopics(currentSort, cid, null, currentTopPeriod)
+    }
+
+    fun selectTagExternally(tag: String?) {
+        dismissCoveringSheets()
+        selectedTag = tag
+        selectedCategoryId = null
+        searchQuery = ""
+        mobileShowingDetail = false
+        currentTab = MainTab.HOME
+        loadTopics(currentSort, null, tag, currentTopPeriod)
+    }
+
     // 站内链接原生智能路由：点击帖子内的话题、标签、分类、用户名片或 Connect 链接时直接在 App 原生界面打开，避免跳转 WebView 触发 Cloudflare 验证
     fun openSmartUrl(rawUrl: String) {
         val trimmed = rawUrl.trim()
         if (trimmed.isEmpty()) return
-        if (trimmed.contains("web=1")) {
-            activeWebLoginUrl = trimmed.replace("?web=1", "").replace("&web=1", "")
+        val (forceWeb, cleanedWebUrl) = stripWebOneQueryParam(trimmed)
+        if (forceWeb) {
+            openWebPage(cleanedWebUrl)
             return
         }
-        val topicMatch = Regex(
-            """^https?://(?:www\.)?linux\.do/t/(?:[^/?#]+/)?(\d+)(?:/(\d+))?(?:[?#].*)?$""",
-            RegexOption.IGNORE_CASE
-        ).find(trimmed)
-        if (topicMatch != null) {
-            val tid = topicMatch.groupValues[1].toIntOrNull()
-            val pnum = topicMatch.groupValues.getOrNull(2)?.toIntOrNull()
-            if (tid != null && tid > 0) {
-                openTopicById(tid, "话题 #$tid", pnum)
-                return
-            }
+        val topicTarget = parseSmartTopicUrlTarget(trimmed)
+        if (topicTarget != null) {
+            val (tid, pnum) = topicTarget
+            openTopicById(tid, "话题 #$tid", pnum)
+            return
         }
         val tagMatch = Regex(
             """^https?://(?:www\.)?linux\.do/tag/([^/?#]+)(?:[/?#].*)?$""",
@@ -1677,10 +2084,7 @@ internal fun LinDoApp(
                 java.net.URLDecoder.decode(tagMatch.groupValues[1], "UTF-8")
             }.getOrDefault(tagMatch.groupValues[1])
             if (decodedTag.isNotBlank()) {
-                selectedTag = decodedTag
-                mobileShowingDetail = false
-                currentTab = MainTab.HOME
-                loadTopics(currentSort, selectedCategoryId, decodedTag, currentTopPeriod)
+                selectTagExternally(decodedTag)
                 return
             }
         }
@@ -1691,10 +2095,7 @@ internal fun LinDoApp(
         if (catMatch != null) {
             val cid = catMatch.groupValues[1].toIntOrNull()
             if (cid != null && cid > 0) {
-                selectedCategoryId = cid
-                mobileShowingDetail = false
-                currentTab = MainTab.HOME
-                loadTopics(currentSort, cid, selectedTag, currentTopPeriod)
+                selectCategoryExternally(cid)
                 return
             }
         }
@@ -1739,7 +2140,7 @@ internal fun LinDoApp(
             }
         }
         if (Regex("""^https?://connect\.linux\.do(?:/.*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            activeWebLoginUrl = trimmed
+            openWebPage(trimmed)
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/about(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
@@ -1751,37 +2152,49 @@ internal fun LinDoApp(
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/u/[^/?#]+/follow(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            if (isAuthorized) showFollowSheet = true else activeWebLoginUrl = "https://linux.do/login"
+            if (isAuthorized) showFollowSheet = true else openWebPage("https://linux.do/login")
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences/profile(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            if (isAuthorized) showEditProfileSheet = true else activeWebLoginUrl = "https://linux.do/login"
+            if (isAuthorized) showEditProfileSheet = true else openWebPage("https://linux.do/login")
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences(?:/.*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            if (isAuthorized) showAccountPreferencesSheet = true else activeWebLoginUrl = "https://linux.do/login"
+            if (isAuthorized) showAccountPreferencesSheet = true else openWebPage("https://linux.do/login")
             return
         }
-        activeWebLoginUrl = trimmed
+        val parsedHost = runCatching { java.net.URI(trimmed).host?.lowercase().orEmpty() }.getOrDefault("")
+        val isLinuxDoDomain = parsedHost == "linux.do" || parsedHost.endsWith(".linux.do")
+        val externalLauncher = UserApiKeyAuthManager.openExternalUrlLauncher
+        if (!isLinuxDoDomain && externalLauncher != null) {
+            externalLauncher(trimmed)
+        } else {
+            openWebPage(trimmed)
+        }
     }
 
     LaunchedEffect(Unit) {
         loadTopics(FeedSortFilter.LATEST, null)
-        launch {
-            delay(600L)
-            LinuxDoRepository.syncSiteCategories()
+        if (UserApiKeyAuthManager.isAuthorized()) {
+            launch {
+                delay(600L)
+                LinuxDoRepository.syncSiteCategories()
+            }
+            syncUserProfile(background = true)
         }
-        syncUserProfile(background = true)
     }
 
     LaunchedEffect(isAuthorized) {
         while (isAuthorized) {
-            delay(2000L)
-            if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) continue
-            val batch = ScreenTrackEngine.popNextSendableBatch() ?: continue
-            var status: Int? = null
-            try { status = LinuxDoRepository.sendTopicTimings(batch) }
-            finally { ScreenTrackEngine.onBatchSendResult(batch, status) }
+            ScreenTrackEngine.awaitFlushSignalOrTimeout(2000L)
+            if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground && !ScreenTrackEngine.hasPendingWork()) continue
+            while (isAuthorized) {
+                val batch = ScreenTrackEngine.popNextSendableBatch() ?: break
+                var status: Int? = null
+                try { status = LinuxDoRepository.sendTopicTimings(batch) }
+                finally { ScreenTrackEngine.onBatchSendResult(batch, status) }
+                if (status == null || status !in 200..299) break
+            }
         }
     }
 
@@ -1791,6 +2204,7 @@ internal fun LinDoApp(
             delay(45_000L)
             if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) continue
             if (!isLoadingTopics && !isLoadingMoreTopics && topics.isNotEmpty() && searchQuery.isBlank()) {
+                val genBefore = feedGeneration
                 val fresh = try {
                     LinuxDoRepository.fetchTopics(
                         path = currentSort.apiPath,
@@ -1803,7 +2217,7 @@ internal fun LinDoApp(
                 } catch (_: Throwable) {
                     emptyList()
                 }
-                if (fresh.isNotEmpty()) {
+                if (fresh.isNotEmpty() && genBefore == feedGeneration && !isLoadingTopics) {
                     val currentMap = topics.associateBy { it.id }
                     val changedCount = fresh.filterNot { it.pinned }.count { item ->
                         val prev = currentMap[item.id]
@@ -1821,9 +2235,13 @@ internal fun LinDoApp(
     }
 
     SideEffect {
-        val canIntercept = activeWebLoginUrl != null ||
+        val canIntercept = BackNavigationBridge.hasActiveInterceptors ||
+            activeWebLoginUrl != null ||
             inspectedBadge != null ||
             inspectedUsername != null ||
+            showAppIconPage ||
+            pendingEditDraft != null ||
+            showLogoutConfirm ||
             showBadgesCenterSheet ||
             showGlobalSearchSheet ||
             showCreateTopicSheet ||
@@ -1849,12 +2267,24 @@ internal fun LinDoApp(
                     closeWebPage()
                     true
                 }
+                showLogoutConfirm -> {
+                    showLogoutConfirm = false
+                    true
+                }
+                showAppIconPage -> {
+                    showAppIconPage = false
+                    true
+                }
                 inspectedBadge != null -> {
                     inspectedBadge = null
                     true
                 }
                 inspectedUsername != null -> {
                     inspectedUsername = null
+                    true
+                }
+                pendingEditDraft != null -> {
+                    pendingEditDraft = null
                     true
                 }
                 showBadgesCenterSheet -> {
@@ -1867,6 +2297,7 @@ internal fun LinDoApp(
                 }
                 showCreateTopicSheet -> {
                     showCreateTopicSheet = false
+                    pendingNewTopicDraft = null
                     true
                 }
                 showNotificationsSheet -> {
@@ -1891,6 +2322,8 @@ internal fun LinDoApp(
                 }
                 showPrivateMessagesSheet -> {
                     showPrivateMessagesSheet = false
+                    pmInitialRecipient = null
+                    pmInitialDraft = null
                     true
                 }
                 showEditProfileSheet -> {
@@ -1951,12 +2384,14 @@ internal fun LinDoApp(
     }
 
     val baseDensity = LocalDensity.current
-    val scaledDensity = remember(baseDensity, fontScale) {
+    val targetFontScale = baseDensity.fontScale * fontScale
+    val scaledDensity = remember(baseDensity.density, targetFontScale) {
         Density(
             density = baseDensity.density,
-            fontScale = baseDensity.fontScale * fontScale
+            fontScale = targetFontScale
         )
     }
+    val materialScheme = remember(palette) { buildMaterialSchemeFromPalette(palette) }
 
     CompositionLocalProvider(
         LocalPalette provides palette,
@@ -1964,10 +2399,11 @@ internal fun LinDoApp(
         LocalLinDoDarkTheme provides isDarkTheme,
         LocalLinDoAppIcon provides appIcon,
         LocalFontScale provides fontScale,
+        LocalTargetFontScale provides targetFontScale,
         LocalDensity provides scaledDensity
     ) {
         MaterialTheme(
-            colorScheme = if (isDarkTheme) DarkMaterialScheme else LightMaterialScheme
+            colorScheme = materialScheme
         ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
@@ -1975,40 +2411,53 @@ internal fun LinDoApp(
             ) {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     val isDesktop = maxWidth >= 840.dp
-                    LaunchedEffect(isDesktop, isAuthorized, topics.isNotEmpty()) {
-                        if (!isDesktop || !isAuthorized || activeTopicSummary != null) return@LaunchedEffect
+                    LaunchedEffect(isDesktop, isAuthorized, isGuestMode, topics.isNotEmpty()) {
+                        if (!isDesktop || (!isAuthorized && !isGuestMode) || activeTopicSummary != null) return@LaunchedEffect
                         val first = topics.firstOrNull { !it.pinned } ?: topics.firstOrNull() ?: return@LaunchedEffect
                         activeTopicSummary = first
                         detailLoadJob = scope.launch {
                             isLoadingDetail = true
                             try {
                                 val loaded = LinuxDoRepository.fetchTopicDetail(first.id, first, trackVisit = false)
-                                if (activeTopicSummary == first && !mobileShowingDetail) activeTopicDetail = loaded
+                                if (activeTopicSummary?.id == first.id && !mobileShowingDetail) activeTopicDetail = loaded
                             } finally {
-                                if (activeTopicSummary == first && !mobileShowingDetail) isLoadingDetail = false
+                                if (activeTopicSummary?.id == first.id && !mobileShowingDetail) isLoadingDetail = false
                             }
                         }
                     }
 
-                    if (!isAuthorized) {
+                    if (!isAuthorized && !isGuestMode) {
                         GoogleWelcomeLoginScreen(
                             onOpenAppIcon = openAppIconPage,
                             onPrimaryWebLogin = {
-                                activeWebLoginUrl = "https://linux.do/login"
+                                openWebPage("https://linux.do/login")
                             },
                             onBrowserOneClickAuth = {
                                 val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
                                 if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
-                                    activeWebLoginUrl = url
+                                    openWebPage(url)
                                 }
                             },
-                            onToggleDark = { updateThemePref(!isDarkTheme) }
+                            onToggleDark = { updateThemePref(!isDarkTheme) },
+                            onGuestBrowse = {
+                                isGuestMode = true
+                                if (currentSort !in setOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)) {
+                                    currentSort = FeedSortFilter.LATEST
+                                }
+                                if (topics.isEmpty() && !isLoadingTopics) {
+                                    loadTopics(FeedSortFilter.LATEST, null)
+                                }
+                                scope.launch {
+                                    runCatching { LinuxDoRepository.syncSiteCategories() }
+                                }
+                            }
                         )
                     } else if (isDesktop) {
                         Row(modifier = Modifier.fillMaxSize()) {
                             DesktopSideRail(
                                 currentTab = currentTab,
                                 isDarkTheme = isDarkTheme,
+                                unreadCount = fullUserProfile?.unreadNotifications ?: 0,
                                 onSelectTab = { currentTab = it },
                                 onToggleTheme = { updateThemePref(!isDarkTheme) }
                             )
@@ -2043,13 +2492,15 @@ internal fun LinDoApp(
                                             currentUser = currentUser,
                                             unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
                                             onRequestLogin = {
-                                                activeWebLoginUrl = "https://linux.do/login"
+                                                openWebPage("https://linux.do/login")
                                             },
                                             onSearchChange = { searchQuery = it },
                                             onOpenGlobalSearch = { showGlobalSearchSheet = true },
                                             onOpenCreateTopic = {
-                                                if (isAuthorized) showCreateTopicSheet = true
-                                                else activeWebLoginUrl = "https://linux.do/login"
+                                                if (isAuthorized) {
+                                                    pendingNewTopicDraft = null
+                                                    showCreateTopicSheet = true
+                                                } else openWebPage("https://linux.do/login")
                                             },
                                             onOpenNotifications = {
                                                 currentTab = MainTab.MESSAGES
@@ -2090,6 +2541,8 @@ internal fun LinDoApp(
                                             summary = activeTopicSummary,
                                             detail = activeTopicDetail,
                                             targetPostNumber = activeTargetPostNumber,
+                                            targetFloorJumpNonce = targetFloorJumpNonce,
+                                            isAuthorized = isAuthorized,
                                             initialReplyDraft = pendingReplyDraft,
                                             onConsumeReplyDraft = { pendingReplyDraft = null },
                                             isLoading = isLoadingDetail,
@@ -2098,15 +2551,12 @@ internal fun LinDoApp(
                                             onBack = {},
                                             onRefresh = { activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) } },
                                             onUnavailable = ::returnFromUnavailableTopic,
-                                            onDetailUpdated = { if (activeTopicSummary?.id == it.id) activeTopicDetail = it },
+                                            onDetailUpdated = ::syncUpdatedTopicDetail,
                                             onInspectBadge = { inspectedBadge = it },
                                             onInspectUser = { inspectedUsername = it },
-                                            onSelectTag = { tag ->
-                                                selectedTag = tag
-                                                loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
-                                            },
+                                            onSelectTag = { tag -> selectTagExternally(tag) },
                                             onOpenWebUrl = { openSmartUrl(it) },
-                                            onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" }
+                                            onRequestLogin = { openWebPage("https://linux.do/login") }
                                         )
                                     }
                                 }
@@ -2116,16 +2566,8 @@ internal fun LinDoApp(
                                         hotTopics = discoverHotTopics.ifEmpty { topics.filterNot { it.pinned }.take(5) },
                                         isLoadingHot = isLoadingDiscoverHot,
                                         onRefreshHot = ::refreshDiscoverHotTopics,
-                                        onSelectCategory = { catId ->
-                                            selectedCategoryId = catId
-                                            currentTab = MainTab.HOME
-                                            loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
-                                        },
-                                        onSelectTag = { tag ->
-                                            selectedTag = tag
-                                            currentTab = MainTab.HOME
-                                            loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
-                                        },
+                                        onSelectCategory = { catId -> selectCategoryExternally(catId) },
+                                        onSelectTag = { tag -> selectTagExternally(tag) },
                                         onSelectTopic = { topic ->
                                             currentTab = MainTab.HOME
                                             openTopic(topic)
@@ -2139,7 +2581,8 @@ internal fun LinDoApp(
                                     CommunityMessagesScreen(
                                         isAuthorized = isAuthorized,
                                         username = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
-                                        onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" },
+                                        globalUnreadCount = fullUserProfile?.unreadNotifications ?: 0,
+                                        onRequestLogin = { openWebPage("https://linux.do/login") },
                                         onSelectTopicId = { tid, title, postNum ->
                                             currentTab = MainTab.HOME
                                             openTopicById(tid, title, postNum)
@@ -2151,16 +2594,19 @@ internal fun LinDoApp(
                                         onInspectUser = { uname -> inspectedUsername = uname },
                                         onInspectBadge = { badge -> inspectedBadge = badge },
                                         onUnreadCountSynced = { unread ->
+                                            UserApiKeyAuthManager.updateCachedUnreadNotifications(unread)
                                             fullUserProfile = fullUserProfile?.copy(unreadNotifications = unread)
                                         },
                                         onManagePrivateMessages = {
                                             pmInitialRecipient = null
+                                            pmInitialDraft = null
                                             showPrivateMessagesSheet = true
                                         },
                                         onOpenWebUrl = { openSmartUrl(it) },
                                         onMarkedAllRead = {
+                                            UserApiKeyAuthManager.updateCachedUnreadNotifications(0)
                                             fullUserProfile = fullUserProfile?.copy(unreadNotifications = 0)
-                                            syncUserProfile()
+                                            syncUserProfile(force = true)
                                         }
                                     )
                                 }
@@ -2175,7 +2621,8 @@ internal fun LinDoApp(
                                         isAuthorized = isAuthorized,
                                         currentUser = currentUser,
                                         fullProfile = fullUserProfile,
-                                        onRefreshProfile = { syncUserProfile() },
+                                        onRefreshProfile = { syncUserProfile(force = true) },
+                                        onAutoRefreshProfile = { syncUserProfile(background = true) },
                                         onToggleDark = { updateThemePref(!isDarkTheme) },
                                         onChangeFontScale = { updateFontScalePref(it) },
                                         onToggleAnimations = { updateAnimationsPref(!enableAnimations) },
@@ -2189,6 +2636,7 @@ internal fun LinDoApp(
                                         onOpenCloudDrafts = { showCloudDraftsSheet = true },
                                         onOpenPrivateMessages = {
                                             pmInitialRecipient = null
+                                            pmInitialDraft = null
                                             showPrivateMessagesSheet = true
                                         },
                                         onOpenEditProfile = ::openOfficialProfileEditor,
@@ -2201,11 +2649,11 @@ internal fun LinDoApp(
                                             badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
                                             showBadgesCenterSheet = true
                                         },
-                                        onOpenConnectSheet = { activeWebLoginUrl = "https://connect.linux.do/" },
+                                        onOpenConnectSheet = { openWebPage("https://connect.linux.do/") },
                                         onOpenAuthSheet = { showAuthSheet = true },
                                         onOpenWebUrl = { openSmartUrl(it) },
                                         onPrimaryWebLogin = {
-                                            activeWebLoginUrl = "https://linux.do/login"
+                                            openWebPage("https://linux.do/login")
                                         },
                                         onLogout = {
                                             showLogoutConfirm = true
@@ -2221,6 +2669,8 @@ internal fun LinDoApp(
                                 summary = activeTopicSummary,
                                 detail = activeTopicDetail,
                                 targetPostNumber = activeTargetPostNumber,
+                                targetFloorJumpNonce = targetFloorJumpNonce,
+                                isAuthorized = isAuthorized,
                                 initialReplyDraft = pendingReplyDraft,
                                 onConsumeReplyDraft = { pendingReplyDraft = null },
                                 isLoading = isLoadingDetail,
@@ -2229,16 +2679,12 @@ internal fun LinDoApp(
                                 onBack = { mobileShowingDetail = false },
                                 onRefresh = { activeTopicSummary?.let { openTopic(it, activeTargetPostNumber) } },
                                 onUnavailable = ::returnFromUnavailableTopic,
-                                onDetailUpdated = { if (activeTopicSummary?.id == it.id) activeTopicDetail = it },
+                                onDetailUpdated = ::syncUpdatedTopicDetail,
                                 onInspectBadge = { inspectedBadge = it },
                                 onInspectUser = { inspectedUsername = it },
-                                onSelectTag = { tag ->
-                                    mobileShowingDetail = false
-                                    selectedTag = tag
-                                    loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
-                                },
+                                onSelectTag = { tag -> selectTagExternally(tag) },
                                 onOpenWebUrl = { openSmartUrl(it) },
-                                onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" }
+                                onRequestLogin = { openWebPage("https://linux.do/login") }
                             )
                         } else {
                             Box(modifier = Modifier.fillMaxSize()) {
@@ -2270,7 +2716,7 @@ internal fun LinDoApp(
                                                 currentUser = currentUser,
                                                 unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
                                                 onRequestLogin = {
-                                                    activeWebLoginUrl = "https://linux.do/login"
+                                                    openWebPage("https://linux.do/login")
                                                 },
                                                 onSearchChange = { searchQuery = it },
                                                 onOpenGlobalSearch = { showGlobalSearchSheet = true },
@@ -2278,7 +2724,7 @@ internal fun LinDoApp(
                                                     if (isAuthorized) {
                                                         pendingNewTopicDraft = null
                                                         showCreateTopicSheet = true
-                                                    } else activeWebLoginUrl = "https://linux.do/login"
+                                                    } else openWebPage("https://linux.do/login")
                                                 },
                                                 onOpenNotifications = {
                                                     currentTab = MainTab.MESSAGES
@@ -2315,16 +2761,8 @@ internal fun LinDoApp(
                                                 hotTopics = discoverHotTopics.ifEmpty { topics.filterNot { it.pinned }.take(5) },
                                                 isLoadingHot = isLoadingDiscoverHot,
                                                 onRefreshHot = ::refreshDiscoverHotTopics,
-                                                onSelectCategory = { catId ->
-                                                    selectedCategoryId = catId
-                                                    currentTab = MainTab.HOME
-                                                    loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
-                                                },
-                                                onSelectTag = { tag ->
-                                                    selectedTag = tag
-                                                    currentTab = MainTab.HOME
-                                                    loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
-                                                },
+                                                onSelectCategory = { catId -> selectCategoryExternally(catId) },
+                                                onSelectTag = { tag -> selectTagExternally(tag) },
                                                 onSelectTopic = { topic ->
                                                     openTopic(topic)
                                                 },
@@ -2337,22 +2775,26 @@ internal fun LinDoApp(
                                             CommunityMessagesScreen(
                                                 isAuthorized = isAuthorized,
                                                 username = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
-                                                onRequestLogin = { activeWebLoginUrl = "https://linux.do/login" },
+                                                globalUnreadCount = fullUserProfile?.unreadNotifications ?: 0,
+                                                onRequestLogin = { openWebPage("https://linux.do/login") },
                                                 onSelectTopicId = { tid, title, postNum -> openTopicById(tid, title, postNum) },
                                                 onSelectMessageTopic = { topic -> openTopic(topic) },
                                                 onInspectUser = { uname -> inspectedUsername = uname },
                                                 onInspectBadge = { badge -> inspectedBadge = badge },
                                                 onUnreadCountSynced = { unread ->
+                                                    UserApiKeyAuthManager.updateCachedUnreadNotifications(unread)
                                                     fullUserProfile = fullUserProfile?.copy(unreadNotifications = unread)
                                                 },
                                                 onManagePrivateMessages = {
                                                     pmInitialRecipient = null
+                                                    pmInitialDraft = null
                                                     showPrivateMessagesSheet = true
                                                 },
                                                 onOpenWebUrl = { openSmartUrl(it) },
                                                 onMarkedAllRead = {
+                                                    UserApiKeyAuthManager.updateCachedUnreadNotifications(0)
                                                     fullUserProfile = fullUserProfile?.copy(unreadNotifications = 0)
-                                                    syncUserProfile()
+                                                    syncUserProfile(force = true)
                                                 }
                                             )
                                         }
@@ -2367,7 +2809,8 @@ internal fun LinDoApp(
                                                 isAuthorized = isAuthorized,
                                                 currentUser = currentUser,
                                                 fullProfile = fullUserProfile,
-                                                onRefreshProfile = { syncUserProfile() },
+                                                onRefreshProfile = { syncUserProfile(force = true) },
+                                                onAutoRefreshProfile = { syncUserProfile(background = true) },
                                                 onToggleDark = { updateThemePref(!isDarkTheme) },
                                                 onChangeFontScale = { updateFontScalePref(it) },
                                                 onToggleAnimations = { updateAnimationsPref(!enableAnimations) },
@@ -2381,6 +2824,7 @@ internal fun LinDoApp(
                                                 onOpenCloudDrafts = { showCloudDraftsSheet = true },
                                                 onOpenPrivateMessages = {
                                                     pmInitialRecipient = null
+                                                    pmInitialDraft = null
                                                     showPrivateMessagesSheet = true
                                                 },
                                                 onOpenEditProfile = ::openOfficialProfileEditor,
@@ -2393,11 +2837,11 @@ internal fun LinDoApp(
                                                     badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
                                                     showBadgesCenterSheet = true
                                                 },
-                                                onOpenConnectSheet = { activeWebLoginUrl = "https://connect.linux.do/" },
+                                                onOpenConnectSheet = { openWebPage("https://connect.linux.do/") },
                                                 onOpenAuthSheet = { showAuthSheet = true },
                                                 onOpenWebUrl = { openSmartUrl(it) },
                                                 onPrimaryWebLogin = {
-                                                    activeWebLoginUrl = "https://linux.do/login"
+                                                    openWebPage("https://linux.do/login")
                                                 },
                                                 onLogout = {
                                                     showLogoutConfirm = true
@@ -2415,29 +2859,16 @@ internal fun LinDoApp(
                                         currentTab = it
                                     },
                                     onPublishClick = {
-                                        pendingNewTopicDraft = null
-                                        showCreateTopicSheet = true
+                                        if (isAuthorized) {
+                                            pendingNewTopicDraft = null
+                                            showCreateTopicSheet = true
+                                        } else {
+                                            openWebPage("https://linux.do/login")
+                                        }
                                     },
                                     modifier = Modifier.align(Alignment.BottomCenter)
                                 )
                             }
-                        }
-                    }
-
-                    // 内置全屏安全 WebView 登录弹层
-                    activeWebLoginUrl?.let { loginUrl ->
-                        val renderer = PlatformWebLoginHost.webLoginRenderer
-                        if (renderer != null) {
-                            renderer(
-                                loginUrl,
-                                ::closeWebPage,
-                                {
-                                    activeWebLoginUrl = null
-                                    authVersion++
-                                    loadTopics(currentSort, selectedCategoryId)
-                                    syncUserProfile()
-                                }
-                            )
                         }
                     }
                 }
@@ -2463,6 +2894,7 @@ internal fun LinDoApp(
 
                 if (showNotificationsSheet) {
                     UserNotificationsSheet(
+                        globalUnreadCount = fullUserProfile?.unreadNotifications ?: 0,
                         onDismiss = {
                             showNotificationsSheet = false
                             syncUserProfile()
@@ -2473,6 +2905,23 @@ internal fun LinDoApp(
                         },
                         onInspectUser = { uname ->
                             inspectedUsername = uname
+                        },
+                        onInspectBadge = { badge ->
+                            inspectedBadge = badge
+                        },
+                        onOpenPrivateMessages = {
+                            showNotificationsSheet = false
+                            pmInitialRecipient = null
+                            pmInitialDraft = null
+                            showPrivateMessagesSheet = true
+                        },
+                        onOpenWebUrl = { url ->
+                            showNotificationsSheet = false
+                            openSmartUrl(url)
+                        },
+                        onUnreadCountSynced = { unread ->
+                            UserApiKeyAuthManager.updateCachedUnreadNotifications(unread)
+                            fullUserProfile = fullUserProfile?.copy(unreadNotifications = unread)
                         }
                     )
                 }
@@ -2516,7 +2965,15 @@ internal fun LinDoApp(
                         onDismiss = { showCloudDraftsSheet = false },
                         onOpenDraftTopic = { draft ->
                             showCloudDraftsSheet = false
-                            if (draft.action.startsWith("edit") || draft.draftKey.startsWith("edit_post_")) {
+                            val isPmDraft = draft.action.equals("privateMessage", ignoreCase = true) ||
+                                draft.action.equals("private_message", ignoreCase = true) ||
+                                draft.draftKey.startsWith("private_message", ignoreCase = true) ||
+                                draft.draftKey.startsWith("new_private_message", ignoreCase = true)
+                            if (isPmDraft) {
+                                pmInitialRecipient = draft.recipients.takeIf { it.isNotBlank() }
+                                pmInitialDraft = draft
+                                showPrivateMessagesSheet = true
+                            } else if (draft.action.startsWith("edit", ignoreCase = true) || draft.draftKey.startsWith("edit_post_", ignoreCase = true)) {
                                 pendingEditDraft = draft
                             } else if (draft.topicId > 0) {
                                 pendingReplyDraft = draft
@@ -2530,9 +2987,10 @@ internal fun LinDoApp(
                 }
 
                 if (showConnectSheet) {
-                    ConnectTrustLevelSheet(
-                        onDismiss = { showConnectSheet = false }
-                    )
+                    LaunchedEffect(Unit) {
+                        showConnectSheet = false
+                        openWebPage("https://connect.linux.do/")
+                    }
                 }
 
                 if (showEditProfileSheet) {
@@ -2543,7 +3001,7 @@ internal fun LinDoApp(
                         onDismiss = { showEditProfileSheet = false },
                         onSaved = {
                             showEditProfileSheet = false
-                            syncUserProfile()
+                            syncUserProfile(force = true)
                         }
                     )
                 }
@@ -2577,7 +3035,7 @@ internal fun LinDoApp(
                             showAccountPreferencesSheet = false
                             showEditProfileSheet = true
                         },
-                        onUpdated = { syncUserProfile() }
+                        onUpdated = { syncUserProfile(force = true) }
                     )
                 }
 
@@ -2594,13 +3052,13 @@ internal fun LinDoApp(
                         currentUser = currentUser,
                         onPrimaryWebLogin = {
                             showAuthSheet = false
-                            activeWebLoginUrl = "https://linux.do/login"
+                            openWebPage("https://linux.do/login")
                         },
                         onBrowserOneClickAuth = {
                             showAuthSheet = false
                             val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
                             if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
-                                activeWebLoginUrl = url
+                                openWebPage(url)
                             }
                         },
                         onLogout = {
@@ -2611,39 +3069,21 @@ internal fun LinDoApp(
                     )
                 }
 
-                inspectedUsername?.let { uname ->
-                    PublicUserCardSheet(
-                        username = uname,
-                        onDismiss = { inspectedUsername = null },
-                        onSendPrivateMessage = { targetUser ->
-                            pmInitialRecipient = targetUser
-                            showPrivateMessagesSheet = true
-                        },
-                        onSelectTopicId = { tid, title, postNum ->
-                            inspectedUsername = null
-                            openTopicById(tid, title, postNum)
-                        },
-                        onInspectBadge = { badge ->
-                            inspectedBadge = badge
-                        },
-                        onOpenUserBadges = { targetUser ->
-                            badgesCenterUsername = targetUser
-                            showBadgesCenterSheet = true
-                        }
-                    )
-                }
-
                 if (showPrivateMessagesSheet) {
                     val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
                     UserPrivateMessagesSheet(
                         username = uname,
                         initialRecipient = pmInitialRecipient,
+                        initialDraft = pmInitialDraft,
                         onDismiss = {
                             showPrivateMessagesSheet = false
                             pmInitialRecipient = null
+                            pmInitialDraft = null
                         },
                         onSelectMessageTopic = { topic ->
                             showPrivateMessagesSheet = false
+                            pmInitialRecipient = null
+                            pmInitialDraft = null
                             inspectedUsername = null
                             openTopic(topic)
                         }
@@ -2661,17 +3101,6 @@ internal fun LinDoApp(
                         onInspectBadge = { badge ->
                             inspectedBadge = badge
                         }
-                    )
-                }
-
-                inspectedBadge?.let { badge ->
-                    BadgeDetailBottomSheet(
-                        badge = badge,
-                        currentUsername = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
-                        currentUserTitle = fullUserProfile?.title ?: currentUser?.userTitle.orEmpty(),
-                        isAuthorized = isAuthorized,
-                        onDismiss = { inspectedBadge = null },
-                        onTitleUpdated = { syncUserProfile() }
                     )
                 }
 
@@ -2693,26 +3122,174 @@ internal fun LinDoApp(
                 }
 
                 pendingEditDraft?.let { draft ->
-                    ComposerSheet(ComposerAction.EDIT, topicId = draft.topicId.takeIf { it > 0 }, topicTitle = draft.title,
-                        initialDraft = draft, onDismiss = { pendingEditDraft = null }, onPublished = { result ->
-                            result.post?.let { updated -> activeTopicDetail = activeTopicDetail?.let { detail ->
-                                detail.copy(posts = detail.posts.map { if (it.id == updated.id) it.copy(raw = updated.raw, cookedHtml = updated.cookedHtml) else it })
-                            } }
+                    val matchingDetail = activeTopicDetail?.takeIf { it.id == draft.topicId }
+                    val matchingSummary = activeTopicSummary?.takeIf { it.id == draft.topicId }
+                        ?: topics.firstOrNull { it.id == draft.topicId }
+                    val matchingPost = matchingDetail?.posts?.firstOrNull {
+                        draft.postId != null && it.id == draft.postId
+                    }
+                    val isFirstFloorEdit = matchingPost?.postNumber == 1 ||
+                        (matchingPost == null && (draft.replyToPostNumber == 1 || draft.categoryId != null || draft.tags.isNotEmpty()))
+                    ComposerSheet(
+                        action = ComposerAction.EDIT,
+                        topicId = draft.topicId.takeIf { it > 0 },
+                        topicTitle = matchingDetail?.title ?: matchingSummary?.title ?: draft.title,
+                        post = matchingPost,
+                        initialCategoryId = draft.categoryId ?: matchingDetail?.categoryId ?: matchingSummary?.categoryId ?: 4,
+                        initialTags = draft.tags.ifEmpty { matchingDetail?.tags ?: matchingSummary?.tags.orEmpty() },
+                        canEditTopicMeta = isFirstFloorEdit,
+                        initialDraft = draft,
+                        onDismiss = { pendingEditDraft = null },
+                        onPublished = { result ->
+                            val resolvedTopicId = result.topicId?.takeIf { it > 0 } ?: draft.topicId
+                            val updatedTitle = result.title?.takeIf { it.isNotBlank() }
+                            val updatedCatId = result.updatedCategoryId
+                            val updatedCatMeta = updatedCatId?.let { LinuxDoRepository.findCategoryById(it) }
+                            val updatedTags = result.updatedTags
+                            val updatedPost = result.post
+                            if (resolvedTopicId > 0) {
+                                topics = topics.map { item ->
+                                    if (item.id == resolvedTopicId) {
+                                        item.copy(
+                                            title = updatedTitle ?: item.title,
+                                            categoryId = updatedCatId ?: item.categoryId,
+                                            categoryName = updatedCatMeta?.displayName ?: item.categoryName,
+                                            categoryColorHex = updatedCatMeta?.colorHex ?: item.categoryColorHex,
+                                            tags = updatedTags ?: item.tags
+                                        )
+                                    } else item
+                                }
+                                activeTopicSummary?.takeIf { it.id == resolvedTopicId }?.let { cur ->
+                                    activeTopicSummary = cur.copy(
+                                        title = updatedTitle ?: cur.title,
+                                        categoryId = updatedCatId ?: cur.categoryId,
+                                        categoryName = updatedCatMeta?.displayName ?: cur.categoryName,
+                                        categoryColorHex = updatedCatMeta?.colorHex ?: cur.categoryColorHex,
+                                        tags = updatedTags ?: cur.tags
+                                    )
+                                }
+                            }
+                            if (activeTopicDetail?.id == resolvedTopicId && resolvedTopicId > 0) {
+                                if (updatedPost != null || updatedTitle != null || updatedCatId != null || updatedTags != null) {
+                                    activeTopicDetail = activeTopicDetail?.let { detail ->
+                                        detail.copy(
+                                            title = updatedTitle ?: detail.title,
+                                            categoryId = updatedCatId ?: detail.categoryId,
+                                            categoryName = updatedCatMeta?.displayName ?: detail.categoryName,
+                                            categoryColorHex = updatedCatMeta?.colorHex ?: detail.categoryColorHex,
+                                            tags = updatedTags ?: detail.tags,
+                                            posts = if (updatedPost != null) {
+                                                detail.posts.map {
+                                                    if (it.id == updatedPost.id) it.copy(raw = updatedPost.raw, cookedHtml = updatedPost.cookedHtml) else it
+                                                }
+                                            } else detail.posts
+                                        )
+                                    }
+                                } else {
+                                    val summarySnap = activeTopicSummary
+                                    scope.launch {
+                                        val refreshed = LinuxDoRepository.fetchTopicDetail(resolvedTopicId, summarySnap, trackVisit = false)
+                                        if (!refreshed.unavailable && activeTopicSummary?.id == resolvedTopicId) {
+                                            activeTopicDetail = refreshed
+                                        }
+                                    }
+                                }
+                            } else if (resolvedTopicId > 0 && activeTopicSummary?.id != resolvedTopicId) {
+                                openTopicById(
+                                    topicId = resolvedTopicId,
+                                    fallbackTitle = updatedTitle ?: draft.title.ifBlank { "话题 #$resolvedTopicId" },
+                                    targetPostNumber = draft.replyToPostNumber?.takeIf { it > 1 }
+                                )
+                            }
                             pendingEditDraft = null
-                        })
+                        }
+                    )
+                }
+
+                inspectedUsername?.let { uname ->
+                    PublicUserCardSheet(
+                        username = uname,
+                        currentUsername = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
+                        onDismiss = { inspectedUsername = null },
+                        onSendPrivateMessage = { targetUser ->
+                            inspectedUsername = null
+                            if (isAuthorized) {
+                                pmInitialDraft = null
+                                pmInitialRecipient = targetUser
+                                showPrivateMessagesSheet = true
+                            } else {
+                                openWebPage("https://linux.do/login")
+                            }
+                        },
+                        onSelectTopicId = { tid, title, postNum ->
+                            inspectedUsername = null
+                            openTopicById(tid, title, postNum)
+                        },
+                        onInspectBadge = { badge ->
+                            inspectedBadge = badge
+                        },
+                        onOpenUserBadges = { targetUser ->
+                            inspectedUsername = null
+                            badgesCenterUsername = targetUser
+                            showBadgesCenterSheet = true
+                        }
+                    )
+                }
+
+                inspectedBadge?.let { badge ->
+                    BadgeDetailBottomSheet(
+                        badge = badge,
+                        currentUsername = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
+                        currentUserTitle = fullUserProfile?.title ?: currentUser?.userTitle.orEmpty(),
+                        isAuthorized = isAuthorized,
+                        onDismiss = { inspectedBadge = null },
+                        onTitleUpdated = { syncUserProfile(force = true) }
+                    )
                 }
 
                 if (showLogoutConfirm) LinDoConfirmDialog(title = "要退出当前账号吗？", confirmLabel = "退出",
                     onDismiss = { showLogoutConfirm = false }, onConfirm = {
                         showLogoutConfirm = false
+                        wasAuthorized = false
+                        isGuestMode = false
+                        resetSessionUiState()
                         UserApiKeyAuthManager.logout()
-                        fullUserProfile = null
+                        selectedCategoryId = null
+                        selectedTag = null
+                        currentSort = FeedSortFilter.LATEST
+                        currentTopPeriod = TopPeriodFilter.DAILY
+                        searchQuery = ""
                         topics = emptyList()
                         activeTopicDetail = null
                         activeTopicSummary = null
+                        activeTargetPostNumber = null
                         mobileShowingDetail = false
                         currentTab = MainTab.HOME
                     })
+
+                // 内置全屏安全 WebView 弹层置于所有全屏 Sheet 最顶层，并注册 LIFO 返回键拦截 (C6)
+                activeWebLoginUrl?.let { loginUrl ->
+                    DisposableEffect(loginUrl) {
+                        val remove = BackNavigationBridge.pushInterceptor { closeWebPage() }
+                        onDispose { remove() }
+                    }
+                    val renderer = PlatformWebLoginHost.webLoginRenderer
+                    if (renderer != null) {
+                        renderer(
+                            loginUrl,
+                            ::closeWebPage,
+                            {
+                                val wasAlreadyAuth = wasAuthorized
+                                activeWebLoginUrl = null
+                                authVersion++
+                                if (wasAlreadyAuth) {
+                                    loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
+                                    syncUserProfile(force = true)
+                                }
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -2725,6 +3302,7 @@ internal fun LinDoApp(
 private fun DesktopSideRail(
     currentTab: MainTab,
     isDarkTheme: Boolean,
+    unreadCount: Int = 0,
     onSelectTab: (MainTab) -> Unit,
     onToggleTheme: () -> Unit
 ) {
@@ -2766,25 +3344,62 @@ private fun DesktopSideRail(
                     modifier = Modifier
                         .width(56.dp)
                         .height(32.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (selected) palette.activeChipBg else Color.Transparent),
-                    contentAlignment = Alignment.Center
                 ) {
-                    if (tab == MainTab.HOME) {
-                        Image(
-                            painter = painterResource(Res.drawable.lindo_brand_mark),
-                            contentDescription = tab.title,
-                            modifier = Modifier.size(23.dp),
-                            alpha = if (selected) 1f else 0.75f,
-                            contentScale = ContentScale.Fit
-                        )
-                    } else {
-                        Icon(
-                            imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                            contentDescription = tab.title,
-                            modifier = Modifier.size(21.dp),
-                            tint = if (selected) palette.activeChipText else palette.inkSecondary
-                        )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(if (selected) palette.activeChipBg else Color.Transparent),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (tab == MainTab.HOME) {
+                            Image(
+                                painter = painterResource(Res.drawable.lindo_brand_mark),
+                                contentDescription = tab.title,
+                                modifier = Modifier.size(23.dp),
+                                alpha = if (selected) 1f else 0.75f,
+                                contentScale = ContentScale.Fit
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                contentDescription = tab.title,
+                                modifier = Modifier.size(21.dp),
+                                tint = if (selected) palette.activeChipText else palette.inkSecondary
+                            )
+                        }
+                    }
+                    if (tab == MainTab.MESSAGES && unreadCount > 0) {
+                        val badgeText = if (unreadCount > 99) "99+" else unreadCount.toString()
+                        val isSingleDigit = badgeText.length == 1
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .offset(x = if (isSingleDigit) (-4).dp else 0.dp, y = (-3).dp)
+                                .then(
+                                    if (isSingleDigit) {
+                                        Modifier.size(15.dp)
+                                    } else {
+                                        Modifier
+                                            .height(15.dp)
+                                            .widthIn(min = 19.dp)
+                                    }
+                                )
+                                .clip(CircleShape)
+                                .background(palette.logoDoColor)
+                                .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = badgeText,
+                                fontSize = 9.sp,
+                                lineHeight = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (palette.themeOption == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(4.dp))
@@ -3291,44 +3906,59 @@ internal fun CommunityHomeFeedPane(
                         )
                     }
 
-                    // 顶部通知铃铛（带主题色未读小红点/琥珀点）
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .clickable { onOpenNotifications() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.Bell,
-                            contentDescription = "消息通知",
-                            modifier = Modifier.size(19.5.dp),
-                            tint = palette.inkPrimary
+                    if (isAuthorized) {
+                        // 顶部通知铃铛（带主题色未读小红点/琥珀点）
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .clickable { onOpenNotifications() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = LinDoIcons.Bell,
+                                contentDescription = "消息通知",
+                                modifier = Modifier.size(19.5.dp),
+                                tint = palette.inkPrimary
+                            )
+                            if (unreadNotificationCount > 0) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(top = 5.dp, end = 5.dp)
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(palette.tabIndicatorColor)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // 纯净圆形个人头像（与左侧零度娘 icon 严格同尺寸 36.dp）
+                        GoogleAccountRingAvatar(
+                            letter = currentUser?.displayName?.takeIf { it.isNotBlank() }
+                                ?: currentUser?.username
+                                ?: "L",
+                            username = currentUser?.username.orEmpty(),
+                            avatarUrl = currentUser?.avatarTemplate,
+                            animatedAvatar = currentUser?.animatedAvatar,
+                            avatarSize = 36.dp,
+                            onClick = onAvatarClick
                         )
-                        if (unreadNotificationCount > 0) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(top = 5.dp, end = 5.dp)
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(palette.tabIndicatorColor)
+                    } else {
+                        TextButton(
+                            onClick = onRequestLogin,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "登录",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.activeChipText
                             )
                         }
                     }
-
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    // 纯净圆形个人头像（与左侧零度娘 icon 严格同尺寸 36.dp）
-                    GoogleAccountRingAvatar(
-                        letter = currentUser?.displayName?.takeIf { it.isNotBlank() }
-                            ?: currentUser?.username
-                            ?: "L",
-                        avatarUrl = currentUser?.avatarTemplate,
-                        animatedAvatar = currentUser?.animatedAvatar,
-                        avatarSize = 36.dp,
-                        onClick = onAvatarClick
-                    )
                 }
 
                 Spacer(modifier = Modifier.height(11.dp))
@@ -3390,17 +4020,28 @@ internal fun CommunityHomeFeedPane(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 var isCategoryBarExpanded by remember { mutableStateOf(false) }
-                val activeCategoryMeta = remember(selectedCategoryId, LinuxDoRepository.categories.size) {
-                    LinuxDoRepository.categories.firstOrNull { it.id == selectedCategoryId }
+                val catalogVer = LinuxDoRepository.categoryCatalogVersion
+                val activeCategoryMeta = remember(selectedCategoryId, catalogVer) {
+                    LinuxDoRepository.findCategoryById(selectedCategoryId)
+                }
+                val activeParentCategoryId = remember(selectedCategoryId, catalogVer) {
+                    LinuxDoRepository.resolveParentCategoryId(selectedCategoryId)
+                }
+                val activeSubCategories = remember(activeParentCategoryId, catalogVer) {
+                    activeParentCategoryId?.let { LinuxDoRepository.getSubCategoriesForParent(it) }.orEmpty()
                 }
                 LaunchedEffect(isCategoryBarExpanded, listState) {
                     if (!isCategoryBarExpanded) return@LaunchedEffect
-                    androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex > 0 }
-                        .collect { scrolledDown ->
-                            if (scrolledDown) {
-                                isCategoryBarExpanded = false
-                            }
+                    val startIndex = listState.firstVisibleItemIndex
+                    val startOffset = listState.firstVisibleItemScrollOffset
+                    androidx.compose.runtime.snapshotFlow {
+                        listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+                    }.collect { (idx, offset) ->
+                        val scrolledDownAfterExpand = idx > startIndex || (idx == startIndex && offset > startOffset + 24)
+                        if (scrolledDownAfterExpand) {
+                            isCategoryBarExpanded = false
                         }
+                    }
                 }
 
                 // 3. 统一字阶频道 Tab（选中 17sp Bold，未选中 15sp Normal，底部 14x2.5dp 胶囊横条）+ 右侧「分类 ⌄」与布局切换严格底部对齐
@@ -3415,7 +4056,10 @@ internal fun CommunityHomeFeedPane(
                         horizontalArrangement = Arrangement.spacedBy(22.dp),
                         verticalAlignment = Alignment.Bottom
                     ) {
-                        FeedSortFilter.entries.forEach { sort ->
+                        val visibleSorts = remember(isAuthorized) {
+                            if (isAuthorized) FeedSortFilter.entries else listOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)
+                        }
+                        visibleSorts.forEach { sort ->
                             val selected = currentSort == sort
                             Column(
                                 modifier = Modifier
@@ -3525,13 +4169,13 @@ internal fun CommunityHomeFeedPane(
                                     restrictedOverride = category.readRestricted
                                 )
                             }
-                            val selected = selectedCategoryId == category.id
+                            val selected = activeParentCategoryId == category.id
                             Row(
                                 modifier = Modifier
                                     .heightIn(min = 36.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .clickable {
-                                        onSelectCategory(if (selected) null else category.id)
+                                        onSelectCategory(if (selectedCategoryId == category.id) null else category.id)
                                         isCategoryBarExpanded = false
                                     }
                                     .padding(horizontal = 2.dp),
@@ -3589,6 +4233,9 @@ internal fun CommunityHomeFeedPane(
                                     restrictedOverride = activeCategoryMeta.readRestricted
                                 )
                             }
+                            val displayCatTitle = remember(activeCategoryMeta.id, activeCategoryMeta.name, activeCategoryMeta.subLabel) {
+                                activeCategoryMeta.displayName
+                            }
                             Row(
                                 modifier = Modifier
                                     .height(26.dp)
@@ -3613,7 +4260,7 @@ internal fun CommunityHomeFeedPane(
                                     )
                                 }
                                 Text(
-                                    text = activeCategoryMeta.name,
+                                    text = displayCatTitle,
                                     fontSize = 12.5.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = palette.inkPrimary,
@@ -3626,6 +4273,88 @@ internal fun CommunityHomeFeedPane(
                                     modifier = Modifier.size(12.dp),
                                     tint = palette.inkTertiary
                                 )
+                            }
+
+                            // 二级分级版块快捷切换（全部 · Lv1 · Lv2 · Lv3）：无底色极简风格，严格同基线对齐
+                            if (activeParentCategoryId != null && activeSubCategories.isNotEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(0.5.dp)
+                                        .height(12.dp)
+                                        .background(palette.hairline)
+                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                ) {
+                                    val allSelected = selectedCategoryId == activeParentCategoryId
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        modifier = Modifier
+                                            .clickable { onSelectCategory(activeParentCategoryId) }
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "全部",
+                                            fontSize = 12.sp,
+                                            fontWeight = if (allSelected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (allSelected) palette.activeChipText else palette.inkTertiary,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .width(10.dp)
+                                                .height(2.dp)
+                                                .clip(CircleShape)
+                                                .background(if (allSelected) palette.tabIndicatorColor else Color.Transparent)
+                                        )
+                                    }
+
+                                    activeSubCategories.forEach { subCat ->
+                                        val subSelected = selectedCategoryId == subCat.id
+                                        val subLabel = subCat.subLabel ?: subCat.name.substringAfter(",", subCat.name).trim()
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    onSelectCategory(if (subSelected) activeParentCategoryId else subCat.id)
+                                                }
+                                                .padding(vertical = 2.dp)
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(2.5.dp)
+                                            ) {
+                                                if (subCat.readRestricted) {
+                                                    Icon(
+                                                        imageVector = LinDoIcons.FaLock,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(9.5.dp),
+                                                        tint = if (subSelected) palette.activeChipText else palette.inkTertiary
+                                                    )
+                                                }
+                                                Text(
+                                                    text = subLabel,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = if (subSelected) FontWeight.Bold else FontWeight.Normal,
+                                                    color = if (subSelected) palette.activeChipText else palette.inkTertiary,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(10.dp)
+                                                    .height(2.dp)
+                                                    .clip(CircleShape)
+                                                    .background(if (subSelected) palette.tabIndicatorColor else Color.Transparent)
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -3670,6 +4399,14 @@ internal fun CommunityHomeFeedPane(
                         }
 
                         if (currentSort == FeedSortFilter.TOP) {
+                            if (activeCategoryMeta != null || selectedTag != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(0.5.dp)
+                                        .height(12.dp)
+                                        .background(palette.hairline)
+                                )
+                            }
                             TopPeriodFilter.entries.forEach { period ->
                                 val selected = currentTopPeriod == period
                                 Text(
@@ -3752,20 +4489,27 @@ internal fun CommunityHomeFeedPane(
                 } else if (topics.isEmpty() && !isLoading) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         if (errorMessage != null) {
+                            val needsLogin = !isAuthorized && (
+                                errorMessage.contains("登录") || errorMessage.contains("权限")
+                            )
+                            val lacksTrustLevel = isAuthorized && (
+                                errorMessage.contains("权限") || errorMessage.contains("等级")
+                            )
                             LinDoStatePanel(
                                 LinDoMascotState.NetworkError,
                                 detail = errorMessage,
-                                onRetry = onRefresh,
+                                onRetry = when {
+                                    needsLogin -> onRequestLogin
+                                    lacksTrustLevel -> null
+                                    else -> onRefresh
+                                },
+                                actionLabel = if (needsLogin) "去登录" else "重试",
+                                showActionIcon = !needsLogin,
+                                emphasizeAction = needsLogin,
                                 useIconArtwork = true
                             )
                         } else {
-                            LinDoStatePanel(
-                                LinDoMascotState.Empty,
-                                title = "暂无话题",
-                                detail = null,
-                                onRetry = onRefresh,
-                                useIconArtwork = true
-                            )
+                            LinDoEmptyState(message = "暂无话题")
                         }
                     }
                 } else {
@@ -3779,6 +4523,20 @@ internal fun CommunityHomeFeedPane(
                             bottom = 128.dp
                         )
                     ) {
+                        if (errorMessage != null && !isLoading) {
+                            item(key = "feed_inline_error_banner", contentType = "error_banner") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(palette.cardSurface)
+                                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                                ) {
+                                    LinDoLoadFailure(errorMessage, onRetry = onRefresh)
+                                }
+                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                            }
+                        }
+
                         // 置顶公告条（统一轻分割线通栏样式，告别生硬边框盒子）
                         if (pinnedTopics.isNotEmpty()) {
                             item(key = "pinned_banner_group", contentType = "pinned") {
@@ -3789,7 +4547,9 @@ internal fun CommunityHomeFeedPane(
                                         .background(palette.cardSurface)
                                 ) {
                                     displayedPinned.forEach { pinned ->
-                                        val isPinnedUnread = (pinned.unseen || pinned.unreadPosts > 0) && !LinuxDoRepository.isTopicRead(pinned.id)
+                                        val highestFloor = maxOf(pinned.highestPostNumber, pinned.postsCount, 1)
+                                        val isPinnedUnread = (pinned.unseen || pinned.unreadPosts > 0) &&
+                                            !LinuxDoRepository.isTopicConfirmedReadReactive(pinned.id, highestFloor)
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -3863,11 +4623,11 @@ internal fun CommunityHomeFeedPane(
                         }
 
                         // 底部波浪呼吸脉冲分页加载栏（触底无更多时展示零度娘“没有更多了”）
-                        if (regularTopics.isNotEmpty()) {
+                        if (regularTopics.isNotEmpty() && searchQuery.isBlank()) {
                             item(key = "load_more_footer", contentType = "footer") {
                                 LinearPulseLoadingFooter(
                                     isLoadingMore = isLoadingMore,
-                                    hasMore = hasMoreTopics,
+                                    hasMore = hasMoreTopics && searchQuery.isBlank(),
                                     loadedCount = regularTopics.size,
                                     isError = loadMoreError,
                                     useIconArtwork = true,
@@ -3994,6 +4754,316 @@ private fun LinDoSectionTabs(
 }
 
 @Composable
+private fun EmojiGroupOfficialIcon(
+    group: do_.linux.lindo.core.site.LinuxDoEmojiGroup,
+    selected: Boolean,
+    size: Dp = 15.dp
+) {
+    val palette = LocalPalette.current
+    when (group.iconKey) {
+        "feishu" -> {
+            // 飞书 (Feishu / Lark) 官方三色飞鸟 Logo 矢量绘制
+            androidx.compose.foundation.Canvas(modifier = Modifier.size(size)) {
+                val w = this.size.width
+                val h = this.size.height
+                // 顶部青绿羽翼 (#00D6B9)
+                val topWing = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(w * 0.14f, h * 0.14f)
+                    lineTo(w * 0.62f, h * 0.30f)
+                    lineTo(w * 0.36f, h * 0.56f)
+                    lineTo(w * 0.10f, h * 0.42f)
+                    close()
+                }
+                drawPath(topWing, color = Color(0xFF00D6B9))
+                // 右侧主蓝飞翼 (#3370FF)
+                val mainWing = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(w * 0.34f, h * 0.36f)
+                    lineTo(w * 0.92f, h * 0.22f)
+                    lineTo(w * 0.68f, h * 0.86f)
+                    lineTo(w * 0.24f, h * 0.66f)
+                    close()
+                }
+                drawPath(mainWing, color = Color(0xFF3370FF))
+                // 底部深蓝折翼 (#133C9A)
+                val tailWing = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(w * 0.24f, h * 0.64f)
+                    lineTo(w * 0.54f, h * 0.56f)
+                    lineTo(w * 0.44f, h * 0.88f)
+                    close()
+                }
+                drawPath(tailWing, color = Color(0xFF1456F0))
+            }
+        }
+
+        "bilibili" -> {
+            // B站 (Bilibili) 官方蓝小电视 Logo 矢量绘制
+            androidx.compose.foundation.Canvas(modifier = Modifier.size(size)) {
+                val w = this.size.width
+                val h = this.size.height
+                val stroke = (w * 0.11f).coerceAtLeast(1.4f)
+                val biliBlue = Color(0xFF00AEEC)
+                // 顶部触角
+                drawLine(
+                    color = biliBlue,
+                    start = androidx.compose.ui.geometry.Offset(w * 0.28f, h * 0.10f),
+                    end = androidx.compose.ui.geometry.Offset(w * 0.44f, h * 0.27f),
+                    strokeWidth = stroke,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round
+                )
+                drawLine(
+                    color = biliBlue,
+                    start = androidx.compose.ui.geometry.Offset(w * 0.72f, h * 0.10f),
+                    end = androidx.compose.ui.geometry.Offset(w * 0.56f, h * 0.27f),
+                    strokeWidth = stroke,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round
+                )
+                // 电视外框
+                drawRoundRect(
+                    color = biliBlue,
+                    topLeft = androidx.compose.ui.geometry.Offset(w * 0.10f, h * 0.26f),
+                    size = androidx.compose.ui.geometry.Size(w * 0.80f, h * 0.62f),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * 0.18f, w * 0.18f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
+                )
+                // 左右小眼睛
+                drawLine(
+                    color = biliBlue,
+                    start = androidx.compose.ui.geometry.Offset(w * 0.30f, h * 0.50f),
+                    end = androidx.compose.ui.geometry.Offset(w * 0.40f, h * 0.58f),
+                    strokeWidth = stroke,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round
+                )
+                drawLine(
+                    color = biliBlue,
+                    start = androidx.compose.ui.geometry.Offset(w * 0.70f, h * 0.50f),
+                    end = androidx.compose.ui.geometry.Offset(w * 0.60f, h * 0.58f),
+                    strokeWidth = stroke,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round
+                )
+            }
+        }
+
+        "tieba" -> {
+            // 贴吧官方蓝标 / 滑稽经典配色徽章
+            androidx.compose.foundation.Canvas(modifier = Modifier.size(size)) {
+                val w = this.size.width
+                val h = this.size.height
+                drawCircle(
+                    color = Color(0xFF3385FF),
+                    radius = w * 0.45f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.5f)
+                )
+                // 百度熊掌核心脚垫与四趾意向
+                drawCircle(
+                    color = Color.White,
+                    radius = w * 0.16f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.50f, h * 0.62f)
+                )
+                drawCircle(color = Color.White, radius = w * 0.065f, center = androidx.compose.ui.geometry.Offset(w * 0.31f, h * 0.42f))
+                drawCircle(color = Color.White, radius = w * 0.065f, center = androidx.compose.ui.geometry.Offset(w * 0.43f, h * 0.33f))
+                drawCircle(color = Color.White, radius = w * 0.065f, center = androidx.compose.ui.geometry.Offset(w * 0.57f, h * 0.33f))
+                drawCircle(color = Color.White, radius = w * 0.065f, center = androidx.compose.ui.geometry.Offset(w * 0.69f, h * 0.42f))
+            }
+        }
+
+        "coolapk" -> {
+            // 酷安官方绿标双环
+            androidx.compose.foundation.Canvas(modifier = Modifier.size(size)) {
+                val w = this.size.width
+                val h = this.size.height
+                drawCircle(
+                    color = Color(0xFF11AB60),
+                    radius = w * 0.45f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.5f)
+                )
+                val stroke = (w * 0.10f).coerceAtLeast(1.2f)
+                drawCircle(
+                    color = Color.White,
+                    radius = w * 0.16f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.38f, h * 0.5f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
+                )
+                drawCircle(
+                    color = Color.White,
+                    radius = w * 0.16f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.62f, h * 0.5f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
+                )
+            }
+        }
+
+        "weibo" -> {
+            // 微博官方红睛徽标
+            androidx.compose.foundation.Canvas(modifier = Modifier.size(size)) {
+                val w = this.size.width
+                val h = this.size.height
+                drawCircle(
+                    color = Color(0xFFE6162D),
+                    radius = w * 0.45f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.5f)
+                )
+                drawCircle(
+                    color = Color.White,
+                    radius = w * 0.22f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.48f, h * 0.54f)
+                )
+                drawCircle(
+                    color = Color(0xFFE6162D),
+                    radius = w * 0.10f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.50f, h * 0.54f)
+                )
+            }
+        }
+
+        "xhs" -> {
+            // 小红书官方红底方章
+            Box(
+                modifier = Modifier
+                    .size(size)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xFFFF2442)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("红", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        "qq" -> {
+            // 小黄脸 / QQ 经典黄底笑脸徽标
+            androidx.compose.foundation.Canvas(modifier = Modifier.size(size)) {
+                val w = this.size.width
+                val h = this.size.height
+                drawCircle(
+                    color = Color(0xFFF59E0B),
+                    radius = w * 0.45f,
+                    center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.5f)
+                )
+                drawCircle(color = Color(0xFF451A03), radius = w * 0.065f, center = androidx.compose.ui.geometry.Offset(w * 0.36f, h * 0.42f))
+                drawCircle(color = Color(0xFF451A03), radius = w * 0.065f, center = androidx.compose.ui.geometry.Offset(w * 0.64f, h * 0.42f))
+                drawArc(
+                    color = Color(0xFF451A03),
+                    startAngle = 20f,
+                    sweepAngle = 140f,
+                    useCenter = false,
+                    topLeft = androidx.compose.ui.geometry.Offset(w * 0.30f, h * 0.38f),
+                    size = androidx.compose.ui.geometry.Size(w * 0.40f, h * 0.34f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = (w * 0.09f).coerceAtLeast(1.2f), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                )
+            }
+        }
+
+        else -> {
+            val iconUrl = group.iconUrl
+            if (!iconUrl.isNullOrBlank()) {
+                var imgErr by remember(iconUrl) { mutableStateOf(false) }
+                if (!imgErr) {
+                    AsyncImage(
+                        model = iconUrl,
+                        contentDescription = group.labelZh,
+                        contentScale = ContentScale.Fit,
+                        onError = { imgErr = true },
+                        modifier = Modifier.size(size)
+                    )
+                    return
+                }
+            }
+            val unicode = group.iconUnicode ?: when (group.iconKey) {
+                "official_reactions" -> "❤️"
+                "smileys" -> "😀"
+                "people" -> "👋"
+                "animals" -> "🐻"
+                "food" -> "🍔"
+                "travel" -> "✈️"
+                "activities" -> "⚽"
+                "objects" -> "💡"
+                "symbols" -> "🔣"
+                "flags" -> "🏁"
+                "memes" -> "🫠"
+                else -> "🎭"
+            }
+            val glyphSize = with(LocalDensity.current) { (size * 0.85f).toSp() }
+            val glyphLine = with(LocalDensity.current) { size.toSp() }
+            Text(
+                text = unicode,
+                fontSize = glyphSize,
+                lineHeight = glyphLine,
+                color = if (selected) palette.inkPrimary else palette.inkSecondary
+            )
+        }
+    }
+}
+
+@Composable
+internal fun LinDoEmojiGroupTabs(
+    groups: List<do_.linux.lindo.core.site.LinuxDoEmojiGroup>,
+    selectedIndex: Int,
+    fontSize: TextUnit = 12.5.sp,
+    onSelect: (Int) -> Unit
+) {
+    val palette = LocalPalette.current
+    Row(
+        modifier = Modifier
+            .horizontalScroll(rememberScrollState())
+            .selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        groups.forEachIndexed { index, group ->
+            val selected = index == selectedIndex
+            val interactionSource = remember { MutableInteractionSource() }
+            val focused by interactionSource.collectIsFocusedAsState()
+            Box(
+                modifier = Modifier
+                    .heightIn(min = 38.dp)
+                    .selectable(
+                        selected = selected,
+                        interactionSource = interactionSource,
+                        indication = null,
+                        role = Role.Tab,
+                        onClick = { onSelect(index) }
+                    )
+                    .padding(horizontal = 2.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    modifier = Modifier.padding(bottom = 3.dp)
+                ) {
+                    EmojiGroupOfficialIcon(
+                        group = group,
+                        selected = selected,
+                        size = 14.5.dp
+                    )
+                    Text(
+                        text = group.labelZh,
+                        fontSize = fontSize,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        color = when {
+                            selected -> palette.inkPrimary
+                            focused -> palette.brandGold
+                            else -> palette.inkSecondary
+                        },
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                if (selected) {
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .width(14.dp)
+                            .height(2.5.dp)
+                            .clip(CircleShape)
+                            .background(palette.tabIndicatorColor)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun GoogleM3FilterPill(
     label: String,
     dotColor: Color?,
@@ -4051,6 +5121,7 @@ private fun CommunityTopicItem(
     isSelected: Boolean,
     isCompact: Boolean = false,
     enableAnimations: Boolean,
+    trailingAction: (@Composable () -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -4066,7 +5137,9 @@ private fun CommunityTopicItem(
     val pressBackground = Modifier.drawBehind {
         drawRect(if (isItemPressed) palette.subtleSurface else rowBgColor)
     }
-    val isTopicUnread = (topic.unseen || topic.unreadPosts > 0) && !LinuxDoRepository.isTopicRead(topic.id)
+    val highestFloor = maxOf(topic.highestPostNumber, topic.postsCount, 1)
+    val isTopicUnread = (topic.unseen || topic.unreadPosts > 0) &&
+        !LinuxDoRepository.isTopicConfirmedReadReactive(topic.id, highestFloor)
     val unreadDotColor = if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
     val titleAnnotated = remember(topic.title, isTopicUnread) {
         buildAnnotatedString {
@@ -4224,6 +5297,12 @@ private fun CommunityTopicItem(
                     }
                 }
             }
+            if (trailingAction != null) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(modifier = Modifier.align(Alignment.CenterVertically)) {
+                    trailingAction()
+                }
+            }
         }
     } else {
         // 模式 A：宽松列表模式（Web 端左头像 46dp 独立左列 + 右侧四层：标题+未读蓝点 -> 版块图标+锁+版块名+带图标标签胶囊 -> 2行摘要 -> 作者·时间 | 互动指标）
@@ -4306,47 +5385,21 @@ private fun CommunityTopicItem(
                     }
                 }
 
-                val initialCachedExcerpt = remember(topic.id, topic.excerpt) {
+                val cleanExcerpt = remember(topic.id, topic.excerpt) {
                     topic.excerpt?.trim()?.takeIf { it.isNotEmpty() }
                         ?: LinuxDoRepository.getCachedTopicExcerpt(topic.id)
                 }
-                var resolvedExcerpt by remember(topic.id, initialCachedExcerpt) {
-                    mutableStateOf(initialCachedExcerpt)
-                }
-                var excerptFetchDone by remember(topic.id, initialCachedExcerpt) {
-                    mutableStateOf(initialCachedExcerpt != null || LinuxDoRepository.hasCachedTopicExcerpt(topic.id))
-                }
-                if (!excerptFetchDone && topic.id > 0 && !topic.pinned) {
-                    LaunchedEffect(topic.id) {
-                        delay(140L)
-                        val fetched = LinuxDoRepository.fetchTopicExcerpt(topic.id)
-                        if (!fetched.isNullOrBlank()) {
-                            resolvedExcerpt = fetched
-                        }
-                        excerptFetchDone = true
-                    }
-                }
-                val cleanExcerpt = resolvedExcerpt?.takeIf { it.isNotBlank() }
-                    ?: if (excerptFetchDone && !topic.pinned) topic.title else null
-                if (!topic.pinned || cleanExcerpt != null) {
+                if (!cleanExcerpt.isNullOrBlank()) {
                     Spacer(modifier = Modifier.height(6.dp))
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = cleanExcerpt ?: " \n ",
-                            fontSize = 13.8.sp,
-                            lineHeight = 19.5.sp,
-                            color = if (cleanExcerpt != null) palette.inkSecondary else Color.Transparent,
-                            minLines = 2,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (cleanExcerpt == null) {
-                            TopicExcerptSkeleton(
-                                modifier = Modifier.matchParentSize()
-                            )
-                        }
-                    }
+                    Text(
+                        text = cleanExcerpt,
+                        fontSize = 13.8.sp,
+                        lineHeight = 19.5.sp,
+                        color = palette.inkSecondary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -4464,6 +5517,8 @@ internal fun CommunityTopicReaderPane(
     summary: TopicSummary?,
     detail: TopicDetailModel?,
     targetPostNumber: Int? = null,
+    targetFloorJumpNonce: Int = 0,
+    isAuthorized: Boolean = UserApiKeyAuthManager.isAuthorized(),
     initialReplyDraft: CloudDraftItem? = null,
     onConsumeReplyDraft: () -> Unit = {},
     isLoading: Boolean,
@@ -4527,8 +5582,12 @@ internal fun CommunityTopicReaderPane(
     }
     var onlyOpFilter by remember(summary.id) { mutableStateOf(false) }
     var changingReaderFilter by remember(summary.id) { mutableStateOf(false) }
-    var notificationLevel by remember(summary.id) { mutableStateOf(1) } // 1=常规, 2=跟踪, 3=关注, 0=免扰
+    var notificationLevel by remember(summary.id) { mutableStateOf(detail?.notificationLevel ?: 1) } // 1=常规, 2=跟踪, 3=关注, 0=免扰
+    LaunchedEffect(detail?.notificationLevel) {
+        detail?.notificationLevel?.let { notificationLevel = it }
+    }
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
+    var isLoadingGapPosts by remember(summary.id) { mutableStateOf(false) }
     var loadMorePostsError by remember(summary.id) { mutableStateOf(false) }
     var copiedShareLink by remember(summary.id) { mutableStateOf(false) }
     var showFloorNavigator by remember(summary.id) { mutableStateOf(false) }
@@ -4562,7 +5621,9 @@ internal fun CommunityTopicReaderPane(
     val streamIds = detail?.streamIds.orEmpty()
     val loadedIds = remember(posts) { posts.map { it.id }.toSet() }
     val latestDetail by androidx.compose.runtime.rememberUpdatedState(detail)
-    val remainingPostIds = remember(streamIds, loadedIds) { remainingUnloadedStreamIds(streamIds, loadedIds) }
+    val afterTailPostIds = remember(streamIds, posts, loadedIds) {
+        afterTailUnloadedStreamIds(streamIds, posts, loadedIds)
+    }
     val previousPostIds = remember(streamIds, loadedIds) { previousUnloadedStreamIds(streamIds, loadedIds) }
     var pendingJumpFloor by remember(summary.id) { mutableStateOf<Int?>(null) }
     var jumpFetchedWindow by remember(summary.id) { mutableStateOf(false) }
@@ -4652,12 +5713,12 @@ internal fun CommunityTopicReaderPane(
     }
 
     // 若从通知、搜索、书签或动态指定了目标楼层，加载完成后自动精准滚动到对应楼层（若目标楼层即当前返回窗口第 0 项，保留 index=0 话题标题头可见）
-    var jumpedToTargetFloor by remember(summary.id, targetPostNumber) { mutableStateOf(false) }
-    LaunchedEffect(summary.id, targetPostNumber, posts.size) {
+    var jumpedToTargetFloor by remember(summary.id, targetPostNumber, targetFloorJumpNonce) { mutableStateOf(false) }
+    LaunchedEffect(summary.id, targetPostNumber, targetFloorJumpNonce, posts.size) {
         val targetFloor = targetPostNumber
         if (!jumpedToTargetFloor && targetFloor != null && targetFloor > 1 && posts.isNotEmpty()) {
-            val targetIdx = posts.indexOfFirst { it.postNumber == targetFloor }
-            if (targetIdx >= 0) {
+            val targetIdx = resolveJumpPostIndex(posts, targetFloor, allowNearestFallback = true)
+            if (targetIdx != null) {
                 jumpedToTargetFloor = true
                 if (targetIdx == 0) {
                     readerListState.scrollToItem(0)
@@ -4670,17 +5731,37 @@ internal fun CommunityTopicReaderPane(
 
     fun loadMoreFloorBatch(batchSize: Int = 20, earlier: Boolean = false) {
         val currentDetail = detail ?: return
-        if (changingReaderFilter || isLoadingMorePosts || (if (earlier) previousPostIds else remainingPostIds).isEmpty()) return
+        val candidateIds = if (earlier) previousPostIds else afterTailPostIds
+        if (changingReaderFilter || isLoadingMorePosts || isLoadingGapPosts || candidateIds.isEmpty()) return
         scope.launch {
             isLoadingMorePosts = true
             loadMorePostsError = false
             try {
-                val batchIds = if (earlier) previousPostIds.takeLast(batchSize) else remainingPostIds.take(batchSize)
+                val batchIds = if (earlier) candidateIds.takeLast(batchSize) else candidateIds.take(batchSize)
                 val knownAuthorBadges = currentDetail.posts.associate { it.userId to it.authorBadges }
                 val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds, knownAuthorBadges)
                 if (morePosts.isNotEmpty()) {
-                    val merged = mergeTopicPosts(latestDetail?.posts.orEmpty(), morePosts)
+                    val prevPosts = latestDetail?.posts.orEmpty()
+                    val prevMinFloor = prevPosts.minOfOrNull { it.postNumber } ?: Int.MAX_VALUE
+                    val anchorItem = if (earlier) {
+                        readerListState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is Int }
+                    } else null
+                    val anchorPostId = anchorItem?.key as? Int
+                    val anchorOffset = anchorItem?.offset ?: 0
+                    val merged = mergeTopicPosts(prevPosts, morePosts)
+                    val prependedCount = if (earlier) merged.count { it.postNumber < prevMinFloor } else 0
                     latestDetail?.let { onDetailUpdated(it.copy(posts = merged)) }
+                    if (earlier && prependedCount > 0) {
+                        withFrameNanos { }
+                        if (anchorPostId != null) {
+                            val newPostIdx = merged.indexOfFirst { it.id == anchorPostId }
+                            if (newPostIdx >= 0) {
+                                readerListState.scrollToItem(newPostIdx + 1, (-anchorOffset).coerceAtLeast(0))
+                            }
+                        } else {
+                            readerListState.scrollToItem(1 + prependedCount, 0)
+                        }
+                    }
                 } else {
                     loadMorePostsError = true
                 }
@@ -4694,12 +5775,35 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
-    // 当滚动接近当前已加载楼层末尾时，自动拉取下一批 20 条评论楼层（若发生网络错误则停止自动重试，仅允许手动点击重试）
+    fun loadMiddleGapBatch(gapIds: List<Int>, batchSize: Int = 20) {
+        val currentDetail = detail ?: return
+        if (changingReaderFilter || isLoadingMorePosts || isLoadingGapPosts || gapIds.isEmpty()) return
+        scope.launch {
+            isLoadingGapPosts = true
+            try {
+                val batchIds = gapIds.take(batchSize)
+                val knownAuthorBadges = currentDetail.posts.associate { it.userId to it.authorBadges }
+                val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds, knownAuthorBadges)
+                if (morePosts.isNotEmpty()) {
+                    val merged = mergeTopicPosts(latestDetail?.posts.orEmpty(), morePosts)
+                    latestDetail?.let { onDetailUpdated(it.copy(posts = merged)) }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // Keep gap bar clickable for retry
+            } finally {
+                isLoadingGapPosts = false
+            }
+        }
+    }
+
+    // 当滚动接近当前已加载楼层末尾时，仅自动拉取末尾之后的下一批 20 条评论楼层（跳楼后不会失控级联拉取中间断层 C7）
     val shouldLoadMoreFloors by remember(
-        readerListState, posts.size, remainingPostIds.size, isLoadingMorePosts, loadMorePostsError, changingReaderFilter
+        readerListState, posts.size, afterTailPostIds.size, isLoadingMorePosts, isLoadingGapPosts, loadMorePostsError, changingReaderFilter
     ) {
         derivedStateOf {
-            posts.isNotEmpty() && remainingPostIds.isNotEmpty() && !isLoadingMorePosts &&
+            posts.isNotEmpty() && afterTailPostIds.isNotEmpty() && !isLoadingMorePosts && !isLoadingGapPosts &&
                 !loadMorePostsError && !changingReaderFilter &&
                 (readerListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= posts.size - 2
         }
@@ -4726,27 +5830,19 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
-    val latestReaderPosts by androidx.compose.runtime.rememberUpdatedState(posts)
-    val postFirstSeenAtMs = remember(summary.id) { mutableMapOf<Int, Long>() }
-    val locallyReadPostNumbers = remember(summary.id) { androidx.compose.runtime.mutableStateMapOf<Int, Boolean>() }
+    val latestFloorByPostId by androidx.compose.runtime.rememberUpdatedState(floorByPostId)
 
-    LaunchedEffect(summary.id) {
+    LaunchedEffect(summary.id, isAuthorized) {
+        if (!isAuthorized || !UserApiKeyAuthManager.isAuthorized()) return@LaunchedEffect
         ScreenTrackEngine.onTopicEntered(topicId = summary.id, initialVisiblePosts = emptySet())
         var tickAccumulatorMs = 0L
-        while (true) {
+        while (isAuthorized && UserApiKeyAuthManager.isAuthorized()) {
             delay(400L)
             val nowMs = System.currentTimeMillis()
             if (readerListState.isScrollInProgress) ScreenTrackEngine.onUserScrolled(nowMs)
             val visiblePostNums = readerListState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
-                latestReaderPosts.getOrNull(item.index - 1)?.postNumber
+                latestFloorByPostId[item.key as? Int]
             }.toSet()
-            for (postNum in visiblePostNums) {
-                val firstSeen = postFirstSeenAtMs.getOrPut(postNum) { nowMs }
-                if (nowMs - firstSeen >= 1100L && locallyReadPostNumbers[postNum] != true) {
-                    locallyReadPostNumbers[postNum] = true
-                    ScreenTrackEngine.markPostReadLocally(summary.id, postNum)
-                }
-            }
             ScreenTrackEngine.updateVisiblePosts(visiblePostNums, nowMs)
             tickAccumulatorMs += 400L
             if (tickAccumulatorMs >= 1000L) {
@@ -4757,15 +5853,20 @@ internal fun CommunityTopicReaderPane(
             }
         }
     }
-    LaunchedEffect(summary.id, readerListState) {
+    LaunchedEffect(summary.id, isAuthorized, readerListState) {
+        if (!isAuthorized || !UserApiKeyAuthManager.isAuthorized()) return@LaunchedEffect
         var wasScrolling = false
         androidx.compose.runtime.snapshotFlow { readerListState.isScrollInProgress }.collect { scrolling ->
             if (scrolling || wasScrolling) ScreenTrackEngine.onUserScrolled()
             wasScrolling = scrolling
         }
     }
-    DisposableEffect(summary.id) {
-        onDispose { ScreenTrackEngine.onTopicExited(summary.id) }
+    DisposableEffect(summary.id, isAuthorized) {
+        onDispose {
+            if (isAuthorized && UserApiKeyAuthManager.isAuthorized()) {
+                ScreenTrackEngine.onTopicExited(summary.id)
+            }
+        }
     }
 
     var showTopMoreMenu by remember(summary.id) { mutableStateOf(false) }
@@ -4773,10 +5874,20 @@ internal fun CommunityTopicReaderPane(
     var showAiSummaryPanel by remember(summary.id) { mutableStateOf(false) }
     var isLoadingAiSummary by remember(summary.id) { mutableStateOf(false) }
     var remoteAiSummary by remember(summary.id) { mutableStateOf<String?>(null) }
+    BackNavigationBridge.Handler(enabled = showTopMoreMenu || showAiSummaryPanel) {
+        if (showTopMoreMenu) {
+            showTopMoreMenu = false
+        } else {
+            showAiSummaryPanel = false
+        }
+    }
     val showCollapsedTitleInTopBar by remember {
         derivedStateOf {
             readerListState.firstVisibleItemIndex > 0 || readerListState.firstVisibleItemScrollOffset > 220
         }
+    }
+    LaunchedEffect(showCollapsedTitleInTopBar) {
+        if (!showCollapsedTitleInTopBar) expandTopBarTitle = false
     }
     val allTopicTags = remember(detail?.tags, summary.tags) {
         detail?.tags?.ifEmpty { summary.tags } ?: summary.tags
@@ -4789,20 +5900,14 @@ internal fun CommunityTopicReaderPane(
             ""
         } else {
             fun cleanHtmlSnippet(html: String, maxChars: Int): String {
-                return html
-                    .replace(Regex("<aside[\\s\\S]*?</aside>"), "")
-                    .replace(Regex("<[^>]+>"), " ")
-                    .replace("&nbsp;", " ")
-                    .replace("&quot;", "\"")
-                    .replace("&amp;", "&")
-                    .replace(Regex("\\s+"), " ")
-                    .trim()
+                val strippedQuotes = html.replace(Regex("<aside[\\s\\S]*?</aside>"), "")
+                return decodeDiscourseHtmlSnippet(strippedQuotes)
                     .take(maxChars)
             }
             val opPost = posts.firstOrNull { it.postNumber == 1 } ?: return@remember ""
             val opText = cleanHtmlSnippet(opPost.cookedHtml, 180)
             val topReplies = posts.filter { it.postNumber != 1 }
-                .sortedByDescending { p -> p.likeCount + p.reactions.sumOf { it.count } }
+                .sortedByDescending { p -> maxOf(p.likeCount, p.reactions.sumOf { it.count }) }
                 .take(3)
             buildString {
                 if (opText.isNotBlank()) {
@@ -4978,6 +6083,11 @@ internal fun CommunityTopicReaderPane(
 
                 Row(
                     modifier = Modifier.clickable {
+                        if (!UserApiKeyAuthManager.isAuthorized()) {
+                            showTopMoreMenu = false
+                            onRequestLogin()
+                            return@clickable
+                        }
                         val prevLevel = notificationLevel
                         val nextLevel = when (notificationLevel) {
                             1 -> 3
@@ -5252,23 +6362,74 @@ internal fun CommunityTopicReaderPane(
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
+                        val needsLogin = !UserApiKeyAuthManager.isAuthorized() && (
+                            detail.loadError.contains("登录") || detail.loadError.contains("权限") || detail.loadError.contains("私密")
+                        )
                         LinDoStatePanel(
                             LinDoMascotState.NetworkError,
                             detail = detail.loadError,
-                            onRetry = if (detail.unavailable) onUnavailable else onRefresh,
-                            actionLabel = if (detail.unavailable) "返回列表并刷新" else "重试"
+                            onRetry = when {
+                                needsLogin -> onRequestLogin
+                                detail.unavailable -> onUnavailable
+                                else -> onRefresh
+                            },
+                            actionLabel = when {
+                                needsLogin -> "去登录"
+                                detail.unavailable -> "返回列表"
+                                else -> "重试"
+                            },
+                            showActionIcon = !needsLogin && !detail.unavailable,
+                            emphasizeAction = needsLogin
                         )
                     }
                 }
             }
 
-            items(
-                posts, key = { it.id },
-                contentType = { post -> if (post.postNumber == 1) "original-post" else "reply" }
-            ) { post ->
+            itemsIndexed(
+                posts, key = { _, it -> it.id },
+                contentType = { _, post -> if (post.postNumber == 1) "original-post" else "reply" }
+            ) { index, post ->
+                val gapIds = if (index > 0) {
+                    middleGapStreamIdsBetween(streamIds, posts[index - 1].id, post.id, loadedIds)
+                } else emptyList()
+                if (gapIds.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(palette.subtleSurface.copy(alpha = 0.65f))
+                            .clickable(enabled = !isLoadingGapPosts && !changingReaderFilter) {
+                                loadMiddleGapBatch(gapIds)
+                            }
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.ChevronDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = palette.activeChipText
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isLoadingGapPosts) "正在展开中间楼层…" else "展开中间 ${gapIds.size} 层未加载回复",
+                            fontSize = 12.2.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.activeChipText
+                        )
+                    }
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                }
+
                 val repliedPost = postsByNumber[post.replyToPostNumber]
                 val childReplies = repliesByParent[post.postNumber].orEmpty()
-                val isFloorUnread = !post.isRead && locallyReadPostNumbers[post.postNumber] != true
+                val confirmedReadVer = ScreenTrackEngine.serverConfirmedReadVersion
+                val isFloorUnread = UserApiKeyAuthManager.isAuthorized() &&
+                    !post.isRead &&
+                    remember(summary.id, post.postNumber, confirmedReadVer) {
+                        !ScreenTrackEngine.isPostConfirmedReadByServer(summary.id, post.postNumber) &&
+                            (LinuxDoRepository.getServerConfirmedReadFloor(summary.id) ?: 0) < post.postNumber
+                    }
                 CommunityPostFloor(
                     post = post,
                     repliedPost = repliedPost,
@@ -5346,7 +6507,7 @@ internal fun CommunityTopicReaderPane(
                 item(key = "load_more_posts", contentType = "footer") {
                     LinearPulseLoadingFooter(
                         isLoadingMore = isLoadingMorePosts,
-                        hasMore = remainingPostIds.isNotEmpty(),
+                        hasMore = afterTailPostIds.isNotEmpty(),
                         loadedCount = posts.size,
                         isError = loadMorePostsError,
                         loadingText = "正在同步后续楼层 (${posts.size}/$totalFloorCount)",
@@ -5380,29 +6541,55 @@ internal fun CommunityTopicReaderPane(
                     .padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
-                        .background(palette.subtleSurface.copy(alpha = 0.65f))
-                        .clickable {
-                            if (!UserApiKeyAuthManager.isAuthorized()) {
-                                onRequestLogin()
-                            } else {
+                val readerAuthorized = UserApiKeyAuthManager.isAuthorized()
+                if (readerAuthorized) {
+                    Row(
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
+                            .background(palette.subtleSurface.copy(alpha = 0.65f))
+                            .clickable {
                                 replyTargetPostNumber = null
                                 replyTargetUsername = null
                                 replyInitialQuote = ""
                                 replyCloudDraft = null
                                 showReplySheet = true
                             }
-                        }
-                        .padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(LinDoIcons.Edit, null, Modifier.size(17.dp), tint = palette.inkSecondary)
-                    Text(
-                        if (UserApiKeyAuthManager.isAuthorized()) "回复话题" else "登录后回复",
-                        fontSize = 13.sp, color = palette.inkPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
+                            .padding(horizontal = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(LinDoIcons.Edit, null, Modifier.size(16.dp), tint = palette.inkSecondary)
+                        Text(
+                            "回复话题",
+                            fontSize = 13.sp, color = palette.inkPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 44.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onRequestLogin)
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(LinDoIcons.FaLock, null, Modifier.size(13.dp), tint = palette.inkTertiary)
+                        Text(
+                            "登录后参与回复",
+                            fontSize = 13.sp,
+                            color = palette.inkSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            "登录",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.activeChipText
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))
@@ -5465,15 +6652,44 @@ internal fun CommunityTopicReaderPane(
     }
 
     editingPost?.let { target ->
-        ComposerSheet(ComposerAction.EDIT, topicId = summary.id, topicTitle = detail?.title ?: summary.title,
-            post = target, onDismiss = { editingPost = null }, onPublished = { result ->
-                result.post?.let { updated ->
-                    detail?.let { current -> onDetailUpdated(current.copy(posts = current.posts.map {
-                        if (it.id == target.id) it.copy(cookedHtml = updated.cookedHtml, raw = updated.raw) else it
-                    })) }
+        val curUser = UserApiKeyAuthManager.currentUser
+        val isTargetYours = (curUser != null && curUser.userId > 0 && target.userId == curUser.userId) ||
+            (curUser != null && curUser.username.isNotBlank() && target.username.equals(curUser.username, ignoreCase = true))
+        val canEditMeta = (target.postNumber == 1) && (detail?.canEditTopic == true || isTargetYours || target.canEdit)
+        ComposerSheet(
+            action = ComposerAction.EDIT,
+            topicId = summary.id,
+            topicTitle = detail?.title ?: summary.title,
+            post = target,
+            initialCategoryId = detail?.categoryId ?: summary.categoryId,
+            initialTags = detail?.tags ?: summary.tags,
+            canEditTopicMeta = canEditMeta,
+            onDismiss = { editingPost = null },
+            onPublished = { result ->
+                val updatedPost = result.post
+                val updatedTitle = result.title?.takeIf { it.isNotBlank() }
+                val updatedCatId = result.updatedCategoryId
+                val updatedCatMeta = updatedCatId?.let { LinuxDoRepository.findCategoryById(it) }
+                val updatedTags = result.updatedTags
+                latestDetail?.let { current ->
+                    onDetailUpdated(
+                        current.copy(
+                            title = updatedTitle ?: current.title,
+                            categoryId = updatedCatId ?: current.categoryId,
+                            categoryName = updatedCatMeta?.displayName ?: current.categoryName,
+                            categoryColorHex = updatedCatMeta?.colorHex ?: current.categoryColorHex,
+                            tags = updatedTags ?: current.tags,
+                            posts = if (updatedPost != null) {
+                                current.posts.map {
+                                    if (it.id == target.id) it.copy(cookedHtml = updatedPost.cookedHtml, raw = updatedPost.raw) else it
+                                }
+                            } else current.posts
+                        )
+                    )
                 }
                 editingPost = null
-            })
+            }
+        )
     }
 
     if (showReplySheet) {
@@ -5530,10 +6746,18 @@ internal fun CommunityTopicReaderPane(
                 val currentDetail = detail
                 if (currentDetail != null) {
                     val updatedPosts = mergeTopicPosts(currentDetail.posts, listOf(newPost))
+                    val updatedStreamIds = if (newPost.id > 0 && newPost.id !in currentDetail.streamIds) {
+                        currentDetail.streamIds + newPost.id
+                    } else {
+                        currentDetail.streamIds
+                    }
+                    val updatedHighest = maxOf(currentDetail.highestPostNumber ?: 0, newPost.postNumber, currentDetail.postsCount + 1)
                     onDetailUpdated(
                         currentDetail.copy(
                             postsCount = currentDetail.postsCount + 1,
-                            posts = updatedPosts
+                            highestPostNumber = updatedHighest,
+                            posts = updatedPosts,
+                            streamIds = updatedStreamIds
                         )
                     )
                     scope.launch {
@@ -5681,8 +6905,7 @@ internal fun CommunityPostFloor(
     var expandedBoostId by remember(post.id) { mutableStateOf<Long?>(null) }
     var boostInputText by remember(post.id) { mutableStateOf("") }
     var showBoostEmojiPicker by remember(post.id) { mutableStateOf(false) }
-    var selectedBoostEmojiGroupIdx by remember(post.id) { mutableIntStateOf(0) }
-    var syncedEmojiGroupsVersion by remember { mutableIntStateOf(0) }
+    var selectedBoostEmojiGroupKey by remember(post.id) { mutableStateOf("official_reactions") }
     var isSubmittingBoost by remember(post.id) { mutableStateOf(false) }
     var isDeletingBoostId by remember(post.id) { mutableStateOf<Long?>(null) }
     var isTogglingReaction by remember(post.id) { mutableStateOf(false) }
@@ -5694,6 +6917,16 @@ internal fun CommunityPostFloor(
     var showInlineReplies by remember(post.id) { mutableStateOf(false) }
     var copiedFloorLink by remember(post.id) { mutableStateOf(false) }
 
+    BackNavigationBridge.Handler(
+        enabled = showBoostEmojiPicker || showBoostComposer || showReactionPopover
+    ) {
+        when {
+            showBoostEmojiPicker -> showBoostEmojiPicker = false
+            showBoostComposer -> showBoostComposer = false
+            showReactionPopover -> showReactionPopover = false
+        }
+    }
+
     LaunchedEffect(floorActionError) {
         if (floorActionError != null) {
             delay(4200L)
@@ -5703,9 +6936,7 @@ internal fun CommunityPostFloor(
 
     LaunchedEffect(showReactionPopover, showBoostComposer, showBoostEmojiPicker) {
         if ((showReactionPopover || showBoostComposer || showBoostEmojiPicker) && !LinuxDoEmojiCatalog.hasSyncedServerEmojis()) {
-            if (LinuxDoRepository.syncSiteEmojis()) {
-                syncedEmojiGroupsVersion++
-            }
+            LinuxDoRepository.syncSiteEmojis()
         }
     }
 
@@ -6102,35 +7333,6 @@ internal fun CommunityPostFloor(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        if (targetReplyFloorNum != null) {
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable(enabled = !loadingReplyTarget) {
-                                        onJumpToFloorNumber(targetReplyFloorNum)
-                                    }
-                                    .padding(horizontal = 3.dp, vertical = 1.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.5.dp)
-                            ) {
-                                Icon(
-                                    imageVector = LinDoIcons.Reply,
-                                    contentDescription = "跳转被回复楼层",
-                                    modifier = Modifier
-                                        .size(14.5.dp)
-                                        .graphicsLayer { scaleX = -1f },
-                                    tint = palette.inkSecondary
-                                )
-                                SmartAvatar(
-                                    username = targetReplyUsername ?: "L",
-                                    avatarTemplate = targetReplyAvatarTemplate,
-                                    animatedAvatar = targetReplyAnimatedAvatar,
-                                    size = 20.dp,
-                                    enableAnimations = enableAnimations
-                                )
-                            }
-                        }
-
                         val floorMeta = listOfNotNull(
                             post.postNumber.takeIf { it > 1 }?.let { "$it 楼" },
                             post.createdAtText.takeIf { it.isNotBlank() }
@@ -6240,7 +7442,8 @@ internal fun CommunityPostFloor(
             repliedHtml = repliedPost?.cookedHtml, onJumpToFloorNumber = onJumpToFloorNumber,
             loadingReplyTarget = loadingReplyTarget,
             onSelectionChange = { selectedQuote = it },
-            onOpenWebUrl = onOpenWebUrl
+            onOpenWebUrl = onOpenWebUrl,
+            onRequestLogin = onRequestLogin
         )
 
         // 2.2 官方小火箭 Boost 气泡列表 (`discourse-boosts`：气泡与 `+🚀` 统一 28dp 同高且严格垂直居中对齐)
@@ -6422,8 +7625,15 @@ internal fun CommunityPostFloor(
         // 2.8 独立极简「小火箭 Boost」单行输入条 (`discourse-boosts`：与表情点赞彻底解耦，仅保留单行清爽输入 + 按需展开表情网格)
         AnimatedVisibility(visible = showBoostComposer && canComposeBoost) {
             val boostStats = remember(boostInputText) { BoostInputStats.compute(boostInputText) }
-            val pickerGroups = remember(syncedEmojiGroupsVersion) { LinuxDoEmojiCatalog.getPickerGroups() }
-            val safeGroupIdx = selectedBoostEmojiGroupIdx.coerceIn(0, (pickerGroups.size - 1).coerceAtLeast(0))
+            val emojiCatalogVer = LinuxDoEmojiCatalog.catalogVersion
+            val pickerGroups = remember(emojiCatalogVer) { LinuxDoEmojiCatalog.getPickerGroups() }
+            val safeGroupIdx = remember(pickerGroups, selectedBoostEmojiGroupKey) {
+                pickerGroups.indexOfFirst {
+                    it.id == selectedBoostEmojiGroupKey ||
+                        it.iconKey == selectedBoostEmojiGroupKey ||
+                        it.labelZh == selectedBoostEmojiGroupKey
+                }.let { if (it >= 0) it else 0 }
+            }
             val boostBringIntoViewRequester = remember { BringIntoViewRequester() }
             val boostFocusRequester = remember { FocusRequester() }
             val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
@@ -6452,10 +7662,6 @@ internal fun CommunityPostFloor(
             ) {
                 val counterOverLimit = boostStats.exceedsLength || boostStats.exceedsEmojiLimit
                 val canSendNow = boostStats.isValid && !isSubmittingBoost
-                Text(
-                    "给 @${post.username} 助力", fontSize = 11.5.sp,
-                    color = palette.inkSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis
-                )
                 if (counterOverLimit) Text(
                     if (boostStats.exceedsEmojiLimit) "最多 ${BoostInputStats.MAX_BOOST_EMOJI_COUNT} 个表情"
                     else "最多 ${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH} 个字",
@@ -6512,7 +7718,7 @@ internal fun CommunityPostFloor(
                             .focusRequester(boostFocusRequester),
                         decorationBox = { inner ->
                             LinDoInputDecoration(
-                                boostInputText.isEmpty(), "写一句助力", boostInputStyle, palette.inkSecondary,
+                                boostInputText.isEmpty(), "给 @${post.username} 助力…", boostInputStyle, palette.inkSecondary,
                                 modifier = Modifier.fillMaxWidth(),
                                 innerTextField = inner
                             )
@@ -6588,8 +7794,8 @@ internal fun CommunityPostFloor(
 
                 // 按需展开的全量表情包选择面板
                 AnimatedVisibility(visible = showBoostEmojiPicker && pickerGroups.isNotEmpty()) {
-                    val activeGroup = pickerGroups[safeGroupIdx]
-                    Column(
+                    val activeGroup = pickerGroups.getOrNull(safeGroupIdx)
+                    if (activeGroup != null) Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
@@ -6598,8 +7804,8 @@ internal fun CommunityPostFloor(
                             .padding(8.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        LinDoSectionTabs(pickerGroups.map { it.labelZh }, safeGroupIdx, fontSize = 12.sp) {
-                            selectedBoostEmojiGroupIdx = it
+                        LinDoEmojiGroupTabs(pickerGroups, safeGroupIdx, fontSize = 12.sp) { idx ->
+                            pickerGroups.getOrNull(idx)?.let { grp -> selectedBoostEmojiGroupKey = grp.id }
                         }
 
                         @OptIn(ExperimentalLayoutApi::class)
@@ -6711,7 +7917,7 @@ internal fun CommunityPostFloor(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(0.dp)
             ) {
-                // 1. 点赞 / 表情表态（单击红心点赞，长按展开单行表情表态栏）
+                // 1. 点赞 / 表情表态（单击红心点赞或取消当前表态，长按展开单行表情表态栏）
                 Box(
                     modifier = Modifier
                         .size(48.dp)
@@ -6721,7 +7927,9 @@ internal fun CommunityPostFloor(
                                 if (showReactionPopover) {
                                     showReactionPopover = false
                                 } else {
-                                    toggleReaction("heart", "❤️")
+                                    val targetId = myReactionId ?: "heart"
+                                    val targetEmoji = localReactions.firstOrNull { it.id == targetId }?.emoji ?: "❤️"
+                                    toggleReaction(targetId, targetEmoji)
                                 }
                             },
                             onLongClick = {
@@ -6731,16 +7939,26 @@ internal fun CommunityPostFloor(
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = if (myReactionId != null) LinDoIcons.HeartFilled else LinDoIcons.Heart,
-                        contentDescription = "点赞（长按选择表情表态）",
-                        modifier = Modifier.size(19.dp),
-                        tint = when {
-                            myReactionId != null -> Color(0xFFE11D48)
-                            showReactionPopover -> palette.brandGold
-                            else -> palette.inkSecondary
-                        }
-                    )
+                    val activeReactionId = myReactionId
+                    if (activeReactionId != null && activeReactionId != "heart") {
+                        PostReactionGlyph(
+                            reactionId = activeReactionId,
+                            emojiFallback = localReactions.firstOrNull { it.id == activeReactionId }?.emoji ?: "❤️",
+                            isSelected = true,
+                            size = 18.dp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (activeReactionId != null) LinDoIcons.HeartFilled else LinDoIcons.Heart,
+                            contentDescription = "点赞（长按选择表情表态）",
+                            modifier = Modifier.size(19.dp),
+                            tint = when {
+                                activeReactionId != null -> Color(0xFFE11D48)
+                                showReactionPopover -> palette.brandGold
+                                else -> palette.inkSecondary
+                            }
+                        )
+                    }
                 }
 
                 if (!isOwnPost && (canComposeBoost || myBoost != null)) {
@@ -6786,6 +8004,8 @@ internal fun CommunityPostFloor(
                         onDismissRequest = { showFloorMoreMenu = false },
                         modifier = Modifier.background(palette.cardSurface)
                     ) {
+                        LinDoScaledPopupContent {
+                        Column {
                         if (!isOwnPost && !isDeletedPost) {
                             DropdownMenuItem(
                                 text = {
@@ -6829,7 +8049,9 @@ internal fun CommunityPostFloor(
                             },
                             onClick = {
                                 showFloorMoreMenu = false
-                                onQuoteFloor(post, selectedQuote)
+                                val selection = selectedQuote
+                                selectedQuote = null
+                                onQuoteFloor(post, selection)
                             }
                         )
 
@@ -6866,7 +8088,7 @@ internal fun CommunityPostFloor(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        text = "编辑评论",
+                                        text = if (post.postNumber == 1) "编辑话题" else "编辑评论",
                                         fontSize = 13.5.sp,
                                         color = palette.inkPrimary
                                     )
@@ -6909,6 +8131,8 @@ internal fun CommunityPostFloor(
                                 }
                             )
                         }
+                        }
+                        }
                     }
                 }
 
@@ -6919,7 +8143,12 @@ internal fun CommunityPostFloor(
                         .clip(CircleShape)
                         .clickable {
                             val selection = selectedQuote
-                            if (selection == null) onReplyFloor(post) else onQuoteFloor(post, selection)
+                            if (selection == null) {
+                                onReplyFloor(post)
+                            } else {
+                                selectedQuote = null
+                                onQuoteFloor(post, selection)
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -7019,17 +8248,20 @@ internal fun CommunityPostFloor(
  * 采用 1:1 比例精密矢量图标渲染，粗细均匀、色彩纯正，彻底解决系统字体 Emoji 比例失调或拉伸粗糙问题。
  */
 @Composable
-private fun PostReactionGlyph(
+internal fun PostReactionGlyph(
     reactionId: String,
     emojiFallback: String,
     isSelected: Boolean,
     size: Dp = 15.dp
 ) {
     val normalized = reactionId.lowercase().trim().removeSurrounding(":")
-    val resolvedUnicode = remember(normalized, emojiFallback) {
+    val emojiCatalogVer = LinuxDoEmojiCatalog.catalogVersion
+    val resolvedUnicode = remember(normalized, emojiFallback, emojiCatalogVer) {
         LinuxDoEmojiCatalog.shortcodeToUnicode(normalized)
             ?: emojiFallback.takeUnless { it.startsWith(":") }
     }
+    val glyphFontSize = with(LocalDensity.current) { (size * 0.85f).toSp() }
+    val glyphLineHeight = with(LocalDensity.current) { size.toSp() }
     when {
         normalized == "heart" || normalized == "love" -> {
             Icon(
@@ -7063,22 +8295,14 @@ private fun PostReactionGlyph(
                 tint = Color(0xFFF97316)
             )
         }
-        normalized == "confetti_ball" || normalized == "tada" || normalized == "party_popper" -> {
-            Icon(
-                imageVector = LinDoIcons.Sparkles,
-                contentDescription = "庆祝",
-                modifier = Modifier.size(size),
-                tint = Color(0xFFEC4899)
-            )
-        }
         LinuxDoEmojiCatalog.isCustomImageEmoji(normalized) || resolvedUnicode == null -> {
-            val imageUrl = remember(normalized) { LinuxDoEmojiCatalog.resolveReactionImageUrl(normalized) }
+            val imageUrl = remember(normalized, emojiCatalogVer) { LinuxDoEmojiCatalog.resolveReactionImageUrl(normalized) }
             var imgError by remember(imageUrl) { mutableStateOf(false) }
             if (imgError) {
                 Text(
                     text = resolvedUnicode ?: "✨",
-                    fontSize = (size.value * 0.85f).sp,
-                    lineHeight = size.value.sp
+                    fontSize = glyphFontSize,
+                    lineHeight = glyphLineHeight
                 )
             } else {
                 AsyncImage(
@@ -7093,8 +8317,8 @@ private fun PostReactionGlyph(
         else -> {
             Text(
                 text = resolvedUnicode,
-                fontSize = (size.value * 0.88f).sp,
-                lineHeight = size.value.sp
+                fontSize = glyphFontSize,
+                lineHeight = glyphLineHeight
             )
         }
     }
@@ -7116,7 +8340,8 @@ private fun CommunityPostContent(
     onJumpToFloorNumber: (Int) -> Unit,
     loadingReplyTarget: Boolean,
     onSelectionChange: (String?) -> Unit,
-    onOpenWebUrl: (String) -> Unit
+    onOpenWebUrl: (String) -> Unit,
+    onRequestLogin: (() -> Unit)? = null
 ) {
     val palette = LocalPalette.current
     androidx.compose.runtime.key(postId, cookedHtml) {
@@ -7166,7 +8391,15 @@ private fun CommunityPostContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        PostRichContent(astNodes, palette, onOpenWebUrl, originalUrl, postId, onSelectionChange)
+        PostRichContent(
+            nodes = astNodes,
+            palette = palette,
+            onOpenLink = onOpenWebUrl,
+            originalUrl = originalUrl,
+            postId = postId,
+            onSelectionChange = onSelectionChange,
+            onRequestLogin = onRequestLogin
+        )
 
     }
 }
@@ -7180,7 +8413,7 @@ private fun BoostInlineContent(
 ) {
     val segments = remember(plainText) {
         val list = mutableListOf<BoostInlineSegment>()
-        val regex = Regex(":([a-zA-Z0-9_+\\-]+):")
+        val regex = Regex(":([a-zA-Z0-9_+\\-]+(?::t[2-6])?):")
         var cursor = 0
         for (match in regex.findAll(plainText)) {
             if (match.range.first > cursor) {
@@ -7253,7 +8486,8 @@ internal fun CommunityDiscoverScreen(
     onOpenWebUrl: (String) -> Unit = {}
 ) {
     val palette = LocalPalette.current
-    val categoryRows = remember(LinuxDoRepository.categories.size) {
+    val catalogVer = LinuxDoRepository.categoryCatalogVersion
+    val categoryRows = remember(catalogVer) {
         LinuxDoRepository.categories.chunked(2)
     }
 
@@ -7303,8 +8537,9 @@ internal fun CommunityDiscoverScreen(
                 .background(palette.cardSurface),
             contentPadding = PaddingValues(bottom = 128.dp)
         ) {
-            // 1. 社区版块（与发布/回复版块选择器完全一致的双列细分割线网格）
+            // 1. 社区版块（与发布/回复版块选择器完全一致的双列细分割线网格 + 支持二级 Lv1~Lv3 直达）
             item {
+                var expandedParentId by remember { mutableStateOf<Int?>(null) }
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -7320,10 +8555,18 @@ internal fun CommunityDiscoverScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             rowCats.forEachIndexed { colIdx, category ->
+                                val subCats = remember(category.id, catalogVer) {
+                                    LinuxDoRepository.getSubCategoriesForParent(category.id)
+                                }
                                 CategoryBentoCard(
                                     category = category,
+                                    subCategories = subCats,
+                                    isLevelsExpanded = expandedParentId == category.id,
                                     modifier = Modifier.weight(1f),
-                                    onClick = { onSelectCategory(category.id) }
+                                    onClick = { onSelectCategory(category.id) },
+                                    onToggleLevels = {
+                                        expandedParentId = if (expandedParentId == category.id) null else category.id
+                                    }
                                 )
                                 if (colIdx < 1) {
                                     Box(
@@ -7338,6 +8581,68 @@ internal fun CommunityDiscoverScreen(
                                 Spacer(modifier = Modifier.weight(1f))
                             }
                         }
+
+                        val expandedCategoryInRow = rowCats.firstOrNull { it.id == expandedParentId }
+                        AnimatedVisibility(visible = expandedCategoryInRow != null) {
+                            val targetParent = expandedCategoryInRow ?: rowCats.first()
+                            val subCats = LinuxDoRepository.getSubCategoriesForParent(targetParent.id)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 8.dp)
+                                    .horizontalScroll(rememberScrollState()),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                Text(
+                                    text = "${targetParent.name}：",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.inkSecondary
+                                )
+                                Text(
+                                    text = "全部",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.activeChipText,
+                                    modifier = Modifier
+                                        .clickable {
+                                            expandedParentId = null
+                                            onSelectCategory(targetParent.id)
+                                        }
+                                        .padding(vertical = 2.dp)
+                                )
+                                subCats.forEach { subCat ->
+                                    val subLabel = subCat.subLabel ?: subCat.name.substringAfter(",", subCat.name).trim()
+                                    Row(
+                                        modifier = Modifier
+                                            .clickable {
+                                                expandedParentId = null
+                                                onSelectCategory(subCat.id)
+                                            }
+                                            .padding(vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        if (subCat.readRestricted) {
+                                            Icon(
+                                                imageVector = LinDoIcons.FaLock,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(10.dp),
+                                                tint = palette.inkSecondary
+                                            )
+                                        }
+                                        Text(
+                                            text = subLabel,
+                                            fontSize = 12.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = palette.inkPrimary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                         if (rowIdx < categoryRows.lastIndex) {
                             HorizontalDivider(
                                 modifier = Modifier.padding(horizontal = LinDoTokens.PageHorizontalPadding),
@@ -7508,8 +8813,11 @@ private fun resolveDistinctCategoryIcon(category: LinuxDoCategoryMeta): ImageVec
 @Composable
 private fun CategoryBentoCard(
     category: LinuxDoCategoryMeta,
+    subCategories: List<LinuxDoCategoryMeta> = emptyList(),
+    isLevelsExpanded: Boolean = false,
     modifier: Modifier = Modifier,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onToggleLevels: (() -> Unit)? = null
 ) {
     val palette = LocalPalette.current
     val (categoryIcon, officialColor, isRestricted) = remember(category.id, category.name, category.icon, category.readRestricted) {
@@ -7520,6 +8828,19 @@ private fun CategoryBentoCard(
             restrictedOverride = category.readRestricted
         )
     }
+    val subHintText = remember(subCategories) {
+        if (subCategories.isEmpty()) null
+        else {
+            val lvs = subCategories.mapNotNull { it.trustLevel }.sorted()
+            val hasCloud = subCategories.any { it.subLabel?.contains("网盘") == true }
+            when {
+                hasCloud && lvs.isNotEmpty() -> "网盘/Lv${lvs.first()}-${lvs.last()}"
+                lvs.size >= 2 -> "Lv${lvs.first()}-${lvs.last()}"
+                lvs.size == 1 -> "Lv${lvs.first()}"
+                else -> "${subCategories.size} 子项"
+            }
+        }
+    }
 
     Row(
         modifier = modifier
@@ -7527,7 +8848,7 @@ private fun CategoryBentoCard(
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -7558,12 +8879,38 @@ private fun CategoryBentoCard(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
+
+        if (subHintText != null && onToggleLevels != null) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable(onClick = onToggleLevels)
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = subHintText,
+                    fontSize = 11.sp,
+                    fontWeight = if (isLevelsExpanded) FontWeight.Bold else FontWeight.Normal,
+                    color = if (isLevelsExpanded) palette.activeChipText else palette.inkTertiary,
+                    maxLines = 1,
+                    softWrap = false
+                )
+                Icon(
+                    imageVector = if (isLevelsExpanded) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
+                    contentDescription = "展开子版块等级",
+                    modifier = Modifier.size(10.dp),
+                    tint = if (isLevelsExpanded) palette.activeChipText else palette.inkTertiary
+                )
+            }
+        }
     }
 }
 
 private fun notificationCategory(type: Int): Int = when (type) {
     2, 3, 9, 11, 38, 802 -> 1
-    5, 19, 25 -> 2
+    5, 19, 25, 39, 900 -> 2
     1, 15, 29, 32, 33 -> 3
     else -> 4
 }
@@ -7572,6 +8919,7 @@ private fun notificationCategory(type: Int): Int = when (type) {
 private fun CommunityMessagesScreen(
     isAuthorized: Boolean,
     username: String,
+    globalUnreadCount: Int = 0,
     onRequestLogin: () -> Unit,
     onSelectTopicId: (Int, String, Int?) -> Unit,
     onSelectMessageTopic: (TopicSummary) -> Unit,
@@ -7593,22 +8941,28 @@ private fun CommunityMessagesScreen(
     var notifOffset by remember { mutableIntStateOf(0) }
     var hasMoreNotifications by remember { mutableStateOf(true) }
     var isLoadingMoreNotifications by remember { mutableStateOf(false) }
+    var loadMoreNotifJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     var privateMessages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
     var pmPage by remember { mutableIntStateOf(0) }
     var hasMorePm by remember { mutableStateOf(true) }
     var isLoadingMorePm by remember { mutableStateOf(false) }
+    var loadMorePmJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var loadMoreNotifError by remember { mutableStateOf(false) }
+    var loadMorePmError by remember { mutableStateOf(false) }
 
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
     val notifListState = rememberLazyListState()
     val pmListState = rememberLazyListState()
+    var filterAutoFetches by remember(categoryFilter, reloadToken) { mutableIntStateOf(0) }
 
     fun loadMoreNotifications() {
         if (isLoading || isLoadingMoreNotifications || !hasMoreNotifications || !isAuthorized) return
         isLoadingMoreNotifications = true
-        scope.launch {
+        loadMoreNotifError = false
+        loadMoreNotifJob = scope.launch {
             try {
                 val nextBatch = LinuxDoRepository.fetchUserNotifications(offset = notifOffset)
                 val merged = (notifications + nextBatch).distinctBy { it.id }
@@ -7619,7 +8973,7 @@ private fun CommunityMessagesScreen(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                hasMoreNotifications = false
+                loadMoreNotifError = true
             } finally {
                 isLoadingMoreNotifications = false
             }
@@ -7629,7 +8983,8 @@ private fun CommunityMessagesScreen(
     fun loadMorePrivateMessages() {
         if (isLoading || isLoadingMorePm || !hasMorePm || !isAuthorized) return
         isLoadingMorePm = true
-        scope.launch {
+        loadMorePmError = false
+        loadMorePmJob = scope.launch {
             try {
                 val effectiveUsername = username.ifBlank {
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
@@ -7648,7 +9003,7 @@ private fun CommunityMessagesScreen(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                hasMorePm = false
+                loadMorePmError = true
             } finally {
                 isLoadingMorePm = false
             }
@@ -7656,6 +9011,12 @@ private fun CommunityMessagesScreen(
     }
 
     LaunchedEffect(isAuthorized, subTab, username, reloadToken) {
+        loadMoreNotifJob?.cancel()
+        loadMorePmJob?.cancel()
+        isLoadingMoreNotifications = false
+        isLoadingMorePm = false
+        loadMoreNotifError = false
+        loadMorePmError = false
         if (!isAuthorized) return@LaunchedEffect
         isLoading = true
         loadError = null
@@ -7665,7 +9026,12 @@ private fun CommunityMessagesScreen(
                 notifications = loaded
                 notifOffset = loaded.size
                 hasMoreNotifications = loaded.size >= 30
-                onUnreadCountSynced(loaded.count { !it.read })
+                val pageUnread = loaded.count { !it.read }
+                if (!hasMoreNotifications || pageUnread == 0) {
+                    onUnreadCountSynced(pageUnread)
+                } else {
+                    onUnreadCountSynced(maxOf(globalUnreadCount, pageUnread))
+                }
                 notifListState.scrollToItem(0)
             } else if (subTab == 1) {
                 val effectiveUsername = username.ifBlank {
@@ -7697,6 +9063,25 @@ private fun CommunityMessagesScreen(
     val filteredNotifications = remember(notifications, categoryFilter) {
         if (categoryFilter == 0) notifications
         else notifications.filter { notificationCategory(it.notificationType) == categoryFilter }
+    }
+
+    LaunchedEffect(
+        subTab,
+        categoryFilter,
+        filteredNotifications.isEmpty(),
+        hasMoreNotifications,
+        isLoading,
+        isLoadingMoreNotifications,
+        loadMoreNotifError
+    ) {
+        if (isAuthorized && subTab == 0 && categoryFilter != 0 &&
+            filteredNotifications.isEmpty() && hasMoreNotifications &&
+            !isLoading && !isLoadingMoreNotifications && !loadMoreNotifError &&
+            filterAutoFetches < 2
+        ) {
+            filterAutoFetches++
+            loadMoreNotifications()
+        }
     }
 
     Column(
@@ -7732,18 +9117,20 @@ private fun CommunityMessagesScreen(
                 )
 
                 when {
-                    !isAuthorized -> TextButton(onClick = onRequestLogin) { Text("登录") }
+                    !isAuthorized -> TextButton(onClick = onRequestLogin) { Text("登录", color = palette.activeChipText) }
                     subTab == 0 -> LinDoNotificationActions(
-                        canMarkAll = notifications.isNotEmpty(),
+                        canMarkAll = (notifications.any { !it.read } || globalUnreadCount > 0) && !markingAll,
                         enabled = !isLoading && !markingAll,
                         onMarkAll = { showMarkAllConfirm = true },
                         onRefresh = { reloadToken++ }
                     )
-                    else -> TextButton(onClick = onManagePrivateMessages) { Text("管理私信") }
+                    else -> TextButton(onClick = onManagePrivateMessages) { Text("管理私信", color = palette.activeChipText) }
                 }
             }
-            LinDoSectionTabs(listOf("通知", "私信", "聊天"), subTab) {
-                if (it == 2) onOpenWebUrl("https://linux.do/chat") else subTab = it
+            if (isAuthorized) {
+                LinDoSectionTabs(listOf("通知", "私信", "聊天"), subTab) {
+                    if (it == 2) onOpenWebUrl("https://linux.do/chat") else subTab = it
+                }
             }
         }
 
@@ -7767,7 +9154,23 @@ private fun CommunityMessagesScreen(
         }
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
-        if (subTab == 1) {
+        if (!isAuthorized) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(palette.cardSurface),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoStatusNotice(
+                    message = "登录后查看消息通知",
+                    icon = LinDoIcons.FaLock,
+                    iconSize = 19.dp,
+                    actionLabel = "去登录",
+                    emphasizeAction = true,
+                    onAction = onRequestLogin
+                )
+            }
+        } else if (subTab == 1) {
             // 私信列表与写私信入口
             if (isLoading && privateMessages.isEmpty()) {
                 LinearShimmerTopicSkeletonList()
@@ -7827,6 +9230,7 @@ private fun CommunityMessagesScreen(
                                 isLoadingMore = isLoadingMorePm,
                                 hasMore = hasMorePm,
                                 loadedCount = privateMessages.size,
+                                isError = loadMorePmError,
                                 onLoadMore = ::loadMorePrivateMessages
                             )
                         }
@@ -7864,14 +9268,29 @@ private fun CommunityMessagesScreen(
                             }
                         }
                     } else if (filteredNotifications.isEmpty() && !isLoading) {
-                        if (hasMoreNotifications) {
+                        if (categoryFilter != 0 && hasMoreNotifications) {
                             item(key = "notif_filter_load_more") {
-                                LinearPulseLoadingFooter(
-                                    isLoadingMore = isLoadingMoreNotifications,
-                                    hasMore = true,
-                                    loadedCount = notifications.size.coerceAtLeast(1),
-                                    onLoadMore = ::loadMoreNotifications
-                                )
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 44.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    if (isLoadingMoreNotifications || (filterAutoFetches < 2 && !loadMoreNotifError)) {
+                                        LinDoLoadingIndicator(label = "正在筛选更早通知")
+                                    } else {
+                                        LinDoEmptyState(message = "已加载通知中暂无此类通知")
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        TextButton(onClick = ::loadMoreNotifications) {
+                                            Text(
+                                                text = if (loadMoreNotifError) "加载失败，点击重试" else "加载更早通知",
+                                                color = palette.activeChipText,
+                                                fontSize = 13.5.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             item(key = "notif_empty") {
@@ -7897,7 +9316,17 @@ private fun CommunityMessagesScreen(
                                             if (it.id == item.id) it.copy(read = true) else it
                                         }
                                         notifications = updated
-                                        onUnreadCountSynced(updated.count { !it.read })
+                                        if (!hasMoreNotifications) {
+                                            onUnreadCountSynced(updated.count { !it.read })
+                                        } else {
+                                            val curGlobal = maxOf(globalUnreadCount, UserApiKeyAuthManager.fullProfileCache?.unreadNotifications ?: 0)
+                                            if (curGlobal > 0) {
+                                                onUnreadCountSynced((curGlobal - 1).coerceAtLeast(0))
+                                            }
+                                        }
+                                        scope.launch {
+                                            runCatching { LinuxDoRepository.markSingleNotificationRead(item.id) }
+                                        }
                                     }
                                     when {
                                         item.topicId > 0 -> onSelectTopicId(item.topicId, item.title, item.postNumber)
@@ -7916,18 +9345,44 @@ private fun CommunityMessagesScreen(
                                             }
                                             onOpenWebUrl(url)
                                         }
+                                        item.notificationType == 16 || (item.notificationType == 6 && item.topicId <= 0) -> {
+                                            onManagePrivateMessages()
+                                        }
                                         actor != null -> onInspectUser(actor)
                                     }
                                 }
                             )
                         }
                         item(key = "notifications_end_footer") {
-                            LinearPulseLoadingFooter(
-                                isLoadingMore = isLoadingMoreNotifications,
-                                hasMore = hasMoreNotifications,
-                                loadedCount = notifications.size,
-                                onLoadMore = ::loadMoreNotifications
-                            )
+                            if (categoryFilter != 0 && hasMoreNotifications && filteredNotifications.size < 10) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 14.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isLoadingMoreNotifications) {
+                                        LinDoLoadingIndicator(label = "加载中")
+                                    } else {
+                                        TextButton(onClick = ::loadMoreNotifications) {
+                                            Text(
+                                                text = if (loadMoreNotifError) "加载失败，点击重试" else "加载更早通知",
+                                                color = palette.activeChipText,
+                                                fontSize = 13.5.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                LinearPulseLoadingFooter(
+                                    isLoadingMore = isLoadingMoreNotifications,
+                                    hasMore = hasMoreNotifications,
+                                    loadedCount = notifications.size,
+                                    isError = loadMoreNotifError,
+                                    onLoadMore = ::loadMoreNotifications
+                                )
+                            }
                         }
                     }
                 }
@@ -7990,6 +9445,7 @@ internal fun CommunityProfileScreen(
     currentUser: AuthenticatedUserProfile?,
     fullProfile: UserFullProfileSummary?,
     onRefreshProfile: () -> Unit,
+    onAutoRefreshProfile: () -> Unit = onRefreshProfile,
     onSelectThemeOption: (BrandThemeOption) -> Unit = {},
     onOpenAppIcon: (() -> Unit)? = null,
     onToggleCompactFeed: () -> Unit = {},
@@ -8018,10 +9474,10 @@ internal fun CommunityProfileScreen(
 ) {
     val palette = LocalPalette.current
 
-    // 进入个人中心自动拉取最新服务端个人资料
+    // 进入个人中心按冷却节流拉取个人资料，避免频繁切换底栏反复请求
     LaunchedEffect(isAuthorized, currentUser?.username) {
         if (isAuthorized) {
-            onRefreshProfile()
+            onAutoRefreshProfile()
         }
     }
 
@@ -8092,76 +9548,124 @@ internal fun CommunityProfileScreen(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        GoogleAccountRingAvatar(
-                            letter = displayName.ifBlank { "L" },
-                            avatarUrl = avatarUrl,
-                            animatedAvatar = fullProfile?.animatedAvatar ?: currentUser?.animatedAvatar,
-                            flair = fullProfile?.flair,
-                            avatarSize = 52.dp,
-                            onClick = if (isAuthorized) onOpenEditProfile else onPrimaryWebLogin
-                        )
+                        if (isAuthorized) {
+                            GoogleAccountRingAvatar(
+                                letter = displayName.ifBlank { "L" },
+                                username = displayUsername.ifBlank { displayName.ifBlank { "L" } },
+                                avatarUrl = avatarUrl,
+                                animatedAvatar = fullProfile?.animatedAvatar ?: currentUser?.animatedAvatar,
+                                flair = fullProfile?.flair,
+                                avatarSize = 52.dp,
+                                onClick = onOpenEditProfile
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .clip(CircleShape)
+                                    .background(palette.subtleSurface)
+                                    .border(0.5.dp, palette.hairline, CircleShape)
+                                    .clickable(onClick = onPrimaryWebLogin),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.User,
+                                    contentDescription = "未登录游客",
+                                    modifier = Modifier.size(22.dp),
+                                    tint = palette.inkSecondary
+                                )
+                            }
+                        }
 
                         Spacer(modifier = Modifier.width(12.dp))
 
                         Column(modifier = Modifier.weight(1f)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = displayName,
-                                    fontSize = 18.sp,
-                                    lineHeight = 22.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = palette.inkPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f, fill = false)
-                                )
-                                Text(
-                                    text = if (displayUsername.isNotBlank()) "@" + displayUsername else "@linux.do",
-                                    fontSize = LinDoTokens.Meta,
-                                    lineHeight = 16.sp,
-                                    color = palette.inkSecondary,
-                                    maxLines = 1
-                                )
-                            }
+                            if (isAuthorized) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = displayName,
+                                        fontSize = 18.sp,
+                                        lineHeight = 22.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    Text(
+                                        text = if (displayUsername.isNotBlank()) "@" + displayUsername else "@linux.do",
+                                        fontSize = LinDoTokens.Meta,
+                                        lineHeight = 16.sp,
+                                        color = palette.inkSecondary,
+                                        maxLines = 1
+                                    )
+                                }
 
-                            if (isAuthorized || !userTitle.isNullOrBlank()) {
                                 Spacer(modifier = Modifier.height(3.dp))
 
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    if (isAuthorized) {
-                                        Text(
-                                            text = trustLabel,
-                                            fontSize = LinDoTokens.Meta,
-                                            lineHeight = 15.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = palette.brandGold,
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
+                                    Text(
+                                        text = trustLabel,
+                                        fontSize = LinDoTokens.Meta,
+                                        lineHeight = 15.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.brandGold,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
                                     if (!userTitle.isNullOrBlank()) {
                                         UserTitleTag(title = userTitle)
                                     }
                                 }
+                            } else {
+                                Text(
+                                    text = "未登录游客",
+                                    fontSize = 18.sp,
+                                    lineHeight = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.inkPrimary,
+                                    maxLines = 1
+                                )
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = "登录后同步个人资料、收藏与通知",
+                                    fontSize = LinDoTokens.Meta,
+                                    lineHeight = 15.sp,
+                                    color = palette.inkSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
 
-                        Icon(
-                            imageVector = LinDoIcons.Edit,
-                            contentDescription = "编辑资料",
-                            modifier = Modifier
-                                .size(LinDoTokens.IconM)
-                                .clickable {
-                                    if (isAuthorized) onOpenEditProfile() else onPrimaryWebLogin()
-                                },
-                            tint = palette.inkSecondary
-                        )
+                        if (isAuthorized) {
+                            Icon(
+                                imageVector = LinDoIcons.Edit,
+                                contentDescription = "编辑资料",
+                                modifier = Modifier
+                                    .size(LinDoTokens.IconM)
+                                    .clickable(onClick = onOpenEditProfile),
+                                tint = palette.inkSecondary
+                            )
+                        } else {
+                            TextButton(
+                                onClick = onPrimaryWebLogin,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "登录",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.activeChipText
+                                )
+                            }
+                        }
                     }
 
                     if (isAuthorized && fullProfile != null && fullProfile.badges.isNotEmpty()) {
@@ -8219,7 +9723,7 @@ internal fun CommunityProfileScreen(
                                 if (isAuthorized) onOpenBookmarks() else onPrimaryWebLogin()
                             },
                             Triple("历史", LinDoIcons.HistoryClock) {
-                                onOpenReadHistory()
+                                if (isAuthorized) onOpenReadHistory() else onPrimaryWebLogin()
                             },
                             Triple("草稿", LinDoIcons.FileText) {
                                 if (isAuthorized) onOpenCloudDrafts() else onPrimaryWebLogin()
@@ -8260,32 +9764,22 @@ internal fun CommunityProfileScreen(
                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
             }
 
-            // 2. 分组单行设置列表（社区 & 账号）
+            // 2. 合并精简后的「社区与账号」设置列表（移除与顶栏/底栏重复的徽章、活动、私信入口）
             item {
-                val badgeCountValue = if (isAuthorized && fullProfile != null) {
-                    fullProfile.badgeCount.coerceAtLeast(fullProfile.badges.size).toString() + " 枚"
-                } else {
-                    null
-                }
-
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(palette.cardSurface)
                 ) {
-                    LinDoGroupHeader(text = "社区")
+                    LinDoGroupHeader(text = "社区与账号")
 
-                    LinDoSettingRow(
-                        icon = LinDoIcons.Trophy,
-                        title = "徽章与头衔",
-                        value = badgeCountValue,
-                        onClick = onOpenBadgesCenter
-                    )
-                    LinDoSettingRow(
-                        icon = LinDoIcons.MessageCircle,
-                        title = "我的社区",
-                        onClick = { if (isAuthorized) onOpenActivities() else onPrimaryWebLogin() }
-                    )
+                    if (!isAuthorized || fullProfile?.badges.isNullOrEmpty()) {
+                        LinDoSettingRow(
+                            icon = LinDoIcons.Trophy,
+                            title = "社区徽章墙",
+                            onClick = onOpenBadgesCenter
+                        )
+                    }
                     LinDoSettingRow(
                         icon = LinDoIcons.Users,
                         title = "关注与粉丝",
@@ -8299,24 +9793,13 @@ internal fun CommunityProfileScreen(
                     LinDoSettingRow(
                         icon = LinDoIcons.Sparkles,
                         title = "Connect 保级与成长",
-                        showDivider = false,
-                        onClick = onOpenConnectSheet
+                        onClick = { if (isAuthorized) onOpenConnectSheet() else onPrimaryWebLogin() }
                     )
-
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-
-                    LinDoGroupHeader(text = "账号")
-
                     LinDoSettingRow(
                         icon = LinDoIcons.ShieldCheck,
                         title = "账号与偏好设置",
-                        onClick = { if (isAuthorized) onOpenAccountPreferences() else onPrimaryWebLogin() }
-                    )
-                    LinDoSettingRow(
-                        icon = LinDoIcons.Send,
-                        title = "站内私信",
                         showDivider = false,
-                        onClick = { if (isAuthorized) onOpenPrivateMessages() else onPrimaryWebLogin() }
+                        onClick = { if (isAuthorized) onOpenAccountPreferences() else onPrimaryWebLogin() }
                     )
 
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -8376,7 +9859,7 @@ internal fun CommunityProfileScreen(
                     if (onOpenAppIcon != null) {
                         val icon = LocalLinDoAppIcon.current ?: LinDoAppIcon.Classic
                         LinDoSettingRow(
-                            icon = LinDoIcons.Image,
+                            icon = LinDoIcons.AppsGrid,
                             title = "应用图标",
                             value = "${icon.artwork.label} · ${icon.background.label}",
                             onClick = onOpenAppIcon
@@ -8469,7 +9952,24 @@ internal fun CommunityProfileScreen(
                         }
                     )
 
-                    // 3.4 关于社区
+                    // 3.4 界面与头像动效
+                    LinDoSettingRow(
+                        icon = LinDoIcons.Sparkles,
+                        title = "界面与头像动效",
+                        onClick = onToggleAnimations,
+                        trailing = {
+                            Switch(
+                                checked = enableAnimations,
+                                onCheckedChange = { if (it != enableAnimations) onToggleAnimations() },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = palette.brandGold
+                                )
+                            )
+                        }
+                    )
+
+                    // 3.5 关于社区
                     LinDoSettingRow(
                         icon = LinDoIcons.InfoCircle,
                         title = "关于社区",
@@ -8802,21 +10302,21 @@ private fun BadgeDetailBottomSheet(
                 if (canSetTitle && !equippedNow) {
                     TextButton(
                         enabled = !isEquippingTitle,
-                        onClick = {
+                            onClick = {
                             scope.launch {
                                 isEquippingTitle = true
                                 titleEquipStatus = null
-                                val ok = LinuxDoRepository.updateUserTitle(
+                                val res = LinuxDoRepository.updateUserTitleResult(
                                     username = currentUsername,
                                     title = effectiveBadge.name
                                 )
                                 isEquippingTitle = false
-                                if (ok) {
+                                if (res.isSuccess) {
                                     equippedNow = true
                                     titleEquipStatus = "已设为头衔"
                                     onTitleUpdated()
                                 } else {
-                                    titleEquipStatus = "设置失败，请稍后重试"
+                                    titleEquipStatus = res.exceptionOrNull()?.message ?: "设置失败，请稍后重试"
                                 }
                             }
                         }
@@ -9247,42 +10747,20 @@ private fun UserApiKeyAuthSheet(
 
             Spacer(modifier = Modifier.height(22.dp))
 
-            // 主力登录全圆角胶囊按钮（无杂乱内嵌框，居中纯粹排版）
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .clip(RoundedCornerShape(99.dp))
-                    .background(primaryCapsuleBg)
-                    .clickable(onClick = onPrimaryWebLogin)
-                    .padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(palette.brandGold)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (isAuthorized) "重新验证或切换账号" else "账号一键登录",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = primaryCapsuleFg,
-                    maxLines = 1
-                )
-            }
+            // 主力登录按钮（统一 LinDoPrimaryButton 圆角与主题色规范 D3）
+            LinDoPrimaryButton(
+                label = if (isAuthorized) "重新验证或切换账号" else "账号一键登录",
+                onClick = onPrimaryWebLogin
+            )
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 次级登录全圆角胶囊按钮（无描边柔和浅灰底）
+            // 次级登录按钮（统一 12dp 圆角与柔和浅灰底）
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(46.dp)
-                    .clip(RoundedCornerShape(99.dp))
+                    .clip(RoundedCornerShape(12.dp))
                     .background(palette.subtleSurface)
                     .clickable(onClick = onBrowserOneClickAuth)
                     .padding(horizontal = 20.dp),
@@ -9329,14 +10807,16 @@ private fun GoogleWelcomeLoginScreen(
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
     onToggleDark: () -> Unit = {},
-    onOpenAppIcon: (() -> Unit)? = null
+    onOpenAppIcon: (() -> Unit)? = null,
+    onGuestBrowse: (() -> Unit)? = null
 ) {
     LinDoWelcomeScreen(
         isDark = LocalPalette.current.isDark,
         onPrimaryWebLogin = onPrimaryWebLogin,
         onBrowserOneClickAuth = onBrowserOneClickAuth,
         onToggleDark = onToggleDark,
-        onOpenAppIcon = onOpenAppIcon
+        onOpenAppIcon = onOpenAppIcon,
+        onGuestBrowse = onGuestBrowse
     )
 }
 
@@ -9389,7 +10869,7 @@ private fun CreateTopicModalSheet(
     onDismiss: () -> Unit, onTopicCreated: (Int, String) -> Unit
 ) = ComposerSheet(ComposerAction.NEW_TOPIC, initialCategoryId = initialCategoryId,
     initialDraft = initialDraft, onDismiss = onDismiss,
-    onPublished = { onTopicCreated(it.topicId, it.title) })
+    onPublished = { onTopicCreated(it.topicId ?: 0, it.title.orEmpty()) })
 
 /**
  * ============================================================================
@@ -9448,6 +10928,9 @@ internal fun LinDoMarkdownWorkbench(
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
+    val currentRawValue by rememberUpdatedState(rawValue)
+    val currentOnRawValueChange by rememberUpdatedState(onRawValueChange)
+    val currentEnabled by rememberUpdatedState(enabled)
 
     // TextFieldValue 维护真实光标位置与选区
     var tfv by remember {
@@ -9465,17 +10948,17 @@ internal fun LinDoMarkdownWorkbench(
     val redoStack = remember { mutableStateListOf<TextFieldValue>() }
 
     fun updateTfv(newVal: TextFieldValue, recordHistory: Boolean = true) {
-        if (!enabled) return
+        if (!currentEnabled) return
         if (recordHistory && newVal.text != tfv.text) {
             if (undoStack.size >= 40) undoStack.removeAt(0)
             undoStack.add(tfv)
             redoStack.clear()
         }
         tfv = newVal
-        if (newVal.text != rawValue) {
+        if (newVal.text != currentRawValue) {
             if (emittedValues.size >= 128) emittedValues.remove(emittedValues.first())
             emittedValues.add(newVal.text)
-            onRawValueChange(newVal.text)
+            currentOnRawValueChange(newVal.text)
         }
     }
 
@@ -9499,40 +10982,27 @@ internal fun LinDoMarkdownWorkbench(
 
     // 行首前缀切换（用于标题 H1~H5、列表、引用）
     fun toggleLinePrefix(prefix: String) {
-        val text = tfv.text
-        val pos = tfv.selection.min.coerceIn(0, text.length)
-        val lineStart = if (pos == 0) 0 else text.lastIndexOf('\n', pos - 1) + 1
-        val lineEnd = text.indexOf('\n', pos).let { if (it == -1) text.length else it }
-        val currentLine = text.substring(lineStart, lineEnd)
-        val updatedLine = if (currentLine.startsWith(prefix)) {
-            currentLine.removePrefix(prefix)
-        } else {
-            "$prefix$currentLine"
-        }
-        val newText = text.replaceRange(lineStart, lineEnd, updatedLine)
-        val newCursor = (lineStart + updatedLine.length).coerceIn(0, newText.length)
+        val (newText, newCursor) = toggleMarkdownLinePrefix(tfv.text, tfv.selection.min, prefix)
         updateTfv(TextFieldValue(text = newText, selection = TextRange(newCursor)))
     }
 
     // 在当前光标处直接插入块或短语
     fun insertAtCursor(snippet: String, replaceMention: Boolean = false) {
-        val text = tfv.text
-        val cursor = tfv.selection.min.coerceIn(0, text.length)
-        val mention = if (replaceMention) Regex("@[\\p{L}\\p{N}_-]*$").find(text.substring(0, cursor)) else null
-        val start = mention?.range?.first ?: cursor
-        val end = tfv.selection.max.coerceIn(0, text.length)
-        val newText = text.replaceRange(start, end, snippet)
-        val newCursor = (start + snippet.length).coerceIn(0, newText.length)
+        val (newText, newCursor) = insertSnippetAtCursorWithMentionBoundary(
+            text = tfv.text,
+            selectionMin = tfv.selection.min,
+            selectionMax = tfv.selection.max,
+            snippet = snippet,
+            replaceMention = replaceMention
+        )
         updateTfv(TextFieldValue(text = newText, selection = TextRange(newCursor)))
     }
 
-    // 盘古之白：中英文/数字混排自动补齐空格
+    // 盘古之白：中英文/数字混排自动补齐空格（先掩码保护代码块、行内代码、Markdown 链接/图片、裸 URL 与 @提及）
     fun optimizePanguSpacing(): Boolean {
         val old = tfv.text
         if (old.isBlank()) return false
-        val optimized = old
-            .replace(Regex("([\\u4e00-\\u9fa5])([A-Za-z0-9])"), "$1 $2")
-            .replace(Regex("([A-Za-z0-9])([\\u4e00-\\u9fa5])"), "$1 $2")
+        val optimized = optimizePanguSpacingText(old)
         if (optimized != old) {
             updateTfv(TextFieldValue(text = optimized, selection = TextRange(optimized.length)))
             return true
@@ -9631,7 +11101,7 @@ internal fun LinDoMarkdownWorkbench(
     }
 
     fun pickMedia(mimeFilter: String) {
-        if (!enabled || isUploadingMedia) return
+        if (!currentEnabled || isUploadingMedia) return
         val picker = PlatformMediaPicker.launchPicker
         if (picker == null) {
             uploadStatusText = "当前设备无法选取文件，可插入链接"
@@ -9769,7 +11239,9 @@ internal fun LinDoMarkdownWorkbench(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.End
             ) {
-                TextButton(onClick = { internalViewMode = WorkbenchViewMode.SOURCE }) { Text("继续编辑") }
+                TextButton(onClick = { internalViewMode = WorkbenchViewMode.SOURCE }) {
+                    Text("继续编辑", color = palette.activeChipText)
+                }
             }
         }
 
@@ -10094,11 +11566,61 @@ internal fun WorkbenchDrawerBottomSheet(
         containerColor = palette.cardSurface,
         contentColor = palette.inkPrimary
     ) {
+        WorkbenchDrawerContent(
+            subPanel = subPanel,
+            showBackToMoreTools = showBackToMoreTools,
+            onBackToMoreTools = onBackToMoreTools,
+            onNavigateSubPanel = onNavigateSubPanel,
+            mentionSearchTerm = mentionSearchTerm,
+            onMentionSearchTermChange = onMentionSearchTermChange,
+            mentionCandidates = mentionCandidates,
+            isSearchingMentions = isSearchingMentions,
+            mentionError = mentionError,
+            onRetryMention = onRetryMention,
+            onPickAttachment = onPickAttachment,
+            onToggleLinePrefix = onToggleLinePrefix,
+            onWrapSelection = onWrapSelection,
+            onInsertSnippet = onInsertSnippet,
+            onOptimizePangu = onOptimizePangu,
+            onDismiss = onDismiss
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun WorkbenchDrawerContent(
+    subPanel: WorkbenchSubPanel,
+    showBackToMoreTools: Boolean,
+    onBackToMoreTools: () -> Unit,
+    onNavigateSubPanel: (WorkbenchSubPanel) -> Unit,
+    mentionSearchTerm: String,
+    onMentionSearchTermChange: (String) -> Unit,
+    mentionCandidates: List<MentionCandidate>,
+    isSearchingMentions: Boolean,
+    mentionError: String?,
+    onRetryMention: () -> Unit,
+    onPickAttachment: () -> Unit,
+    onToggleLinePrefix: (String) -> Unit,
+    onWrapSelection: (String, String) -> Unit,
+    onInsertSnippet: (String) -> Unit,
+    onOptimizePangu: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val needsTallSheet = subPanel == WorkbenchSubPanel.EMOJI ||
+        subPanel == WorkbenchSubPanel.MENTION ||
+        subPanel == WorkbenchSubPanel.CODE_LANG ||
+        subPanel == WorkbenchSubPanel.POLL
+    LinDoScaledPopupContent {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .heightIn(min = 420.dp, max = 580.dp)
+                .then(
+                    if (needsTallSheet) Modifier.heightIn(min = 380.dp, max = 580.dp)
+                    else Modifier.heightIn(max = 580.dp)
+                )
                 .padding(horizontal = 16.dp)
                 .padding(bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -10152,7 +11674,7 @@ internal fun WorkbenchDrawerBottomSheet(
 
             when (subPanel) {
                 WorkbenchSubPanel.MORE_TOOLS -> {
-                    val formatTools = remember {
+                    val formatTools = remember(onNavigateSubPanel, onWrapSelection, onInsertSnippet, onOptimizePangu) {
                         listOf(
                             WorkbenchDrawerToolItem("标题层级", LinDoIcons.Heading) { onNavigateSubPanel(WorkbenchSubPanel.HEADINGS) },
                             WorkbenchDrawerToolItem("粗体", LinDoIcons.Bold) { onWrapSelection("**", "**") },
@@ -10164,7 +11686,7 @@ internal fun WorkbenchDrawerBottomSheet(
                             WorkbenchDrawerToolItem("中英空格", LinDoIcons.Sparkles) { onOptimizePangu() }
                         )
                     }
-                    val blockTools = remember {
+                    val blockTools = remember(onToggleLinePrefix, onNavigateSubPanel, onWrapSelection, onPickAttachment) {
                         listOf(
                             WorkbenchDrawerToolItem("引用块", LinDoIcons.Quote) { onToggleLinePrefix("> ") },
                             WorkbenchDrawerToolItem("无序列表", LinDoIcons.ListBullet) { onToggleLinePrefix("- ") },
@@ -10176,7 +11698,7 @@ internal fun WorkbenchDrawerBottomSheet(
                             WorkbenchDrawerToolItem("上传附件", LinDoIcons.Paperclip) { onPickAttachment() }
                         )
                     }
-                    val advancedTools = remember {
+                    val advancedTools = remember(onNavigateSubPanel, onInsertSnippet, onWrapSelection) {
                         listOf(
                             WorkbenchDrawerToolItem("插入表格", LinDoIcons.Table) { onNavigateSubPanel(WorkbenchSubPanel.TABLE) },
                             WorkbenchDrawerToolItem("发起投票", LinDoIcons.BarChartPoll) { onNavigateSubPanel(WorkbenchSubPanel.POLL) },
@@ -10208,33 +11730,57 @@ internal fun WorkbenchDrawerBottomSheet(
                 WorkbenchSubPanel.FORMAT, WorkbenchSubPanel.HEADINGS -> {
                     val headingItems = remember {
                         listOf(
-                            Triple("一级标题 H1", "# ", "文章主章节大标题"),
-                            Triple("二级标题 H2", "## ", "核心小节标题"),
-                            Triple("三级标题 H3", "### ", "子模块细分标题"),
-                            Triple("四级标题 H4", "#### ", "紧凑段落小标题")
+                            "一级标题" to "# ",
+                            "二级标题" to "## ",
+                            "三级标题" to "### ",
+                            "四级标题" to "#### "
                         )
                     }
+                    val headingRows = remember(headingItems) { headingItems.chunked(2) }
                     Column(
-                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        headingItems.forEachIndexed { idx, (title, prefix, desc) ->
+                        headingRows.forEachIndexed { rowIdx, rowItems ->
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 48.dp)
-                                    .clickable { onToggleLinePrefix(prefix) }
-                                    .padding(horizontal = 10.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(LinDoIcons.Heading, contentDescription = null, modifier = Modifier.size(16.dp), tint = palette.inkSecondary)
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(title, fontSize = 13.8.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
-                                    Text(desc, fontSize = 11.8.sp, color = palette.inkSecondary)
+                                rowItems.forEachIndexed { colIdx, (title, prefix) ->
+                                    Row(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .heightIn(min = 46.dp)
+                                            .clickable { onToggleLinePrefix(prefix) }
+                                            .padding(horizontal = 10.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = prefix.trim(),
+                                            fontSize = 12.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.inkTertiary
+                                        )
+                                        Text(
+                                            text = title,
+                                            fontSize = 13.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = palette.inkPrimary,
+                                            maxLines = 1,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    if (colIdx < 1) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(0.5.dp)
+                                                .height(22.dp)
+                                                .background(palette.hairline)
+                                        )
+                                    }
                                 }
-                                Text(prefix.trim(), fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = palette.inkTertiary)
                             }
-                            if (idx < headingItems.lastIndex) {
+                            if (rowIdx < headingRows.lastIndex) {
                                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                             }
                         }
@@ -10244,31 +11790,34 @@ internal fun WorkbenchDrawerBottomSheet(
                 WorkbenchSubPanel.QUOTE_LIST, WorkbenchSubPanel.CALLOUT -> {
                     val calloutItems = remember {
                         listOf(
-                            Triple("NOTE · 补充说明", "NOTE", "背景信息、实现细节或常规注解"),
-                            Triple("TIP · 实用技巧", "TIP", "最佳实践、效率技巧或推荐方案"),
-                            Triple("IMPORTANT · 重要提示", "IMPORTANT", "核心前置要求或关键步骤说明"),
-                            Triple("WARNING · 注意事项", "WARNING", "潜在兼容性问题或风险提醒"),
-                            Triple("CAUTION · 高危警告", "CAUTION", "不可逆操作或安全警示")
+                            "NOTE · 补充说明" to "NOTE",
+                            "TIP · 实用技巧" to "TIP",
+                            "IMPORTANT · 重要提示" to "IMPORTANT",
+                            "WARNING · 注意事项" to "WARNING",
+                            "CAUTION · 高危警告" to "CAUTION"
                         )
                     }
                     Column(
-                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        calloutItems.forEachIndexed { idx, (title, kind, desc) ->
+                        calloutItems.forEachIndexed { idx, (title, kind) ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(min = 48.dp)
+                                    .heightIn(min = 44.dp)
                                     .clickable { onWrapSelection("\n> [!$kind]\n> ", "\n") }
-                                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Icon(LinDoIcons.InfoCircle, contentDescription = null, modifier = Modifier.size(16.dp), tint = palette.inkSecondary)
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(title, fontSize = 13.8.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
-                                    Text(desc, fontSize = 11.8.sp, color = palette.inkSecondary)
-                                }
+                                Icon(LinDoIcons.InfoCircle, contentDescription = null, modifier = Modifier.size(15.dp), tint = palette.inkSecondary)
+                                Text(
+                                    text = title,
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.inkPrimary,
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
                             if (idx < calloutItems.lastIndex) {
                                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -10437,7 +11986,8 @@ internal fun WorkbenchDrawerBottomSheet(
                                             .clickable {
                                                 val suffix = if (item.postNumber > 1) "/${item.postNumber}" else ""
                                                 val url = "https://linux.do/t/topic/${item.topicId}$suffix"
-                                                onInsertSnippet("[${item.title}]($url) ")
+                                                val safeTitle = item.title.replace("[", "\\[").replace("]", "\\]")
+                                                onInsertSnippet("[$safeTitle]($url) ")
                                             }
                                             .padding(vertical = 11.dp, horizontal = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically,
@@ -10496,7 +12046,7 @@ internal fun WorkbenchDrawerBottomSheet(
                     } else {
                         var linkError by remember { mutableStateOf(false) }
                         Column(
-                            modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -10554,43 +12104,53 @@ internal fun WorkbenchDrawerBottomSheet(
                 WorkbenchSubPanel.DETAILS_SPOILER -> {
                     var summaryTitle by remember { mutableStateOf("") }
                     Column(
-                        modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("折叠块标题", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
-                            WorkbenchCompactInputBox(
-                                value = summaryTitle,
-                                onValueChange = { summaryTitle = it },
-                                placeholder = "点击展开查看详情（选填）",
-                                leadingIcon = LinDoIcons.Layers,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        WorkbenchPrimarySheetButton(
-                            label = "插入折叠面板 [details]",
-                            icon = LinDoIcons.Layers,
-                            onClick = {
-                                val title = summaryTitle.trim().ifBlank { "详情" }.replace('"', '”')
-                                onWrapSelection("\n[details=\"$title\"]\n", "\n[/details]\n")
-                            }
+                        WorkbenchCompactInputBox(
+                            value = summaryTitle,
+                            onValueChange = { summaryTitle = it },
+                            placeholder = "折叠块标题（选填，默认“详情”）",
+                            leadingIcon = LinDoIcons.Layers,
+                            modifier = Modifier.fillMaxWidth()
                         )
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(44.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(palette.subtleSurface)
-                                .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
-                                .clickable { onWrapSelection("[spoiler]", "[/spoiler]") }
-                                .padding(horizontal = 16.dp),
+                                .heightIn(min = 44.dp)
+                                .clickable {
+                                    val title = summaryTitle
+                                        .replace(Regex("[\\r\\n]+"), " ")
+                                        .replace("]", "")
+                                        .trim()
+                                        .ifBlank { "详情" }
+                                        .replace('"', '”')
+                                    onWrapSelection("\n[details=\"$title\"]\n", "\n[/details]\n")
+                                }
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Icon(LinDoIcons.EyeOff, contentDescription = null, modifier = Modifier.size(16.dp), tint = palette.inkPrimary)
-                            Spacer(Modifier.width(8.dp))
-                            Text("插入剧透模糊 [spoiler]", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+                            Icon(LinDoIcons.Layers, contentDescription = null, modifier = Modifier.size(16.dp), tint = palette.activeChipText)
+                            Text("插入折叠面板", fontSize = 13.8.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                            Icon(LinDoIcons.ChevronRight, contentDescription = null, modifier = Modifier.size(14.dp), tint = palette.inkTertiary)
                         }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 44.dp)
+                                .clickable { onWrapSelection("[spoiler]", "[/spoiler]") }
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(LinDoIcons.EyeOff, contentDescription = null, modifier = Modifier.size(16.dp), tint = palette.inkSecondary)
+                            Text("插入剧透模糊", fontSize = 13.8.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                            Icon(LinDoIcons.ChevronRight, contentDescription = null, modifier = Modifier.size(14.dp), tint = palette.inkTertiary)
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     }
                 }
 
@@ -10598,45 +12158,66 @@ internal fun WorkbenchDrawerBottomSheet(
                     var cols by remember { mutableStateOf(3) }
                     var rows by remember { mutableStateOf(3) }
                     Column(
-                        modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
                     ) {
-                        Text("选择表格尺寸", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary)
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 46.dp).padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
-                                    .clickable { cols = if (cols >= 6) 2 else cols + 1 }
-                                    .padding(14.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                            Text("列数", fontSize = 13.5.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                            IconButton(
+                                enabled = cols > 2,
+                                onClick = { if (cols > 2) cols-- },
+                                modifier = Modifier.size(34.dp)
                             ) {
-                                Text("列数", fontSize = 12.sp, color = palette.inkSecondary)
-                                Spacer(Modifier.height(4.dp))
-                                Text("$cols 列", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = palette.brandGold)
-                                Text("点击切换 (2~6)", fontSize = 11.sp, color = palette.inkTertiary)
+                                Icon(LinDoIcons.Minus, "减少列数", Modifier.size(15.dp), tint = if (cols > 2) palette.inkPrimary else palette.inkTertiary)
                             }
-                            Column(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(palette.subtleSurface)
-                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
-                                    .clickable { rows = if (rows >= 8) 2 else rows + 1 }
-                                    .padding(14.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                            Text(
+                                text = "$cols",
+                                fontSize = 14.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.inkPrimary,
+                                modifier = Modifier.widthIn(min = 28.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            IconButton(
+                                enabled = cols < 6,
+                                onClick = { if (cols < 6) cols++ },
+                                modifier = Modifier.size(34.dp)
                             ) {
-                                Text("行数", fontSize = 12.sp, color = palette.inkSecondary)
-                                Spacer(Modifier.height(4.dp))
-                                Text("$rows 行", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = palette.brandGold)
-                                Text("点击切换 (2~8)", fontSize = 11.sp, color = palette.inkTertiary)
+                                Icon(LinDoIcons.Plus, "增加列数", Modifier.size(15.dp), tint = if (cols < 6) palette.inkPrimary else palette.inkTertiary)
                             }
                         }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 46.dp).padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("行数", fontSize = 13.5.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                            IconButton(
+                                enabled = rows > 2,
+                                onClick = { if (rows > 2) rows-- },
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(LinDoIcons.Minus, "减少行数", Modifier.size(15.dp), tint = if (rows > 2) palette.inkPrimary else palette.inkTertiary)
+                            }
+                            Text(
+                                text = "$rows",
+                                fontSize = 14.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.inkPrimary,
+                                modifier = Modifier.widthIn(min = 28.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            IconButton(
+                                enabled = rows < 8,
+                                onClick = { if (rows < 8) rows++ },
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(LinDoIcons.Plus, "增加行数", Modifier.size(15.dp), tint = if (rows < 8) palette.inkPrimary else palette.inkTertiary)
+                            }
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                         WorkbenchPrimarySheetButton(
                             label = "插入 ${rows}×${cols} 表格",
                             icon = LinDoIcons.Table,
@@ -10658,6 +12239,17 @@ internal fun WorkbenchDrawerBottomSheet(
                     var pollResults by remember { mutableStateOf("always") }
                     var pollPublic by remember { mutableStateOf(true) }
                     var pollOptionsText by remember { mutableStateOf("选项一\n选项二\n选项三") }
+                    var numMin by remember { mutableIntStateOf(1) }
+                    var numMax by remember { mutableIntStateOf(10) }
+                    var numStep by remember { mutableIntStateOf(1) }
+                    val parsedOpts = remember(pollOptionsText) {
+                        pollOptionsText.lines().map { it.trim() }.filter { it.isNotBlank() }
+                    }
+                    val canInsertPoll = if (pollType == "number") {
+                        numMin in 1 until numMax && numMax <= 20 && numStep >= 1
+                    } else {
+                        parsedOpts.size >= 2
+                    }
 
                     Column(
                         modifier = Modifier
@@ -10699,50 +12291,143 @@ internal fun WorkbenchDrawerBottomSheet(
                             leadingIcon = LinDoIcons.BarChartPoll,
                             modifier = Modifier.fillMaxWidth()
                         )
-                        val optionsStyle = TextStyle(
-                            fontSize = 13.5.sp,
-                            lineHeight = 20.sp,
-                            color = palette.inkPrimary
-                        )
-                        BasicTextField(
-                            value = pollOptionsText,
-                            onValueChange = { pollOptionsText = it },
-                            textStyle = optionsStyle,
-                            cursorBrush = SolidColor(palette.brandGold),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 110.dp, max = 160.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(palette.subtleSurface.copy(alpha = 0.7f))
-                                .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            decorationBox = { inner ->
-                                LinDoInputDecoration(
-                                    empty = pollOptionsText.isEmpty(),
-                                    placeholder = "每行一个投票选项",
-                                    textStyle = optionsStyle,
-                                    placeholderColor = palette.inkSecondary,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    alignment = Alignment.TopStart,
-                                    placeholderLines = 3,
-                                    innerTextField = inner
-                                )
+                        if (pollType == "number") {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.subtleSurface.copy(alpha = 0.7f))
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 42.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("最小值", fontSize = 13.2.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                                    IconButton(
+                                        enabled = numMin > 1,
+                                        onClick = { if (numMin > 1) numMin-- },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(LinDoIcons.Minus, "减小最小值", Modifier.size(14.dp), tint = if (numMin > 1) palette.inkPrimary else palette.inkTertiary)
+                                    }
+                                    Text("$numMin", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary, modifier = Modifier.widthIn(min = 28.dp), textAlign = TextAlign.Center)
+                                    IconButton(
+                                        enabled = numMin < numMax - 1,
+                                        onClick = {
+                                            if (numMin < numMax - 1) {
+                                                numMin++
+                                                if (numStep > numMax - numMin) numStep = (numMax - numMin).coerceAtLeast(1)
+                                            }
+                                        },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(LinDoIcons.Plus, "增大最小值", Modifier.size(14.dp), tint = if (numMin < numMax - 1) palette.inkPrimary else palette.inkTertiary)
+                                    }
+                                }
+                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 42.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("最大值", fontSize = 13.2.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                                    IconButton(
+                                        enabled = numMax > numMin + 1,
+                                        onClick = {
+                                            if (numMax > numMin + 1) {
+                                                numMax--
+                                                if (numStep > numMax - numMin) numStep = (numMax - numMin).coerceAtLeast(1)
+                                            }
+                                        },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(LinDoIcons.Minus, "减小最大值", Modifier.size(14.dp), tint = if (numMax > numMin + 1) palette.inkPrimary else palette.inkTertiary)
+                                    }
+                                    Text("$numMax", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary, modifier = Modifier.widthIn(min = 28.dp), textAlign = TextAlign.Center)
+                                    IconButton(
+                                        enabled = numMax < 20,
+                                        onClick = { if (numMax < 20) numMax++ },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(LinDoIcons.Plus, "增大最大值", Modifier.size(14.dp), tint = if (numMax < 20) palette.inkPrimary else palette.inkTertiary)
+                                    }
+                                }
+                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                                val maxStep = (numMax - numMin).coerceAtLeast(1)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 42.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("步长", fontSize = 13.2.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary, modifier = Modifier.weight(1f))
+                                    IconButton(
+                                        enabled = numStep > 1,
+                                        onClick = { if (numStep > 1) numStep-- },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(LinDoIcons.Minus, "减小步长", Modifier.size(14.dp), tint = if (numStep > 1) palette.inkPrimary else palette.inkTertiary)
+                                    }
+                                    Text("$numStep", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = palette.inkPrimary, modifier = Modifier.widthIn(min = 28.dp), textAlign = TextAlign.Center)
+                                    IconButton(
+                                        enabled = numStep < maxStep,
+                                        onClick = { if (numStep < maxStep) numStep++ },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(LinDoIcons.Plus, "增大步长", Modifier.size(14.dp), tint = if (numStep < maxStep) palette.inkPrimary else palette.inkTertiary)
+                                    }
+                                }
                             }
-                        )
+                        } else {
+                            val optionsStyle = TextStyle(
+                                fontSize = 13.5.sp,
+                                lineHeight = 20.sp,
+                                color = palette.inkPrimary
+                            )
+                            BasicTextField(
+                                value = pollOptionsText,
+                                onValueChange = { pollOptionsText = it },
+                                textStyle = optionsStyle,
+                                cursorBrush = SolidColor(palette.brandGold),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 110.dp, max = 160.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.subtleSurface.copy(alpha = 0.7f))
+                                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                decorationBox = { inner ->
+                                    LinDoInputDecoration(
+                                        empty = pollOptionsText.isEmpty(),
+                                        placeholder = "每行一个投票选项（至少两项）",
+                                        textStyle = optionsStyle,
+                                        placeholderColor = palette.inkSecondary,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        alignment = Alignment.TopStart,
+                                        placeholderLines = 3,
+                                        innerTextField = inner
+                                    )
+                                }
+                            )
+                        }
                         WorkbenchPrimarySheetButton(
                             label = "插入投票",
                             icon = LinDoIcons.BarChartPoll,
+                            enabled = canInsertPoll,
                             onClick = {
-                                val opts = pollOptionsText.lines().map { it.trim() }.filter { it.isNotBlank() }
-                                val extraAttrs = buildString {
-                                    append(" type=$pollType results=$pollResults")
-                                    if (pollType == "multiple") append(" min=1 max=${opts.size.coerceAtLeast(2)}")
-                                    if (pollPublic) append(" public=true")
-                                    append(" chartType=bar")
+                                if (!canInsertPoll) return@WorkbenchPrimarySheetButton
+                                val bbCode = buildWorkbenchPollBbCode(
+                                    pollType = pollType,
+                                    pollResults = pollResults,
+                                    pollPublic = pollPublic,
+                                    pollTitle = pollTitle,
+                                    options = parsedOpts,
+                                    numMin = numMin,
+                                    numMax = numMax,
+                                    numStep = numStep
+                                )
+                                if (bbCode != null) {
+                                    onInsertSnippet(bbCode)
                                 }
-                                val headerLine = if (pollTitle.isNotBlank()) "# ${pollTitle.trim()}\n" else ""
-                                val optLines = opts.joinToString("\n") { "- $it" }
-                                onInsertSnippet("\n[poll$extraAttrs]\n$headerLine$optLines\n[/poll]\n")
                             }
                         )
                     }
@@ -10750,21 +12435,28 @@ internal fun WorkbenchDrawerBottomSheet(
 
                 WorkbenchSubPanel.EMOJI -> {
                     var emojiQuery by remember { mutableStateOf("") }
-                    var selectedGroupIdx by remember { mutableIntStateOf(0) }
-                    var syncTrigger by remember { mutableIntStateOf(0) }
+                    var selectedGroupKey by remember { mutableStateOf("official_reactions") }
+                    val emojiCatalogVer = LinuxDoEmojiCatalog.catalogVersion
 
                     LaunchedEffect(Unit) {
-                        if (LinuxDoRepository.syncSiteEmojis()) {
-                            syncTrigger++
+                        if (!LinuxDoEmojiCatalog.hasSyncedServerEmojis()) {
+                            LinuxDoRepository.syncSiteEmojis()
                         }
                     }
 
-                    val groups = remember(syncTrigger) { LinuxDoEmojiCatalog.getPickerGroups() }
+                    val groups = remember(emojiCatalogVer) { LinuxDoEmojiCatalog.getPickerGroups() }
+                    val selectedGroupIdx = remember(groups, selectedGroupKey) {
+                        groups.indexOfFirst {
+                            it.id == selectedGroupKey ||
+                                it.iconKey == selectedGroupKey ||
+                                it.labelZh == selectedGroupKey
+                        }.let { if (it >= 0) it else 0 }
+                    }
                     val activeItems = remember(emojiQuery, selectedGroupIdx, groups) {
                         if (emojiQuery.isNotBlank()) {
                             LinuxDoEmojiCatalog.searchEmojis(emojiQuery)
                         } else {
-                            groups.getOrNull(selectedGroupIdx.coerceIn(0, (groups.size - 1).coerceAtLeast(0)))?.items.orEmpty()
+                            groups.getOrNull(selectedGroupIdx)?.items.orEmpty()
                         }
                     }
 
@@ -10777,8 +12469,8 @@ internal fun WorkbenchDrawerBottomSheet(
                     )
 
                     if (emojiQuery.isBlank() && groups.isNotEmpty()) {
-                        LinDoSectionTabs(groups.map { it.labelZh }, selectedGroupIdx.coerceIn(groups.indices), fontSize = 13.sp) {
-                            selectedGroupIdx = it
+                        LinDoEmojiGroupTabs(groups, selectedGroupIdx.coerceIn(groups.indices), fontSize = 13.sp) { idx ->
+                            groups.getOrNull(idx)?.let { grp -> selectedGroupKey = grp.id }
                         }
                     }
 
@@ -11016,35 +12708,37 @@ private fun WorkbenchToolGridSection(
 private fun WorkbenchPrimarySheetButton(
     label: String,
     icon: ImageVector,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
-    val bg = if (palette.isDark) palette.publishBtnBg else Color(0xFF111827)
-    val fg = if (palette.isDark) palette.publishBtnContent else Color.White
+    val contentTint = if (enabled) palette.activeChipText else palette.inkTertiary.copy(alpha = 0.5f)
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(46.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(bg)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
+            .padding(top = 4.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = fg
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = label,
-            fontSize = 14.5.sp,
-            fontWeight = FontWeight.Bold,
-            color = fg
-        )
+        TextButton(
+            onClick = onClick,
+            enabled = enabled,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+                tint = contentTint
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = label,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = contentTint
+            )
+        }
     }
 }
 
@@ -11129,35 +12823,31 @@ private fun WorkbenchToolChip(
 ) {
     val palette = LocalPalette.current
     val isEmphasized = active || highlighted
-    val bg = when {
-        highlighted -> palette.brandGold.copy(alpha = if (palette.isDark) 0.22f else 0.16f)
-        active -> palette.activeChipBg
-        else -> palette.subtleSurface
-    }
-    val borderCol = when {
-        isEmphasized -> palette.brandGold.copy(alpha = 0.55f)
-        else -> palette.hairline
-    }
-    val textCol = when {
-        isEmphasized -> palette.brandGold
-        else -> palette.inkSecondary
-    }
-    Box(
+    val textCol = if (isEmphasized) palette.activeChipText else palette.inkSecondary
+    Column(
         modifier = Modifier
-            .height(29.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(bg)
-            .border(0.5.dp, borderCol, RoundedCornerShape(8.dp))
+            .heightIn(min = 28.dp)
+            .clip(RoundedCornerShape(6.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp),
-        contentAlignment = Alignment.Center
+            .padding(horizontal = 6.dp, vertical = 3.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
     ) {
         Text(
             text = label,
             color = textCol,
-            fontSize = 11.8.sp,
+            fontSize = 12.2.sp,
             fontWeight = if (isEmphasized) FontWeight.Bold else FontWeight.Medium,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Box(
+            modifier = Modifier
+                .width(10.dp)
+                .height(2.dp)
+                .clip(CircleShape)
+                .background(if (isEmphasized) palette.tabIndicatorColor else Color.Transparent)
         )
     }
 }
@@ -11186,13 +12876,18 @@ internal fun GlobalSearchModalSheet(
     var currentPage by remember { mutableIntStateOf(1) }
     var hasMoreResults by remember { mutableStateOf(false) }
     var isLoadingMore by remember { mutableStateOf(false) }
+    var loadMoreError by remember { mutableStateOf(false) }
+    var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val searchScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
     var submittedQuery by remember { mutableStateOf(initialQuery.trim()) }
     fun performSearch(targetQuery: String = query) {
         keyboardController?.hide()
+        loadMoreJob?.cancel()
+        isLoadingMore = false
         submittedQuery = targetQuery.trim()
+        loadMoreError = false
         reloadToken++
     }
 
@@ -11201,9 +12896,11 @@ internal fun GlobalSearchModalSheet(
         if (q.isBlank() || isSearching || isLoadingMore || !hasMoreResults) return
         val nextPage = currentPage + 1
         isLoadingMore = true
-        searchScope.launch {
+        loadMoreError = false
+        loadMoreJob = searchScope.launch {
             try {
-                val nextItems = LinuxDoRepository.searchCommunity(q, order, page = nextPage)
+                val pageResult = LinuxDoRepository.searchCommunityPage(q, order, page = nextPage)
+                val nextItems = pageResult.items
                 if (nextItems.isEmpty()) {
                     hasMoreResults = false
                 } else {
@@ -11214,11 +12911,13 @@ internal fun GlobalSearchModalSheet(
                     } else {
                         results = results + appended
                         currentPage = nextPage
-                        hasMoreResults = nextItems.size >= 20
+                        hasMoreResults = pageResult.hasMore
                     }
                 }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
-                hasMoreResults = false
+                loadMoreError = true
             } finally {
                 isLoadingMore = false
             }
@@ -11229,6 +12928,7 @@ internal fun GlobalSearchModalSheet(
     LaunchedEffect(query) {
         val trimmed = query.trim()
         if (trimmed.isBlank()) {
+            loadMoreJob?.cancel()
             submittedQuery = ""
             results = emptyList()
             loadError = null
@@ -11245,20 +12945,22 @@ internal fun GlobalSearchModalSheet(
     }
 
     LaunchedEffect(submittedQuery, order, reloadToken) {
+        loadMoreJob?.cancel()
+        isLoadingMore = false
+        loadMoreError = false
         if (submittedQuery.isBlank()) return@LaunchedEffect
         if (initialResults.isNotEmpty() && reloadToken == 0 && order == null && submittedQuery == initialQuery.trim()) {
             return@LaunchedEffect
         }
         isSearching = true
-        isLoadingMore = false
         currentPage = 1
         hasMoreResults = false
         loadError = null
         results = emptyList()
         try {
-            val firstPage = LinuxDoRepository.searchCommunity(submittedQuery, order, page = 1)
-            results = firstPage
-            hasMoreResults = firstPage.size >= 20
+            val firstPage = LinuxDoRepository.searchCommunityPage(submittedQuery, order, page = 1)
+            results = firstPage.items
+            hasMoreResults = firstPage.hasMore
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -11276,8 +12978,8 @@ internal fun GlobalSearchModalSheet(
         }
     }
 
-    LaunchedEffect(shouldTriggerLoadMore, hasMoreResults, isSearching, isLoadingMore) {
-        if (shouldTriggerLoadMore && hasMoreResults && !isSearching && !isLoadingMore) {
+    LaunchedEffect(shouldTriggerLoadMore, hasMoreResults, isSearching, isLoadingMore, loadMoreError) {
+        if (shouldTriggerLoadMore && hasMoreResults && !isSearching && !isLoadingMore && !loadMoreError) {
             loadMoreSearchResults()
         }
     }
@@ -11384,33 +13086,26 @@ internal fun GlobalSearchModalSheet(
                         Text(
                             text = "搜索",
                             fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (query.isNotBlank()) palette.activeChipText else palette.inkTertiary
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
-                // 排序快筛胶囊
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val orders = listOf("相关性" to null, "最新发帖" to "latest", "最多获赞" to "likes")
-                    orders.forEach { (label, ord) ->
-                        val selected = order == ord
-                        GoogleM3FilterPill(
-                            label = label,
-                            dotColor = null,
-                            selected = selected,
-                            onClick = {
-                                if (order != ord) {
-                                    order = ord
-                                    if (query.isNotBlank()) performSearch()
-                                }
-                            }
-                        )
+                // 排序切换栏（统一使用 LinDoSectionTabs D2）
+                val orders = remember { listOf("相关性" to null, "最新发帖" to "latest", "最多获赞" to "likes") }
+                val selectedOrderIdx = orders.indexOfFirst { it.second == order }.let { if (it >= 0) it else 0 }
+                LinDoSectionTabs(
+                    labels = orders.map { it.first },
+                    selectedIndex = selectedOrderIdx,
+                    fontSize = 13.8.sp
+                ) { idx ->
+                    val nextOrd = orders.getOrNull(idx)?.second
+                    if (order != nextOrd) {
+                        order = nextOrd
+                        if (query.isNotBlank()) performSearch()
                     }
                 }
             }
@@ -11516,8 +13211,12 @@ internal fun GlobalSearchModalSheet(
                 }
             } else {
                 itemsIndexed(results, key = { idx, item -> "${item.topicId}_${item.postNumber}_$idx" }, contentType = { _, _ -> "search-result" }) { _, item ->
-                    val catDotColor = remember(item.categoryColorHex) {
-                        LinuxDoSiteRules.parseHexColor(item.categoryColorHex)
+                    val catDotColor = remember(item.categoryName, item.categoryColorHex, palette.isDark) {
+                        if (item.categoryName.isNotBlank()) {
+                            resolveMorandiCategoryColors(item.categoryName, palette.isDark).second
+                        } else {
+                            LinuxDoSiteRules.parseHexColor(item.categoryColorHex)
+                        }
                     }
                     Column(
                         modifier = Modifier
@@ -11642,6 +13341,7 @@ internal fun GlobalSearchModalSheet(
                             isLoadingMore = isLoadingMore,
                             hasMore = hasMoreResults,
                             loadedCount = results.size,
+                            isError = loadMoreError,
                             doneText = "没有更多了 · 共找到 ${results.size} 条相关结果",
                             onLoadMore = ::loadMoreSearchResults
                         )
@@ -11658,9 +13358,14 @@ internal fun GlobalSearchModalSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun UserNotificationsSheet(
+    globalUnreadCount: Int = 0,
     onDismiss: () -> Unit,
     onSelectNotification: (Int, String, Int?) -> Unit,
-    onInspectUser: (String) -> Unit = {}
+    onInspectUser: (String) -> Unit = {},
+    onInspectBadge: (GrantedBadge) -> Unit = {},
+    onOpenPrivateMessages: () -> Unit = {},
+    onOpenWebUrl: (String) -> Unit = {},
+    onUnreadCountSynced: (Int) -> Unit = {}
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -11671,15 +13376,19 @@ private fun UserNotificationsSheet(
     var notifOffset by remember { mutableIntStateOf(0) }
     var hasMore by remember { mutableStateOf(true) }
     var isLoadingMore by remember { mutableStateOf(false) }
+    var loadMoreError by remember { mutableStateOf(false) }
+    var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var filterTab by remember { mutableStateOf(0) } // 0=全部, 1=未读, 2=回复/@, 3=获赞
+    var filterAutoFetches by remember(filterTab, reloadToken) { mutableIntStateOf(0) }
 
     fun loadMore() {
         if (isLoading || isLoadingMore || !hasMore) return
         isLoadingMore = true
-        scope.launch {
+        loadMoreError = false
+        loadMoreJob = scope.launch {
             try {
                 val nextBatch = LinuxDoRepository.fetchUserNotifications(offset = notifOffset)
                 val merged = (notifications + nextBatch).distinctBy { it.id }
@@ -11690,7 +13399,7 @@ private fun UserNotificationsSheet(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                hasMore = false
+                loadMoreError = true
             } finally {
                 isLoadingMore = false
             }
@@ -11698,6 +13407,9 @@ private fun UserNotificationsSheet(
     }
 
     LaunchedEffect(reloadToken) {
+        loadMoreJob?.cancel()
+        isLoadingMore = false
+        loadMoreError = false
         isLoading = true
         loadError = null
         try {
@@ -11705,6 +13417,12 @@ private fun UserNotificationsSheet(
             notifications = loaded
             notifOffset = loaded.size
             hasMore = loaded.size >= 30
+            val pageUnread = loaded.count { !it.read }
+            if (!hasMore || pageUnread == 0) {
+                onUnreadCountSynced(pageUnread)
+            } else {
+                onUnreadCountSynced(maxOf(globalUnreadCount, pageUnread))
+            }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -11718,8 +13436,18 @@ private fun UserNotificationsSheet(
         when (filterTab) {
             1 -> notifications.filter { !it.read }
             2 -> notifications.filter { it.notificationType in setOf(1, 2, 3, 6, 9, 11, 15, 29, 32, 33, 38, 802) }
-            3 -> notifications.filter { it.notificationType in setOf(5, 19, 25) }
+            3 -> notifications.filter { it.notificationType in setOf(5, 19, 25, 39, 900) }
             else -> notifications
+        }
+    }
+
+    LaunchedEffect(filterTab, filtered.isEmpty(), hasMore, isLoading, isLoadingMore, loadMoreError) {
+        if (filterTab != 0 && filtered.isEmpty() && hasMore &&
+            !isLoading && !isLoadingMore && !loadMoreError &&
+            filterAutoFetches < 2
+        ) {
+            filterAutoFetches++
+            loadMore()
         }
     }
 
@@ -11732,7 +13460,7 @@ private fun UserNotificationsSheet(
             onBack = onDismiss,
             trailingContent = {
                 LinDoNotificationActions(
-                    canMarkAll = notifications.isNotEmpty(),
+                    canMarkAll = (notifications.any { !it.read } || globalUnreadCount > 0) && !markingAll,
                     enabled = !isLoading && !markingAll,
                     onMarkAll = { showMarkAllConfirm = true },
                     onRefresh = { reloadToken++ }
@@ -11740,20 +13468,12 @@ private fun UserNotificationsSheet(
             }
         )
         Column(Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp).selectableGroup(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                val tabs = listOf("全部", "未读", "回复与提及", "表态")
-                tabs.forEachIndexed { idx, label ->
-                    GoogleM3FilterPill(
-                        label = label,
-                        dotColor = null,
-                        selected = filterTab == idx,
-                        modifier = Modifier.widthIn(min = 48.dp),
-                        onClick = { filterTab = idx }
-                    )
-                }
+            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                LinDoSectionTabs(
+                    labels = listOf("全部", "未读", "回复与提及", "表态"),
+                    selectedIndex = filterTab,
+                    fontSize = 14.sp
+                ) { filterTab = it }
             }
 
             HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -11775,14 +13495,27 @@ private fun UserNotificationsSheet(
                     contentPadding = PaddingValues(bottom = 16.dp)
                 ) {
                     if (filtered.isEmpty() && loadError == null) {
-                        if (hasMore) {
+                        if (filterTab != 0 && hasMore) {
                             item(key = "notif_filter_more") {
-                                LinearPulseLoadingFooter(
-                                    isLoadingMore = isLoadingMore,
-                                    hasMore = true,
-                                    loadedCount = notifications.size.coerceAtLeast(1),
-                                    onLoadMore = ::loadMore
-                                )
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    if (isLoadingMore || (filterAutoFetches < 2 && !loadMoreError)) {
+                                        LinDoLoadingIndicator(label = "正在筛选更早通知")
+                                    } else {
+                                        LinDoEmptyState(message = if (filterTab == 1) "已加载通知中暂无未读通知" else "已加载通知中暂无此类通知")
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        TextButton(onClick = ::loadMore) {
+                                            Text(
+                                                text = if (loadMoreError) "加载失败，点击重试" else "加载更早通知",
+                                                color = palette.activeChipText,
+                                                fontSize = 13.5.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             item {
@@ -11799,22 +13532,78 @@ private fun UserNotificationsSheet(
                             val actor = item.actorUsername
                             LinDoNotificationRow(
                                 item = item,
-                                onClick = when {
-                                    item.topicId > 0 -> {
-                                        { onSelectNotification(item.topicId, item.title, item.postNumber) }
+                                onInspectUser = onInspectUser,
+                                onClick = {
+                                    if (!item.read) {
+                                        val updated = notifications.map {
+                                            if (it.id == item.id) it.copy(read = true) else it
+                                        }
+                                        notifications = updated
+                                        if (!hasMore) {
+                                            onUnreadCountSynced(updated.count { !it.read })
+                                        } else {
+                                            val curGlobal = maxOf(globalUnreadCount, UserApiKeyAuthManager.fullProfileCache?.unreadNotifications ?: 0)
+                                            if (curGlobal > 0) {
+                                                onUnreadCountSynced((curGlobal - 1).coerceAtLeast(0))
+                                            }
+                                        }
+                                        scope.launch {
+                                            runCatching { LinuxDoRepository.markSingleNotificationRead(item.id) }
+                                        }
                                     }
-                                    actor != null -> { { onInspectUser(actor) } }
-                                    else -> null
+                                    when {
+                                        item.topicId > 0 -> onSelectNotification(item.topicId, item.title, item.postNumber)
+                                        item.badgeId > 0 -> onInspectBadge(
+                                            GrantedBadge(
+                                                id = item.badgeId,
+                                                name = item.badgeName.ifBlank { item.title },
+                                                description = "LINUX DO 社区授予徽章"
+                                            )
+                                        )
+                                        item.notificationType in 29..33 -> {
+                                            val url = if (item.chatChannelId > 0) {
+                                                "https://linux.do/chat/c/-/${item.chatChannelId}"
+                                            } else {
+                                                "https://linux.do/chat"
+                                            }
+                                            onOpenWebUrl(url)
+                                        }
+                                        item.notificationType == 16 || (item.notificationType == 6 && item.topicId <= 0) -> {
+                                            onOpenPrivateMessages()
+                                        }
+                                        actor != null -> onInspectUser(actor)
+                                    }
                                 }
                             )
                         }
                         item(key = "notif_sheet_footer") {
-                            LinearPulseLoadingFooter(
-                                isLoadingMore = isLoadingMore,
-                                hasMore = hasMore,
-                                loadedCount = notifications.size,
-                                onLoadMore = ::loadMore
-                            )
+                            if (filterTab != 0 && hasMore && filtered.size < 10) {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isLoadingMore) {
+                                        LinDoLoadingIndicator(label = "加载中")
+                                    } else {
+                                        TextButton(onClick = ::loadMore) {
+                                            Text(
+                                                text = if (loadMoreError) "加载失败，点击重试" else "加载更早通知",
+                                                color = palette.activeChipText,
+                                                fontSize = 13.5.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                LinearPulseLoadingFooter(
+                                    isLoadingMore = isLoadingMore,
+                                    hasMore = hasMore,
+                                    loadedCount = notifications.size,
+                                    isError = loadMoreError,
+                                    onLoadMore = ::loadMore
+                                )
+                            }
                         }
                     }
                 }
@@ -11832,6 +13621,7 @@ private fun UserNotificationsSheet(
                         if (ok) {
                             showMarkAllConfirm = false
                             notifications = notifications.map { it.copy(read = true) }
+                            onUnreadCountSynced(0)
                         } else {
                             markAllError = "标记失败"
                         }
@@ -11865,6 +13655,8 @@ private fun UserActivitiesSheet(
     var actOffset by remember { mutableIntStateOf(0) }
     var hasMore by remember { mutableStateOf(true) }
     var isLoadingMore by remember { mutableStateOf(false) }
+    var loadMoreError by remember { mutableStateOf(false) }
+    var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
@@ -11872,7 +13664,8 @@ private fun UserActivitiesSheet(
     fun loadMoreActivities() {
         if (isLoading || isLoadingMore || !hasMore) return
         isLoadingMore = true
-        scope.launch {
+        loadMoreError = false
+        loadMoreJob = scope.launch {
             try {
                 val nextBatch = LinuxDoRepository.fetchUserActivities(username, filterCode, offset = actOffset)
                 items = items + nextBatch
@@ -11881,7 +13674,7 @@ private fun UserActivitiesSheet(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                hasMore = false
+                loadMoreError = true
             } finally {
                 isLoadingMore = false
             }
@@ -11889,6 +13682,9 @@ private fun UserActivitiesSheet(
     }
 
     LaunchedEffect(username, filterCode, reloadToken) {
+        loadMoreJob?.cancel()
+        isLoadingMore = false
+        loadMoreError = false
         isLoading = true
         loadError = null
         try {
@@ -11969,6 +13765,7 @@ private fun UserActivitiesSheet(
                             isLoadingMore = isLoadingMore,
                             hasMore = hasMore,
                             loadedCount = items.size,
+                            isError = loadMoreError,
                             onLoadMore = ::loadMoreActivities
                         )
                     }
@@ -11994,14 +13791,19 @@ private fun UserBookmarksSheet(
     var bookmarkPage by remember { mutableIntStateOf(0) }
     var hasMore by remember { mutableStateOf(true) }
     var isLoadingMore by remember { mutableStateOf(false) }
+    var loadMoreError by remember { mutableStateOf(false) }
+    var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
+    var deleteError by remember { mutableStateOf<String?>(null) }
+    var deletingIds by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
 
     fun loadMoreBookmarks() {
         if (isLoading || isLoadingMore || !hasMore) return
         isLoadingMore = true
-        scope.launch {
+        loadMoreError = false
+        loadMoreJob = scope.launch {
             try {
                 val nextPage = bookmarkPage + 1
                 val nextBatch = LinuxDoRepository.fetchUserBookmarks(username, page = nextPage)
@@ -12013,7 +13815,7 @@ private fun UserBookmarksSheet(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                hasMore = false
+                loadMoreError = true
             } finally {
                 isLoadingMore = false
             }
@@ -12021,6 +13823,10 @@ private fun UserBookmarksSheet(
     }
 
     LaunchedEffect(username, reloadToken) {
+        loadMoreJob?.cancel()
+        isLoadingMore = false
+        loadMoreError = false
+        deleteError = null
         isLoading = true
         loadError = null
         try {
@@ -12052,6 +13858,14 @@ private fun UserBookmarksSheet(
         )
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
+        deleteError?.let { msg ->
+            LinDoFeedbackRow(
+                message = msg,
+                state = LinDoMascotState.NetworkError,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
+
         if (isLoading) {
             Box(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -12080,7 +13894,47 @@ private fun UserBookmarksSheet(
                     }
                 } else {
                     itemsIndexed(items, key = { idx, item -> "${item.id}_$idx" }, contentType = { _, _ -> "activity" }) { _, item ->
-                        ProfileActivityRow(item) {
+                        val isDeleting = item.id in deletingIds
+                        ProfileActivityRow(
+                            activity = item,
+                            trailingAction = if (item.id > 0) {
+                                {
+                                    IconButton(
+                                        enabled = !isDeleting,
+                                        onClick = {
+                                            if (item.id !in deletingIds) {
+                                                deleteError = null
+                                                deletingIds = deletingIds + item.id
+                                                scope.launch {
+                                                    try {
+                                                        val ok = LinuxDoRepository.deleteBookmark(item.id)
+                                                        if (ok) {
+                                                            items = items.filterNot { it.id == item.id }
+                                                        } else {
+                                                            deleteError = "移除书签失败，请稍后重试"
+                                                        }
+                                                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                                        throw cancelled
+                                                    } catch (error: Exception) {
+                                                        deleteError = error.message ?: "移除书签失败，请稍后重试"
+                                                    } finally {
+                                                        deletingIds = deletingIds - item.id
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = LinDoIcons.Trash,
+                                            contentDescription = "取消收藏",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = if (isDeleting) palette.inkTertiary else palette.inkSecondary
+                                        )
+                                    }
+                                }
+                            } else null
+                        ) {
                             onSelectBookmark(item.topicId, item.title, item.postNumber)
                         }
                     }
@@ -12089,6 +13943,7 @@ private fun UserBookmarksSheet(
                             isLoadingMore = isLoadingMore,
                             hasMore = hasMore,
                             loadedCount = items.size,
+                            isError = loadMoreError,
                             onLoadMore = ::loadMoreBookmarks
                         )
                     }
@@ -12106,34 +13961,71 @@ private fun UserBookmarksSheet(
 internal fun UserPrivateMessagesSheet(
     username: String,
     initialRecipient: String?,
+    initialDraft: CloudDraftItem? = null,
     onDismiss: () -> Unit,
     onSelectMessageTopic: (TopicSummary) -> Unit
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val openedDirectlyInComposer = !initialRecipient.isNullOrBlank() || initialDraft != null
     var pendingArchive by remember { mutableStateOf<TopicSummary?>(null) }
     var archiving by remember { mutableStateOf(false) }
     var archiveError by remember { mutableStateOf<String?>(null) }
-    var tab by remember(initialRecipient) { mutableIntStateOf(if (!initialRecipient.isNullOrBlank()) 2 else 0) }
+    var showDiscardConfirm by remember { mutableStateOf(false) }
+    var tab by remember(initialRecipient, initialDraft?.draftKey) {
+        mutableIntStateOf(if (openedDirectlyInComposer) 2 else 0)
+    }
     var messages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
     var pmPage by remember { mutableIntStateOf(0) }
     var hasMorePm by remember { mutableStateOf(true) }
     var isLoadingMorePm by remember { mutableStateOf(false) }
+    var loadMorePmError by remember { mutableStateOf(false) }
+    var loadMorePmJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
 
-    var recipient by remember(initialRecipient) { mutableStateOf(initialRecipient.orEmpty()) }
-    var pmTitle by remember { mutableStateOf("") }
-    var pmBody by remember { mutableStateOf("") }
+    var recipient by remember(initialRecipient, initialDraft?.draftKey) {
+        mutableStateOf(initialDraft?.recipients?.takeIf { it.isNotBlank() } ?: initialRecipient.orEmpty())
+    }
+    var pmTitle by remember(initialDraft?.draftKey) {
+        mutableStateOf(
+            initialDraft?.title
+                ?.takeUnless { it.startsWith("未命名") }
+                .orEmpty()
+        )
+    }
+    var pmBody by remember(initialDraft?.draftKey) {
+        mutableStateOf(initialDraft?.raw.orEmpty())
+    }
+    var activeDraft by remember(initialDraft?.draftKey) {
+        mutableStateOf(initialDraft)
+    }
     var isSending by remember { mutableStateOf(false) }
     var isUploading by remember { mutableStateOf(false) }
     var statusMsg by remember { mutableStateOf<String?>(null) }
+    var statusIsError by remember { mutableStateOf(false) }
+
+    fun handleBack() {
+        if (isSending || isUploading) return
+        if (tab == 2) {
+            if (pmTitle.isNotBlank() || pmBody.isNotBlank()) {
+                showDiscardConfirm = true
+            } else if (openedDirectlyInComposer) {
+                onDismiss()
+            } else {
+                tab = 0
+            }
+        } else {
+            onDismiss()
+        }
+    }
 
     fun loadMorePm() {
         if (tab == 2 || isLoading || isLoadingMorePm || !hasMorePm) return
         isLoadingMorePm = true
-        scope.launch {
+        loadMorePmError = false
+        loadMorePmJob = scope.launch {
             try {
                 val effectiveUsername = username.ifBlank {
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
@@ -12148,7 +14040,7 @@ internal fun UserPrivateMessagesSheet(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                hasMorePm = false
+                loadMorePmError = true
             } finally {
                 isLoadingMorePm = false
             }
@@ -12156,6 +14048,9 @@ internal fun UserPrivateMessagesSheet(
     }
 
     LaunchedEffect(username, tab, reloadToken) {
+        loadMorePmJob?.cancel()
+        isLoadingMorePm = false
+        loadMorePmError = false
         if (tab == 2) return@LaunchedEffect
         isLoading = true
         loadError = null
@@ -12178,31 +14073,99 @@ internal fun UserPrivateMessagesSheet(
     }
 
     LinDoFullScreenPage(
-        onBack = onDismiss,
+        onBack = ::handleBack,
         containerColor = palette.cardSurface
     ) {
-        LinDoPageTopBar(
-            title = "站内私信中心",
-            onBack = onDismiss
-        )
+        val pmTabs = remember { listOf("收件箱" to 0, "已发送" to 1, "归档" to 3) }
+        val selectedTabPos = pmTabs.indexOfFirst { it.second == tab }.let { if (it >= 0) it else 0 }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(palette.cardSurface)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp)
+                    .padding(start = 4.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = ::handleBack) {
+                    Icon(
+                        imageVector = LinDoIcons.ArrowLeft,
+                        contentDescription = "返回",
+                        modifier = Modifier.size(20.dp),
+                        tint = palette.inkPrimary
+                    )
+                }
+                Spacer(modifier = Modifier.width(2.dp))
+                Text(
+                    text = if (tab == 2) "写私信" else "站内私信",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (tab != 2) {
+                    TextButton(
+                        onClick = {
+                            if (!isSending && !isUploading) {
+                                statusMsg = null
+                                statusIsError = false
+                                tab = 2
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.Edit,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.5.dp),
+                            tint = palette.activeChipText
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "写私信",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.activeChipText
+                        )
+                    }
+                }
+            }
+            if (tab != 2) {
+                Box(modifier = Modifier.padding(horizontal = 18.dp)) {
+                    LinDoSectionTabs(
+                        labels = pmTabs.map { it.first },
+                        selectedIndex = selectedTabPos,
+                        fontSize = 14.sp
+                    ) { pos ->
+                        if (!isSending && !isUploading) {
+                            pmTabs.getOrNull(pos)?.second?.let { nextTab ->
+                                loadMorePmJob?.cancel()
+                                loadMorePmError = false
+                                tab = nextTab
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 10.dp)
+                .padding(horizontal = if (tab == 2) 18.dp else 0.dp, vertical = if (tab == 2) 10.dp else 0.dp)
         ) {
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                val tabs = listOf("收件箱" to 0, "已发送" to 1, "归档" to 3, "写私信" to 2)
-                tabs.forEach { (label, idx) ->
-                    GoogleM3FilterPill(
-                        label = label,
-                        dotColor = null,
-                        selected = tab == idx,
-                        onClick = { if (!isSending && !isUploading) tab = idx }
-                    )
-                }
+            if (statusMsg != null) {
+                LinDoFeedbackRow(
+                    message = statusMsg!!,
+                    state = if (statusIsError) LinDoMascotState.NetworkError else LinDoMascotState.Success,
+                    modifier = Modifier.padding(horizontal = if (tab == 2) 0.dp else 18.dp, vertical = 6.dp)
+                )
             }
-
-            Spacer(modifier = Modifier.height(10.dp))
 
             if (tab == 2) {
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
@@ -12212,35 +14175,69 @@ internal fun UserPrivateMessagesSheet(
                     pmBody, { pmBody = it }, "写下私信", enabled = !isSending,
                     onUploadingChange = { isUploading = it }, defaultEditorHeight = 180.dp
                 )
-                if (statusMsg != null) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    LinDoFeedbackRow(message = statusMsg!!, state = if (statusMsg!!.contains("失败")) LinDoMascotState.NetworkError else LinDoMascotState.Success)
-                }
-                Spacer(modifier = Modifier.height(10.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.Transparent)
-                        .clickable(enabled = !isSending && !isUploading && recipient.isNotBlank() && pmTitle.isNotBlank() && pmBody.isNotBlank()) {
-                            if (!isSending) {
-                                isSending = true
-                                scope.launch {
-                                    try {
-                                        val tid = LinuxDoRepository.sendPrivateMessage(recipient, pmTitle, pmBody)
-                                        if (tid != null) { statusMsg = "私信已发送"; pmTitle = ""; pmBody = ""; tab = 1 }
-                                        else statusMsg = "发送失败，内容已保留"
-                                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                                    catch (error: Exception) { statusMsg = error.message ?: "发送失败，内容已保留" }
-                                    finally { isSending = false }
+                Spacer(modifier = Modifier.height(12.dp))
+                LinDoPrimaryButton(
+                    label = "发送私信",
+                    busy = isSending,
+                    busyLabel = "正在发送",
+                    leadingIcon = LinDoIcons.Send,
+                    enabled = !isSending && !isUploading && recipient.isNotBlank() && pmTitle.isNotBlank() && pmBody.isNotBlank(),
+                    onClick = {
+                        if (!isSending) {
+                            isSending = true
+                            statusMsg = null
+                            val draftToClean = activeDraft
+                            scope.launch {
+                                try {
+                                    val res = LinuxDoRepository.sendPrivateMessageDetailed(
+                                        targetUsernames = recipient,
+                                        title = pmTitle,
+                                        rawMarkdown = pmBody,
+                                        draftKey = draftToClean?.draftKey
+                                    )
+                                    when (res.outcome) {
+                                        PrivateMessageSendOutcome.SENT, PrivateMessageSendOutcome.ENQUEUED -> {
+                                            statusIsError = false
+                                            statusMsg = if (res.outcome == PrivateMessageSendOutcome.ENQUEUED) {
+                                                "私信已提交审核，通过后将自动送达"
+                                            } else {
+                                                "私信已发送"
+                                            }
+                                            if (draftToClean != null) {
+                                                val draftOwner = username.ifBlank {
+                                                    UserApiKeyAuthManager.currentUser?.username.orEmpty()
+                                                }
+                                                LocalComposerDrafts.remove(draftOwner, draftToClean.draftKey)
+                                                launch {
+                                                    runCatching {
+                                                        LinuxDoRepository.deleteCloudDraft(draftToClean.draftKey, draftToClean.sequence)
+                                                    }
+                                                }
+                                                activeDraft = null
+                                            }
+                                            recipient = ""
+                                            pmTitle = ""
+                                            pmBody = ""
+                                            tab = 1
+                                            reloadToken++
+                                        }
+                                        PrivateMessageSendOutcome.FAILED -> {
+                                            statusIsError = true
+                                            statusMsg = res.errorMessage ?: "发送失败，内容已保留"
+                                        }
+                                    }
+                                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                    throw cancelled
+                                } catch (error: Exception) {
+                                    statusIsError = true
+                                    statusMsg = error.message ?: "发送失败，内容已保留"
+                                } finally {
+                                    isSending = false
                                 }
                             }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    LinDoBusyButtonLabel(busy = isSending, busyLabel = "正在发送", label = "发送私信", color = palette.brandGold)
-                }
+                        }
+                    }
+                )
 
                 }
             } else {
@@ -12275,13 +14272,23 @@ internal fun UserPrivateMessagesSheet(
                                     isSelected = false,
                                     isCompact = true,
                                     enableAnimations = false,
+                                    trailingAction = if (tab == 0 || tab == 3) {
+                                        {
+                                            TextButton(
+                                                onClick = { pendingArchive = msg; archiveError = null },
+                                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                            ) {
+                                                Text(
+                                                    text = if (tab == 3) "移回" else "归档",
+                                                    color = palette.inkSecondary,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                            }
+                                        }
+                                    } else null,
                                     onClick = { onSelectMessageTopic(msg) }
                                 )
-                                if (tab == 0 || tab == 3) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                    TextButton(onClick = { pendingArchive = msg; archiveError = null }) {
-                                        Text(if (tab == 3) "移回收件箱" else "归档会话", color = palette.inkSecondary, fontSize = 12.sp)
-                                    }
-                                }
                                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                             }
                             item(key = "pm_sheet_footer") {
@@ -12289,6 +14296,7 @@ internal fun UserPrivateMessagesSheet(
                                     isLoadingMore = isLoadingMorePm,
                                     hasMore = hasMorePm,
                                     loadedCount = messages.size,
+                                    isError = loadMorePmError,
                                     onLoadMore = ::loadMorePm
                                 )
                             }
@@ -12297,6 +14305,24 @@ internal fun UserPrivateMessagesSheet(
                 }
             }
         }
+    }
+    if (showDiscardConfirm) {
+        LinDoConfirmDialog(
+            title = "放弃未发送的私信？",
+            confirmLabel = "放弃",
+            destructive = true,
+            onDismiss = { showDiscardConfirm = false },
+            onConfirm = {
+                showDiscardConfirm = false
+                pmTitle = ""
+                pmBody = ""
+                if (openedDirectlyInComposer) {
+                    onDismiss()
+                } else {
+                    tab = 0
+                }
+            }
+        )
     }
     pendingArchive?.let { message ->
         val movingToInbox = tab == 3
@@ -12335,6 +14361,7 @@ internal fun UserPrivateMessagesSheet(
 @Composable
 private fun PublicUserCardSheet(
     username: String,
+    currentUsername: String = "",
     onDismiss: () -> Unit,
     onSendPrivateMessage: (String) -> Unit,
     onSelectTopicId: (Int, String, Int) -> Unit,
@@ -12351,6 +14378,7 @@ private fun PublicUserCardSheet(
     var hasMoreTopics by remember(username) { mutableStateOf(true) }
     var hasMoreReplies by remember(username) { mutableStateOf(true) }
     var isLoadingMoreActions by remember(username) { mutableStateOf(false) }
+    var loadMoreActionsError by remember(username) { mutableStateOf(false) }
     var profileBadges by remember(username) { mutableStateOf<List<GrantedBadge>?>(null) }
     var profileBadgeError by remember(username) { mutableStateOf(false) }
     var retryProfileBadges by remember(username) { mutableIntStateOf(0) }
@@ -12370,6 +14398,7 @@ private fun PublicUserCardSheet(
         }
         if (isLoading || tabLoading || isLoadingMoreActions || !currentHasMore) return
         isLoadingMoreActions = true
+        loadMoreActionsError = false
         val targetTab = activeTab
         scope.launch {
             try {
@@ -12395,11 +14424,7 @@ private fun PublicUserCardSheet(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                when (targetTab) {
-                    1 -> hasMoreTopics = false
-                    2 -> hasMoreReplies = false
-                    0 -> hasMoreAll = false
-                }
+                loadMoreActionsError = true
             } finally {
                 isLoadingMoreActions = false
             }
@@ -12475,12 +14500,15 @@ private fun PublicUserCardSheet(
         containerColor = palette.cardSurface
     ) {
         val p = cardProfile
+        val isViewingSelf = currentUsername.isNotBlank() && username.equals(currentUsername, ignoreCase = true)
         LinDoPageTopBar(
             title = "用户主页",
             onBack = onDismiss,
             trailingContent = {
-                TextButton(onClick = { onSendPrivateMessage(username) }) {
-                    Text("私信", color = palette.inkPrimary)
+                if (!isViewingSelf) {
+                    TextButton(onClick = { onSendPrivateMessage(username) }) {
+                        Text("私信", color = palette.inkPrimary)
+                    }
                 }
             }
         )
@@ -12498,6 +14526,7 @@ private fun PublicUserCardSheet(
                 ) {
                     GoogleAccountRingAvatar(
                         letter = displayName,
+                        username = username,
                         avatarUrl = p?.avatarTemplate,
                         animatedAvatar = p?.animatedAvatar,
                         flair = p?.flair,
@@ -12738,10 +14767,14 @@ private fun PublicUserCardSheet(
                                             )
                                         }
                                     }
-                                    if (badge.description.isNotBlank()) {
+                                    val cleanBadgeDesc = remember(badge.name, badge.description, badge.longDescription) {
+                                        badge.plainDescription.takeUnless { it == badge.name }
+                                            ?: badge.plainLongDescription
+                                    }
+                                    if (cleanBadgeDesc.isNotBlank()) {
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            text = badge.description,
+                                            text = cleanBadgeDesc,
                                             fontSize = 12.sp,
                                             lineHeight = 17.sp,
                                             color = palette.inkSecondary,
@@ -12803,6 +14836,7 @@ private fun PublicUserCardSheet(
                                 isLoadingMore = isLoadingMoreActions,
                                 hasMore = tabHasMore,
                                 loadedCount = activeList.size,
+                                isError = loadMoreActionsError,
                                 onLoadMore = ::loadMoreCardActions
                             )
                         }
@@ -12828,6 +14862,7 @@ private val profileImagePlaceholder = Regex("\\[(?:IMG|PXL|DSC|Screenshot)[-_ ][
 internal fun ProfileActivityRow(
     activity: UserActivityItem,
     showActionLabel: Boolean = true,
+    trailingAction: (@Composable () -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -12835,66 +14870,75 @@ internal fun ProfileActivityRow(
     val (_, morandiFg) = remember(activity.categoryName, palette.isDark) {
         resolveMorandiCategoryColors(activity.categoryName, palette.isDark)
     }
-    Column(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp)
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        Column(
+            Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            if (activity.categoryName.isNotBlank()) {
-                LinDoCategoryLabel(
-                    name = activity.categoryName,
-                    dotColor = morandiFg,
-                    dotSize = 12.dp
-                )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (activity.categoryName.isNotBlank()) {
+                    LinDoCategoryLabel(
+                        name = activity.categoryName,
+                        dotColor = morandiFg,
+                        dotSize = 12.dp
+                    )
+                }
+                if (showActionLabel && activity.actionLabel.isNotBlank()) {
+                    Text(
+                        text = if (activity.categoryName.isNotBlank()) "· ${activity.actionLabel}" else activity.actionLabel,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Normal,
+                        color = palette.inkTertiary,
+                        maxLines = 1
+                    )
+                }
+                if (activity.postNumber > 1) {
+                    Text(
+                        text = "· ${activity.postNumber} 楼",
+                        fontSize = 11.5.sp,
+                        color = palette.inkTertiary
+                    )
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                if (activity.createdAtText.isNotBlank()) {
+                    Text(
+                        text = activity.createdAtText,
+                        color = palette.inkTertiary,
+                        fontSize = 11.5.sp,
+                        maxLines = 1
+                    )
+                }
             }
-            if (showActionLabel && activity.actionLabel.isNotBlank()) {
-                Text(
-                    text = if (activity.categoryName.isNotBlank()) "· ${activity.actionLabel}" else activity.actionLabel,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Normal,
-                    color = palette.inkTertiary,
-                    maxLines = 1
-                )
-            }
-            if (activity.postNumber > 1) {
-                Text(
-                    text = "· ${activity.postNumber} 楼",
-                    fontSize = 11.5.sp,
-                    color = palette.inkTertiary
-                )
-            }
-            Spacer(modifier = Modifier.weight(1f))
-            if (activity.createdAtText.isNotBlank()) {
-                Text(
-                    text = activity.createdAtText,
-                    color = palette.inkTertiary,
-                    fontSize = 11.5.sp,
-                    maxLines = 1
-                )
-            }
-        }
-        Text(
-            activity.title,
-            color = palette.inkPrimary,
-            fontSize = 15.sp,
-            lineHeight = 21.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-        if (excerpt.isNotBlank() && excerpt != activity.title) {
             Text(
-                excerpt,
-                color = palette.inkSecondary,
-                fontSize = 12.6.sp,
-                lineHeight = 18.sp,
+                activity.title,
+                color = palette.inkPrimary,
+                fontSize = 15.sp,
+                lineHeight = 21.sp,
+                fontWeight = FontWeight.Medium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
+            if (excerpt.isNotBlank() && excerpt != activity.title) {
+                Text(
+                    excerpt,
+                    color = palette.inkSecondary,
+                    fontSize = 12.6.sp,
+                    lineHeight = 18.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        if (trailingAction != null) {
+            Spacer(modifier = Modifier.width(6.dp))
+            trailingAction()
         }
     }
     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -12915,6 +14959,7 @@ private fun UserReadHistorySheet(
     var historyPage by remember { mutableIntStateOf(0) }
     var hasMore by remember { mutableStateOf(true) }
     var isLoadingMore by remember { mutableStateOf(false) }
+    var loadMoreError by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
@@ -12922,6 +14967,7 @@ private fun UserReadHistorySheet(
     fun loadMoreHistory() {
         if (isLoading || isLoadingMore || !hasMore) return
         isLoadingMore = true
+        loadMoreError = false
         scope.launch {
             try {
                 val nextPage = historyPage + 1
@@ -12934,7 +14980,7 @@ private fun UserReadHistorySheet(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                hasMore = false
+                loadMoreError = true
             } finally {
                 isLoadingMore = false
             }
@@ -13016,6 +15062,7 @@ private fun UserReadHistorySheet(
                             isLoadingMore = isLoadingMore,
                             hasMore = hasMore,
                             loadedCount = items.size,
+                            isError = loadMoreError,
                             onLoadMore = ::loadMoreHistory
                         )
                     }
@@ -13049,8 +15096,8 @@ private fun EditProfileModalSheet(
     var displayName by remember { mutableStateOf(fullProfile?.displayName.orEmpty()) }
     var userTitle by remember { mutableStateOf(fullProfile?.title.orEmpty()) }
     var location by remember { mutableStateOf(fullProfile?.location.orEmpty()) }
-    var website by remember { mutableStateOf(fullProfile?.websiteName.orEmpty()) }
-    var bioRaw by remember { mutableStateOf(fullProfile?.bioExcerpt.orEmpty()) }
+    var website by remember { mutableStateOf(fullProfile?.websiteUrl.orEmpty()) }
+    var bioRaw by remember { mutableStateOf("") }
     var availableTitles by remember {
         mutableStateOf(
             fullProfile?.badges.orEmpty().filter { it.allowTitle }.map { it.name }.distinct()
@@ -13058,23 +15105,29 @@ private fun EditProfileModalSheet(
     }
     var titleDropdownExpanded by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isSaving by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(username) {
+    LaunchedEffect(username, reloadToken) {
         isLoading = true
+        loadError = null
         try {
             val snap = LinuxDoRepository.fetchUserAccountPreferences(username)
-            if (snap != null) {
-                displayName = snap.displayName
-                userTitle = snap.title
-                location = snap.location
-                website = snap.website
-                bioRaw = snap.bioRaw
-                if (snap.availableTitles.isNotEmpty()) {
-                    availableTitles = snap.availableTitles
-                }
+                ?: throw ApiReadException(ApiFailureKind.Connection)
+            displayName = snap.displayName
+            userTitle = snap.title
+            location = snap.location
+            website = snap.website
+            bioRaw = snap.bioRaw
+            if (snap.availableTitles.isNotEmpty()) {
+                availableTitles = snap.availableTitles
             }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "无法同步个人资料，为避免覆盖原有简介已暂停编辑"
         } finally {
             isLoading = false
         }
@@ -13101,13 +15154,14 @@ private fun EditProfileModalSheet(
             title = "编辑个人资料",
             onBack = onDismiss,
             trailingContent = {
+                val canSave = !isSaving && !isLoading && loadError == null
                 TextButton(
-                    enabled = !isSaving && !isLoading,
+                    enabled = canSave,
                     onClick = {
                         isSaving = true
                         statusMessage = null
                         scope.launch {
-                            val ok = LinuxDoRepository.updateUserProfileInfo(
+                            val res = LinuxDoRepository.updateUserProfileInfoResult(
                                 username = username,
                                 displayName = displayName,
                                 bioRaw = bioRaw,
@@ -13116,10 +15170,10 @@ private fun EditProfileModalSheet(
                                 website = website
                             )
                             isSaving = false
-                            if (ok) {
+                            if (res.isSuccess) {
                                 onSaved()
                             } else {
-                                statusMessage = "保存失败，请稍后重试"
+                                statusMessage = res.exceptionOrNull()?.message ?: "保存失败，请稍后重试"
                             }
                         }
                     }
@@ -13127,7 +15181,7 @@ private fun EditProfileModalSheet(
                     Text(
                         text = if (isSaving) "保存中…" else "保存",
                         fontWeight = FontWeight.Bold,
-                        color = palette.brandGold
+                        color = if (canSave) palette.brandGold else palette.inkTertiary
                     )
                 }
             }
@@ -13137,6 +15191,17 @@ private fun EditProfileModalSheet(
         if (isLoading) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 LinDoLoadingIndicator(label = "同步资料中")
+            }
+        } else if (loadError != null) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoStatePanel(
+                    state = LinDoMascotState.NetworkError,
+                    detail = loadError!!,
+                    onRetry = { reloadToken++ }
+                )
             }
         } else {
             Column(
@@ -13154,6 +15219,7 @@ private fun EditProfileModalSheet(
                 ) {
                     GoogleAccountRingAvatar(
                         letter = displayName.ifBlank { username.ifBlank { "L" } },
+                        username = username.ifBlank { displayName.ifBlank { "L" } },
                         avatarUrl = fullProfile?.avatarTemplate,
                         animatedAvatar = fullProfile?.animatedAvatar,
                         flair = fullProfile?.flair,
@@ -13264,6 +15330,8 @@ private fun EditProfileModalSheet(
                             .background(palette.cardSurface)
                             .widthIn(min = 220.dp, max = 320.dp)
                     ) {
+                        LinDoScaledPopupContent {
+                        Column {
                         titleOptions.forEach { (label, value) ->
                             val selected = userTitle == value
                             DropdownMenuItem(
@@ -13290,6 +15358,8 @@ private fun EditProfileModalSheet(
                                     titleDropdownExpanded = false
                                 }
                             )
+                        }
+                        }
                         }
                     }
                 }
@@ -13436,13 +15506,23 @@ private fun UserFollowNetworkSheet(
     var users by remember { mutableStateOf<List<FollowUserEntry>>(emptyList()) }
     var feedItems by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var followActionError by remember { mutableStateOf<String?>(null) }
+    var togglingUsernames by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val currentUsername = UserApiKeyAuthManager.currentUser?.username.orEmpty()
     var isLoadingMoreFeed by remember { mutableStateOf(false) }
+    var loadMoreFeedError by remember { mutableStateOf(false) }
     var hasMoreFeed by remember { mutableStateOf(false) }
     var feedPage by remember { mutableIntStateOf(0) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var loadMoreFeedJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     LaunchedEffect(username, activeTab, reloadToken) {
+        loadMoreFeedJob?.cancel()
+        isLoadingMoreFeed = false
         isLoading = true
+        loadError = null
+        loadMoreFeedError = false
         try {
             if (activeTab == 2) {
                 feedPage = 0
@@ -13455,6 +15535,10 @@ private fun UserFollowNetworkSheet(
                     followers = activeTab == 1
                 )
             }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载失败"
         } finally {
             isLoading = false
         }
@@ -13464,7 +15548,9 @@ private fun UserFollowNetworkSheet(
         if (isLoadingMoreFeed || !hasMoreFeed || isLoading || activeTab != 2) return
         val nextPage = feedPage + 1
         isLoadingMoreFeed = true
-        scope.launch {
+        loadMoreFeedError = false
+        loadMoreFeedJob?.cancel()
+        loadMoreFeedJob = scope.launch {
             try {
                 val more = LinuxDoRepository.fetchUserFollowFeed(username, page = nextPage)
                 if (more.isEmpty()) {
@@ -13480,6 +15566,10 @@ private fun UserFollowNetworkSheet(
                         hasMoreFeed = more.size >= 15
                     }
                 }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                loadMoreFeedError = true
             } finally {
                 isLoadingMoreFeed = false
             }
@@ -13513,9 +15603,24 @@ private fun UserFollowNetworkSheet(
         }
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
+        followActionError?.let { msg ->
+            LinDoFeedbackRow(message = msg, state = LinDoMascotState.NetworkError, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        }
+
         if (isLoading) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 LinDoLoadingIndicator(label = "加载中")
+            }
+        } else if (loadError != null && ((activeTab == 2 && feedItems.isEmpty()) || (activeTab != 2 && users.isEmpty()))) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoStatePanel(
+                    state = LinDoMascotState.NetworkError,
+                    detail = loadError!!,
+                    onRetry = { reloadToken++ }
+                )
             }
         } else if (activeTab == 2) {
             LazyColumn(
@@ -13542,6 +15647,7 @@ private fun UserFollowNetworkSheet(
                             isLoadingMore = isLoadingMoreFeed,
                             hasMore = hasMoreFeed,
                             loadedCount = feedItems.size,
+                            isError = loadMoreFeedError,
                             onLoadMore = { loadMoreFeed() }
                         )
                     }
@@ -13574,6 +15680,7 @@ private fun UserFollowNetworkSheet(
                         ) {
                             GoogleAccountRingAvatar(
                                 letter = user.displayName,
+                                username = user.username,
                                 avatarUrl = user.avatarUrl,
                                 animatedAvatar = user.animatedAvatar,
                                 avatarSize = 42.dp
@@ -13614,23 +15721,43 @@ private fun UserFollowNetworkSheet(
                                     UserTitleTag(title = user.title)
                                 }
                             }
-                            TextButton(
-                                onClick = {
-                                    val targetFollow = !user.isFollowing
-                                    users = users.map {
-                                        if (it.username == user.username) it.copy(isFollowing = targetFollow) else it
+                            val isSelfRow = currentUsername.isNotBlank() &&
+                                user.username.equals(currentUsername, ignoreCase = true)
+                            if (!isSelfRow) {
+                                val isToggling = user.username in togglingUsernames
+                                TextButton(
+                                    enabled = !isToggling,
+                                    onClick = {
+                                        if (isToggling) return@TextButton
+                                        val prevFollow = user.isFollowing
+                                        val targetFollow = !prevFollow
+                                        followActionError = null
+                                        togglingUsernames = togglingUsernames + user.username
+                                        users = users.map {
+                                            if (it.username == user.username) it.copy(isFollowing = targetFollow) else it
+                                        }
+                                        scope.launch {
+                                            try {
+                                                val ok = LinuxDoRepository.toggleFollowUser(user.username, follow = targetFollow)
+                                                if (!ok) {
+                                                    users = users.map {
+                                                        if (it.username == user.username) it.copy(isFollowing = prevFollow) else it
+                                                    }
+                                                    followActionError = if (targetFollow) "关注失败，请稍后重试" else "取消关注失败，请稍后重试"
+                                                }
+                                            } finally {
+                                                togglingUsernames = togglingUsernames - user.username
+                                            }
+                                        }
                                     }
-                                    scope.launch {
-                                        LinuxDoRepository.toggleFollowUser(user.username, follow = targetFollow)
-                                    }
+                                ) {
+                                    Text(
+                                        text = if (user.isFollowing) "已关注" else "+ 关注",
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (isToggling) palette.inkTertiary else if (user.isFollowing) palette.inkSecondary else palette.brandGold
+                                    )
                                 }
-                            ) {
-                                Text(
-                                    text = if (user.isFollowing) "已关注" else "+ 关注",
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (user.isFollowing) palette.inkSecondary else palette.brandGold
-                                )
                             }
                         }
                         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -13658,19 +15785,30 @@ private fun CommunityLeaderboardSheet(
     var selectedPeriodIdx by remember { mutableIntStateOf(1) }
     var entries by remember { mutableStateOf<List<LeaderboardUserEntry>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     var isLoadingMore by remember { mutableStateOf(false) }
+    var loadMoreError by remember { mutableStateOf(false) }
     var hasMore by remember { mutableStateOf(false) }
     var currentPage by remember { mutableIntStateOf(0) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     LaunchedEffect(selectedPeriodIdx, reloadToken) {
+        loadMoreJob?.cancel()
+        isLoadingMore = false
         isLoading = true
+        loadError = null
+        loadMoreError = false
         currentPage = 0
         try {
             val periodKey = periods.getOrNull(selectedPeriodIdx)?.second ?: "weekly"
             val firstPage = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey, page = 0)
             entries = firstPage
             hasMore = firstPage.size >= 40
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载排行榜失败"
         } finally {
             isLoading = false
         }
@@ -13681,7 +15819,9 @@ private fun CommunityLeaderboardSheet(
         val nextPage = currentPage + 1
         val periodKey = periods.getOrNull(selectedPeriodIdx)?.second ?: "weekly"
         isLoadingMore = true
-        scope.launch {
+        loadMoreError = false
+        loadMoreJob?.cancel()
+        loadMoreJob = scope.launch {
             try {
                 val more = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey, page = nextPage)
                 if (more.isEmpty()) {
@@ -13699,6 +15839,10 @@ private fun CommunityLeaderboardSheet(
                         hasMore = more.size >= 40
                     }
                 }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                loadMoreError = true
             } finally {
                 isLoadingMore = false
             }
@@ -13736,6 +15880,17 @@ private fun CommunityLeaderboardSheet(
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 LinDoLoadingIndicator(label = "加载排行榜中")
             }
+        } else if (loadError != null && entries.isEmpty()) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoStatePanel(
+                    state = LinDoMascotState.NetworkError,
+                    detail = loadError!!,
+                    onRetry = { reloadToken++ }
+                )
+            }
         } else {
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -13768,6 +15923,7 @@ private fun CommunityLeaderboardSheet(
                             )
                             GoogleAccountRingAvatar(
                                 letter = entry.displayName,
+                                username = entry.username,
                                 avatarUrl = entry.avatarUrl,
                                 avatarSize = 40.dp
                             )
@@ -13818,6 +15974,7 @@ private fun CommunityLeaderboardSheet(
                             isLoadingMore = isLoadingMore,
                             hasMore = hasMore,
                             loadedCount = entries.size,
+                            isError = loadMoreError,
                             onLoadMore = { loadMoreLeaderboard() }
                         )
                     }
@@ -13844,17 +16001,24 @@ private fun UserAccountPreferencesSheet(
     var hidePresence by remember { mutableStateOf(false) }
     var allowPm by remember { mutableStateOf(true) }
     var isLoading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var toggleError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var isSavingToggle by remember { mutableStateOf(false) }
 
-    LaunchedEffect(username) {
+    LaunchedEffect(username, reloadToken) {
         isLoading = true
+        loadError = null
         try {
             val loaded = LinuxDoRepository.fetchUserAccountPreferences(username)
+                ?: throw ApiReadException(ApiFailureKind.Connection)
             snapshot = loaded
-            if (loaded != null) {
-                hidePresence = loaded.hideProfileAndPresence
-                allowPm = loaded.allowPrivateMessages
-            }
+            hidePresence = loaded.hideProfileAndPresence
+            allowPm = loaded.allowPrivateMessages
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载账号偏好失败"
         } finally {
             isLoading = false
         }
@@ -13862,22 +16026,27 @@ private fun UserAccountPreferencesSheet(
 
     fun persistPrivacyPrefs(newHidePresence: Boolean, newAllowPm: Boolean) {
         val snap = snapshot ?: return
+        val prevHide = hidePresence
+        val prevAllow = allowPm
         hidePresence = newHidePresence
         allowPm = newAllowPm
+        toggleError = null
         isSavingToggle = true
         scope.launch {
-            LinuxDoRepository.updateUserProfileInfo(
+            val res = LinuxDoRepository.updateUserProfileInfoResult(
                 username = snap.username,
-                displayName = snap.displayName,
-                bioRaw = snap.bioRaw,
-                title = snap.title,
-                location = snap.location,
-                website = snap.website,
                 hidePresence = newHidePresence,
                 allowPrivateMessages = newAllowPm
             )
             isSavingToggle = false
-            onUpdated()
+            if (res.isSuccess) {
+                snapshot = snap.copy(hideProfileAndPresence = newHidePresence, allowPrivateMessages = newAllowPm)
+                onUpdated()
+            } else {
+                hidePresence = prevHide
+                allowPm = prevAllow
+                toggleError = res.exceptionOrNull()?.message ?: "偏好保存失败，已恢复原设置"
+            }
         }
     }
 
@@ -13895,10 +16064,24 @@ private fun UserAccountPreferencesSheet(
             }
         )
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        toggleError?.let { msg ->
+            LinDoFeedbackRow(message = msg, state = LinDoMascotState.NetworkError, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        }
 
         if (isLoading && snapshot == null) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 LinDoLoadingIndicator(label = "加载账号信息")
+            }
+        } else if (loadError != null && snapshot == null) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoStatePanel(
+                    state = LinDoMascotState.NetworkError,
+                    detail = loadError!!,
+                    onRetry = { reloadToken++ }
+                )
             }
         } else {
             val s = snapshot
@@ -14054,12 +16237,20 @@ private fun CommunityAboutSheet(
     val palette = LocalPalette.current
     var aboutData by remember { mutableStateOf<CommunityAboutData?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
     var activeTeamTab by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(reloadToken) {
         isLoading = true
+        loadError = null
         try {
             aboutData = LinuxDoRepository.fetchCommunityAboutInfo()
+                ?: throw ApiReadException(ApiFailureKind.Connection)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            loadError = error.message ?: "加载社区信息失败"
         } finally {
             isLoading = false
         }
@@ -14078,6 +16269,17 @@ private fun CommunityAboutSheet(
         if (isLoading && aboutData == null) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 LinDoLoadingIndicator(label = "加载中")
+            }
+        } else if (loadError != null && aboutData == null) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                LinDoStatePanel(
+                    state = LinDoMascotState.NetworkError,
+                    detail = loadError!!,
+                    onRetry = { reloadToken++ }
+                )
             }
         } else {
             val info = aboutData
@@ -14149,6 +16351,7 @@ private fun CommunityAboutSheet(
                         ) {
                             GoogleAccountRingAvatar(
                                 letter = member.displayName,
+                                username = member.username,
                                 avatarUrl = member.avatarUrl,
                                 animatedAvatar = member.animatedAvatar,
                                 avatarSize = 40.dp
@@ -14198,11 +16401,16 @@ fun LinDoReadRegressionPreview(scene: String, cooked: String = "", onClose: () -
     when (scene) {
         "search" -> GlobalSearchModalSheet("linux", onClose, { _, _, _ -> })
         "bookmarks" -> UserBookmarksSheet(UserApiKeyAuthManager.currentUser?.username.orEmpty(), onClose, { _, _, _ -> })
-        "notifications" -> UserNotificationsSheet(onClose, { _, _, _ -> })
+        "notifications" -> UserNotificationsSheet(onDismiss = onClose, onSelectNotification = { _, _, _ -> })
         "drafts" -> UserCloudDraftsSheet(onClose, { _ -> })
         "history" -> UserReadHistorySheet(onClose, {})
         "activity" -> UserActivitiesSheet(UserApiKeyAuthManager.currentUser?.username.orEmpty(), onClose, { _, _, _ -> })
-        "messages" -> UserPrivateMessagesSheet(UserApiKeyAuthManager.currentUser?.username.orEmpty(), null, onClose, {})
+        "messages" -> UserPrivateMessagesSheet(
+            username = UserApiKeyAuthManager.currentUser?.username.orEmpty(),
+            initialRecipient = null,
+            onDismiss = onClose,
+            onSelectMessageTopic = {}
+        )
         else -> {
             val nodes by androidx.compose.runtime.produceState<List<PostBlockNode>>(emptyList(), cooked) {
                 value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { DiscourseAstParser.parseCookedHtml(cooked) }

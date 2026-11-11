@@ -30,6 +30,7 @@ import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import coil3.compose.AsyncImage
 import do_.linux.lindo.core.render.*
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
+import do_.linux.lindo.ui.components.LinDoIcons
 
 @Composable
 internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
@@ -59,7 +60,7 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
                     background = if (run.code) palette.subtleSurface else androidx.compose.ui.graphics.Color.Unspecified,
                     textDecoration = when { run.strike -> TextDecoration.LineThrough; run.underline -> TextDecoration.Underline; else -> null }))
                 if (run.href != null) pushLink(LinkAnnotation.Clickable(run.href,
-                    TextLinkStyles(SpanStyle(color = if (palette.isDark) androidx.compose.ui.graphics.Color(0xFFF6C762) else androidx.compose.ui.graphics.Color(0xFF8A5A00), textDecoration = TextDecoration.Underline)),
+                    TextLinkStyles(SpanStyle(color = palette.activeChipText, textDecoration = TextDecoration.Underline)),
                     linkInteractionListener = {
                         if (run.href.startsWith("mailto:", ignoreCase = true)) {
                             runCatching { uriHandler.openUri(run.href) }.onFailure { unavailableMailLink = run.href }
@@ -73,7 +74,8 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
     }
     val failedEmoji = remember(rich) { mutableStateMapOf<String, Boolean>() }
     val failures = failedEmoji.toMap()
-    val inlineImages = remember(rich, failures) {
+    val emojiCatalogVer = LinuxDoEmojiCatalog.catalogVersion
+    val inlineImages = remember(rich, failures, emojiCatalogVer) {
         rich.runs.mapIndexedNotNull { index, run -> run.imageUrl?.let { url ->
             val failed = failures[url] == true
             val fallbackGlyph = shortcodeToUnicodeEmoji(run.text)
@@ -104,10 +106,12 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
     }
     unavailableMailLink?.let { mail ->
         TextButton(onClick = { clipboard.setText(AnnotatedString(mail.removePrefix("mailto:"))) }) {
-            Text("无法打开邮件应用，点击复制地址")
+            Text("无法打开邮件应用，点击复制地址", color = palette.activeChipText)
         }
     }
 }
+
+private val LocalActiveSelectionOwner = compositionLocalOf<MutableState<Any?>?> { null }
 
 // Compose exposes selection offsets through its controlled container on the pinned runtime.
 @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
@@ -121,12 +125,26 @@ private fun SelectablePostText(
         SelectionContainer(content = content)
         return
     }
+    val ownerToken = remember { Any() }
+    val activeOwner = LocalActiveSelectionOwner.current
     var selection by remember(text) {
         mutableStateOf<androidx.compose.foundation.text.selection.Selection?>(null)
     }
     val latestCallback by rememberUpdatedState(onSelectionChange)
-    DisposableEffect(text) {
-        onDispose { if (selection != null) latestCallback(null) }
+    LaunchedEffect(activeOwner?.value) {
+        if (activeOwner != null && activeOwner.value != ownerToken && selection != null) {
+            selection = null
+        }
+    }
+    DisposableEffect(text, ownerToken) {
+        onDispose {
+            if (activeOwner == null) {
+                if (selection != null) latestCallback(null)
+            } else if (activeOwner.value == ownerToken) {
+                activeOwner.value = null
+                latestCallback(null)
+            }
+        }
     }
     SelectionContainer(
         selection = selection,
@@ -136,9 +154,19 @@ private fun SelectablePostText(
             if (next != null) {
                 val start = minOf(next.start.offset, next.end.offset).coerceIn(0, text.length)
                 val end = maxOf(next.start.offset, next.end.offset).coerceIn(start, text.length)
-                latestCallback(text.substring(start, end).takeIf { it.isNotBlank() })
+                val selectedText = text.substring(start, end).takeIf { it.isNotBlank() }
+                if (selectedText != null) {
+                    activeOwner?.value = ownerToken
+                    latestCallback(selectedText)
+                } else if (activeOwner == null || activeOwner.value == ownerToken) {
+                    if (activeOwner?.value == ownerToken) activeOwner.value = null
+                    latestCallback(null)
+                }
             } else if (hadSelection) {
-                latestCallback(null)
+                if (activeOwner == null || activeOwner.value == ownerToken) {
+                    if (activeOwner?.value == ownerToken) activeOwner.value = null
+                    latestCallback(null)
+                }
             }
         },
         children = content
@@ -146,9 +174,52 @@ private fun SelectablePostText(
 }
 
 @Composable
-internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePalette,
-    onOpenLink: (String) -> Unit, originalUrl: String? = null, postId: Int? = null,
-    onSelectionChange: ((String?) -> Unit)? = null) {
+internal fun PostRichContent(
+    nodes: List<PostBlockNode>,
+    palette: LinDoThemePalette,
+    onOpenLink: (String) -> Unit,
+    originalUrl: String? = null,
+    postId: Int? = null,
+    onSelectionChange: ((String?) -> Unit)? = null,
+    onRequestLogin: (() -> Unit)? = null
+) {
+    val existingSelectionOwner = LocalActiveSelectionOwner.current
+    if (existingSelectionOwner == null) {
+        val rootSelectionOwner = remember { mutableStateOf<Any?>(null) }
+        CompositionLocalProvider(LocalActiveSelectionOwner provides rootSelectionOwner) {
+            PostRichContentBody(
+                nodes = nodes,
+                palette = palette,
+                onOpenLink = onOpenLink,
+                originalUrl = originalUrl,
+                postId = postId,
+                onSelectionChange = onSelectionChange,
+                onRequestLogin = onRequestLogin
+            )
+        }
+    } else {
+        PostRichContentBody(
+            nodes = nodes,
+            palette = palette,
+            onOpenLink = onOpenLink,
+            originalUrl = originalUrl,
+            postId = postId,
+            onSelectionChange = onSelectionChange,
+            onRequestLogin = onRequestLogin
+        )
+    }
+}
+
+@Composable
+private fun PostRichContentBody(
+    nodes: List<PostBlockNode>,
+    palette: LinDoThemePalette,
+    onOpenLink: (String) -> Unit,
+    originalUrl: String? = null,
+    postId: Int? = null,
+    onSelectionChange: ((String?) -> Unit)? = null,
+    onRequestLogin: (() -> Unit)? = null
+) {
     val clipboard = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
         for (node in nodes) when (node) {
@@ -158,19 +229,21 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
                 var revealed by remember(node) { mutableStateOf(false) }
                 Column {
                     TextButton(onClick = { revealed = !revealed }) { Text(if (revealed) "收起隐藏内容" else "显示隐藏内容", color = palette.inkSecondary) }
-                    if (revealed) PostRichContent(node.children, palette, onOpenLink, originalUrl, postId, onSelectionChange)
+                    if (revealed) PostRichContent(node.children, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
                 }
             }
-            is PostBlockNode.Poll -> NativePostPoll(node, palette, postId, originalUrl, onOpenLink)
+            is PostBlockNode.Poll -> NativePostPoll(node, palette, postId, originalUrl, onOpenLink, onRequestLogin)
 
             is PostBlockNode.QuoteBlock -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp)).padding(12.dp)) {
                 node.username?.let { Text("@$it", color = palette.inkSecondary, fontSize = 12.sp) }
-                PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.quotedText)) }, palette, onOpenLink, originalUrl, postId, onSelectionChange)
+                PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.quotedText)) }, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
             }
             is PostBlockNode.CodeBlock -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp))) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp)) {
                     Text(node.language.ifBlank { "text" }, Modifier.weight(1f).padding(top = 14.dp), color = palette.inkSecondary, fontSize = 12.sp)
-                    TextButton(onClick = { clipboard.setText(AnnotatedString(node.code)) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("复制代码") }
+                    TextButton(onClick = { clipboard.setText(AnnotatedString(node.code)) }, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text("复制代码", color = palette.activeChipText)
+                    }
                 }
                 SelectablePostText(node.code, onSelectionChange) {
                     Text(node.code, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 20.sp,
@@ -181,7 +254,7 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
                 node.items.forEachIndexed { index, text ->
                     Row {
                         Text(if (node.ordered) "${node.start + index}. " else "• ", color = palette.inkPrimary, modifier = Modifier.widthIn(min = 24.dp))
-                        Box(Modifier.weight(1f)) { PostRichContent(node.itemBlocks.getOrNull(index) ?: listOf(PostBlockNode.Paragraph(text)), palette, onOpenLink, originalUrl, postId, onSelectionChange) }
+                        Box(Modifier.weight(1f)) { PostRichContent(node.itemBlocks.getOrNull(index) ?: listOf(PostBlockNode.Paragraph(text)), palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin) }
                     }
                 }
             }
@@ -189,51 +262,70 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
                 var expanded by remember(node) { mutableStateOf(false) }
                 Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp)).padding(8.dp)) {
                     TextButton(onClick = { expanded = !expanded }, modifier = Modifier.heightIn(min = 48.dp)) {
-                        Text("${if (expanded) "▾" else "▸"} ${node.title}", color = palette.inkPrimary)
+                        Icon(
+                            imageVector = if (expanded) LinDoIcons.ChevronDown else LinDoIcons.ChevronRight,
+                            contentDescription = null,
+                            tint = palette.inkSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(node.title, color = palette.inkPrimary)
                     }
-                    if (expanded) PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.innerText)) }, palette, onOpenLink, originalUrl, postId, onSelectionChange)
+                    if (expanded) {
+                        val fallbackNodes = if (node.innerText.isNotBlank()) listOf(PostBlockNode.Paragraph(node.innerText)) else emptyList()
+                        val bodyChildren = node.children.ifEmpty { fallbackNodes }
+                        if (bodyChildren.isNotEmpty()) {
+                            PostRichContent(bodyChildren, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
+                        }
+                    }
                 }
             }
             is PostBlockNode.ImageGallery -> node.urls.forEachIndexed { index, url ->
                 var failed by remember(url) { mutableStateOf(false) }
+                val fullUrl = node.fullUrls.getOrElse(index) { url }
+                val linkTarget = node.linkUrls.getOrNull(index)?.takeIf { it.isNotBlank() } ?: fullUrl
                 val alt = node.captions.getOrNull(index).orEmpty().ifBlank { "帖子配图" }
                 if (failed) {
-                    TextButton(onClick = { onOpenLink(url) }) { Text("$alt · 打开图片") }
+                    TextButton(onClick = { onOpenLink(linkTarget) }) { Text("$alt · 打开图片", color = palette.activeChipText) }
                 } else {
                     val context = coil3.compose.LocalPlatformContext.current
                     val imageRequest = remember(context, url) {
                         coil3.request.ImageRequest.Builder(context)
                             .data(url)
-                            .size(coil3.size.Size.ORIGINAL)
+                            .size(coil3.size.Size(coil3.size.Dimension(1440), coil3.size.Dimension.Undefined))
+                            .precision(coil3.size.Precision.INEXACT)
                             .build()
                     }
                     AsyncImage(
                         model = imageRequest,
                         contentDescription = alt,
                         contentScale = ContentScale.FillWidth,
-                        filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
+                        filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
                         onError = { failed = true },
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 60.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .background(palette.subtleSurface)
-                            .clickable { onOpenLink(url) }
+                            .clickable { onOpenLink(linkTarget) }
                     )
                 }
             }
             is PostBlockNode.Table -> Column(Modifier.horizontalScroll(rememberScrollState())) {
-                node.rows.forEachIndexed { index, cells -> Row {
-                    cells.forEach { cell -> Column(Modifier.width(160.dp).border(.5.dp, palette.hairline)
+                node.rows.forEachIndexed { index, cells -> Row(Modifier.height(IntrinsicSize.Min)) {
+                    cells.forEach { cell -> Column(Modifier.width(160.dp).fillMaxHeight().border(.5.dp, palette.hairline)
                         .background(if (index in node.headerRows) palette.subtleSurface else palette.cardSurface).padding(10.dp)) {
-                        PostRichContent(cell, palette, onOpenLink, originalUrl, postId, onSelectionChange)
+                        PostRichContent(cell, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
                     } }
                 } }
             }
             is PostBlockNode.Media -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(10.dp)).border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp)).padding(12.dp)) {
                 Text(node.label, color = palette.inkPrimary, fontWeight = FontWeight.Medium)
                 TextButton(onClick = { (node.url ?: originalUrl)?.let(onOpenLink) }, enabled = node.url != null || originalUrl != null) {
-                    Text("播放${if (node.kind == "audio") "音频" else "媒体内容"}")
+                    Text(
+                        "播放${if (node.kind == "audio") "音频" else "媒体内容"}",
+                        color = if (node.url != null || originalUrl != null) palette.activeChipText else palette.inkTertiary
+                    )
                 }
             }
             is PostBlockNode.OneboxCard -> Column(
@@ -295,7 +387,7 @@ internal fun PostRichContent(nodes: List<PostBlockNode>, palette: LinDoThemePale
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    PostRichContent(node.children, palette, onOpenLink, originalUrl, postId, onSelectionChange)
+                    PostRichContent(node.children, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
                 }
             }
             is PostBlockNode.Unsupported -> {
@@ -370,28 +462,138 @@ private fun shortcodeToUnicodeEmoji(raw: String): String? {
 
 
 @Composable
-private fun NativePostPoll(poll: PostBlockNode.Poll, palette: LinDoThemePalette, postId: Int?, originalUrl: String?, onOpenLink: (String) -> Unit) {
+private fun NativePostPoll(
+    poll: PostBlockNode.Poll,
+    palette: LinDoThemePalette,
+    postId: Int?,
+    originalUrl: String?,
+    onOpenLink: (String) -> Unit,
+    onRequestLogin: (() -> Unit)? = null
+) {
     val scope = rememberCoroutineScope()
     val snapshot = remember(postId, poll.name) { postId?.let { LinuxDoRepository.getPollVoteSnapshot(it, poll.name) } }
-    var selected by remember(postId, poll) { mutableStateOf(snapshot?.selectedIds.orEmpty()) }
+    var snapshotSelectedIds by remember(postId, poll, snapshot) { mutableStateOf(snapshot?.selectedIds.orEmpty()) }
+    var selected by remember(postId, poll, snapshot) { mutableStateOf(snapshot?.selectedIds.orEmpty()) }
     var submitting by remember(postId, poll) { mutableStateOf(false) }
-    var submitted by remember(postId, poll) { mutableStateOf(snapshot != null) }
-    var optionVotes by remember(postId, poll) { mutableStateOf(snapshot?.optionVotes.orEmpty()) }
-    var voters by remember(postId, poll) { mutableStateOf(snapshot?.voters) }
+    var retracting by remember(postId, poll) { mutableStateOf(false) }
+    var submitted by remember(postId, poll, snapshot) { mutableStateOf(snapshot?.hasVoted == true) }
+    var optionVotes by remember(postId, poll, snapshot) { mutableStateOf(snapshot?.optionVotes.orEmpty()) }
+    var voters by remember(postId, poll, snapshot) { mutableStateOf(snapshot?.voters) }
+    var isClosed by remember(postId, poll, snapshot) { mutableStateOf(poll.closed || snapshot?.closed == true) }
     var error by remember(postId, poll) { mutableStateOf<String?>(null) }
+    val busy = submitting || retracting
+    val isAuthorized = UserApiKeyAuthManager.isAuthorized()
+
+    fun submitOrUpdateVote() {
+        if (postId == null || busy) return
+        if (!UserApiKeyAuthManager.isAuthorized()) {
+            if (onRequestLogin != null) onRequestLogin() else error = "请先登录后投票"
+            return
+        }
+        if (selected.size !in poll.min..poll.max) return
+        submitting = true
+        error = null
+        scope.launch {
+            try {
+                val latest = LinuxDoRepository.votePoll(postId, poll.name, selected.toList())
+                if (latest != null) {
+                    submitted = latest.hasVoted
+                    snapshotSelectedIds = latest.selectedIds
+                    selected = latest.selectedIds
+                    optionVotes = latest.optionVotes
+                    voters = latest.voters
+                    isClosed = poll.closed || latest.closed
+                } else {
+                    error = if (submitted) "投票未更新，请重试" else "投票未提交，请重试"
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = failure.message ?: if (submitted) "投票未更新，请重试" else "投票未提交，请重试"
+            } finally {
+                submitting = false
+            }
+        }
+    }
+
+    fun retractVote() {
+        if (postId == null || busy) return
+        if (!UserApiKeyAuthManager.isAuthorized()) {
+            if (onRequestLogin != null) onRequestLogin() else error = "请先登录后操作"
+            return
+        }
+        retracting = true
+        error = null
+        scope.launch {
+            try {
+                val removed = LinuxDoRepository.removePollVote(postId, poll.name)
+                if (removed != null) {
+                    submitted = false
+                    snapshotSelectedIds = emptySet()
+                    selected = emptySet()
+                    optionVotes = removed.optionVotes
+                    voters = removed.voters
+                    isClosed = poll.closed || removed.closed
+                } else {
+                    error = "撤回投票失败，请重试"
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = failure.message ?: "撤回投票失败，请重试"
+            } finally {
+                retracting = false
+            }
+        }
+    }
+
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(poll.title, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
         poll.options.forEach { option ->
+            val isOptionSelected = option.id in selected
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                .clickable(enabled = postId != null && !poll.closed && !submitting && !submitted) {
+                .clickable(enabled = postId != null && !isClosed && !busy) {
                     selected = when {
-                        option.id in selected -> selected - option.id
+                        isOptionSelected -> selected - option.id
                         !poll.multiple -> setOf(option.id)
                         selected.size < poll.max -> selected + option.id
                         else -> selected
                     }
+                    error = null
                 }.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (option.id in selected) "●" else "○", color = if (option.id in selected) palette.brandGold else palette.inkSecondary)
+                val indicatorShape = if (poll.multiple) RoundedCornerShape(4.dp) else androidx.compose.foundation.shape.CircleShape
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .clip(indicatorShape)
+                        .border(
+                            width = if (isOptionSelected) 1.5.dp else 1.dp,
+                            color = if (isOptionSelected) palette.brandGold else palette.inkTertiary,
+                            shape = indicatorShape
+                        )
+                        .background(
+                            if (isOptionSelected && poll.multiple) palette.brandGold else androidx.compose.ui.graphics.Color.Transparent
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isOptionSelected) {
+                        if (poll.multiple) {
+                            Icon(
+                                imageVector = LinDoIcons.Check,
+                                contentDescription = null,
+                                tint = androidx.compose.ui.graphics.Color.White,
+                                modifier = Modifier.size(12.dp)
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.5.dp)
+                                    .clip(androidx.compose.foundation.shape.CircleShape)
+                                    .background(palette.brandGold)
+                            )
+                        }
+                    }
+                }
                 Text(option.text, modifier = Modifier.weight(1f), color = palette.inkPrimary, fontSize = 14.sp)
                 optionVotes[option.id]?.let { count ->
                     Text("$count 票", color = palette.inkSecondary, fontSize = 12.sp)
@@ -399,33 +601,64 @@ private fun NativePostPoll(poll: PostBlockNode.Poll, palette: LinDoThemePalette,
             }
         }
         when {
-            poll.closed -> Text("投票已关闭", color = palette.inkSecondary, fontSize = 12.sp)
+            isClosed -> Text(voters?.let { "投票已关闭 · 共 $it 人参与" } ?: "投票已关闭", color = palette.inkSecondary, fontSize = 12.sp)
             postId == null -> Text("投票在发布后可用", color = palette.inkSecondary, fontSize = 12.sp)
-            submitted -> Text(voters?.let { "投票已提交 · 共 $it 人参与" } ?: "投票已提交", color = palette.inkSecondary, fontSize = 13.sp)
-            else -> TextButton(enabled = !submitting && selected.size in poll.min..poll.max, onClick = {
-                if (!UserApiKeyAuthManager.isAuthorized()) { error = "请先登录后投票"; return@TextButton }
-                if (submitting) return@TextButton
-                submitting = true
-                error = null
-                scope.launch {
-                    try {
-                        submitted = LinuxDoRepository.voteInPoll(postId, poll.name, selected.toList())
-                        if (submitted) {
-                            LinuxDoRepository.getPollVoteSnapshot(postId, poll.name)?.let { latest ->
-                                selected = latest.selectedIds
-                                optionVotes = latest.optionVotes
-                                voters = latest.voters
-                            }
-                        } else error = "投票未提交，请重试"
-                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                    catch (failure: Exception) { error = failure.message ?: "投票未提交，请重试" }
-                    finally { submitting = false }
+            !isAuthorized && onRequestLogin != null -> TextButton(enabled = !busy, onClick = onRequestLogin) {
+                Text("登录后投票", color = palette.brandGold, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+            }
+            submitted -> {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = voters?.let { "投票已提交 · 共 $it 人参与" } ?: "投票已提交",
+                        modifier = Modifier.weight(1f),
+                        color = palette.inkSecondary,
+                        fontSize = 13.sp
+                    )
+                    if (selected != snapshotSelectedIds) {
+                        val canUpdate = !busy && selected.size in poll.min..poll.max
+                        TextButton(
+                            enabled = canUpdate,
+                            onClick = ::submitOrUpdateVote,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            LinDoBusyButtonLabel(
+                                busy = submitting,
+                                busyLabel = "更新中",
+                                label = "更新投票",
+                                color = if (canUpdate || submitting) palette.brandGold else palette.inkTertiary
+                            )
+                        }
+                    }
+                    TextButton(
+                        enabled = !busy,
+                        onClick = ::retractVote,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        LinDoBusyButtonLabel(
+                            busy = retracting,
+                            busyLabel = "撤回中",
+                            label = "撤回投票",
+                            color = palette.inkSecondary
+                        )
+                    }
                 }
-            }) { LinDoBusyButtonLabel(submitting, "提交中", "提交投票", palette.brandGold) }
+            }
+            else -> {
+                val canVote = !busy && selected.size in poll.min..poll.max
+                TextButton(enabled = canVote, onClick = ::submitOrUpdateVote) {
+                    LinDoBusyButtonLabel(
+                        busy = submitting,
+                        busyLabel = "提交中",
+                        label = "提交投票",
+                        color = if (canVote || submitting) palette.brandGold else palette.inkTertiary
+                    )
+                }
+            }
         }
         error?.let { LinDoFeedbackRow(it, LinDoMascotState.NetworkError) }
-        if (originalUrl != null) TextButton(onClick = { onOpenLink(originalUrl + if (originalUrl.contains('?')) "&web=1" else "?web=1") }) {
-            Text("在原帖查看投票结果", color = palette.inkSecondary, fontSize = 12.sp)
-        }
     }
 }

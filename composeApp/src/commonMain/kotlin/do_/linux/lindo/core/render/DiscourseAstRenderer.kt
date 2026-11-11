@@ -25,7 +25,12 @@ sealed interface PostBlockNode {
     data class Poll(val name: String, val title: String, val options: List<PollOption>, val multiple: Boolean, val min: Int, val max: Int, val closed: Boolean) : PostBlockNode
     data class BulletList(val items: List<String>, val ordered: Boolean = false,
         val itemBlocks: List<List<PostBlockNode>> = emptyList(), val start: Int = 1) : PostBlockNode
-    data class ImageGallery(val urls: List<String>, val captions: List<String> = emptyList()) : PostBlockNode
+    data class ImageGallery(
+        val urls: List<String>,
+        val captions: List<String> = emptyList(),
+        val fullUrls: List<String> = urls,
+        val linkUrls: List<String?> = emptyList()
+    ) : PostBlockNode
     data class Table(val rows: List<List<List<PostBlockNode>>>, val headerRows: Set<Int>) : PostBlockNode
     data class Media(val label: String, val url: String?, val kind: String) : PostBlockNode
     data class OneboxCard(
@@ -76,13 +81,39 @@ object DiscourseAstParser {
         return parsed
     }
 
+    private fun encodeLooseUriChars(input: String): String {
+        val ipv6Prefix = Regex("^(?:https?:)?//\\[[0-9a-fA-F:]+]").find(input)?.value.orEmpty()
+        val rest = input.substring(ipv6Prefix.length)
+        val sb = StringBuilder(input.length + 16)
+        sb.append(ipv6Prefix)
+        for (ch in rest) {
+            when (ch) {
+                ' ' -> sb.append("%20")
+                '|' -> sb.append("%7C")
+                '[' -> sb.append("%5B")
+                ']' -> sb.append("%5D")
+                '{' -> sb.append("%7B")
+                '}' -> sb.append("%7D")
+                '^' -> sb.append("%5E")
+                '`' -> sb.append("%60")
+                '"' -> sb.append("%22")
+                '<' -> sb.append("%3C")
+                '>' -> sb.append("%3E")
+                '\\' -> sb.append("%5C")
+                else -> sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
     fun safeUrl(raw: String, allowMailto: Boolean = true): String? = runCatching {
         val value = raw.trim().let {
             if (it.startsWith("upload://") && it.removePrefix("upload://").matches(Regex("[A-Za-z0-9_.-]+")))
                 "https://linux.do/uploads/short-url/${it.removePrefix("upload://")}" else it
         }
         if (value.isEmpty()) return null
-        val uri = URI("https://linux.do/").resolve(value)
+        val encoded = encodeLooseUriChars(value)
+        val uri = URI("https://linux.do/").resolve(encoded)
         if (uri.scheme?.lowercase() !in if (allowMailto) setOf("https", "http", "mailto") else setOf("https", "http")) return null
         if (uri.scheme != "mailto" && uri.host.isNullOrBlank()) return null
         uri.toASCIIString()
@@ -100,8 +131,13 @@ object DiscourseAstParser {
         val pending = mutableListOf<InlineRun>()
         fun flush() {
             val rich = trimmed(pending)
-            if (rich.text.isNotBlank()) result += PostBlockNode.Paragraph(rich.text,
-                rich.runs.filter { it.code }.map { it.text }, rich)
+            if (rich.text.isNotBlank() || rich.runs.any { it.code && it.text.isNotEmpty() }) {
+                result += PostBlockNode.Paragraph(
+                    rich.text,
+                    rich.runs.filter { it.code }.map { it.text },
+                    rich
+                )
+            }
             pending.clear()
         }
         fun visit(node: Node, style: InlineRun = InlineRun(""), nesting: Int = depth) {
@@ -127,10 +163,17 @@ object DiscourseAstParser {
                     val options = node.select("[data-poll-option-id]").map { PostBlockNode.PollOption(it.attr("data-poll-option-id"), it.text().trim()) }.filter { it.id.isNotBlank() }
                     if (options.isNotEmpty() && node.attr("data-poll-name").isNotBlank()) {
                         val multiple = node.attr("data-poll-type") == "multiple"
-                        result += PostBlockNode.Poll(node.attr("data-poll-name"), title, options, multiple,
-                            node.attr("data-poll-min").toIntOrNull() ?: 1,
-                            node.attr("data-poll-max").toIntOrNull() ?: if (multiple) options.size else 1,
-                            node.attr("data-poll-status") == "closed")
+                        val minChoices = if (multiple) (node.attr("data-poll-min").toIntOrNull() ?: 1).coerceAtLeast(1) else 1
+                        val maxChoices = if (multiple) (node.attr("data-poll-max").toIntOrNull() ?: options.size).coerceAtLeast(minChoices) else 1
+                        result += PostBlockNode.Poll(
+                            node.attr("data-poll-name"),
+                            title,
+                            options,
+                            multiple,
+                            minChoices,
+                            maxChoices,
+                            node.attr("data-poll-status") == "closed"
+                        )
                     } else result += PostBlockNode.Unsupported(
                         label = title,
                         text = node.wholeText().trim(),
@@ -212,8 +255,16 @@ object DiscourseAstParser {
                 }
                 tag == "details" -> {
                     flush(); val summary = node.children().firstOrNull { it.normalName() == "summary" }
-                    val children = blocks(node.childNodes().filter { it !== summary }, nesting + 1)
-                    result += PostBlockNode.DetailsSpoilerBlock(summary?.text().orEmpty().ifBlank { "展开内容" }, node.wholeText(), children)
+                    val bodyNodes = node.childNodes().filter { it !== summary }
+                    val children = blocks(bodyNodes, nesting + 1)
+                    val bodyText = bodyNodes.joinToString("") { n ->
+                        when (n) {
+                            is TextNode -> n.wholeText
+                            is Element -> n.wholeText()
+                            else -> ""
+                        }
+                    }.trim()
+                    result += PostBlockNode.DetailsSpoilerBlock(summary?.text().orEmpty().ifBlank { "展开内容" }, bodyText, children)
                 }
                 tag == "ul" || tag == "ol" -> {
                     flush(); val items = node.children().filter { it.normalName() == "li" }
@@ -297,8 +348,27 @@ object DiscourseAstParser {
                 }
                 tag == "img" -> {
                     flush()
-                    resolveBestImageUrl(node)?.let {
-                        result += PostBlockNode.ImageGallery(listOf(it), listOf(node.attr("alt")))
+                    resolveImageDisplayAndFullUrl(node)?.let { (displayUrl, fullUrl) ->
+                        val linkUrl = resolveImageLinkUrl(node, style.href)
+                        val prev = result.lastOrNull() as? PostBlockNode.ImageGallery
+                        if (prev != null) {
+                            val prevCaptions = List(prev.urls.size) { prev.captions.getOrNull(it).orEmpty() }
+                            val prevFullUrls = List(prev.urls.size) { prev.fullUrls.getOrElse(it) { prev.urls[it] } }
+                            val prevLinkUrls = List(prev.urls.size) { prev.linkUrls.getOrNull(it) }
+                            result[result.lastIndex] = PostBlockNode.ImageGallery(
+                                urls = prev.urls + displayUrl,
+                                captions = prevCaptions + node.attr("alt"),
+                                fullUrls = prevFullUrls + fullUrl,
+                                linkUrls = prevLinkUrls + linkUrl
+                            )
+                        } else {
+                            result += PostBlockNode.ImageGallery(
+                                urls = listOf(displayUrl),
+                                captions = listOf(node.attr("alt")),
+                                fullUrls = listOf(fullUrl),
+                                linkUrls = listOf(linkUrl)
+                            )
+                        }
                     } ?: run {
                         result += PostBlockNode.Unsupported("图片暂不可用", node.attr("alt"))
                     }
@@ -332,7 +402,7 @@ object DiscourseAstParser {
         return result
     }
 
-    private fun resolveBestImageUrl(node: Element): String? {
+    private fun resolveImageDisplayAndFullUrl(node: Element): Pair<String, String>? {
         val lightboxHref = node.parents()
             .firstOrNull {
                 it.normalName() == "a" && (it.hasClass("lightbox") || it.attr("href").contains("/uploads/"))
@@ -340,12 +410,23 @@ object DiscourseAstParser {
             ?.attr("href")
             .orEmpty()
             .trim()
-        val bestSrcset = node.attr("srcset")
+        val srcsetEntries = node.attr("srcset")
             .split(',')
             .map { it.trim().substringBefore(' ').trim() }
-            .lastOrNull { it.isNotEmpty() }
-            .orEmpty()
-        val candidates = listOf(
+            .filter { it.isNotEmpty() }
+        val midSrcset = srcsetEntries.getOrNull((srcsetEntries.size - 1).coerceAtMost(1)).orEmpty()
+        val bestSrcset = srcsetEntries.lastOrNull().orEmpty()
+
+        val displayCandidates = listOf(
+            midSrcset,
+            node.attr("src").trim(),
+            node.attr("data-src").trim(),
+            node.attr("data-large-src").trim(),
+            bestSrcset,
+            lightboxHref,
+            node.attr("data-orig-src").trim()
+        )
+        val fullCandidates = listOf(
             lightboxHref,
             node.attr("data-orig-src").trim(),
             node.attr("data-large-src").trim(),
@@ -353,21 +434,44 @@ object DiscourseAstParser {
             node.attr("src").trim(),
             node.attr("data-src").trim()
         )
-        for (candidate in candidates) {
-            if (candidate.isNotEmpty()) {
-                safeUrl(candidate, allowMailto = false)?.let { return it }
-            }
+        val displayUrl = displayCandidates.firstNotNullOfOrNull { c ->
+            if (c.isNotEmpty()) safeUrl(c, allowMailto = false) else null
+        } ?: return null
+        val fullUrl = fullCandidates.firstNotNullOfOrNull { c ->
+            if (c.isNotEmpty()) safeUrl(c, allowMailto = false) else null
+        } ?: displayUrl
+        return displayUrl to fullUrl
+    }
+
+    private val imageFileExtensions = listOf(".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg")
+
+    private fun resolveImageLinkUrl(node: Element, inheritedHref: String?): String? {
+        val anchor = node.parents().firstOrNull { it.normalName() == "a" }
+        if (anchor != null && anchor.hasClass("lightbox")) return null
+        val candidate = inheritedHref ?: anchor?.let { safeUrl(it.attr("href"), allowMailto = false) } ?: return null
+        if (candidate.startsWith("mailto:", ignoreCase = true)) return null
+        val pathOnly = candidate.substringBefore('#').substringBefore('?').lowercase()
+        if (pathOnly.contains("/uploads/") || imageFileExtensions.any { pathOnly.endsWith(it) }) {
+            return null
         }
-        return null
+        return candidate
     }
 
     private fun trimmed(runs: List<InlineRun>): RichText {
-        val copy = runs.filter { it.text.isNotEmpty() }.toMutableList()
-        while (copy.isNotEmpty() && copy.first().text.isBlank()) copy.removeAt(0)
-        while (copy.isNotEmpty() && copy.last().text.isBlank()) copy.removeAt(copy.lastIndex)
+        val copy = runs.filter { it.text.isNotEmpty() || it.imageUrl != null }.toMutableList()
+        while (copy.isNotEmpty() && !copy.first().code && copy.first().imageUrl == null && copy.first().text.isBlank()) {
+            copy.removeAt(0)
+        }
+        while (copy.isNotEmpty() && !copy.last().code && copy.last().imageUrl == null && copy.last().text.isBlank()) {
+            copy.removeAt(copy.lastIndex)
+        }
         if (copy.isNotEmpty()) {
-            copy[0] = copy.first().copy(text = copy.first().text.trimStart())
-            copy[copy.lastIndex] = copy.last().copy(text = copy.last().text.trimEnd())
+            if (!copy.first().code && copy.first().imageUrl == null) {
+                copy[0] = copy.first().copy(text = copy.first().text.trimStart())
+            }
+            if (!copy.last().code && copy.last().imageUrl == null) {
+                copy[copy.lastIndex] = copy.last().copy(text = copy.last().text.trimEnd())
+            }
         }
         return RichText(copy)
     }

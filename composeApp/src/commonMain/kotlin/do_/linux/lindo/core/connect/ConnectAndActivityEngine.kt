@@ -115,8 +115,12 @@ object ScreenTrackEngine {
     private const val PAUSE_UNLESS_SCROLLED_MS = 3 * 60 * 1000L
     private const val MAX_TRACKING_TIME_PER_POST_MS = 6 * 60 * 1000
     private const val FLUSH_INTERVAL_MS = 15_000L
+    private const val MAX_TOPIC_RETRIES = 3
     private val BACKOFF_DELAYS_MS = longArrayOf(5_000L, 10_000L, 20_000L, 40_000L)
     private val RETRYABLE_STATUS_CODES = setOf(405, 429, 500, 501, 502, 503, 504)
+    private val PERMANENT_DROP_STATUS_CODES = setOf(400, 401, 403, 404, 410, 422)
+    private val lock = Any()
+    private val flushSignal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
 
     private var currentTopicId: Int? = null
     private var lastTickEpochMs: Long = 0L
@@ -129,6 +133,7 @@ object ScreenTrackEngine {
     private val readPostsSet = LinkedHashSet<Pair<Int, Int>>()
     private var sessionReadingMilliseconds = 0L
     private val consolidatedQueue = ArrayList<ConsolidatedTimingBatch>()
+    private val retryCounts = HashMap<Int, Int>()
 
     private var onscreenPosts: Set<Int> = emptySet()
     private var consecutiveFailures: Int = 0
@@ -147,35 +152,64 @@ object ScreenTrackEngine {
     var pendingBatchesCount by mutableIntStateOf(0)
         private set
 
-    fun onTopicEntered(topicId: Int, initialVisiblePosts: Set<Int> = setOf(1), nowMs: Long = System.currentTimeMillis()) {
-        if (currentTopicId != null && currentTopicId != topicId) {
-            onTopicExited(currentTopicId!!, nowMs)
+    private val serverConfirmedReadPosts = HashSet<Pair<Int, Int>>()
+
+    var serverConfirmedReadVersion by mutableLongStateOf(0L)
+        private set
+
+    fun isPostConfirmedReadByServer(topicId: Int, postNumber: Int): Boolean = synchronized(lock) {
+        serverConfirmedReadPosts.contains(topicId to postNumber)
+    }
+
+    fun clearServerConfirmedReadPosts() = synchronized(lock) {
+        if (serverConfirmedReadPosts.isNotEmpty()) {
+            serverConfirmedReadPosts.clear()
+            serverConfirmedReadVersion += 1L
         }
-        resetCurrentTopicState(nowMs)
-        currentTopicId = topicId
-        onscreenPosts = initialVisiblePosts
-        sessionTopicsEntered += 1
+    }
+
+    suspend fun awaitFlushSignalOrTimeout(timeoutMs: Long) {
+        kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            flushSignal.receive()
+        }
+    }
+
+    fun onTopicEntered(topicId: Int, initialVisiblePosts: Set<Int> = setOf(1), nowMs: Long = System.currentTimeMillis()) {
+        synchronized(lock) {
+            if (currentTopicId != null && currentTopicId != topicId) {
+                onTopicExitedLocked(currentTopicId!!, nowMs)
+            }
+            resetCurrentTopicStateLocked(nowMs)
+            currentTopicId = topicId
+            onscreenPosts = initialVisiblePosts
+            sessionTopicsEntered += 1
+        }
         UserPresenceService.markUserActivity(nowMs)
     }
 
     fun updateVisiblePosts(visiblePostNumbers: Set<Int>, nowMs: Long = System.currentTimeMillis()) {
-        onscreenPosts = visiblePostNumbers
-        // Updating the viewport is not user interaction; a stationary screen must still time out.
+        synchronized(lock) {
+            onscreenPosts = visiblePostNumbers
+        }
     }
 
     fun onUserScrolled(nowMs: Long = System.currentTimeMillis()) {
-        lastScrolledEpochMs = nowMs
+        synchronized(lock) {
+            lastScrolledEpochMs = nowMs
+        }
         UserPresenceService.markUserActivity(nowMs)
     }
 
-    fun isPostRead(topicId: Int, postNumber: Int): Boolean {
-        return readPostsSet.contains(topicId to postNumber)
+    fun isPostRead(topicId: Int, postNumber: Int): Boolean = synchronized(lock) {
+        readPostsSet.contains(topicId to postNumber)
     }
 
     fun markPostReadLocally(topicId: Int, postNumber: Int) {
         if (topicId > 0 && postNumber > 0) {
-            if (readPostsSet.add(topicId to postNumber)) {
-                sessionPostsRead += 1
+            synchronized(lock) {
+                if (readPostsSet.add(topicId to postNumber)) {
+                    sessionPostsRead += 1
+                }
             }
         }
     }
@@ -184,7 +218,7 @@ object ScreenTrackEngine {
      * 每秒调用一次，累加当前屏幕可见楼层的阅读毫秒数
      * @return 若达到上报条件，返回待发送的批次
      */
-    fun tick(nowMs: Long = System.currentTimeMillis()): ConsolidatedTimingBatch? {
+    fun tick(nowMs: Long = System.currentTimeMillis()): ConsolidatedTimingBatch? = synchronized(lock) {
         val topicId = currentTopicId ?: return null
         if (!UserPresenceService.isForeground) {
             lastTickEpochMs = nowMs
@@ -216,18 +250,22 @@ object ScreenTrackEngine {
 
         // 检查是否有首次阅读的新楼层累积满 1 秒（rush 立即上报策略）
         val hasUnreadRush = currentTimingsMs.entries.any { (postNum, ms) ->
-            ms >= 1_000 && !totalTimingsMs.containsKey(postNum) && !readPostsSet.contains(topicId to postNum)
+            ms >= 1_000 && !totalTimingsMs.containsKey(postNum)
         }
 
         if (accumulatedSinceFlushMs >= FLUSH_INTERVAL_MS || hasUnreadRush) {
-            return flushCurrentTopic(nowMs)
+            return flushCurrentTopicLocked(nowMs)
         }
 
-        return popNextSendableBatch(nowMs)
+        return null
     }
 
-    fun flushCurrentTopic(nowMs: Long = System.currentTimeMillis()): ConsolidatedTimingBatch? {
-        val topicId = currentTopicId ?: return null
+    fun flushCurrentTopic(nowMs: Long = System.currentTimeMillis()): ConsolidatedTimingBatch? = synchronized(lock) {
+        flushCurrentTopicLocked(nowMs)
+    }
+
+    private fun enqueueCurrentTopicTimingsLocked(): Boolean {
+        val topicId = currentTopicId ?: return false
         val newTimings = LinkedHashMap<Int, Int>()
 
         for ((postNumber, timeMs) in currentTimingsMs) {
@@ -243,14 +281,23 @@ object ScreenTrackEngine {
         currentTimingsMs.clear()
 
         if (newTimings.isNotEmpty() && currentTopicTimeMs > 0) {
-            consolidateBatch(topicId, currentTopicTimeMs, newTimings)
+            consolidateBatchLocked(topicId, currentTopicTimeMs, newTimings)
             currentTopicTimeMs = 0
         }
         accumulatedSinceFlushMs = 0L
-        return popNextSendableBatch(nowMs)
+        return true
     }
 
-    fun onTopicExited(topicId: Int, nowMs: Long = System.currentTimeMillis()) {
+    private fun flushCurrentTopicLocked(nowMs: Long): ConsolidatedTimingBatch? {
+        if (!enqueueCurrentTopicTimingsLocked()) return null
+        return popNextSendableBatchLocked(nowMs)
+    }
+
+    fun onTopicExited(topicId: Int, nowMs: Long = System.currentTimeMillis()) = synchronized(lock) {
+        onTopicExitedLocked(topicId, nowMs)
+    }
+
+    private fun onTopicExitedLocked(topicId: Int, nowMs: Long) {
         if (currentTopicId != topicId) return
         if (currentTimingsMs.isEmpty() && onscreenPosts.isNotEmpty() && lastTickEpochMs > 0L && nowMs > lastTickEpochMs) {
             val remainderMs = (nowMs - lastTickEpochMs).coerceIn(150L, 3_000L).toInt()
@@ -261,19 +308,32 @@ object ScreenTrackEngine {
             lastTickEpochMs = nowMs
         }
         // Disposal must enqueue, never launch work into a scope that Compose is cancelling.
-        val batch = flushCurrentTopic(nowMs)
-        if (batch != null) consolidateBatch(batch.topicId, batch.topicTimeMs, batch.timingsMs)
+        enqueueCurrentTopicTimingsLocked()
         currentTopicId = null
         onscreenPosts = emptySet()
     }
 
-    fun consolidateBatch(topicId: Int, topicTimeMs: Int, timingsMs: Map<Int, Int>) {
+    fun consolidateBatch(topicId: Int, topicTimeMs: Int, timingsMs: Map<Int, Int>) = synchronized(lock) {
+        consolidateBatchLocked(topicId, topicTimeMs, timingsMs)
+    }
+
+    private fun consolidateBatchLocked(
+        topicId: Int,
+        topicTimeMs: Int,
+        timingsMs: Map<Int, Int>,
+        moveToTail: Boolean = false
+    ) {
         if (timingsMs.isEmpty()) return
-        val existing = consolidatedQueue.firstOrNull { it.topicId == topicId }
-        if (existing != null) {
+        val existingIdx = consolidatedQueue.indexOfFirst { it.topicId == topicId }
+        if (existingIdx >= 0) {
+            val existing = consolidatedQueue[existingIdx]
             existing.topicTimeMs += topicTimeMs
             for ((postNum, ms) in timingsMs) {
                 existing.timingsMs[postNum] = (existing.timingsMs[postNum] ?: 0) + ms
+            }
+            if (moveToTail && existingIdx != consolidatedQueue.lastIndex) {
+                consolidatedQueue.removeAt(existingIdx)
+                consolidatedQueue.add(existing)
             }
         } else {
             consolidatedQueue.add(
@@ -285,30 +345,59 @@ object ScreenTrackEngine {
             )
         }
         pendingBatchesCount = consolidatedQueue.size
+        flushSignal.trySend(Unit)
     }
 
-    fun popNextSendableBatch(nowMs: Long = System.currentTimeMillis()): ConsolidatedTimingBatch? {
+    fun hasPendingWork(): Boolean = synchronized(lock) {
+        consolidatedQueue.isNotEmpty()
+    }
+
+    fun popNextSendableBatch(nowMs: Long = System.currentTimeMillis()): ConsolidatedTimingBatch? = synchronized(lock) {
+        popNextSendableBatchLocked(nowMs)
+    }
+
+    private fun popNextSendableBatchLocked(nowMs: Long): ConsolidatedTimingBatch? {
         if (consolidatedQueue.isEmpty()) return null
         if (nowMs < blockSendingUntilEpochMs) return null
-        val batch = consolidatedQueue.removeAt(consolidatedQueue.lastIndex)
+        val batch = consolidatedQueue.removeAt(0)
         pendingBatchesCount = consolidatedQueue.size
         return batch
     }
 
-    fun onBatchSendResult(batch: ConsolidatedTimingBatch, statusCode: Int?, nowMs: Long = System.currentTimeMillis()) {
+    fun onBatchSendResult(batch: ConsolidatedTimingBatch, statusCode: Int?, nowMs: Long = System.currentTimeMillis()) = synchronized(lock) {
         if (statusCode != null && statusCode in 200..299) {
             consecutiveFailures = 0
             blockSendingUntilEpochMs = 0L
-        } else if (statusCode == null || statusCode in RETRYABLE_STATUS_CODES) {
-            val delayIdx = consecutiveFailures.coerceIn(0, BACKOFF_DELAYS_MS.lastIndex)
-            consecutiveFailures += 1
-            blockSendingUntilEpochMs = nowMs + BACKOFF_DELAYS_MS[delayIdx]
-            // 失败不丢数据：重新合并回队列等待退避后重发
-            consolidateBatch(batch.topicId, batch.topicTimeMs, batch.timingsMs)
+            retryCounts.remove(batch.topicId)
+            var added = false
+            for (postNum in batch.timingsMs.keys) {
+                if (serverConfirmedReadPosts.add(batch.topicId to postNum)) {
+                    added = true
+                }
+            }
+            if (added) {
+                serverConfirmedReadVersion += 1L
+            }
+        } else if (statusCode != null && statusCode in PERMANENT_DROP_STATUS_CODES) {
+            retryCounts.remove(batch.topicId)
+        } else if (statusCode == null || statusCode == 0 || statusCode in RETRYABLE_STATUS_CODES) {
+            val retries = (retryCounts[batch.topicId] ?: 0) + 1
+            if (retries >= MAX_TOPIC_RETRIES) {
+                retryCounts.remove(batch.topicId)
+            } else {
+                retryCounts[batch.topicId] = retries
+                val delayIdx = consecutiveFailures.coerceIn(0, BACKOFF_DELAYS_MS.lastIndex)
+                consecutiveFailures += 1
+                blockSendingUntilEpochMs = nowMs + BACKOFF_DELAYS_MS[delayIdx]
+                // 失败不丢数据：重新合并回队列尾部等待退避后重发（FIFO 不阻塞其他话题）
+                consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
+            }
+        } else {
+            retryCounts.remove(batch.topicId)
         }
     }
 
-    private fun resetCurrentTopicState(nowMs: Long) {
+    private fun resetCurrentTopicStateLocked(nowMs: Long) {
         lastTickEpochMs = nowMs
         lastScrolledEpochMs = nowMs
         accumulatedSinceFlushMs = 0L
@@ -318,12 +407,45 @@ object ScreenTrackEngine {
         onscreenPosts = emptySet()
     }
 
-    fun resetForTest() {
+    fun resetSessionState() = synchronized(lock) {
         currentTopicId = null
+        lastTickEpochMs = 0L
+        lastScrolledEpochMs = 0L
+        accumulatedSinceFlushMs = 0L
+        currentTopicTimeMs = 0
         currentTimingsMs.clear()
         totalTimingsMs.clear()
         readPostsSet.clear()
+        if (serverConfirmedReadPosts.isNotEmpty()) {
+            serverConfirmedReadPosts.clear()
+            serverConfirmedReadVersion += 1L
+        }
         consolidatedQueue.clear()
+        retryCounts.clear()
+        onscreenPosts = emptySet()
+        sessionTopicsEntered = 0
+        sessionPostsRead = 0
+        sessionReadingSeconds = 0L
+        sessionReadingMilliseconds = 0L
+        pendingBatchesCount = 0
+        consecutiveFailures = 0
+        blockSendingUntilEpochMs = 0L
+    }
+
+    fun resetForTest() = synchronized(lock) {
+        currentTopicId = null
+        lastTickEpochMs = 0L
+        lastScrolledEpochMs = 0L
+        accumulatedSinceFlushMs = 0L
+        currentTopicTimeMs = 0
+        currentTimingsMs.clear()
+        totalTimingsMs.clear()
+        readPostsSet.clear()
+        serverConfirmedReadPosts.clear()
+        serverConfirmedReadVersion = 0L
+        consolidatedQueue.clear()
+        retryCounts.clear()
+        onscreenPosts = emptySet()
         sessionTopicsEntered = 0
         sessionPostsRead = 0
         sessionReadingSeconds = 0L
@@ -606,7 +728,7 @@ object ConnectStatsParser {
     }
 
     private fun cleanText(raw: String): String {
-        return raw.replace(Regex("<[^>]+>"), "").trim()
+        return do_.linux.lindo.core.model.decodeDiscourseHtmlSnippet(raw)
     }
 
     private fun matchMetric(data: Map<String, Int>, keywords: List<String>): Int {

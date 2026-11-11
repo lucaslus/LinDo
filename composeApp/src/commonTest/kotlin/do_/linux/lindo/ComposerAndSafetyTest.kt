@@ -30,7 +30,7 @@ class ComposerAndSafetyTest {
             assertEquals(ApiFailureKind.Connection, error.kind)
         }
         withTransport({ url, _, _ ->
-            if (url.contains("/search/query.json")) 200 to """{"posts":[],"topics":[]}""" else null
+            if (url.contains("/search.json")) 200 to """{"posts":[],"topics":[]}""" else null
         }) {
             assertTrue(LinuxDoRepository.searchCommunity("lindo").isEmpty())
         }

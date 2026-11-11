@@ -1,13 +1,16 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -18,6 +21,41 @@ import do_.linux.lindo.core.network.*
 import do_.linux.lindo.ui.components.LinDoIcons
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+
+internal fun resolveDraftKindLabel(draft: CloudDraftItem): String = when {
+    draft.action == "privateMessage" ||
+        draft.draftKey.startsWith("private_message") ||
+        draft.draftKey.startsWith("new_private_message") -> "私信"
+    draft.action.startsWith("edit") ||
+        draft.draftKey.startsWith("edit_post_") -> "编辑"
+    draft.draftKey == "new_topic" ||
+        draft.action == "createTopic" -> "新话题"
+    else -> "回复"
+}
+
+internal fun mergeCloudAndLocalDraftLists(
+    owner: String,
+    cloud: List<CloudDraftItem>,
+    local: List<CloudDraftItem>
+): List<CloudDraftItem> {
+    val cloudByKey = cloud.associateBy { it.draftKey }
+    val mergedLocal = local.mapNotNull { item ->
+        val remote = cloudByKey[item.draftKey]
+        when {
+            remote == null -> item
+            !item.sequenceKnown -> item.copy(sequenceKnown = false)
+            remote.sequence >= item.sequence -> {
+                if (remote.sequence > item.sequence || remote.raw.trim() != item.raw.trim()) {
+                    LocalComposerDrafts.remove(owner, item.draftKey)
+                    LocalComposerDrafts.forgetSequence(owner, item.draftKey)
+                }
+                null
+            }
+            else -> item
+        }
+    }
+    return (cloud + mergedLocal).associateBy { it.draftKey }.values.toList()
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -39,12 +77,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
         drafts = local
         try {
             val cloud = LinuxDoRepository.fetchCloudDrafts()
-            val cloudByKey = cloud.associateBy { it.draftKey }
-            val mergedLocal = local.map { item ->
-                val remote = cloudByKey[item.draftKey]
-                if (remote != null && !item.sequenceKnown) item.copy(sequence = remote.sequence, sequenceKnown = true) else item
-            }
-            drafts = (cloud + mergedLocal).associateBy { it.draftKey }.values.toList()
+            drafts = mergeCloudAndLocalDraftLists(owner = owner, cloud = cloud, local = local)
         }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { error = failure.message ?: "云端草稿同步失败" }
@@ -58,9 +91,46 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
             else LazyColumn(Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) {
                 if (drafts.isEmpty() && error == null) item { LinDoEmptyState("暂无草稿") }
                 items(drafts, key = { it.draftKey }) { draft ->
+                    val kindLabel = resolveDraftKindLabel(draft)
                     Row(Modifier.fillMaxWidth().clickable { onOpen(draft) }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(draft.title, color = palette.inkPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(palette.subtleSurface)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = kindLabel,
+                                        color = palette.activeChipText,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                }
+                                Text(
+                                    text = draft.title,
+                                    color = palette.inkPrimary,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                            }
+                            if (draft.recipients.isNotBlank()) {
+                                Text(
+                                    text = "收件人：${draft.recipients}",
+                                    color = palette.inkSecondary,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             if (draft.excerpt.isNotBlank()) Text(draft.excerpt, color = palette.inkSecondary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(draft.createdAtText, color = palette.inkTertiary, fontSize = 12.sp)
                         }
@@ -84,13 +154,27 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                 busy = true
                 scope.launch {
                     try {
-                        val sequence = if (draft.sequenceKnown) draft.sequence else LinuxDoRepository.fetchDraftSequence(draft.draftKey)
-                        if (LinuxDoRepository.deleteCloudDraft(draft.draftKey, sequence)) {
+                        if (!draft.sequenceKnown) {
+                            val cloudDeleted = runCatching {
+                                val sequence = LinuxDoRepository.fetchDraftSequence(draft.draftKey)
+                                LinuxDoRepository.deleteCloudDraft(draft.draftKey, sequence)
+                            }.getOrDefault(true)
+                            if (!cloudDeleted) {
+                                deleteError = "草稿已在其他设备更新，请重新核对"
+                                return@launch
+                            }
                             LocalComposerDrafts.remove(owner, draft.draftKey)
                             LocalComposerDrafts.forgetSequence(owner, draft.draftKey)
                             drafts = drafts.filterNot { it.draftKey == draft.draftKey }
                             deleting = null
-                        } else deleteError = "草稿已在其他设备更新，请重新核对"
+                        } else {
+                            if (LinuxDoRepository.deleteCloudDraft(draft.draftKey, draft.sequence)) {
+                                LocalComposerDrafts.remove(owner, draft.draftKey)
+                                LocalComposerDrafts.forgetSequence(owner, draft.draftKey)
+                                drafts = drafts.filterNot { it.draftKey == draft.draftKey }
+                                deleting = null
+                            } else deleteError = "草稿已在其他设备更新，请重新核对"
+                        }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failure: Exception) {

@@ -23,7 +23,8 @@ class RichContentAndLoadingTest {
         val images = nodes.filterIsInstance<PostBlockNode.ImageGallery>()
         assertEquals("https://example.test/a.png", images[0].urls.single())
         assertEquals("caption", images[0].captions.single())
-        assertEquals("https://linux.do/uploads/default/original/4X/hd.jpeg", images[1].urls.single())
+        assertEquals("https://linux.do/uploads/default/optimized/4X/thumb_2_690x1000.jpeg", images[1].urls.single())
+        assertEquals("https://linux.do/uploads/default/original/4X/hd.jpeg", images[1].fullUrls.single())
     }
     @Test fun nestedListsAndOrderedOffsetsSurvive() {
         val list = DiscourseAstParser.parseCookedHtml("<ol start='3'><li>one<ul><li>nested</li></ul></li><li>two</li></ol>").single() as PostBlockNode.BulletList

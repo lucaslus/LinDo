@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -136,7 +137,7 @@ fun LinDoMascot(
  */
 @Composable
 fun LinDoWaveDots(
-    color: Color = if (LocalLinDoDarkTheme.current) Color(0xFFC7BFB3) else Color(0xFF746C61),
+    color: Color = LocalPalette.current.inkSecondary,
     dotSize: Dp = 4.dp,
     modifier: Modifier = Modifier
 ) {
@@ -185,7 +186,7 @@ fun LinDoWaveDots(
 @Composable
 fun LinDoLoadingIndicator(
     modifier: Modifier = Modifier,
-    color: Color = if (LocalLinDoDarkTheme.current) Color(0xFFC7BFB3) else Color(0xFF746C61),
+    color: Color = LocalPalette.current.inkSecondary,
     trackColor: Color = Color.Transparent,
     progress: (() -> Float)? = null,
     label: String = "加载中",
@@ -201,7 +202,8 @@ fun LinDoLoadingIndicator(
             .removeSuffix("…")
             .trim()
         when {
-            stripped.isEmpty() || stripped.length > 6 -> "加载中"
+            stripped.isEmpty() -> "加载中"
+            stripped.length > 16 -> stripped.take(16) + "…"
             else -> stripped
         }
     }
@@ -223,7 +225,7 @@ fun LinDoLoadingIndicator(
         ) {
             LinDoMascot(state = state, compact = true, size = 24.dp, animate = true, useIconArtwork = useIconArtwork)
             Spacer(Modifier.width(7.dp))
-            Text(cleanLabel, fontSize = 12.sp, lineHeight = 16.sp, color = color, maxLines = 1)
+            Text(cleanLabel, fontSize = 12.sp, lineHeight = 16.sp, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.width(4.dp))
             LinDoWaveDots(color = color, dotSize = 3.5.dp)
         }
@@ -265,7 +267,8 @@ fun LinDoLoadingIndicator(
                         lineHeight = 16.sp,
                         fontWeight = FontWeight.Medium,
                         color = color,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Spacer(Modifier.width(5.dp))
                     LinDoWaveDots(color = color, dotSize = 4.dp)
@@ -279,6 +282,70 @@ fun LinDoLoadingIndicator(
     }
 }
 
+/**
+ * 全局统一极简状态提示组件（无权限 / 需登录 / 空状态 / 异常）：
+ * 仅保留「单个无背景矢量图标 + 一行灰色小字 + 可选无背景简洁文字动作」，全站视觉严丝合缝统一。
+ */
+@Composable
+fun LinDoStatusNotice(
+    message: String,
+    icon: ImageVector = LinDoIcons.Inbox,
+    iconSize: Dp = 21.dp,
+    actionLabel: String? = null,
+    actionIcon: ImageVector? = null,
+    emphasizeAction: Boolean = false,
+    onAction: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalPalette.current
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 20.dp)
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(iconSize),
+            tint = palette.inkTertiary
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = message,
+            color = palette.inkSecondary,
+            fontSize = 12.5.sp,
+            lineHeight = 18.sp,
+            textAlign = TextAlign.Center
+        )
+        if (onAction != null && !actionLabel.isNullOrBlank()) {
+            Spacer(Modifier.height(4.dp))
+            val actionTint = if (emphasizeAction) palette.activeChipText else palette.inkSecondary
+            TextButton(
+                onClick = onAction,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+            ) {
+                if (actionIcon != null) {
+                    Icon(
+                        imageVector = actionIcon,
+                        contentDescription = null,
+                        modifier = Modifier.size(13.dp),
+                        tint = actionTint
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(
+                    text = actionLabel,
+                    color = actionTint,
+                    fontSize = 12.5.sp,
+                    fontWeight = if (emphasizeAction) FontWeight.SemiBold else FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun LinDoStatePanel(
     state: LinDoMascotState,
@@ -287,7 +354,10 @@ fun LinDoStatePanel(
     onRetry: (() -> Unit)? = null,
     actionLabel: String = if (state == LinDoMascotState.NetworkError) "重试" else "刷新",
     modifier: Modifier = Modifier,
-    useIconArtwork: Boolean = false
+    useIconArtwork: Boolean = false,
+    iconOverride: ImageVector? = null,
+    showActionIcon: Boolean = true,
+    emphasizeAction: Boolean = false
 ) {
     if (state in setOf(LinDoMascotState.Loading, LinDoMascotState.Refreshing) && onRetry == null) {
         LinDoLoadingIndicator(
@@ -298,70 +368,59 @@ fun LinDoStatePanel(
         )
         return
     }
-    val dark = LocalLinDoDarkTheme.current
-    val secondaryText = if (dark) Color(0xFFB8AFA2) else Color(0xFF746C61)
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 14.dp)
-            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        if (state == LinDoMascotState.NetworkError) {
-            LinDoMascot(state = state, size = 48.dp, useIconArtwork = useIconArtwork, animate = false)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                detail?.takeIf { it.isNotBlank() } ?: title,
-                color = secondaryText, fontSize = 12.sp,
-                textAlign = TextAlign.Center, lineHeight = 17.sp
-            )
-        } else {
-            LinDoMascot(state = state, size = 60.dp, useIconArtwork = useIconArtwork)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = title,
-                color = secondaryText,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                lineHeight = 18.sp
-            )
-            if (!detail.isNullOrBlank() && detail != title) {
-                Spacer(Modifier.height(5.dp))
-                Text(detail, color = secondaryText, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 18.sp)
-            }
-        }
-        if (onRetry != null) {
-            Spacer(Modifier.height(8.dp))
-            TextButton(
-                onClick = onRetry,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-            ) {
-                Icon(
-                    imageVector = LinDoIcons.Refresh,
-                    contentDescription = null,
-                    modifier = Modifier.size(13.5.dp),
-                    tint = secondaryText
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    text = actionLabel,
-                    color = secondaryText,
-                    fontSize = 11.8.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
+    val displayMessage = when {
+        state == LinDoMascotState.NetworkError -> detail?.takeIf { it.isNotBlank() } ?: title
+        !detail.isNullOrBlank() && detail != title && detail != state.detail -> detail
+        else -> title
     }
+    val isPermissionOrAuth = displayMessage.contains("权限") ||
+        displayMessage.contains("登录") ||
+        displayMessage.contains("等级") ||
+        displayMessage.contains("受限") ||
+        displayMessage.contains("私密")
+    val resolvedIcon = iconOverride ?: when {
+        isPermissionOrAuth -> LinDoIcons.FaLock
+        state == LinDoMascotState.NetworkError -> LinDoIcons.InfoCircle
+        state == LinDoMascotState.Success -> LinDoIcons.Check
+        else -> LinDoIcons.Inbox
+    }
+    val resolvedIconSize = if (resolvedIcon == LinDoIcons.FaLock) 19.dp else 21.dp
+    LinDoStatusNotice(
+        message = displayMessage,
+        icon = resolvedIcon,
+        iconSize = resolvedIconSize,
+        actionLabel = if (onRetry != null) actionLabel else null,
+        actionIcon = if (onRetry != null && showActionIcon && !isPermissionOrAuth) LinDoIcons.Refresh else null,
+        emphasizeAction = emphasizeAction || isPermissionOrAuth,
+        onAction = onRetry,
+        modifier = modifier
+    )
 }
 
 @Composable
-fun LinDoEmptyState(message: String, modifier: Modifier = Modifier) {
-    LinDoStatePanel(state = LinDoMascotState.Empty, title = message, detail = null, modifier = modifier)
+fun LinDoEmptyState(
+    message: String,
+    modifier: Modifier = Modifier,
+    icon: ImageVector = LinDoIcons.Inbox,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null
+) {
+    val isRestricted = message.contains("权限") || message.contains("登录") || message.contains("受限")
+    val resolvedIcon = if (isRestricted && icon == LinDoIcons.Inbox) LinDoIcons.FaLock else icon
+    LinDoStatusNotice(
+        message = message,
+        icon = resolvedIcon,
+        iconSize = if (resolvedIcon == LinDoIcons.FaLock) 19.dp else 21.dp,
+        actionLabel = actionLabel,
+        emphasizeAction = onAction != null,
+        onAction = onAction,
+        modifier = modifier
+    )
 }
 
 @Composable
 fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifier = Modifier) {
+    val secondaryText = LocalPalette.current.inkSecondary
     Row(
         modifier = modifier
             .heightIn(min = 22.dp)
@@ -378,7 +437,7 @@ fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifie
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
-            color = if (LocalLinDoDarkTheme.current) Color(0xFFB8AFA2) else Color(0xFF746C61)
+            color = secondaryText
         )
     }
 }
@@ -449,7 +508,7 @@ fun LinDoMascotGallery(onClose: () -> Unit, onThemeChanged: (Boolean) -> Unit = 
 /** Inline failure is never represented by the successful-empty illustration. */
 @Composable
 fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
-    val secondaryText = if (LocalLinDoDarkTheme.current) Color(0xFFB8AFA2) else Color(0xFF746C61)
+    val secondaryText = LocalPalette.current.inkSecondary
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically

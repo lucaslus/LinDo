@@ -1,5 +1,8 @@
 package do_.linux.lindo.core.site
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -12,23 +15,33 @@ data class LinuxDoEmojiItem(
     val group: String = "default",
     val keywordsZh: String = ""
 ) {
-    val markdownCode: String get() = ":$shortcode:"
+    val markdownCode: String get() = ":${shortcode.lowercase()}:"
 
     val resolvedImageUrl: String
         get() = if (!customUrl.isNullOrBlank()) {
             LinuxDoSiteRules.resolveUrl(customUrl)
         } else {
-            "https://linux.do/images/emoji/twemoji/$shortcode.png?v=12"
+            LinuxDoEmojiCatalog.resolveReactionImageUrl(shortcode)
         }
 }
 
 /**
  * 表情选择器分组
+ *
+ * @param id 分组唯一标识
+ * @param labelZh 纯净中文分组名称（不含任何统一星星前缀）
+ * @param items 分组内的表情条目列表
+ * @param iconKey 官方分类图标或品牌 Logo 标识（如 `feishu`、`bilibili`、`tieba`、`smileys`、`people`、`animals`、`food` 等）
+ * @param iconUnicode 标准分类对应的独立代表性 Emoji（如 😀、👋、🐻、🍔、✈️、⚽、💡、🔣、🏁）
+ * @param iconUrl 自定义表情包的代表性图标 URL
  */
 data class LinuxDoEmojiGroup(
     val id: String,
     val labelZh: String,
-    val items: List<LinuxDoEmojiItem>
+    val items: List<LinuxDoEmojiItem>,
+    val iconKey: String = id,
+    val iconUnicode: String? = null,
+    val iconUrl: String? = null
 )
 
 /**
@@ -75,13 +88,82 @@ object LinuxDoEmojiCatalog {
     @Volatile
     private var dynamicServerGroups: List<LinuxDoEmojiGroup> = emptyList()
 
+    var catalogVersion by mutableIntStateOf(0)
+        private set
+
     fun hasSyncedServerEmojis(): Boolean = dynamicServerGroups.isNotEmpty()
 
     fun registerSingleEmojiUrl(shortcode: String, rawUrl: String) {
         val cleanName = shortcode.trim().removeSurrounding(":").lowercase()
         val cleanUrl = rawUrl.trim()
         if (cleanName.isNotEmpty() && cleanUrl.isNotEmpty()) {
-            dynamicCustomUrls[cleanName] = LinuxDoSiteRules.resolveUrl(cleanUrl)
+            val resolved = LinuxDoSiteRules.resolveUrl(cleanUrl)
+            val prev = dynamicCustomUrls.put(cleanName, resolved)
+            if (prev != resolved) {
+                catalogVersion++
+            }
+        }
+    }
+
+    private data class GroupMetaSpec(
+        val labelZh: String,
+        val iconKey: String,
+        val iconUnicode: String? = null,
+        val isBrandPack: Boolean = false
+    )
+
+    private fun resolveGroupMeta(rawKey: String): GroupMetaSpec {
+        val clean = rawKey.removePrefix("✨").trim()
+        val key = clean.lowercase().replace('-', '_').replace(' ', '_')
+        return when {
+            key == "smileys_&_emotion" || key == "smileys_&_people" || key == "smileys" || clean == "笑脸" ->
+                GroupMetaSpec("笑脸", "smileys", "😀")
+            key == "people_&_body" || key == "gestures" || clean == "人物与手势" ->
+                GroupMetaSpec("人物与手势", "people", "👋")
+            key == "animals_&_nature" || key == "animals" || clean == "动物与自然" ->
+                GroupMetaSpec("动物与自然", "animals", "🐻")
+            key == "food_&_drink" || key == "food" || clean == "食物与饮品" ->
+                GroupMetaSpec("食物与饮品", "food", "🍔")
+            key == "travel_&_places" || key == "travel" || clean == "旅行与地点" ->
+                GroupMetaSpec("旅行与地点", "travel", "✈️")
+            key == "activities" || clean == "活动" ->
+                GroupMetaSpec("活动", "activities", "⚽")
+            key == "objects" || key == "geek_celebration" || clean == "物品" ->
+                GroupMetaSpec("物品", "objects", "💡")
+            key == "symbols" || clean == "符号" ->
+                GroupMetaSpec("符号", "symbols", "🔣")
+            key == "flags" || clean == "旗帜" ->
+                GroupMetaSpec("旗帜", "flags", "🏁")
+            key.contains("feishu") || key.contains("lark") || clean.contains("飞书") ->
+                GroupMetaSpec("飞书", "feishu", null, isBrandPack = true)
+            key.contains("bili") || clean.contains("B站", ignoreCase = true) || clean.contains("小电视") ->
+                GroupMetaSpec("B站", "bilibili", null, isBrandPack = true)
+            key.contains("tieba") || clean.contains("贴吧") || clean.contains("滑稽") ->
+                GroupMetaSpec("贴吧", "tieba", null, isBrandPack = true)
+            key == "qq" || clean.contains("小黄脸") || clean.contains("QQ", ignoreCase = true) ->
+                GroupMetaSpec("小黄脸", "qq", null, isBrandPack = true)
+            key.contains("coolapk") || clean.contains("酷安") ->
+                GroupMetaSpec("酷安", "coolapk", null, isBrandPack = true)
+            key.contains("weibo") || clean.contains("微博") ->
+                GroupMetaSpec("微博", "weibo", null, isBrandPack = true)
+            key.contains("xhs") || key.contains("xiaohongshu") || clean.contains("小红书") ->
+                GroupMetaSpec("小红书", "xhs", null, isBrandPack = true)
+            key.contains("acfun") || clean.contains("AC娘", ignoreCase = true) ->
+                GroupMetaSpec("AC娘", "acfun", null, isBrandPack = true)
+            key.contains("menhera") || clean.contains("胡桃") ->
+                GroupMetaSpec("七濑胡桃", "menhera", null, isBrandPack = true)
+            key.contains("doraemon") || clean.contains("哆啦") ->
+                GroupMetaSpec("哆啦A梦", "doraemon", null, isBrandPack = true)
+            key.contains("aru") || clean.contains("阿鲁") ->
+                GroupMetaSpec("阿鲁", "aru", null, isBrandPack = true)
+            key.contains("onion") || clean.contains("洋葱") ->
+                GroupMetaSpec("洋葱头", "onion", null, isBrandPack = true)
+            key.contains("blob") || clean.contains("果冻") ->
+                GroupMetaSpec("果冻Blob", "blob", null, isBrandPack = true)
+            key == "default" || key == "ungrouped" ->
+                GroupMetaSpec("社区精选", "custom_pack", "🎭", isBrandPack = true)
+            else ->
+                GroupMetaSpec(clean, "custom_$key", null, isBrandPack = true)
         }
     }
 
@@ -90,40 +172,14 @@ object LinuxDoEmojiCatalog {
      */
     fun registerDynamicServerEmojis(rawGroups: Map<String, List<Pair<String, String>>>) {
         if (rawGroups.isEmpty()) return
-        val groupLabelMap = mapOf(
-            "default" to "社区精选",
-            "smileys_&_emotion" to "笑脸",
-            "smileys_&_people" to "笑脸",
-            "people_&_body" to "人物与手势",
-            "animals_&_nature" to "动物与自然",
-            "food_&_drink" to "食物与饮品",
-            "travel_&_places" to "旅行与地点",
-            "activities" to "活动",
-            "objects" to "物品",
-            "symbols" to "符号",
-            "flags" to "旗帜",
-            "feishu" to "飞书表情",
-            "lark" to "飞书表情",
-            "bilibili" to "B站小电视",
-            "bili" to "B站表情",
-            "tieba" to "贴吧滑稽",
-            "qq" to "小黄脸",
-            "coolapk" to "酷安表情",
-            "weibo" to "微博表情",
-            "acfun" to "AC娘",
-            "menhera" to "七濑胡桃",
-            "doraemon" to "哆啦A梦",
-            "aru" to "阿鲁表情",
-            "onion" to "洋葱头",
-            "blob" to "果冻Blob"
-        )
-        val builtGroups = mutableListOf<LinuxDoEmojiGroup>()
+        val brandGroups = mutableListOf<LinuxDoEmojiGroup>()
+        val standardGroups = mutableListOf<LinuxDoEmojiGroup>()
+        val seenIconKeys = HashSet<String>()
+
         for ((groupKey, entries) in rawGroups) {
             if (entries.isEmpty()) continue
             val cleanGroupKey = groupKey.trim()
-            val labelKey = cleanGroupKey.removePrefix("✨").trim().lowercase()
-                .replace('-', '_').replace(' ', '_')
-            val labelZh = groupLabelMap[labelKey] ?: cleanGroupKey
+            val meta = resolveGroupMeta(cleanGroupKey)
             val items = entries.mapNotNull { (rawName, rawUrl) ->
                 val cleanName = rawName.trim().removeSurrounding(":")
                 val cleanUrl = rawUrl.trim()
@@ -135,22 +191,72 @@ object LinuxDoEmojiCatalog {
                     unicode = builtInShortcodeToUnicode[cleanName.lowercase()],
                     customUrl = fullUrl,
                     group = cleanGroupKey,
-                    keywordsZh = "$labelZh $cleanName"
+                    keywordsZh = "${meta.labelZh} $cleanName"
                 )
             }
             if (items.isNotEmpty()) {
-                builtGroups.add(
-                    LinuxDoEmojiGroup(
-                        id = "server_$cleanGroupKey",
-                        labelZh = "✨ $labelZh",
-                        items = items
+                // 如果 default 分组里混有按前缀命名的飞书/B站/贴吧等自定义包，自动按品牌前缀拆分为独立品牌分组
+                val normalizedKey = cleanGroupKey.lowercase()
+                if (normalizedKey == "default" || normalizedKey == "ungrouped") {
+                    val prefixBuckets = mapOf(
+                        "feishu" to items.filter { it.shortcode.startsWith("feishu_", true) || it.shortcode.startsWith("lark_", true) },
+                        "bilibili" to items.filter { it.shortcode.startsWith("bili_", true) || it.shortcode.startsWith("bilibili_", true) },
+                        "tieba" to items.filter { it.shortcode.startsWith("tieba_", true) },
+                        "qq" to items.filter { it.shortcode.startsWith("qq_", true) }
                     )
-                )
+                    val groupedShortcodes = HashSet<String>()
+                    for ((brandKey, brandItems) in prefixBuckets) {
+                        if (brandItems.isNotEmpty() && seenIconKeys.add(brandKey)) {
+                            val bMeta = resolveGroupMeta(brandKey)
+                            brandItems.forEach { groupedShortcodes.add(it.shortcode) }
+                            brandGroups.add(
+                                LinuxDoEmojiGroup(
+                                    id = "server_$brandKey",
+                                    labelZh = bMeta.labelZh,
+                                    items = brandItems,
+                                    iconKey = bMeta.iconKey,
+                                    iconUnicode = bMeta.iconUnicode,
+                                    iconUrl = brandItems.firstOrNull()?.resolvedImageUrl
+                                )
+                            )
+                        }
+                    }
+                    val remaining = items.filterNot { it.shortcode in groupedShortcodes }
+                    if (remaining.isNotEmpty()) {
+                        brandGroups.add(
+                            LinuxDoEmojiGroup(
+                                id = "server_$cleanGroupKey",
+                                labelZh = meta.labelZh,
+                                items = remaining,
+                                iconKey = meta.iconKey,
+                                iconUnicode = meta.iconUnicode,
+                                iconUrl = remaining.firstOrNull()?.resolvedImageUrl
+                            )
+                        )
+                    }
+                } else {
+                    seenIconKeys.add(meta.iconKey)
+                    val group = LinuxDoEmojiGroup(
+                        id = "server_$cleanGroupKey",
+                        labelZh = meta.labelZh,
+                        items = items,
+                        iconKey = meta.iconKey,
+                        iconUnicode = meta.iconUnicode,
+                        iconUrl = if (meta.isBrandPack) items.firstOrNull()?.resolvedImageUrl else null
+                    )
+                    if (meta.isBrandPack) {
+                        brandGroups.add(group)
+                    } else {
+                        standardGroups.add(group)
+                    }
+                }
             }
         }
-        if (builtGroups.isNotEmpty()) {
-            dynamicServerGroups = builtGroups
+        val combined = brandGroups + standardGroups
+        if (combined.isNotEmpty()) {
+            dynamicServerGroups = combined
         }
+        catalogVersion++
     }
 
     /**
@@ -195,7 +301,7 @@ object LinuxDoEmojiCatalog {
      * 笑脸与情绪标准组
      */
     private val smileyEmojis: List<LinuxDoEmojiItem> = listOf(
-        LinuxDoEmojiItem("Grinning", "😀", keywordsZh = "笑脸 开心"),
+        LinuxDoEmojiItem("grinning", "😀", keywordsZh = "笑脸 开心"),
         LinuxDoEmojiItem("smile", "😄", keywordsZh = "微笑 高兴"),
         LinuxDoEmojiItem("grin", "😁", keywordsZh = "露齿笑 嘻嘻"),
         LinuxDoEmojiItem("laughing", "😆", keywordsZh = "大笑 哈哈"),
@@ -357,16 +463,29 @@ object LinuxDoEmojiCatalog {
     fun shortcodeToUnicode(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
         val key = raw.trim().removeSurrounding(":").lowercase()
-        return builtInShortcodeToUnicode[key]
+        builtInShortcodeToUnicode[key]?.let { return it }
+        val baseWithoutTone = key.replace(Regex(":t[2-6]$"), "")
+        return builtInShortcodeToUnicode[baseWithoutTone]
     }
 
     /**
-     * 解析任意表情或 Reaction ID 的官方图片 URL（优先使用 `/emojis.json` 同步的自定义 URL，否则回退至官方 Twemoji 地址）
+     * 解析任意表情或 Reaction ID 的官方图片 URL（优先使用 `/emojis.json` 同步的自定义 URL，否则回退至官方 Twemoji 地址，兼容 `:t2`~`:t6` 肤色后缀）
      */
     fun resolveReactionImageUrl(reactionIdOrShortcode: String): String {
         val clean = reactionIdOrShortcode.trim().removeSurrounding(":")
         val lower = clean.lowercase()
         dynamicCustomUrls[lower]?.let { return it }
+        val toneMatch = Regex("^([a-z0-9_+-]+):t([2-6])$").matchEntire(lower)
+        if (toneMatch != null) {
+            val rawBase = toneMatch.groupValues[1]
+            val tone = toneMatch.groupValues[2]
+            val baseFile = when (rawBase) {
+                "+1", "thumbsup", "thumb_up" -> "+1"
+                "-1", "thumbsdown" -> "-1"
+                else -> rawBase
+            }
+            return "https://linux.do/images/emoji/twemoji/$baseFile/$tone.png?v=12"
+        }
         val normalizedFile = when (lower) {
             "+1", "thumbsup", "thumb_up" -> "+1"
             "-1", "thumbsdown" -> "-1"
@@ -375,21 +494,67 @@ object LinuxDoEmojiCatalog {
         return "https://linux.do/images/emoji/twemoji/$normalizedFile.png?v=12"
     }
 
+    private val customEmojiPackPrefixes = listOf(
+        "feishu_",
+        "lark_",
+        "bili_",
+        "bilibili_",
+        "tieba_",
+        "qq_",
+        "coolapk_",
+        "weibo_",
+        "xhs_",
+        "acfun_",
+        "ac_",
+        "menhera_",
+        "doraemon_",
+        "aru_",
+        "onion_",
+        "blob_",
+        "linuxdo_"
+    )
+
     /**
      * 判断某个 reactionId 是否属于站点自定义图片表情（如 `bili_*`、`tieba_*`、`feishu_*` 等）
      */
     fun isCustomImageEmoji(reactionIdOrShortcode: String): Boolean {
         val clean = reactionIdOrShortcode.trim().removeSurrounding(":").lowercase()
+        if (clean.isEmpty()) return false
         return dynamicCustomUrls.containsKey(clean) ||
-            clean.startsWith("bili_") ||
-            clean.startsWith("tieba_") ||
-            clean.startsWith("feishu_") ||
-            clean.startsWith("lark_") ||
-            clean.startsWith("qq_") ||
-            clean.startsWith("ac_") ||
-            clean.startsWith("aru_") ||
-            builtInShortcodeToUnicode[clean] == null
+            customEmojiPackPrefixes.any { clean.startsWith(it) }
     }
+
+    private val animalAndNatureEmojis: List<LinuxDoEmojiItem> = listOf(
+        LinuxDoEmojiItem("dog", "🐶", keywordsZh = "狗 汪 狗头"),
+        LinuxDoEmojiItem("cat", "🐱", keywordsZh = "猫 喵 猫猫"),
+        LinuxDoEmojiItem("fox_face", "🦊", keywordsZh = "狐狸"),
+        LinuxDoEmojiItem("bear", "🐻", keywordsZh = "熊 小熊"),
+        LinuxDoEmojiItem("panda_face", "🐼", keywordsZh = "熊猫 国宝"),
+        LinuxDoEmojiItem("tiger", "🐯", keywordsZh = "老虎"),
+        LinuxDoEmojiItem("lion", "🦁", keywordsZh = "狮子"),
+        LinuxDoEmojiItem("rabbit", "🐰", keywordsZh = "兔子 兔兔"),
+        LinuxDoEmojiItem("penguin", "🐧", keywordsZh = "企鹅 Linux"),
+        LinuxDoEmojiItem("whale", "🐳", keywordsZh = "鲸鱼 Docker"),
+        LinuxDoEmojiItem("unicorn", "🦄", keywordsZh = "独角兽"),
+        LinuxDoEmojiItem("bug", "🐛", keywordsZh = "虫子 漏洞 Bug"),
+        LinuxDoEmojiItem("seedling", "🌱", keywordsZh = "幼苗 新手 成长"),
+        LinuxDoEmojiItem("four_leaf_clover", "🍀", keywordsZh = "四叶草 幸运")
+    )
+
+    private val foodAndDrinkEmojis: List<LinuxDoEmojiItem> = listOf(
+        LinuxDoEmojiItem("coffee", "☕", keywordsZh = "咖啡 早安 Java"),
+        LinuxDoEmojiItem("beer", "🍺", keywordsZh = "啤酒 干杯"),
+        LinuxDoEmojiItem("beers", "🍻", keywordsZh = "碰杯 庆祝"),
+        LinuxDoEmojiItem("popcorn", "🍿", keywordsZh = "爆米花 吃瓜 看戏"),
+        LinuxDoEmojiItem("watermelon", "🍉", keywordsZh = "西瓜 吃瓜 围观"),
+        LinuxDoEmojiItem("lemon", "🍋", keywordsZh = "柠檬 酸了"),
+        LinuxDoEmojiItem("apple", "🍎", keywordsZh = "苹果 Apple"),
+        LinuxDoEmojiItem("hamburger", "🍔", keywordsZh = "汉堡 美食"),
+        LinuxDoEmojiItem("pizza", "🍕", keywordsZh = "披萨"),
+        LinuxDoEmojiItem("cake", "🍰", keywordsZh = "蛋糕 生日 庆祝"),
+        LinuxDoEmojiItem("tea", "🍵", keywordsZh = "茶 喝茶 养生"),
+        LinuxDoEmojiItem("pill", "💊", keywordsZh = "药丸 吃药")
+    )
 
     /**
      * 获取编辑器表情面板的全部分组（包含动态同步的站点自定义表情包）
@@ -397,30 +562,102 @@ object LinuxDoEmojiCatalog {
     fun getPickerGroups(): List<LinuxDoEmojiGroup> {
         val baseFirst = LinuxDoEmojiGroup(
             id = "official_reactions",
-            labelZh = "🔥 官方表态",
-            items = officialReactions
+            labelZh = "官方表态",
+            items = officialReactions,
+            iconKey = "official_reactions",
+            iconUnicode = "❤️"
         )
-        val memeGroup = LinuxDoEmojiGroup(
-            id = "community_memes",
-            labelZh = "🫠 社区热梗",
-            items = communityMemeEmojis
+        val builtInBrandPacks = listOf(
+            LinuxDoEmojiGroup(
+                id = "feishu",
+                labelZh = "飞书",
+                items = listOf(
+                    LinuxDoEmojiItem("+1", "👍", keywordsZh = "飞书 赞 强"),
+                    LinuxDoEmojiItem("tada", "🎉", keywordsZh = "飞书 撒花 庆祝"),
+                    LinuxDoEmojiItem("pray", "🙏", keywordsZh = "飞书 感谢 拜托"),
+                    LinuxDoEmojiItem("fire", "🔥", keywordsZh = "飞书 给力 加油"),
+                    LinuxDoEmojiItem("heart", "❤️", keywordsZh = "飞书 比心 喜欢"),
+                    LinuxDoEmojiItem("saluting_face", "🫡", keywordsZh = "飞书 收到 敬礼")
+                ),
+                iconKey = "feishu"
+            ),
+            LinuxDoEmojiGroup(
+                id = "bilibili",
+                labelZh = "B站",
+                items = buildList {
+                    if (dynamicCustomUrls.containsKey("bili_057")) {
+                        add(LinuxDoEmojiItem("bili_057", null, customUrl = dynamicCustomUrls["bili_057"], keywordsZh = "B站 小电视 赞"))
+                    }
+                    add(LinuxDoEmojiItem("clap", "👏", keywordsZh = "B站 鼓掌 支持"))
+                    add(LinuxDoEmojiItem("open_mouth", "😮", keywordsZh = "B站 吃惊"))
+                    add(LinuxDoEmojiItem("sob", "😭", keywordsZh = "B站 泪目 哭"))
+                    add(LinuxDoEmojiItem("laughing", "😆", keywordsZh = "B站 大笑"))
+                },
+                iconKey = "bilibili"
+            ),
+            LinuxDoEmojiGroup(
+                id = "tieba",
+                labelZh = "贴吧",
+                items = buildList {
+                    if (dynamicCustomUrls.containsKey("tieba_087")) {
+                        add(LinuxDoEmojiItem("tieba_087", null, customUrl = dynamicCustomUrls["tieba_087"], keywordsZh = "贴吧 滑稽 狗头"))
+                    }
+                    add(LinuxDoEmojiItem("smirk", "😏", keywordsZh = "贴吧 滑稽 坏笑"))
+                    add(LinuxDoEmojiItem("sweat_smile", "😅", keywordsZh = "贴吧 流汗黄豆"))
+                    add(LinuxDoEmojiItem("joy", "😂", keywordsZh = "贴吧 笑哭"))
+                    add(LinuxDoEmojiItem("rofl", "🤣", keywordsZh = "贴吧 笑死"))
+                },
+                iconKey = "tieba"
+            )
         )
-        val smileyGroup = LinuxDoEmojiGroup(
-            id = "smileys",
-            labelZh = "😀 笑脸情绪",
-            items = smileyEmojis
+        val builtInFallbacks = listOf(
+            LinuxDoEmojiGroup(
+                id = "smileys",
+                labelZh = "笑脸",
+                items = smileyEmojis,
+                iconKey = "smileys",
+                iconUnicode = "😀"
+            ),
+            LinuxDoEmojiGroup(
+                id = "gestures",
+                labelZh = "人物与手势",
+                items = gestureEmojis,
+                iconKey = "people",
+                iconUnicode = "👋"
+            ),
+            LinuxDoEmojiGroup(
+                id = "animals",
+                labelZh = "动物与自然",
+                items = animalAndNatureEmojis,
+                iconKey = "animals",
+                iconUnicode = "🐻"
+            ),
+            LinuxDoEmojiGroup(
+                id = "food",
+                labelZh = "食物与饮品",
+                items = foodAndDrinkEmojis,
+                iconKey = "food",
+                iconUnicode = "🍔"
+            ),
+            LinuxDoEmojiGroup(
+                id = "geek_celebration",
+                labelZh = "物品与庆典",
+                items = geekAndCelebrationEmojis,
+                iconKey = "objects",
+                iconUnicode = "💡"
+            ),
+            LinuxDoEmojiGroup(
+                id = "community_memes",
+                labelZh = "社区热梗",
+                items = communityMemeEmojis,
+                iconKey = "memes",
+                iconUnicode = "🫠"
+            )
         )
-        val gestureGroup = LinuxDoEmojiGroup(
-            id = "gestures",
-            labelZh = "🙌 手势互动",
-            items = gestureEmojis
-        )
-        val geekGroup = LinuxDoEmojiGroup(
-            id = "geek_celebration",
-            labelZh = "💻 极客庆典",
-            items = geekAndCelebrationEmojis
-        )
-        return listOf(baseFirst) + dynamicServerGroups + listOf(memeGroup, smileyGroup, gestureGroup, geekGroup)
+        val serverIconKeys = dynamicServerGroups.map { it.iconKey }.toSet()
+        val nonOverlappingBrands = builtInBrandPacks.filterNot { it.iconKey in serverIconKeys }
+        val nonOverlappingFallbacks = builtInFallbacks.filterNot { it.iconKey in serverIconKeys }
+        return listOf(baseFirst) + dynamicServerGroups + nonOverlappingFallbacks + nonOverlappingBrands
     }
 
     /**

@@ -1,5 +1,9 @@
 package do_.linux.lindo.core.network
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
 import do_.linux.lindo.core.connect.ConnectStatsParser
 import do_.linux.lindo.core.connect.ConnectTrustLevelReport
 import do_.linux.lindo.core.connect.ConsolidatedTimingBatch
@@ -13,6 +17,8 @@ import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.model.PostBoostItem
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.PostReactionItem
+import do_.linux.lindo.core.model.PrivateMessageSendResult
+import do_.linux.lindo.core.model.SearchPageResult
 import do_.linux.lindo.core.model.TopicDetailModel
 import do_.linux.lindo.core.model.TopicSummary
 import do_.linux.lindo.core.model.TopicUser
@@ -20,10 +26,13 @@ import do_.linux.lindo.core.model.UserActivityItem
 import do_.linux.lindo.core.model.UserFullProfileSummary
 import do_.linux.lindo.core.model.UserNotificationItem
 import do_.linux.lindo.core.model.UserStatus
+import do_.linux.lindo.core.model.decodeDiscourseHtmlSnippet
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.ResponseBody.Companion.toResponseBody
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitForm
 import io.ktor.client.request.forms.submitFormWithBinaryData
@@ -47,6 +56,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -100,12 +110,18 @@ data class CookieVariant(
  */
 object CookieSentinel {
     val criticalCookieNames = setOf("_t", "_forum_session", "cf_clearance")
+    val cfTrustCookieNames = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
     private val store = LinkedHashMap<CookieQuadrupleKey, StoredCookieRecord>()
     private val sessionRefreshMutex = Mutex()
 
     @Synchronized
     fun putCookie(record: StoredCookieRecord) {
-        if (record.key.name in criticalCookieNames && record.value.isBlank()) {
+        if (record.value.isBlank() || record.isExpired()) {
+            val normalizedDomain = record.key.domain.trim().lowercase().trimStart('.')
+            val toRemove = store.keys.filter {
+                it.name == record.key.name && matchesDomain(it, normalizedDomain)
+            }
+            toRemove.forEach { store.remove(it) }
             return
         }
         store[record.key] = record
@@ -172,10 +188,13 @@ object CookieSentinel {
 
     fun buildCookieHeader(
         nowMs: Long = System.currentTimeMillis(),
-        targetHost: String = "linux.do"
+        targetHost: String = "linux.do",
+        includeCloudflareCookies: Boolean = UserApiKeyAuthManager.webViewHttpExecutor == null
     ): String {
         return resolveWinningCookies(nowMs, targetHost)
             .entries
+            .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
+            .filter { includeCloudflareCookies || it.key !in cfTrustCookieNames }
             .joinToString("; ") { "${it.key}=${it.value.value}" }
     }
 
@@ -196,7 +215,7 @@ object CookieSentinel {
             if (eqIdx > 0) {
                 val name = trimmed.substring(0, eqIdx).trim()
                 val value = trimmed.substring(eqIdx + 1).trim()
-                if (name.isNotEmpty() && value.isNotEmpty()) {
+                if (name.isNotEmpty()) {
                     val effectiveHostOnly = hostOnly || name in discourseHostOnlyNames
                     putCookie(
                         StoredCookieRecord(
@@ -212,6 +231,54 @@ object CookieSentinel {
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * 以系统 WebView `CookieManager.getCookie("https://linux.do")` 为权威源同步会话：
+     * 若服务端已吊销/清除 `_t` 或 `_forum_session`，同步从内存哨兵移除，绝不将已失效旧 Cookie 反写复活。
+     */
+    fun syncFromAuthoritativeBrowserCookieString(
+        rawCookieHeader: String?,
+        domain: String = "linux.do"
+    ) {
+        val normalizedDomain = domain.trim().lowercase().trimStart('.')
+        var shouldClearStaleCookieUser = false
+        synchronized(this) {
+            val hadAuthCookie = resolveWinningCookies(targetHost = normalizedDomain)["_t"]?.value
+                ?.let { it.isNotBlank() && it != "demo_session_token" } == true
+            if (rawCookieHeader.isNullOrBlank()) {
+                val keysToRemove = store.keys.filter { matchesDomain(it, normalizedDomain) }
+                keysToRemove.forEach { store.remove(it) }
+            } else {
+                val presentNonBlankNames = HashSet<String>()
+                rawCookieHeader.split(";").forEach { segment ->
+                    val trimmed = segment.trim()
+                    val eqIdx = trimmed.indexOf('=')
+                    if (eqIdx > 0) {
+                        val name = trimmed.substring(0, eqIdx).trim()
+                        val value = trimmed.substring(eqIdx + 1).trim()
+                        if (name.isNotEmpty() && value.isNotEmpty()) {
+                            presentNonBlankNames.add(name)
+                        }
+                    }
+                }
+                ingestRawCookieString(rawCookieHeader, domain = domain, hostOnly = false)
+                val staleAuthKeys = store.keys.filter {
+                    it.name in setOf("_t", "_forum_session") &&
+                        it.name !in presentNonBlankNames &&
+                        matchesDomain(it, normalizedDomain)
+                }
+                staleAuthKeys.forEach { store.remove(it) }
+            }
+            val nowHasAuthCookie = resolveWinningCookies(targetHost = normalizedDomain)["_t"]?.value
+                ?.let { it.isNotBlank() && it != "demo_session_token" } == true
+            if (hadAuthCookie && !nowHasAuthCookie) {
+                shouldClearStaleCookieUser = true
+            }
+        }
+        if (shouldClearStaleCookieUser) {
+            UserApiKeyAuthManager.onBrowserAuthCookieEvicted()
         }
     }
 
@@ -236,8 +303,7 @@ object CookieSentinel {
      */
     @Synchronized
     fun clearAuthCookiesOnly() {
-        val cfTrustCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
-        val keysToRemove = store.keys.filter { it.name !in cfTrustCookies }
+        val keysToRemove = store.keys.filter { it.name !in cfTrustCookieNames }
         keysToRemove.forEach { store.remove(it) }
     }
 }
@@ -320,8 +386,14 @@ object UserApiKeyAuthManager {
         uiCompactFeed = compactFeed
         onPersistThemeAndDensity?.invoke(themeAccent, compactFeed)
     }
+    data class BinaryHttpPayload(
+        val status: Int,
+        val contentType: String,
+        val bytes: ByteArray
+    )
+
     var webViewJsonFetcher: (suspend (String) -> String?)? = null
-    var webViewConnectHtmlFetcher: (suspend () -> String?)? = null
+    var webViewBinaryFetcher: (suspend (String) -> BinaryHttpPayload?)? = null
     var webViewHttpExecutor: (suspend (
         url: String,
         method: String,
@@ -366,20 +438,71 @@ object UserApiKeyAuthManager {
         return token
     }
 
+    private val invalidatingServerAuth = java.util.concurrent.atomic.AtomicBoolean(false)
+
     fun setApiKey(apiKey: String?) {
         activeUserApiKey = apiKey?.trim()?.takeIf { it.isNotEmpty() }
         onPersistSession?.invoke(currentUser, activeUserApiKey)
         onAuthStateChanged?.invoke()
     }
 
+    internal fun clearApiKeyQuietly() {
+        activeUserApiKey = null
+    }
+
+    internal fun persistSessionQuietly() {
+        onPersistSession?.invoke(currentUser, activeUserApiKey)
+    }
+
     fun getApiKey(): String? = activeUserApiKey
+
+    fun updateCachedUnreadNotifications(count: Int) {
+        val safeCount = count.coerceAtLeast(0)
+        fullProfileCache = fullProfileCache?.copy(unreadNotifications = safeCount)
+    }
+
+    internal fun onBrowserAuthCookieEvicted() {
+        if (!activeUserApiKey.isNullOrBlank()) return
+        if (currentUser == null && fullProfileCache == null) return
+        sessionGeneration++
+        currentUser = null
+        fullProfileCache = null
+        LinuxDoRepository.clearUserSessionCaches()
+        LinuxDoRepository.updateCsrfToken(null)
+        onPersistSession?.invoke(null, null)
+        onAuthStateChanged?.invoke()
+    }
+
+    fun handleServerAuthInvalidated() {
+        if (!isAuthorized()) return
+        if (!invalidatingServerAuth.compareAndSet(false, true)) return
+        try {
+            logout()
+        } finally {
+            invalidatingServerAuth.set(false)
+        }
+    }
+
+    private fun hasValidWebSessionCookie(): Boolean {
+        val rawT = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value.orEmpty()
+        return rawT.isNotBlank() && rawT != "demo_session_token"
+    }
 
     fun onSessionAuthenticated(
         profile: AuthenticatedUserProfile,
         rawCookies: String? = null
     ) {
+        val prevUsername = currentUser?.username
+        if (prevUsername.isNullOrBlank() || !prevUsername.equals(profile.username, ignoreCase = true)) {
+            sessionGeneration++
+            fullProfileCache = null
+            LinuxDoRepository.clearUserSessionCaches()
+        }
         if (!rawCookies.isNullOrBlank()) {
             CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
+        }
+        if (hasValidWebSessionCookie()) {
+            activeUserApiKey = null
         }
         currentUser = profile
         onPersistSession?.invoke(profile, activeUserApiKey)
@@ -396,6 +519,15 @@ object UserApiKeyAuthManager {
         userTitle: String? = null
     ) {
         if (username.isBlank() || username == "linuxdo_user") return
+        val prevUsername = currentUser?.username
+        if (prevUsername.isNullOrBlank() || !prevUsername.equals(username, ignoreCase = true)) {
+            sessionGeneration++
+            fullProfileCache = null
+            LinuxDoRepository.clearUserSessionCaches()
+        }
+        if (hasValidWebSessionCookie()) {
+            activeUserApiKey = null
+        }
         val updated = AuthenticatedUserProfile(
             userId = userId,
             username = username,
@@ -417,7 +549,8 @@ object UserApiKeyAuthManager {
         if (!rawCookies.isNullOrBlank()) {
             CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
         }
-        activeUserApiKey = apiKey?.trim()?.takeIf { it.isNotEmpty() }
+        val hasWebCookie = hasValidWebSessionCookie()
+        activeUserApiKey = if (hasWebCookie) null else apiKey?.trim()?.takeIf { it.isNotEmpty() }
         // 过滤掉旧版曾写入的假占位用户名，确保只保留真实账号
         currentUser = profile?.takeIf { it.username != "linuxdo_user" }
         onAuthStateChanged?.invoke()
@@ -426,7 +559,8 @@ object UserApiKeyAuthManager {
     fun isAuthorized(): Boolean {
         val realUser = currentUser?.takeIf { it.username != "linuxdo_user" }
         return realUser != null ||
-            CookieSentinel.resolveWinningCookies(targetHost = "linux.do").containsKey("_t")
+            hasValidWebSessionCookie() ||
+            !activeUserApiKey.isNullOrBlank()
     }
 
     fun logout() {
@@ -438,8 +572,7 @@ object UserApiKeyAuthManager {
         pendingPrivateKey = null
         pendingNonce = null
         pendingAuthCreatedAt = 0L
-        LinuxDoRepository.clearPollVoteState()
-        LinuxDoRepository.clearReadTopics()
+        LinuxDoRepository.clearUserSessionCaches()
         LinuxDoRepository.updateCsrfToken(null)
         onPersistPendingKey?.invoke(null, null)
         CookieSentinel.clearAuthCookiesOnly()
@@ -450,13 +583,13 @@ object UserApiKeyAuthManager {
 
     /**
      * 生成对齐 Linux.do 服务端白名单的浏览器一键授权链接：
-     * - `scopes=one_time_password`（Linux.do 现行允许范围）
+     * - `scopes=read,write,one_time_password`（同时申请读写 User-Api-Key 与 OTP 一次性兑换令牌）
      * - `auth_redirect=discourse://auth_redirect`（Discourse 官方白名单回跳协议）
      * - `otp=true`（随回调返回一次性登录兑换令牌）
      */
     fun generateAuthorizationUrl(
         applicationName: String = "Lindo",
-        scopes: String = "one_time_password"
+        scopes: String = "read,write,one_time_password"
     ): Pair<String, String> {
         val kpg = KeyPairGenerator.getInstance("RSA")
         kpg.initialize(2048)
@@ -490,7 +623,7 @@ object UserApiKeyAuthManager {
      * 启动系统浏览器进行一键授权
      */
     fun startBrowserOneClickAuth(): String {
-        val (url, _) = generateAuthorizationUrl()
+        val (url, _) = generateAuthorizationUrl(scopes = "read,write,one_time_password")
         openExternalUrlLauncher?.invoke(url)
         return url
     }
@@ -532,10 +665,13 @@ object UserApiKeyAuthManager {
             val nonce = obj["nonce"]?.jsonPrimitive?.contentOrNull ?: return false
             if (!java.security.MessageDigest.isEqual(nonce.toByteArray(), expectedNonce.toByteArray())) return false
             val key = obj["key"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-            val encryptedOtp = params["oneTimePassword"] ?: params["one_time_password"]
+            val encryptedOtp = (params["oneTimePassword"] ?: params["one_time_password"])?.takeIf { it.isNotBlank() }
             val otp = if (encryptedOtp != null) {
-                decryptRsaBase64(encryptedOtp, privateKey)?.trim()?.takeIf { it.isNotEmpty() } ?: return false
-            } else obj["one_time_password"]?.jsonPrimitive?.contentOrNull
+                decryptRsaBase64(encryptedOtp, privateKey)?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: if (key == null) return false else null
+            } else {
+                obj["one_time_password"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            }
             if (key == null && otp.isNullOrBlank()) return false
             // Consume before notifying observers so a duplicate deep link cannot replay the grant.
             pendingPrivateKey = null
@@ -553,7 +689,7 @@ object UserApiKeyAuthManager {
 }
 
 /**
- * Linux.do 板块元数据定义
+ * Linux.do 板块元数据定义（支持一级主版块与 Lv1/Lv2/Lv3 二级子版块）
  */
 data class LinuxDoCategoryMeta(
     val id: Int,
@@ -562,8 +698,17 @@ data class LinuxDoCategoryMeta(
     val colorHex: String,
     val description: String,
     val icon: String? = null,
-    val readRestricted: Boolean = false
-)
+    val readRestricted: Boolean = false,
+    val parentId: Int? = null,
+    val parentSlug: String? = null,
+    val trustLevel: Int? = null,
+    val subLabel: String? = null,
+    val isVerifiedFromServer: Boolean = true,
+    val hasServerParent: Boolean = false
+) {
+    val displayName: String
+        get() = name.replace(Regex(",\\s*"), " · ")
+}
 
 internal data class ComposerTagOption(
     val name: String,
@@ -599,48 +744,152 @@ object LinuxDoRepository {
         coerceInputValues = true
     }
 
-    private val locallyReadTopicPosts = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    private val serverConfirmedReadFloor = java.util.concurrent.ConcurrentHashMap<Int, Int>()
     private val readTopicOrder = java.util.concurrent.ConcurrentLinkedQueue<Int>()
+    private val readTopicsStateLock = Any()
+    private val detachedDraftScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val followFeedCursors = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val userFollowFeedActivityCursors = java.util.concurrent.ConcurrentHashMap<String, String>()
 
-    fun markTopicRead(topicId: Int, postsCount: Int = 1) {
-        if (topicId <= 0) return
-        val effective = maxOf(locallyReadTopicPosts[topicId] ?: 0, postsCount, 1)
-        val isNew = locallyReadTopicPosts.put(topicId, effective) == null
-        if (isNew) {
+    var readTopicsVersion by mutableIntStateOf(0)
+        private set
+
+    private fun bumpReadTopicsVersion() {
+        synchronized(readTopicsStateLock) {
+            Snapshot.withMutableSnapshot {
+                readTopicsVersion++
+            }
+        }
+    }
+
+    fun launchDetachedDraftOp(block: suspend () -> Unit) {
+        detachedDraftScope.launch {
+            runCatching { block() }
+        }
+    }
+
+    /**
+     * 当且仅当服务端真实确认某话题已读楼层推进（如 `POST /topics/timings` 返回 2xx，或 `/t/{id}.json` 返回 `last_read_post_number`）时回调 UI，
+     * 绝不提前在客户端本地伪造消除未读小圆点。
+     */
+    var onTopicReadFloorConfirmed: ((topicId: Int, confirmedFloor: Int) -> Unit)? = null
+
+    private fun <K, V> putBounded(map: java.util.concurrent.ConcurrentHashMap<K, V>, key: K, value: V, maxEntries: Int = 600) {
+        if (map.size >= maxEntries && !map.containsKey(key)) {
+            val trimCount = (maxEntries / 6).coerceAtLeast(1)
+            val iter = map.keys.iterator()
+            var removed = 0
+            while (iter.hasNext() && removed < trimCount) {
+                runCatching {
+                    iter.next()
+                    iter.remove()
+                }
+                removed++
+            }
+        }
+        map[key] = value
+    }
+
+    fun recordServerConfirmedReadFloor(
+        topicId: Int,
+        floor: Int,
+        notify: Boolean = true,
+        persist: Boolean = true
+    ) {
+        if (topicId <= 0 || floor <= 0) return
+        var prevFloor = 0
+        var updatedFloor = 0
+        var insertedNew = false
+        serverConfirmedReadFloor.compute(topicId) { _, existing ->
+            prevFloor = existing ?: 0
+            if (existing == null) insertedNew = true
+            updatedFloor = maxOf(prevFloor, floor)
+            updatedFloor
+        }
+        if (insertedNew) {
             readTopicOrder.add(topicId)
             while (readTopicOrder.size > 1500) {
                 val oldest = readTopicOrder.poll() ?: break
-                locallyReadTopicPosts.remove(oldest)
+                serverConfirmedReadFloor.remove(oldest)
             }
         }
-        UserApiKeyAuthManager.onPersistReadTopics?.invoke(exportReadTopics())
+        if (updatedFloor > prevFloor) {
+            bumpReadTopicsVersion()
+            if (persist) {
+                UserApiKeyAuthManager.onPersistReadTopics?.invoke(exportReadTopics())
+            }
+            if (notify) {
+                onTopicReadFloorConfirmed?.invoke(topicId, updatedFloor)
+            }
+        }
     }
 
-    fun isTopicRead(topicId: Int): Boolean = topicId > 0 && locallyReadTopicPosts.containsKey(topicId)
+    fun getServerConfirmedReadFloor(topicId: Int): Int? =
+        if (topicId > 0) serverConfirmedReadFloor[topicId] else null
 
-    fun getReadTopicSnapshot(): Map<Int, Int> = HashMap(locallyReadTopicPosts)
+    fun markTopicRead(topicId: Int, postsCount: Int = 1) {
+        recordServerConfirmedReadFloor(topicId, postsCount, notify = true, persist = true)
+    }
+
+    fun isTopicRead(topicId: Int, highestPostNumber: Int = 1): Boolean {
+        @Suppress("UNUSED_VARIABLE")
+        val observedVersion = readTopicsVersion
+        if (topicId <= 0) return false
+        val confirmed = serverConfirmedReadFloor[topicId] ?: return false
+        return confirmed >= highestPostNumber.coerceAtLeast(1)
+    }
+
+    fun isTopicConfirmedReadReactive(topicId: Int, highestPostNumber: Int = 1): Boolean =
+        isTopicRead(topicId, highestPostNumber)
+
+    fun getReadTopicSnapshot(): Map<Int, Int> = HashMap(serverConfirmedReadFloor)
 
     fun restoreReadTopics(serialized: String?) {
         if (serialized.isNullOrBlank()) return
+        var changed = false
         serialized.split(',').forEach { entry ->
             val parts = entry.split(':')
             val id = parts.getOrNull(0)?.toIntOrNull() ?: return@forEach
             val count = parts.getOrNull(1)?.toIntOrNull() ?: 1
-            if (id > 0) {
-                if (locallyReadTopicPosts.put(id, count.coerceAtLeast(1)) == null) {
+            if (id > 0 && count > 0) {
+                val prev = serverConfirmedReadFloor.put(id, count)
+                if (prev == null) {
                     readTopicOrder.add(id)
                 }
+                if (prev != count) {
+                    changed = true
+                }
             }
+        }
+        if (changed) {
+            bumpReadTopicsVersion()
         }
     }
 
     fun clearReadTopics() {
-        locallyReadTopicPosts.clear()
+        val hadAny = serverConfirmedReadFloor.isNotEmpty()
+        serverConfirmedReadFloor.clear()
         readTopicOrder.clear()
+        if (hadAny) {
+            bumpReadTopicsVersion()
+        }
+    }
+
+    fun clearUserSessionCaches() {
+        ScreenTrackEngine.resetSessionState()
+        clearPollVoteState()
+        clearReadTopics()
+        followFeedCursors.clear()
+        userFollowFeedActivityCursors.clear()
+        cachedUserBadgesByUsername = emptyMap()
+        cachedCategoryTemplates = null
+        syncedCategoriesSessionGen = -1L
+        categoriesLastSyncedAtMs = 0L
+        bumpReadTopicsVersion()
     }
 
     private fun exportReadTopics(): String {
-        return locallyReadTopicPosts.entries.take(1500).joinToString(",") { "${it.key}:${it.value}" }
+        return serverConfirmedReadFloor.entries.take(1500).joinToString(",") { "${it.key}:${it.value}" }
     }
 
     val defaultCategories: List<LinuxDoCategoryMeta> = listOf(
@@ -663,9 +912,103 @@ object LinuxDoRepository {
         LinuxDoCategoryMeta(108, "深海幽域", "abyss", "12A89D", "深度讨论与高阶专区", icon = "water", readRestricted = true)
     )
 
+    val defaultSubCategories: List<LinuxDoCategoryMeta> = listOf(
+        // 开发调优 (4)
+        LinuxDoCategoryMeta(20, "开发调优, Lv1", "develop-lv1", "32C3C3", "开发调优 Lv1 专区", icon = "code", readRestricted = true, parentId = 4, parentSlug = "develop", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(64, "开发调优, Lv2", "develop-lv2", "32C3C3", "开发调优 Lv2 专区", icon = "code", readRestricted = true, parentId = 4, parentSlug = "develop", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(65, "开发调优, Lv3", "develop-lv3", "32C3C3", "开发调优 Lv3 专区", icon = "code", readRestricted = true, parentId = 4, parentSlug = "develop", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        // 资源荟萃 (14)
+        LinuxDoCategoryMeta(21, "资源荟萃, Lv1", "resource-lv1", "12A89D", "资源荟萃 Lv1 专区", icon = "square-share-nodes", readRestricted = true, parentId = 14, parentSlug = "resource", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(88, "资源荟萃, Lv2", "resource-lv2", "12A89D", "资源荟萃 Lv2 专区", icon = "square-share-nodes", readRestricted = true, parentId = 14, parentSlug = "resource", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(89, "资源荟萃, Lv3", "resource-lv3", "12A89D", "资源荟萃 Lv3 专区", icon = "square-share-nodes", readRestricted = true, parentId = 14, parentSlug = "resource", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(94, "网盘资源", "cloud-asset", "16B176", "网盘资源分享专区", icon = "hard-drive", readRestricted = false, parentId = 14, parentSlug = "resource", trustLevel = null, subLabel = "网盘", isVerifiedFromServer = true),
+        // 文档共建 (42)
+        LinuxDoCategoryMeta(75, "文档共建, Lv1", "wiki-lv1", "9CB6C4", "文档共建 Lv1 专区", icon = "book", readRestricted = true, parentId = 42, parentSlug = "wiki", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(76, "文档共建, Lv2", "wiki-lv2", "9CB6C4", "文档共建 Lv2 专区", icon = "book", readRestricted = true, parentId = 42, parentSlug = "wiki", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(77, "文档共建, Lv3", "wiki-lv3", "9CB6C4", "文档共建 Lv3 专区", icon = "book", readRestricted = true, parentId = 42, parentSlug = "wiki", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        // 搞七捻三 (11)
+        LinuxDoCategoryMeta(35, "搞七捻三, Lv1", "gossip-lv1", "3AB54A", "搞七捻三 Lv1 专区", icon = "droplet", readRestricted = true, parentId = 11, parentSlug = "gossip", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(79, "搞七捻三, Lv2", "gossip-lv2", "3AB54A", "搞七捻三 Lv2 专区", icon = "droplet", readRestricted = true, parentId = 11, parentSlug = "gossip", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(80, "搞七捻三, Lv3", "gossip-lv3", "3AB54A", "搞七捻三 Lv3 专区", icon = "droplet", readRestricted = true, parentId = 11, parentSlug = "gossip", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        // 福利羊毛 (36)
+        LinuxDoCategoryMeta(45, "福利羊毛, Lv1", "welfare-lv1", "E45735", "福利羊毛 Lv1 专区", icon = "piggy-bank", readRestricted = true, parentId = 36, parentSlug = "welfare", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(68, "福利羊毛, Lv2", "welfare-lv2", "E45735", "福利羊毛 Lv2 专区", icon = "piggy-bank", readRestricted = true, parentId = 36, parentSlug = "welfare", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(69, "福利羊毛, Lv3", "welfare-lv3", "E45735", "福利羊毛 Lv3 专区", icon = "piggy-bank", readRestricted = true, parentId = 36, parentSlug = "welfare", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        // 前沿快讯 (34)
+        LinuxDoCategoryMeta(52, "前沿快讯, Lv1", "news-lv1", "BB8FCE", "前沿快讯 Lv1 专区", icon = "newspaper", readRestricted = true, parentId = 34, parentSlug = "news", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(72, "前沿快讯, Lv2", "news-lv2", "BB8FCE", "前沿快讯 Lv2 专区", icon = "newspaper", readRestricted = true, parentId = 34, parentSlug = "news", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(73, "前沿快讯, Lv3", "news-lv3", "BB8FCE", "前沿快讯 Lv3 专区", icon = "newspaper", readRestricted = true, parentId = 34, parentSlug = "news", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        // 非我莫属 (27)
+        LinuxDoCategoryMeta(55, "非我莫属, Lv1", "job-lv1", "A8C6FE", "非我莫属 Lv1 专区", icon = "briefcase", readRestricted = true, parentId = 27, parentSlug = "job", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(56, "非我莫属, Lv2", "job-lv2", "A8C6FE", "非我莫属 Lv2 专区", icon = "briefcase", readRestricted = true, parentId = 27, parentSlug = "job", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(57, "非我莫属, Lv3", "job-lv3", "A8C6FE", "非我莫属 Lv3 专区", icon = "briefcase", readRestricted = true, parentId = 27, parentSlug = "job", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        // 跳蚤市场 (10)
+        LinuxDoCategoryMeta(58, "跳蚤市场, Lv1", "market-lv1", "ED207B", "跳蚤市场 Lv1 专区", icon = "store", readRestricted = true, parentId = 10, parentSlug = "market", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(59, "跳蚤市场, Lv2", "market-lv2", "ED207B", "跳蚤市场 Lv2 专区", icon = "store", readRestricted = true, parentId = 10, parentSlug = "market", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(60, "跳蚤市场, Lv3", "market-lv3", "ED207B", "跳蚤市场 Lv3 专区", icon = "store", readRestricted = true, parentId = 10, parentSlug = "market", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        // 读书成诗 (32)
+        LinuxDoCategoryMeta(61, "读书成诗, Lv1", "reading-lv1", "E0D900", "读书成诗 Lv1 专区", icon = "book-open-reader", readRestricted = true, parentId = 32, parentSlug = "reading", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(62, "读书成诗, Lv2", "reading-lv2", "E0D900", "读书成诗 Lv2 专区", icon = "book-open-reader", readRestricted = true, parentId = 32, parentSlug = "reading", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(63, "读书成诗, Lv3", "reading-lv3", "E0D900", "读书成诗 Lv3 专区", icon = "book-open-reader", readRestricted = true, parentId = 32, parentSlug = "reading", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false),
+        // 积分乐园 (95)
+        LinuxDoCategoryMeta(96, "积分乐园, Lv1", "playground-lv1", "E0D900", "积分乐园 Lv1 专区", icon = "coins", readRestricted = true, parentId = 95, parentSlug = "playground", trustLevel = 1, subLabel = "Lv1", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(97, "积分乐园, Lv2", "playground-lv2", "E0D900", "积分乐园 Lv2 专区", icon = "coins", readRestricted = true, parentId = 95, parentSlug = "playground", trustLevel = 2, subLabel = "Lv2", isVerifiedFromServer = false),
+        LinuxDoCategoryMeta(99, "积分乐园, Lv3", "playground-lv3", "E0D900", "积分乐园 Lv3 专区", icon = "coins", readRestricted = true, parentId = 95, parentSlug = "playground", trustLevel = 3, subLabel = "Lv3", isVerifiedFromServer = false)
+    )
+
     @Volatile
     var categories: List<LinuxDoCategoryMeta> = defaultCategories
         private set
+
+    @Volatile
+    var subCategoriesByParentId: Map<Int, List<LinuxDoCategoryMeta>> =
+        defaultSubCategories.groupBy { it.parentId ?: 0 }
+        private set
+
+    var categoryCatalogVersion by mutableIntStateOf(0)
+        private set
+
+    @Volatile
+    private var syncedCategoriesSessionGen: Long = -1L
+
+    @Volatile
+    private var categoriesLastSyncedAtMs: Long = 0L
+
+    private val siteCategoriesSyncMutex = Mutex()
+    private val siteBadgesSyncMutex = Mutex()
+    private val siteEmojisSyncMutex = Mutex()
+
+    @Volatile
+    private var badgesLastSyncedAtMs: Long = 0L
+
+    @Volatile
+    private var emojisLastSyncedAtMs: Long = 0L
+
+    private fun encodeUrlSegment(raw: String): String =
+        java.net.URLEncoder.encode(raw.trim(), "UTF-8").replace("+", "%20")
+
+    fun findCategoryById(id: Int?): LinuxDoCategoryMeta? {
+        if (id == null) return null
+        categories.firstOrNull { it.id == id }?.let { return it }
+        subCategoriesByParentId.values.forEach { subs ->
+            subs.firstOrNull { it.id == id }?.let { return it }
+        }
+        return null
+    }
+
+    fun resolveParentCategoryId(categoryId: Int?): Int? {
+        if (categoryId == null) return null
+        val cat = findCategoryById(categoryId) ?: return categoryId
+        return cat.parentId ?: cat.id
+    }
+
+    fun getSubCategoriesForParent(parentId: Int): List<LinuxDoCategoryMeta> {
+        return subCategoriesByParentId[parentId].orEmpty().filter { it.id > 0 }
+    }
+
+    fun getPostableSubCategoriesForParent(parentId: Int): List<LinuxDoCategoryMeta> {
+        return subCategoriesByParentId[parentId].orEmpty().filter { it.isVerifiedFromServer && it.id > 0 }
+    }
 
     @Volatile
     var canCreateTag: Boolean = false
@@ -673,22 +1016,15 @@ object LinuxDoRepository {
 
     private val categoryLookup = java.util.concurrent.ConcurrentHashMap<Int, Pair<String, String>>().apply {
         defaultCategories.forEach { put(it.id, it.name to it.colorHex) }
-        put(94, "网盘资源" to "16B176")
+        defaultSubCategories.filter { it.isVerifiedFromServer }.forEach { put(it.id, it.name to it.colorHex) }
         put(49, "公告" to "F1592A")
         put(123, "悬赏" to "C4B512")
         put(30, "活动" to "38571A")
         put(124, "模板" to "04A407")
-        put(20, "开发调优, Lv1" to "32C3C3")
-        put(21, "资源荟萃, Lv1" to "12A89D")
-        put(45, "福利羊毛, Lv1" to "E45735")
-        put(52, "前沿快讯, Lv1" to "BB8FCE")
-        put(64, "开发调优, Lv2" to "32C3C3")
-        put(72, "前沿快讯, Lv2" to "BB8FCE")
-        put(88, "资源荟萃, Lv2" to "12A89D")
     }
 
     private val categoryIconLookup = java.util.concurrent.ConcurrentHashMap<String, String>().apply {
-        defaultCategories.forEach { meta ->
+        (defaultCategories + defaultSubCategories).forEach { meta ->
             meta.icon?.let { put(meta.name, it) }
         }
         put("网盘资源", "hard-drive")
@@ -699,7 +1035,7 @@ object LinuxDoRepository {
     }
 
     private val categoryRestrictedLookup = java.util.concurrent.ConcurrentHashMap<String, Boolean>().apply {
-        defaultCategories.forEach { meta ->
+        (defaultCategories + defaultSubCategories).forEach { meta ->
             put(meta.name, meta.readRestricted)
         }
     }
@@ -711,24 +1047,29 @@ object LinuxDoRepository {
     fun resolveCategoryIconName(categoryName: String): String? {
         val trimmed = categoryName.trim()
         categoryIconLookup[trimmed]?.let { return it }
-        val base = trimmed.substringBefore(",").trim()
+        val normalizedComma = trimmed.replace(" · ", ", ")
+        categoryIconLookup[normalizedComma]?.let { return it }
+        val base = normalizedComma.substringBefore(",").trim()
         return categoryIconLookup[base]
     }
 
     fun isCategoryRestricted(categoryName: String): Boolean {
         val trimmed = categoryName.trim()
         if (trimmed.contains(", Lv", ignoreCase = true) ||
+            trimmed.contains("· Lv", ignoreCase = true) ||
             Regex("\\bLv[1-4]\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)
         ) {
             return true
         }
+        val normalizedComma = trimmed.replace(" · ", ", ")
         categoryRestrictedLookup[trimmed]?.let { if (it) return true }
-        val base = trimmed.substringBefore(",").trim()
+        categoryRestrictedLookup[normalizedComma]?.let { if (it) return true }
+        val base = normalizedComma.substringBefore(",").trim()
         return categoryRestrictedLookup[base] == true ||
             base in setOf("跳蚤市场", "深海幽域", "积分乐园", "扬帆起航", "社区孵化")
     }
 
-    private fun mergeCategoriesFromSiteRoot(root: JsonObject) {
+    internal fun mergeCategoriesFromSiteRoot(root: JsonObject) {
         (root["can_create_tag"] as? JsonPrimitive)?.booleanOrNull?.let {
             canCreateTag = it
         }
@@ -736,76 +1077,222 @@ object LinuxDoRepository {
         val mergedById = LinkedHashMap<Int, LinuxDoCategoryMeta>()
         defaultCategories.forEach { mergedById[it.id] = it }
 
-        val rawById = HashMap<Int, JsonObject>()
+        val subById = LinkedHashMap<Int, LinuxDoCategoryMeta>()
+        defaultSubCategories.forEach { subById[it.id] = it }
+
+        val rawById = LinkedHashMap<Int, JsonObject>()
         catArr.forEach { elem ->
             val cObj = elem as? JsonObject ?: return@forEach
             val id = cObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
             rawById[id] = cObj
         }
 
-        catArr.forEach { elem ->
-            val cObj = elem as? JsonObject ?: return@forEach
-            val id = cObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-            val name = cObj["name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@forEach
-            val slug = cObj["slug"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: "cat-$id"
-            val parentId = cObj["parent_category_id"]?.jsonPrimitive?.intOrNull
-            val parentObj = parentId?.let { rawById[it] }
-            val parentMeta = parentId?.let { mergedById[it] }
+        fun relocateUnverifiedIfPresent(collidingId: Int) {
+            val displaced = subById[collidingId]
+            if (displaced != null && !displaced.isVerifiedFromServer) {
+                subById.remove(collidingId)
+            }
+        }
 
+        data class PendingSubEntry(
+            val id: Int,
+            val cObj: JsonObject,
+            val preferredName: String,
+            val slug: String,
+            val rawParentId: Int?,
+            val detectedLv: Int?,
+            val basePrefix: String
+        )
+        val pendingSubs = mutableListOf<PendingSubEntry>()
+
+        // Pass 1: 处理所有一级主版块，确保子版块推断时能引用最新真实主版块名称与 slug，且绝不发生 ID 碰撞
+        for ((id, cObj) in rawById) {
+            val name = cObj["name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            val slug = cObj["slug"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: "cat-$id"
+            val rawParentId = cObj["parent_category_id"]?.jsonPrimitive?.intOrNull
+            val existingTop = mergedById[id]
+            val preferredName = if (existingTop != null && existingTop.name.any { it.code > 127 } && name.all { it.code < 128 }) {
+                existingTop.name
+            } else {
+                name
+            }
+            val lvMatch = Regex("Lv\\s*([1-4])", RegexOption.IGNORE_CASE).find(preferredName)
+            val detectedLv = lvMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+            val basePrefix = preferredName.substringBefore(",").trim()
+
+            val isSubCandidate = rawParentId != null ||
+                preferredName.startsWith("网盘资源") ||
+                (detectedLv != null && basePrefix != preferredName)
+
+            if (isSubCandidate) {
+                pendingSubs += PendingSubEntry(id, cObj, preferredName, slug, rawParentId, detectedLv, basePrefix)
+                continue
+            }
+
+            relocateUnverifiedIfPresent(id)
+            val color = cObj["color"]?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
+                ?: existingTop?.colorHex ?: "32C3C3"
+            val icon = cObj["icon"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: existingTop?.icon
+            val readRestricted = cObj["read_restricted"]?.jsonPrimitive?.booleanOrNull
+                ?: existingTop?.readRestricted ?: false
+            val desc = cObj["description_text"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: cObj["description_excerpt"]?.jsonPrimitive?.contentOrNull?.let { decodeDiscourseHtmlSnippet(it) }?.takeIf { it.isNotEmpty() }
+                ?: existingTop?.description ?: preferredName
+
+            categoryLookup[id] = preferredName to color
+            if (icon != null) categoryIconLookup[preferredName] = icon
+            categoryRestrictedLookup[preferredName] = readRestricted
+
+            mergedById[id] = LinuxDoCategoryMeta(
+                id = id,
+                name = preferredName,
+                slug = slug,
+                colorHex = color,
+                description = desc.take(28),
+                icon = icon,
+                readRestricted = readRestricted,
+                isVerifiedFromServer = true,
+                hasServerParent = false
+            )
+        }
+
+        // Pass 2: 处理二级与三级子版块（如 `资源荟萃 -> 网盘资源 -> 网盘资源, Lv1` 自动归拢至顶层主版块）
+        for (sub in pendingSubs) {
+            val id = sub.id
+            val cObj = sub.cObj
+            var rootParentId = when {
+                sub.rawParentId != null -> sub.rawParentId
+                sub.preferredName.startsWith("网盘资源") -> 14
+                sub.detectedLv != null -> mergedById.values.firstOrNull { it.name == sub.basePrefix }?.id
+                else -> null
+            }
+            // 若父分类本身也是子分类（如三级 `网盘资源, Lv1` 的 rawParentId=94），沿树向上追溯到一级主版块
+            var guard = 0
+            while (rootParentId != null && !mergedById.containsKey(rootParentId) && guard++ < 5) {
+                val parentRaw = rawById[rootParentId]
+                val upperId = parentRaw?.get("parent_category_id")?.jsonPrimitive?.intOrNull
+                if (upperId != null && upperId != rootParentId) {
+                    rootParentId = upperId
+                } else if (sub.preferredName.startsWith("网盘资源")) {
+                    rootParentId = 14
+                    break
+                } else {
+                    break
+                }
+            }
+
+            if (rootParentId == null || rootParentId == id) {
+                relocateUnverifiedIfPresent(id)
+                val existingTop = mergedById[id]
+                val color = cObj["color"]?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
+                    ?: existingTop?.colorHex ?: "32C3C3"
+                val icon = cObj["icon"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: existingTop?.icon
+                val readRestricted = cObj["read_restricted"]?.jsonPrimitive?.booleanOrNull
+                    ?: if (sub.detectedLv != null) true else (existingTop?.readRestricted ?: false)
+                val desc = cObj["description_text"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: cObj["description_excerpt"]?.jsonPrimitive?.contentOrNull?.let { decodeDiscourseHtmlSnippet(it) }?.takeIf { it.isNotEmpty() }
+                    ?: existingTop?.description ?: sub.preferredName
+                categoryLookup[id] = sub.preferredName to color
+                if (icon != null) categoryIconLookup[sub.preferredName] = icon
+                categoryRestrictedLookup[sub.preferredName] = readRestricted
+                mergedById[id] = LinuxDoCategoryMeta(
+                    id = id,
+                    name = sub.preferredName,
+                    slug = sub.slug,
+                    colorHex = color,
+                    description = desc.take(28),
+                    icon = icon,
+                    readRestricted = readRestricted,
+                    isVerifiedFromServer = true,
+                    hasServerParent = false
+                )
+                continue
+            }
+
+            val parentMeta = mergedById[rootParentId]
+            val directParentObj = sub.rawParentId?.let { rawById[it] }
+            val existingSub = subById[id]?.takeIf { it.isVerifiedFromServer }
             val rawColor = cObj["color"]?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
-            val parentColor = parentObj?.get("color")?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
+            val parentColor = directParentObj?.get("color")?.jsonPrimitive?.contentOrNull?.trim()?.removePrefix("#")?.takeIf { it.isNotEmpty() }
                 ?: parentMeta?.colorHex
             val color = when {
                 rawColor != null && !(parentColor != null && rawColor.equals("0088CC", ignoreCase = true)) -> rawColor
                 parentColor != null -> parentColor
-                else -> mergedById[id]?.colorHex ?: "32C3C3"
+                else -> existingSub?.colorHex ?: "32C3C3"
             }
             val icon = cObj["icon"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
-                ?: parentObj?.get("icon")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: (if (sub.preferredName.startsWith("网盘资源")) "hard-drive" else null)
+                ?: directParentObj?.get("icon")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
                 ?: parentMeta?.icon
-                ?: mergedById[id]?.icon
+                ?: existingSub?.icon
             val readRestricted = cObj["read_restricted"]?.jsonPrimitive?.booleanOrNull
-                ?: mergedById[id]?.readRestricted
-                ?: false
+                ?: if (sub.detectedLv != null) true else (existingSub?.readRestricted ?: false)
+            val desc = cObj["description_text"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: cObj["description_excerpt"]?.jsonPrimitive?.contentOrNull?.let { decodeDiscourseHtmlSnippet(it) }?.takeIf { it.isNotEmpty() }
+                ?: existingSub?.description ?: sub.preferredName
 
-            val desc = cObj["description_text"]?.jsonPrimitive?.contentOrNull?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?: cObj["description_excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")?.trim()
-                    ?.takeIf { it.isNotEmpty() }
-                ?: mergedById[id]?.description
-                ?: name
-            val existing = mergedById[id]
-            val preferredName = if (existing != null && existing.name.any { it.code > 127 } && name.all { it.code < 128 }) {
-                existing.name
+            categoryLookup[id] = sub.preferredName to color
+            if (icon != null) categoryIconLookup[sub.preferredName] = icon
+            categoryRestrictedLookup[sub.preferredName] = readRestricted
+
+            val computedSubLabel = when {
+                sub.preferredName.startsWith("网盘资源") && sub.detectedLv != null -> "网盘 Lv${sub.detectedLv}"
+                sub.preferredName.startsWith("网盘资源") -> "网盘"
+                sub.detectedLv != null -> "Lv${sub.detectedLv}"
+                else -> sub.preferredName.substringAfter(",", sub.preferredName).trim()
+            }
+
+            // 仅当服务端真实配置了 parent_category_id 且直接父级是一级主版块时，才允许拼接两段式 `c/{parentSlug}/{slug}/{id}.json`
+            val directParentIsTopLevel = sub.rawParentId != null &&
+                rawById[sub.rawParentId]?.get("parent_category_id")?.jsonPrimitive?.intOrNull == null
+            val serverParentSlug = if (directParentIsTopLevel) {
+                directParentObj?.get("slug")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: parentMeta?.slug
             } else {
-                name
+                null
             }
-            val existingLookup = categoryLookup[id]
-            val lookupName = if (existingLookup != null && existingLookup.first.any { it.code > 127 } && preferredName.all { it.code < 128 }) {
-                existingLookup.first
-            } else {
-                preferredName
+
+            // 移除同父级 + 同子标签的未验证默认占位项
+            val duplicateDefaultKey = subById.entries.firstOrNull { (_, v) ->
+                !v.isVerifiedFromServer && v.parentId == rootParentId && v.subLabel.equals(computedSubLabel, ignoreCase = true)
+            }?.key
+            if (duplicateDefaultKey != null) {
+                subById.remove(duplicateDefaultKey)
             }
-            categoryLookup[id] = lookupName to color
-            if (icon != null) {
-                categoryIconLookup[lookupName] = icon
-            }
-            categoryRestrictedLookup[lookupName] = readRestricted
-            if (parentId == null || mergedById.containsKey(id)) {
-                mergedById[id] = LinuxDoCategoryMeta(
-                    id = id,
-                    name = preferredName,
-                    slug = slug,
-                    colorHex = color,
-                    description = desc.take(28),
-                    icon = icon,
-                    readRestricted = readRestricted
-                )
-            }
+            // 若当前真实 ID 恰好与另一个子版块的未验证占位 ID 冲突，将该未验证占位迁移至安全负数 ID，避免误覆盖
+            relocateUnverifiedIfPresent(id)
+            mergedById.remove(id)
+
+            subById[id] = LinuxDoCategoryMeta(
+                id = id,
+                name = sub.preferredName,
+                slug = sub.slug,
+                colorHex = color,
+                description = desc.take(28),
+                icon = icon,
+                readRestricted = readRestricted,
+                parentId = rootParentId,
+                parentSlug = serverParentSlug,
+                trustLevel = sub.detectedLv,
+                subLabel = computedSubLabel,
+                isVerifiedFromServer = true,
+                hasServerParent = directParentIsTopLevel
+            )
         }
+
         if (mergedById.isNotEmpty()) {
             categories = mergedById.values.toList()
         }
+        if (subById.isNotEmpty()) {
+            subCategoriesByParentId = subById.values
+                .groupBy { it.parentId ?: 0 }
+                .mapValues { (_, list) ->
+                    list.sortedWith(compareBy({ it.trustLevel ?: 99 }, { it.name }))
+                }
+        }
+        syncedCategoriesSessionGen = UserApiKeyAuthManager.sessionGeneration
+        categoryCatalogVersion++
     }
 
     private val sharedClient: HttpClient by lazy {
@@ -820,11 +1307,52 @@ object LinuxDoRepository {
         }
     }
 
+    private val imageByteCache = object : LinkedHashMap<String, UserApiKeyAuthManager.BinaryHttpPayload>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, UserApiKeyAuthManager.BinaryHttpPayload>?): Boolean {
+            return size > 320
+        }
+    }
+    private val inFlightBinaryFetches = java.util.concurrent.ConcurrentHashMap<String, Deferred<UserApiKeyAuthManager.BinaryHttpPayload?>>()
+    private val binaryFetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private fun getCachedImagePayload(url: String): UserApiKeyAuthManager.BinaryHttpPayload? = synchronized(imageByteCache) {
+        imageByteCache[url]
+    }
+
+    private fun putCachedImagePayload(url: String, payload: UserApiKeyAuthManager.BinaryHttpPayload) {
+        if (payload.bytes.isEmpty() || payload.bytes.size > 768 * 1024) return
+        synchronized(imageByteCache) {
+            imageByteCache[url] = payload
+        }
+    }
+
+    private suspend fun fetchLinuxDoBinarySingleFlight(
+        cleanUrl: String,
+        fetcher: suspend (String) -> UserApiKeyAuthManager.BinaryHttpPayload?
+    ): UserApiKeyAuthManager.BinaryHttpPayload? {
+        getCachedImagePayload(cleanUrl)?.let { return it }
+        val deferred = inFlightBinaryFetches.computeIfAbsent(cleanUrl) {
+            binaryFetchScope.async {
+                try {
+                    val result = fetcher(cleanUrl)
+                    if (result != null && result.status in 200..299 && result.bytes.isNotEmpty()) {
+                        putCachedImagePayload(cleanUrl, result)
+                    }
+                    result
+                } finally {
+                    inFlightBinaryFetches.remove(cleanUrl)
+                }
+            }
+        }
+        return deferred.await()
+    }
+
     /**
      * Coil 图片客户端：
-     * 仅加载公开静态图片资源（头像/表情/上传图片），严禁在已挂载 Chromium WebView 的平台上通过 OkHttp (Java TLS)
-     * 携带 `cf_clearance` / `__cf_bm` / `_cfuvid` / `_t` / `_forum_session` 等指纹或会话绑定 Cookie，
-     * 防止 Cloudflare Bot Management 检测到同一 `cf_clearance` 在 BoringSSL 与 Java TLS 双栈混用而吊销通行证！
+     * 1. 在已挂载同源 Chromium WebView 的平台（Android）上，针对 `linux.do` 域名的头像/表情/帖子图片请求，
+     *    直接走同源 WebView 二进制桥接 (`webViewBinaryFetcher`)，复用 Chromium BoringSSL JA3/JA4 指纹与 `cf_clearance`、
+     *    彻底杜绝 OkHttp (Java TLS) 被 Cloudflare 拦截返回 `429 cf-mitigated: challenge` 导致头像一直灰屏的问题！
+     * 2. 同时配合内存 LRU 字节缓存与 `Cache-Control: public, max-age=604800, immutable` 响应头，让 Coil 内存与磁盘缓存 100% 命中。
      */
     val imageHttpClient: HttpClient by lazy {
         HttpClient(OkHttp) {
@@ -835,17 +1363,85 @@ object LinuxDoRepository {
                     addInterceptor { chain ->
                         val orig = chain.request()
                         val host = orig.url.host.lowercase()
-                        val builder = orig.newBuilder()
-                        if (UserApiKeyAuthManager.webViewHttpExecutor == null) {
-                            UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
-                                builder.header("User-Agent", it)
+                        val rawUrl = orig.url.toString()
+                        val cleanUrl = rawUrl
+                            .replace(Regex("([?&])_r=\\d+(&?)")) { match ->
+                                val prefix = match.groupValues[1]
+                                val suffix = match.groupValues[2]
+                                when {
+                                    prefix == "?" && suffix == "&" -> "?"
+                                    prefix == "&" && suffix == "&" -> "&"
+                                    else -> ""
+                                }
                             }
+                            .trimEnd('?', '&')
+
+                        if (host == "linux.do" || host.endsWith(".linux.do")) {
+                            getCachedImagePayload(cleanUrl)?.let { cached ->
+                                val mediaType = cached.contentType.ifBlank { "image/png" }.toMediaTypeOrNull()
+                                return@addInterceptor okhttp3.Response.Builder()
+                                    .request(orig)
+                                    .protocol(okhttp3.Protocol.HTTP_2)
+                                    .code(200)
+                                    .message("OK")
+                                    .header("Content-Type", cached.contentType.ifBlank { "image/png" })
+                                    .header("Cache-Control", "public, max-age=604800, immutable")
+                                    .body(cached.bytes.toResponseBody(mediaType))
+                                    .build()
+                            }
+                            val binaryFetcher = UserApiKeyAuthManager.webViewBinaryFetcher
+                            if (binaryFetcher != null) {
+                                val payload = kotlinx.coroutines.runBlocking {
+                                    fetchLinuxDoBinarySingleFlight(cleanUrl, binaryFetcher)
+                                }
+                                if (payload != null && payload.status in 200..299 && payload.bytes.isNotEmpty()) {
+                                    val mediaType = payload.contentType.ifBlank { "image/png" }.toMediaTypeOrNull()
+                                    return@addInterceptor okhttp3.Response.Builder()
+                                        .request(orig)
+                                        .protocol(okhttp3.Protocol.HTTP_2)
+                                        .code(payload.status)
+                                        .message("OK")
+                                        .header("Content-Type", payload.contentType.ifBlank { "image/png" })
+                                        .header("Cache-Control", "public, max-age=604800, immutable")
+                                        .body(payload.bytes.toResponseBody(mediaType))
+                                        .build()
+                                }
+                                // 严格单栈隔离：已挂载同源 Chromium WebView 的平台严禁针对 linux.do 域名回落 Java TLS OkHttp，
+                                // 杜绝暴露裸 OkHttp 指纹或污染 WebView 会话。
+                                val failCode = payload?.status?.takeIf { it >= 400 } ?: 504
+                                val emptyType = "text/plain".toMediaTypeOrNull()
+                                return@addInterceptor okhttp3.Response.Builder()
+                                    .request(orig)
+                                    .protocol(okhttp3.Protocol.HTTP_2)
+                                    .code(failCode)
+                                    .message("Image bridge fetch failed")
+                                    .body(ByteArray(0).toResponseBody(emptyType))
+                                    .build()
+                            }
+                        }
+
+                        val builder = orig.newBuilder().url(cleanUrl)
+                        UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
+                            builder.header("User-Agent", it)
                         }
                         if (host == "linux.do" || host.endsWith(".linux.do")) {
                             builder.header("Referer", "https://linux.do/")
                             builder.header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
                         }
-                        chain.proceed(builder.build())
+                        val resp = chain.proceed(builder.build())
+                        if ((host == "linux.do" || host.endsWith(".linux.do")) && resp.isSuccessful) {
+                            val ct = resp.header("Content-Type").orEmpty()
+                            val bytes = resp.body?.bytes() ?: ByteArray(0)
+                            if (bytes.isNotEmpty() && !ct.contains("text/html", ignoreCase = true)) {
+                                putCachedImagePayload(cleanUrl, UserApiKeyAuthManager.BinaryHttpPayload(resp.code, ct, bytes))
+                            }
+                            val mediaType = ct.ifBlank { "image/png" }.toMediaTypeOrNull()
+                            return@addInterceptor resp.newBuilder()
+                                .header("Cache-Control", "public, max-age=604800, immutable")
+                                .body(bytes.toResponseBody(mediaType))
+                                .build()
+                        }
+                        resp
                     }
                 }
             }
@@ -923,7 +1519,9 @@ object LinuxDoRepository {
         val winningCookies = CookieSentinel.resolveWinningCookies()
         val rawT = winningCookies["_t"]?.value.orEmpty()
         val hasWebCookie = rawT.isNotBlank() && rawT != "demo_session_token"
-        val isLoggedIn = hasWebCookie
+        val apiKey = UserApiKeyAuthManager.getApiKey()?.takeIf { it.isNotBlank() }
+        val hasApiKey = apiKey != null
+        val isLoggedIn = hasWebCookie || hasApiKey
         val presenceHeaders = UserPresenceService.buildPresenceHeaders(
             isBackgroundTimingRequest = extraHeaders["Discourse-Background"] == "true",
             isLoggedIn = isLoggedIn
@@ -932,9 +1530,10 @@ object LinuxDoRepository {
             put("Accept", "application/json")
             put("X-Requested-With", "XMLHttpRequest")
             presenceHeaders.forEach { (k, v) -> put(k, v) }
-            // 仅当不存在 Web 会话 Cookie 且无 WebView 执行器时才附带 User-Api-Key
-            if (!hasWebCookie && UserApiKeyAuthManager.webViewHttpExecutor == null) {
-                UserApiKeyAuthManager.getApiKey()?.let { put("User-Api-Key", it) }
+            // 当不存在 Web 会话 Cookie 且持有有效 User-Api-Key 时，附带 User-Api-Key 与 User-Api-Client-Id（含 WebView 通道）
+            if (!hasWebCookie && apiKey != null) {
+                put("User-Api-Key", apiKey)
+                put("User-Api-Client-Id", UserApiKeyAuthManager.getClientId())
             }
             extraHeaders.forEach { (k, v) -> put(k, v) }
         }
@@ -986,7 +1585,7 @@ object LinuxDoRepository {
                     .filterNot { UserApiKeyAuthManager.webViewHttpExecutor != null && it.key in cfTlsBoundCookies }
                     .joinToString("; ") { "${it.key}=${it.value.value}" }
                 val requestHeaders = mergedHeaders.toMutableMap()
-                if (!hasWebCookie) {
+                if (!hasWebCookie && !hasApiKey) {
                     requestHeaders.remove("Discourse-Logged-In")
                 }
                 UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
@@ -1070,8 +1669,35 @@ object LinuxDoRepository {
      * - 若直连兑换成功返回 `true`（直接完成登录），若被拦截则返回 `false` 交由 WebView 兜底。
      */
     suspend fun redeemOtpSilently(otp: String): Boolean = withContext(Dispatchers.IO) {
-        if (otp.isBlank()) return@withContext false
+        if (otp.isBlank()) {
+            if (!UserApiKeyAuthManager.getApiKey().isNullOrBlank()) {
+                val profile = fetchCurrentUserProfile()
+                if (profile != null || UserApiKeyAuthManager.isAuthorized()) {
+                    UserApiKeyAuthManager.persistSessionQuietly()
+                    UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+                    return@withContext true
+                }
+            }
+            return@withContext false
+        }
         try {
+            if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
+                val otpRes = executeHttp(
+                    url = "https://linux.do/session/otp/${otp.trim()}",
+                    method = "POST",
+                    formParams = emptyMap(),
+                    preserveFailure = true
+                )
+                if (otpRes != null && CookieSentinel.resolveWinningCookies(targetHost = "linux.do").containsKey("_t")) {
+                    UserApiKeyAuthManager.clearApiKeyQuietly()
+                    val profile = fetchCurrentUserProfile()
+                    UserApiKeyAuthManager.persistSessionQuietly()
+                    UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+                    return@withContext profile != null || UserApiKeyAuthManager.isAuthorized()
+                }
+                return@withContext false
+            }
+
             val initialCookie = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
             val csrfResp = sharedClient.get("https://linux.do/session/csrf.json") {
                 header("Accept", "application/json")
@@ -1107,14 +1733,132 @@ object LinuxDoRepository {
             }
 
             if (CookieSentinel.resolveWinningCookies(targetHost = "linux.do").containsKey("_t")) {
-                fetchCurrentUserProfile()
+                UserApiKeyAuthManager.clearApiKeyQuietly()
+                val profile = fetchCurrentUserProfile()
+                UserApiKeyAuthManager.persistSessionQuietly()
                 UserApiKeyAuthManager.onAuthStateChanged?.invoke()
-                return@withContext true
+                return@withContext profile != null || UserApiKeyAuthManager.isAuthorized()
             }
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
         } catch (t: Throwable) {
             println("LinDoAuth: redeemOtpSilently failed: ${t.message}")
         }
         false
+    }
+
+    private fun parseFollowPostsIntoTopicSummaries(
+        postsArr: JsonArray,
+        filterCategoryId: Int? = null,
+        filterTag: String? = null
+    ): List<TopicSummary> {
+        val seenTopicIds = HashSet<Int>()
+        val summaries = mutableListOf<TopicSummary>()
+        val cleanTagFilter = filterTag?.trim()?.takeIf { it.isNotEmpty() }
+        postsArr.forEach { elem ->
+            val pObj = elem as? JsonObject ?: return@forEach
+            val topicObj = pObj["topic"] as? JsonObject
+            val tid = pObj["topic_id"]?.jsonPrimitive?.intOrNull
+                ?: topicObj?.get("id")?.jsonPrimitive?.intOrNull
+                ?: return@forEach
+            if (!seenTopicIds.add(tid)) return@forEach
+
+            val catId = pObj["category_id"]?.jsonPrimitive?.intOrNull
+                ?: topicObj?.get("category_id")?.jsonPrimitive?.intOrNull
+                ?: 4
+            if (filterCategoryId != null) {
+                val catParent = findCategoryById(catId)?.parentId
+                if (catId != filterCategoryId && catParent != filterCategoryId) return@forEach
+            }
+            val tags = parseTagsArray((topicObj?.get("tags") as? JsonArray) ?: (pObj["tags"] as? JsonArray))
+            if (cleanTagFilter != null && tags.none { it.equals(cleanTagFilter, ignoreCase = true) }) {
+                return@forEach
+            }
+
+            val (catName, catColor) = resolveCategoryMeta(catId)
+            val userObj = pObj["user"] as? JsonObject
+            val uid = userObj?.get("id")?.jsonPrimitive?.intOrNull
+                ?: pObj["user_id"]?.jsonPrimitive?.intOrNull
+                ?: 0
+            val uname = userObj?.get("username")?.jsonPrimitive?.contentOrNull
+                ?: pObj["username"]?.jsonPrimitive?.contentOrNull
+                ?: "linuxdo"
+            val avatarTpl = userObj?.get("avatar_template")?.jsonPrimitive?.contentOrNull
+                ?: pObj["avatar_template"]?.jsonPrimitive?.contentOrNull
+                ?: ""
+            cacheUserAvatar(uname, avatarTpl)
+            val poster = TopicUser(
+                id = uid,
+                username = uname,
+                name = userObj?.get("name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
+                avatarTemplate = avatarTpl,
+                animatedAvatar = userObj?.get("animated_avatar")?.jsonPrimitive?.contentOrNull,
+                primaryGroupName = userObj?.get("primary_group_name")?.jsonPrimitive?.contentOrNull,
+                flairName = userObj?.get("flair_name")?.jsonPrimitive?.contentOrNull,
+                flairUrl = userObj?.get("flair_url")?.jsonPrimitive?.contentOrNull,
+                flairBgColor = userObj?.get("flair_bg_color")?.jsonPrimitive?.contentOrNull,
+                flairColor = userObj?.get("flair_color")?.jsonPrimitive?.contentOrNull,
+                flairGroupId = userObj?.get("flair_group_id")?.jsonPrimitive?.intOrNull,
+                trustLevel = userObj?.get("trust_level")?.jsonPrimitive?.intOrNull ?: 1,
+                admin = userObj?.get("admin")?.jsonPrimitive?.booleanOrNull ?: false,
+                moderator = userObj?.get("moderator")?.jsonPrimitive?.booleanOrNull ?: false
+            )
+
+            val postNumber = pObj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
+            val rawPostsCount = topicObj?.get("posts_count")?.jsonPrimitive?.intOrNull
+                ?: postNumber.coerceAtLeast(1)
+            val rawHighest = maxOf(
+                topicObj?.get("highest_post_number")?.jsonPrimitive?.intOrNull ?: rawPostsCount,
+                postNumber,
+                rawPostsCount
+            )
+            val rawTitle = topicObj?.get("title")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: pObj["title"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: topicObj?.get("fancy_title")?.jsonPrimitive?.contentOrNull?.let { decodeDiscourseHtmlSnippet(it) }?.takeIf { it.isNotBlank() }
+                ?: "话题 #$tid"
+            val fancyTitle = topicObj?.get("fancy_title")?.jsonPrimitive?.contentOrNull.orEmpty()
+            val slug = topicObj?.get("slug")?.jsonPrimitive?.contentOrNull
+                ?: pObj["slug"]?.jsonPrimitive?.contentOrNull
+                ?: ""
+            val rawExcerpt = pObj["excerpt"]?.jsonPrimitive?.contentOrNull
+                ?: pObj["cooked"]?.jsonPrimitive?.contentOrNull
+            val cleanedExcerpt = extractPlainExcerptFromHtml(rawExcerpt).takeIf { it.isNotBlank() }
+                ?.also { putBounded(topicExcerptCache, tid, it) }
+                ?: topicExcerptCache[tid]?.takeIf { it.isNotBlank() }
+            val createdIso = pObj["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val confirmedFloor = serverConfirmedReadFloor[tid]
+            val rawUnseen = topicObj?.get("unseen")?.jsonPrimitive?.booleanOrNull ?: false
+            val effectiveUnseen = if (confirmedFloor != null && confirmedFloor >= 1) false else rawUnseen
+
+            summaries.add(
+                TopicSummary(
+                    id = tid,
+                    title = rawTitle,
+                    fancyTitle = fancyTitle,
+                    slug = slug,
+                    postsCount = rawPostsCount,
+                    highestPostNumber = rawHighest,
+                    replyCount = topicObj?.get("reply_count")?.jsonPrimitive?.intOrNull ?: (rawPostsCount - 1).coerceAtLeast(0),
+                    views = topicObj?.get("views")?.jsonPrimitive?.intOrNull ?: 0,
+                    likeCount = topicObj?.get("like_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    categoryId = catId,
+                    categoryName = catName,
+                    categoryColorHex = catColor,
+                    tags = tags,
+                    excerpt = cleanedExcerpt,
+                    pinned = topicObj?.get("pinned")?.jsonPrimitive?.booleanOrNull ?: false,
+                    unseen = effectiveUnseen,
+                    unreadPosts = 0,
+                    hasAcceptedAnswer = topicObj?.get("has_accepted_answer")?.jsonPrimitive?.booleanOrNull ?: false,
+                    lastPostedAt = formatRelativeTime(createdIso).ifBlank { "1m" },
+                    createdAtIso = createdIso,
+                    lastPostedAtIso = createdIso,
+                    originalPoster = poster,
+                    participantAvatars = listOf(poster)
+                )
+            )
+        }
+        return summaries
     }
 
     /**
@@ -1131,20 +1875,124 @@ object LinuxDoRepository {
         topPeriod: String? = null,
         background: Boolean = false
     ): List<TopicSummary> = withContext(Dispatchers.IO) {
+        val sortMode = path.trimStart('/').substringBefore('?').removeSuffix(".json").lowercase()
+        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
+        if (sortMode == "follow") {
+            if (!UserApiKeyAuthManager.isAuthorized()) {
+                throw ApiReadException(ApiFailureKind.Authentication)
+            }
+            val uname = UserApiKeyAuthManager.currentUser?.username?.takeIf {
+                it.isNotBlank() && it != "linuxdo_user"
+            } ?: fetchCurrentUserProfile(background = background)?.username?.takeIf {
+                it.isNotBlank() && it != "linuxdo_user"
+            } ?: throw ApiReadException(ApiFailureKind.Authentication)
+
+            val cleanPage = page.coerceAtLeast(0)
+            val cursorPrefix = "${uname.trim().lowercase()}:"
+            val cursorQuery = if (cleanPage == 0) {
+                followFeedCursors.keys.removeIf { it.startsWith(cursorPrefix) }
+                ""
+            } else {
+                val cursor = followFeedCursors["$cursorPrefix$cleanPage"]?.takeIf { it.isNotBlank() }
+                    ?: return@withContext emptyList()
+                "&created_before=${encodeUrlSegment(cursor)}"
+            }
+            if (!background) {
+                markForegroundPriority(2_200L)
+            }
+            val primaryUrl = "https://linux.do/follow/posts/${encodeUrlSegment(uname)}.json?limit=30$cursorQuery"
+            val primaryRes = executeHttp(url = primaryUrl, extraHeaders = headers, preserveFailure = true)
+            val effectiveRes = if (primaryRes?.first == 404) {
+                val offsetParam = if (cleanPage > 0) "?offset=${cleanPage * 20}" else ""
+                val feedFallback = executeHttp(
+                    url = "https://linux.do/u/${encodeUrlSegment(uname)}/follow/feed.json$offsetParam",
+                    extraHeaders = headers,
+                    preserveFailure = true
+                )
+                if (feedFallback?.first == 404) {
+                    val pageQuery = if (cleanPage > 0) "?no_definitions=true&page=$cleanPage" else "?no_definitions=true"
+                    executeHttp(
+                        url = "https://linux.do/follow.json$pageQuery",
+                        extraHeaders = headers,
+                        preserveFailure = true
+                    ) ?: feedFallback
+                } else {
+                    feedFallback ?: primaryRes
+                }
+            } else {
+                primaryRes
+            }
+
+            val root = readApiObject(effectiveRes)
+            val postsArr = (root["posts"] as? JsonArray) ?: (root["feed"] as? JsonArray)
+            if (postsArr != null) {
+                val hasMore = (root["extras"] as? JsonObject)?.get("has_more")?.jsonPrimitive?.booleanOrNull == true
+                val lastCreatedAt = (postsArr.lastOrNull() as? JsonObject)
+                    ?.get("created_at")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val nextKey = "$cursorPrefix${cleanPage + 1}"
+                if (hasMore && lastCreatedAt != null) {
+                    followFeedCursors[nextKey] = lastCreatedAt
+                } else {
+                    followFeedCursors.remove(nextKey)
+                }
+                return@withContext parseFollowPostsIntoTopicSummaries(
+                    postsArr = postsArr,
+                    filterCategoryId = categoryId,
+                    filterTag = tag
+                )
+            }
+            if (root["topic_list"] is JsonObject) {
+                val parsed = parseTopicListRoot(root)
+                return@withContext parsed.filter { item ->
+                    val catOk = categoryId == null || item.categoryId == categoryId ||
+                        findCategoryById(item.categoryId)?.parentId == categoryId
+                    val tagOk = tag.isNullOrBlank() || item.tags.any { it.equals(tag.trim(), ignoreCase = true) }
+                    catOk && tagOk
+                }
+            }
+            throw ApiReadException(ApiFailureKind.InvalidPayload)
+        }
+
+        val sortSuffix = if (sortMode in setOf("top", "new", "unread", "hot")) "/l/$sortMode.json" else ".json"
+
         val basePath = when {
             !tag.isNullOrBlank() -> {
-                val encodedTag = java.net.URLEncoder.encode(tag.trim(), "UTF-8")
-                "tag/$encodedTag.json"
+                val encodedTag = encodeUrlSegment(tag.trim())
+                "tag/$encodedTag$sortSuffix"
             }
             categoryId != null -> {
-                val cat = categories.firstOrNull { it.id == categoryId }
-                if (cat != null) "c/${cat.slug}/${cat.id}.json" else "c/$categoryId.json"
+                var cat = findCategoryById(categoryId)
+                if (cat != null && !cat.isVerifiedFromServer && syncedCategoriesSessionGen != UserApiKeyAuthManager.sessionGeneration) {
+                    val origParent = cat.parentId
+                    val origSubLabel = cat.subLabel
+                    runCatching { syncSiteCategories() }
+                    cat = findCategoryById(categoryId)
+                        ?: origParent?.let { pid ->
+                            subCategoriesByParentId[pid]?.firstOrNull { it.subLabel == origSubLabel }
+                        }
+                }
+                if (cat != null && !cat.isVerifiedFromServer && cat.readRestricted) {
+                    val deniedReason = if (!UserApiKeyAuthManager.isAuthorized()) {
+                        "该版块需登录后访问"
+                    } else {
+                        "当前信任等级暂无权访问该版块"
+                    }
+                    throw ApiReadException(ApiFailureKind.PermissionDenied, customMessage = deniedReason)
+                }
+                val catPrefix = when {
+                    cat == null -> "c/$categoryId"
+                    cat.hasServerParent && !cat.parentSlug.isNullOrBlank() && !cat.slug.contains("/") ->
+                        "c/${cat.parentSlug}/${cat.slug}/${cat.id}"
+                    cat.isVerifiedFromServer -> "c/${cat.slug}/${cat.id}"
+                    else -> "c/${cat.id}"
+                }
+                "$catPrefix$sortSuffix"
             }
             else -> path
         }
 
         val queryParams = mutableListOf("no_definitions=true")
-        if (basePath.startsWith("top") && !topPeriod.isNullOrBlank()) {
+        if (sortMode == "top" && !topPeriod.isNullOrBlank()) {
             queryParams.add("period=$topPeriod")
         }
         if (page > 0) {
@@ -1155,15 +2003,9 @@ object LinuxDoRepository {
         }
         val sep = if (basePath.contains("?")) "&" else "?"
         val url = "https://linux.do/${basePath.trimStart('/')}$sep${queryParams.joinToString("&")}"
-        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         val root = readApiObject(executeHttp(url = url, extraHeaders = headers, preserveFailure = true))
         (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
-        val initialList = parseTopicListRoot(root)
-        if (background || UserApiKeyAuthManager.uiCompactFeed || isRateLimitedNow()) {
-            initialList
-        } else {
-            hydrateFirstScreenExcerptsAndPrefetchRest(initialList)
-        }
+        parseTopicListRoot(root)
     }
 
     /**
@@ -1198,7 +2040,7 @@ object LinuxDoRepository {
         }
         val queryParts = mutableListOf<String>()
         if (trackVisit) queryParts.add("track_visit=true")
-        if (!filterUsername.isNullOrBlank()) queryParts.add("username_filters=$filterUsername")
+        if (!filterUsername.isNullOrBlank()) queryParts.add("username_filters=${encodeUrlSegment(filterUsername)}")
         val querySuffix = if (queryParts.isNotEmpty()) "?${queryParts.joinToString("&")}" else ""
         val pathSegment = if (targetPostNumber != null && targetPostNumber > 1) {
             "$topicId/$targetPostNumber.json"
@@ -1215,10 +2057,6 @@ object LinuxDoRepository {
             emptyMap()
         }
 
-        if (trackVisit) {
-            markTopicRead(topicId, s?.postsCount ?: 1)
-        }
-
         val res = executeHttp(url = url, method = "GET", extraHeaders = extraHeaders, preserveFailure = true)
         val statusCode = res?.first ?: 0
         val text = res?.second
@@ -1227,16 +2065,9 @@ object LinuxDoRepository {
                 val root = json.parseToJsonElement(text).jsonObject
                 val detail = parseLiveTopicDetail(root, summaryFallback)
                 if (detail.posts.isNotEmpty()) {
-                    val highest = maxOf(detail.postsCount, detail.highestPostNumber ?: 0, s?.postsCount ?: 1)
-                    if (trackVisit) {
-                        markTopicRead(topicId, highest)
-                        val immediateTimings = LinkedHashMap<Int, Int>().apply {
-                            put(1, 1200)
-                            detail.posts.firstOrNull()?.postNumber?.let { put(it, 1200) }
-                            detail.posts.lastOrNull()?.postNumber?.let { put(it, 1200) }
-                            put(highest, 1200)
-                        }
-                        ScreenTrackEngine.consolidateBatch(topicId, 1200, immediateTimings)
+                    val serverLastRead = detail.lastReadPostNumber
+                    if (serverLastRead != null && serverLastRead > 0) {
+                        recordServerConfirmedReadFloor(topicId, serverLastRead, notify = true)
                     }
                     return@withContext detail
                 }
@@ -1244,12 +2075,12 @@ object LinuxDoRepository {
             }
         }
 
-        val isJsonError = text?.trimStart()?.let { it.startsWith("{") || it.startsWith("[") } == true
+        val isCfChallenge = looksLikeCloudflareChallenge(text)
         val specificError = when {
             statusCode in listOf(404, 410) -> "这篇话题已不可用"
-            statusCode == 403 && isJsonError -> "当前账号暂无访问该话题的权限（可能属于高信任等级或私密板块）。"
+            isCfChallenge && statusCode in listOf(403, 429, 503) -> "需要完成站点验证"
             statusCode == 401 -> "登录已失效"
-            statusCode == 403 -> "需要完成站点验证"
+            statusCode == 403 -> extractActionErrorMessage(res, "当前账号暂无访问该话题的权限")
             statusCode == 429 -> "请求太频繁，请稍后再试"
             statusCode in 500..599 -> "服务暂时不可用"
             else -> "网络连接失败"
@@ -1315,50 +2146,90 @@ object LinuxDoRepository {
     suspend fun fetchCurrentUserProfile(background: Boolean = false): UserFullProfileSummary? = withContext(Dispatchers.IO) {
         val generation = UserApiKeyAuthManager.sessionGeneration
         val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
-        var currentUsername = UserApiKeyAuthManager.currentUser?.username?.takeIf {
-            it.isNotBlank() && it != "linuxdo_user"
-        }
-        var userId = UserApiKeyAuthManager.currentUser?.userId ?: 0
-        var displayName = UserApiKeyAuthManager.currentUser?.displayName ?: ""
-        var avatarUrl = UserApiKeyAuthManager.currentUser?.avatarTemplate ?: ""
-        var animatedAvatar = UserApiKeyAuthManager.currentUser?.animatedAvatar
-        var trustLevel = UserApiKeyAuthManager.currentUser?.trustLevel ?: 1
-        var title = UserApiKeyAuthManager.currentUser?.userTitle ?: ""
-        var unreadNotifs = 0
+        val cachedAccount = UserApiKeyAuthManager.currentUser
 
-        // 1. 探测 /session/current.json 获取最权威的当前登录态
-        val sessionRes = executeHttp("https://linux.do/session/current.json", extraHeaders = headers)
-        if (sessionRes != null && sessionRes.second.trimStart().startsWith("{")) {
-            try {
-                val root = json.parseToJsonElement(sessionRes.second).jsonObject
-                val cu = root["current_user"] as? JsonObject
-                if (cu != null) {
-                    userId = cu["id"]?.jsonPrimitive?.intOrNull ?: userId
-                    currentUsername = cu["username"]?.jsonPrimitive?.contentOrNull ?: currentUsername
-                    displayName = cu["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                        ?: currentUsername ?: displayName
-                    val rawTpl = cu["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
-                    if (rawTpl.isNotBlank()) {
-                        avatarUrl = LinuxDoSiteRules.resolveUrl(rawTpl)
-                    }
-                    animatedAvatar = LinuxDoSiteRules.resolveAnimatedAvatarUrl(
-                        cu["animated_avatar"]?.jsonPrimitive?.contentOrNull) ?: animatedAvatar
-                    trustLevel = cu["trust_level"]?.jsonPrimitive?.intOrNull ?: trustLevel
-                    title = cu["title"]?.jsonPrimitive?.contentOrNull ?: title
-                    unreadNotifs = cu["unread_notifications"]?.jsonPrimitive?.intOrNull
-                        ?: cu["all_unread_notifications_count"]?.jsonPrimitive?.intOrNull ?: 0
-                }
-            } catch (_: Throwable) {
+        // 1. 探测 /session/current.json 获取最权威的当前登录态（严禁在 401/403/404 或 current_user=null 时回退到匿名 /u/{username}.json 维持僵尸登录态）
+        val sessionRes = executeHttp(
+            url = "https://linux.do/session/current.json",
+            extraHeaders = headers,
+            preserveFailure = true
+        ) ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+
+        val sessionStatus = sessionRes.first
+        val sessionBody = sessionRes.second
+        val sessionTrimmed = sessionBody.trimStart()
+        val isCfChallenge = looksLikeCloudflareChallenge(sessionBody)
+
+        if (sessionStatus == 401 || sessionStatus == 404) {
+            UserApiKeyAuthManager.handleServerAuthInvalidated()
+            return@withContext null
+        }
+        if (sessionStatus == 403 && !isCfChallenge) {
+            val errorType = if (sessionTrimmed.startsWith("{")) {
+                runCatching {
+                    json.parseToJsonElement(sessionTrimmed).jsonObject["error_type"]?.jsonPrimitive?.contentOrNull
+                }.getOrNull()
+            } else null
+            if (errorType == "not_logged_in") {
+                UserApiKeyAuthManager.handleServerAuthInvalidated()
+                return@withContext null
             }
+            return@withContext UserApiKeyAuthManager.fullProfileCache
+        }
+        if (sessionStatus !in 200..299 || isCfChallenge || !sessionTrimmed.startsWith("{")) {
+            return@withContext UserApiKeyAuthManager.fullProfileCache
         }
 
-        val uname = currentUsername?.takeIf { it.isNotBlank() && it != "linuxdo_user" } ?: return@withContext null
+        val sessionRoot = runCatching { json.parseToJsonElement(sessionTrimmed).jsonObject }.getOrNull()
+            ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+        val cuElement = sessionRoot["current_user"]
+        if (cuElement == null || cuElement is JsonNull) {
+            UserApiKeyAuthManager.handleServerAuthInvalidated()
+            return@withContext null
+        }
+        val cu = cuElement as? JsonObject ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+
+        var userId = cu["id"]?.jsonPrimitive?.intOrNull ?: (cachedAccount?.userId ?: 0)
+        val currentUsername = cu["username"]?.jsonPrimitive?.contentOrNull?.takeIf {
+            it.isNotBlank() && it != "linuxdo_user"
+        } ?: run {
+            UserApiKeyAuthManager.handleServerAuthInvalidated()
+            return@withContext null
+        }
+        val sameCachedUser = cachedAccount?.username?.equals(currentUsername, ignoreCase = true) == true
+        var displayName = cu["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: (if (sameCachedUser) cachedAccount?.displayName else null)
+            ?: currentUsername
+        val rawSessionTpl = cu["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        var avatarUrl = if (rawSessionTpl.isNotBlank()) {
+            LinuxDoSiteRules.resolveUrl(rawSessionTpl)
+        } else if (sameCachedUser) {
+            cachedAccount?.avatarTemplate.orEmpty()
+        } else {
+            ""
+        }
+        var animatedAvatar = LinuxDoSiteRules.resolveAnimatedAvatarUrl(
+            cu["animated_avatar"]?.jsonPrimitive?.contentOrNull
+        ) ?: if (sameCachedUser) cachedAccount?.animatedAvatar else null
+        var trustLevel = cu["trust_level"]?.jsonPrimitive?.intOrNull
+            ?: (if (sameCachedUser) cachedAccount?.trustLevel else null)
+            ?: 1
+        var title = cu["title"]?.jsonPrimitive?.contentOrNull
+            ?: (if (sameCachedUser) cachedAccount?.userTitle else null).orEmpty()
+        val unreadNotifs = cu["unread_notifications"]?.jsonPrimitive?.intOrNull
+            ?: cu["all_unread_notifications_count"]?.jsonPrimitive?.intOrNull ?: 0
+
+        val uname = currentUsername
 
         var bioExcerpt = ""
         var primaryGroupName: String? = null
         var admin = false
         var moderator = false
         var createdAtText = ""
+        var location = ""
+        var websiteName = ""
+        var websiteUrl = ""
+        var statusText = ""
         var badgeCount = 0
         var topBadges = emptyList<GrantedBadge>()
         var flair = FlairInfo()
@@ -1375,9 +2246,10 @@ object LinuxDoRepository {
 
 
         // 2 & 3. 并发拉取 /u/{username}.json 与 /u/{username}/summary.json，将个人中心同步耗时缩短 50%+
+        val encodedUname = encodeUrlSegment(uname)
         val (userRes, summaryRes) = coroutineScope {
-            val dUser = async { executeHttp("https://linux.do/u/$uname.json", extraHeaders = headers) }
-            val dSummary = async { executeHttp("https://linux.do/u/$uname/summary.json", extraHeaders = headers) }
+            val dUser = async { executeHttp("https://linux.do/u/$encodedUname.json", extraHeaders = headers) }
+            val dSummary = async { executeHttp("https://linux.do/u/$encodedUname/summary.json", extraHeaders = headers) }
             dUser.await() to dSummary.await()
         }
 
@@ -1397,7 +2269,8 @@ object LinuxDoRepository {
                     trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: trustLevel
                     title = uObj["title"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: title
                     bioExcerpt = uObj["bio_excerpt"]?.jsonPrimitive?.contentOrNull
-                        ?.replace(Regex("<[^>]+>"), "")?.trim()
+                        ?.let { decodeDiscourseHtmlSnippet(it) }
+                        ?.takeIf { it.isNotEmpty() }
                         ?: uObj["bio_raw"]?.jsonPrimitive?.contentOrNull?.trim()
                         ?: ""
                     primaryGroupName = uObj["primary_group_name"]?.jsonPrimitive?.contentOrNull
@@ -1406,6 +2279,14 @@ object LinuxDoRepository {
                     badgeCount = uObj["badge_count"]?.jsonPrimitive?.intOrNull ?: 0
                     topBadges = BadgeInjector.readFeaturedBadges(root, uObj)
                     flair = parseFlair(uObj)
+                    location = uObj["location"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    websiteUrl = uObj["website"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    websiteName = (uObj["website_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        ?: websiteUrl.takeIf { it.isNotBlank() }).orEmpty().trim()
+                    val statusObj = uObj["status"] as? JsonObject
+                    if (statusObj != null) {
+                        statusText = statusObj["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    }
                     val createdIso = uObj["created_at"]?.jsonPrimitive?.contentOrNull
                     if (!createdIso.isNullOrBlank() && createdIso.length >= 10) {
                         createdAtText = createdIso.substring(0, 10)
@@ -1438,7 +2319,7 @@ object LinuxDoRepository {
             }
         }
 
-        // 同步更新全局登录用户状态（修正 Lv.3 等真实等级与真实头像）
+        // 同步更新全局登录用户状态（注意：Guest -> 登录态转换时 recordWebSessionLogin 会合法递增 sessionGeneration）
         if (generation != UserApiKeyAuthManager.sessionGeneration) return@withContext null
         UserApiKeyAuthManager.recordWebSessionLogin(
             username = uname,
@@ -1474,10 +2355,18 @@ object LinuxDoRepository {
             postCount = postCount,
             badgeCount = maxOf(badgeCount, topBadges.sumOf { it.count.coerceAtLeast(1) }),
             unreadNotifications = unreadNotifs,
+            location = location,
+            websiteName = websiteName,
+            websiteUrl = websiteUrl,
+            statusText = statusText,
             badges = topBadges,
             flair = flair
         )
-        if (generation != UserApiKeyAuthManager.sessionGeneration) return@withContext null
+        if (!UserApiKeyAuthManager.isAuthorized() ||
+            !UserApiKeyAuthManager.currentUser?.username.equals(uname, ignoreCase = true)
+        ) {
+            return@withContext null
+        }
         UserApiKeyAuthManager.fullProfileCache = fullProfile
         fullProfile
     }
@@ -1586,13 +2475,56 @@ object LinuxDoRepository {
             if (!raw.isNullOrBlank()) return@withContext raw
         }
         if (topicId != null && topicId > 0 && postNumber != null && postNumber > 0) {
-            val rawRes = executeHttp("https://linux.do/raw/$topicId/$postNumber", method = "GET")
-            if (rawRes != null && rawRes.first in 200..299 && !rawRes.second.trimStart().startsWith("<!DOCTYPE", ignoreCase = true)) {
-                val text = rawRes.second.trim()
-                if (text.isNotEmpty()) return@withContext text
+            val rawRes = executeHttp(
+                url = "https://linux.do/raw/$topicId/$postNumber",
+                method = "GET",
+                extraHeaders = mapOf("Accept" to "text/plain"),
+                preserveFailure = true
+            )
+            if (rawRes != null && rawRes.first in 200..299 && !looksLikeCloudflareChallenge(rawRes.second)) {
+                val trimmedStart = rawRes.second.trimStart()
+                if (!trimmedStart.startsWith("<!DOCTYPE", ignoreCase = true) &&
+                    !trimmedStart.startsWith("<html", ignoreCase = true)
+                ) {
+                    val text = rawRes.second.trim()
+                    if (text.isNotEmpty()) return@withContext text
+                }
             }
         }
         null
+    }
+
+    /**
+     * 更新话题标题、所属分类与标签 (`PUT /t/-/{topicId}.json`)
+     */
+    suspend fun updateTopicMetadata(
+        topicId: Int,
+        title: String,
+        categoryId: Int?,
+        tags: List<String> = emptyList()
+    ): Boolean = withContext(Dispatchers.IO) {
+        val cleanTags = tags.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val params = buildMap {
+            put("title", title.trim())
+            if (categoryId != null && categoryId > 0) {
+                put("category_id", categoryId.toString())
+            }
+            if (cleanTags.isEmpty()) {
+                put("tags[0]", "")
+            } else {
+                cleanTags.forEachIndexed { idx, tag ->
+                    put("tags[$idx]", tag)
+                }
+            }
+        }
+        val res = executeHttp(
+            url = "https://linux.do/t/-/$topicId.json",
+            method = "PUT",
+            formParams = params,
+            preserveFailure = true
+        ) ?: throw ApiReadException(ApiFailureKind.Connection)
+        requireMutationObject(res)
+        true
     }
 
     /**
@@ -1625,6 +2557,23 @@ object LinuxDoRepository {
         val route = if (bookmarked) "bookmark" else "remove_bookmarks"
         requireMutationSuccess(executeHttp("https://linux.do/t/$topicId/$route.json", "PUT", emptyMap(), preserveFailure = true))
         true
+    }
+
+    /**
+     * 按书签 ID 删除单条个人书签 (`DELETE /bookmarks/{bookmarkId}.json`)
+     */
+    suspend fun deleteBookmark(bookmarkId: Int): Boolean = withContext(Dispatchers.IO) {
+        if (bookmarkId <= 0) return@withContext false
+        val res = executeHttp(
+            url = "https://linux.do/bookmarks/$bookmarkId.json",
+            method = "DELETE",
+            preserveFailure = true
+        ) ?: return@withContext false
+        if (res.first in 200..299) {
+            return@withContext true
+        }
+        runCatching { readApiObject(res) }
+        false
     }
 
     suspend fun archivePrivateMessage(topicId: Int, archived: Boolean = true): Boolean = withContext(Dispatchers.IO) {
@@ -1708,13 +2657,7 @@ object LinuxDoRepository {
                 }
                 val cleanFancyTitle = obj["fancy_title"]?.jsonPrimitive?.contentOrNull
                     ?.takeIf { it.isNotBlank() }
-                    ?.replace(Regex("<[^>]+>"), "")
-                    ?.replace("&quot;", "\"")
-                    ?.replace("&#39;", "'")
-                    ?.replace("&lt;", "<")
-                    ?.replace("&gt;", ">")
-                    ?.replace("&amp;", "&")
-                    ?.trim()
+                    ?.let { decodeDiscourseHtmlSnippet(it) }
                     ?.takeIf { it.isNotBlank() }
                 val rawTopicTitle = dataObj?.get("topic_title")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     ?: cleanFancyTitle
@@ -1744,6 +2687,9 @@ object LinuxDoRepository {
                     ?: dataObj?.get("acting_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     ?: dataObj?.get("original_user_avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     ?: primaryActorUsername?.let { getCachedUserAvatar(it) }
+                if (!primaryActorUsername.isNullOrBlank() && !actingAvatarTemplate.isNullOrBlank()) {
+                    cacheUserAvatar(primaryActorUsername, actingAvatarTemplate)
+                }
                 val excerpt = cleanSearchSnippet(rawExcerpt)
                 UserNotificationItem(
                     id = id,
@@ -1763,28 +2709,7 @@ object LinuxDoRepository {
                     chatChannelId = chatChannelId
                 )
             }
-            val missingAvatarUsers = parsedItems
-                .filter { it.actingAvatarTemplate.isNullOrBlank() && it.actorUsername != null }
-                .mapNotNull { it.actorUsername }
-                .distinctBy { it.lowercase() }
-                .take(4)
-            if (missingAvatarUsers.isNotEmpty() && !isRateLimitedNow()) {
-                withTimeoutOrNull(1400L) {
-                    coroutineScope {
-                        missingAvatarUsers.map { uname ->
-                            async { resolveUserAvatarTemplate(uname) }
-                        }.awaitAll()
-                    }
-                }
-            }
-            parsedItems.map { item ->
-                if (!item.actingAvatarTemplate.isNullOrBlank()) {
-                    item
-                } else {
-                    val resolved = item.actorUsername?.let { getCachedUserAvatar(it) }
-                    if (!resolved.isNullOrBlank()) item.copy(actingAvatarTemplate = resolved) else item
-                }
-            }
+            parsedItems
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: ApiReadException) {
@@ -1799,9 +2724,9 @@ object LinuxDoRepository {
      */
     suspend fun fetchUserActivities(username: String, filter: String? = null, offset: Int = 0): List<UserActivityItem> = withContext(Dispatchers.IO) {
         if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
-        val filterParam = if (!filter.isNullOrBlank()) "&filter=$filter" else ""
+        val filterParam = if (!filter.isNullOrBlank()) "&filter=${encodeUrlSegment(filter)}" else ""
         val cleanOffset = offset.coerceAtLeast(0)
-        val url = "https://linux.do/user_actions.json?offset=$cleanOffset&username=$username$filterParam"
+        val url = "https://linux.do/user_actions.json?offset=$cleanOffset&username=${encodeUrlSegment(username)}$filterParam"
         val res = executeHttp(url, method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
@@ -1811,9 +2736,12 @@ object LinuxDoRepository {
                 val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
                 val postId = obj["post_id"]?.jsonPrimitive?.intOrNull ?: (topicId * 10)
                 val postNumber = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
-                val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: "话题 #$topicId"
+                val title = obj["title"]?.jsonPrimitive?.contentOrNull
+                    ?.let { decodeDiscourseHtmlSnippet(it) }
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "话题 #$topicId"
                 val excerpt = obj["excerpt"]?.jsonPrimitive?.contentOrNull
-                    ?.replace(Regex("<[^>]+>"), "")?.trim() ?: ""
+                    ?.let { decodeDiscourseHtmlSnippet(it) } ?: ""
                 val actionType = obj["action_type"]?.jsonPrimitive?.intOrNull ?: 5
                 val createdAt = formatRelativeTime(obj["created_at"]?.jsonPrimitive?.contentOrNull)
                 val catId = obj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
@@ -1844,7 +2772,7 @@ object LinuxDoRepository {
     suspend fun fetchUserBookmarks(username: String, page: Int = 0): List<UserActivityItem> = withContext(Dispatchers.IO) {
         if (username.isBlank() || username == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
         val pageParam = if (page > 0) "?page=$page" else ""
-        val res = executeHttp("https://linux.do/u/$username/bookmarks.json$pageParam", method = "GET", preserveFailure = true)
+        val res = executeHttp("https://linux.do/u/${encodeUrlSegment(username)}/bookmarks.json$pageParam", method = "GET", preserveFailure = true)
             ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
@@ -1856,11 +2784,11 @@ object LinuxDoRepository {
                 val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
                 val postNumber = obj["linked_post_number"]?.jsonPrimitive?.intOrNull
                     ?: obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
-                val title = obj["title"]?.jsonPrimitive?.contentOrNull
-                    ?: obj["fancy_title"]?.jsonPrimitive?.contentOrNull
+                val title = (obj["title"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: obj["fancy_title"]?.jsonPrimitive?.contentOrNull?.let { decodeDiscourseHtmlSnippet(it) }?.takeIf { it.isNotBlank() })
                     ?: "收藏话题 #$topicId"
                 val excerpt = obj["excerpt"]?.jsonPrimitive?.contentOrNull
-                    ?.replace(Regex("<[^>]+>"), "")?.trim() ?: ""
+                    ?.let { decodeDiscourseHtmlSnippet(it) } ?: ""
                 val createdAt = formatRelativeTime(obj["created_at"]?.jsonPrimitive?.contentOrNull)
                 val catId = obj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
                 val (catName, _) = resolveCategoryMeta(catId)
@@ -1890,26 +2818,40 @@ object LinuxDoRepository {
     /**
      * 从 Discourse `/site.json` 同步动态版块目录与各版块真实的 `topic_template`（服务端配置的发帖模板）
      */
-    suspend fun syncSiteCategories(): List<LinuxDoCategoryMeta> = withContext(Dispatchers.IO) {
-        val res = executeHttp("https://linux.do/site.json", method = "GET")
-        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
-            try {
-                val root = json.parseToJsonElement(res.second).jsonObject
-                mergeCategoriesFromSiteRoot(root)
-                val map = mutableMapOf<Int, String>()
-                (root["categories"] as? JsonArray)?.forEach { cElem ->
-                    val cObj = cElem as? JsonObject ?: return@forEach
-                    val id = cObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    val tpl = cObj["topic_template"]?.jsonPrimitive?.contentOrNull?.trim() ?: ""
-                    if (tpl.isNotEmpty()) {
-                        map[id] = tpl
-                    }
-                }
-                cachedCategoryTemplates = map
-            } catch (_: Throwable) {
-            }
+    suspend fun syncSiteCategories(force: Boolean = false): List<LinuxDoCategoryMeta> = withContext(Dispatchers.IO) {
+        val currentGen = UserApiKeyAuthManager.sessionGeneration
+        val now = System.currentTimeMillis()
+        val ttlMs = 24L * 60L * 60L * 1000L
+        if (!force && syncedCategoriesSessionGen == currentGen && now - categoriesLastSyncedAtMs in 0 until ttlMs) {
+            return@withContext categories
         }
-        categories
+        siteCategoriesSyncMutex.withLock {
+            val recheckGen = UserApiKeyAuthManager.sessionGeneration
+            val recheckNow = System.currentTimeMillis()
+            if (!force && syncedCategoriesSessionGen == recheckGen && recheckNow - categoriesLastSyncedAtMs in 0 until ttlMs) {
+                return@withLock categories
+            }
+            val res = executeHttp("https://linux.do/site.json", method = "GET")
+            if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
+                try {
+                    val root = json.parseToJsonElement(res.second).jsonObject
+                    mergeCategoriesFromSiteRoot(root)
+                    val map = mutableMapOf<Int, String>()
+                    (root["categories"] as? JsonArray)?.forEach { cElem ->
+                        val cObj = cElem as? JsonObject ?: return@forEach
+                        val id = cObj["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                        val tpl = cObj["topic_template"]?.jsonPrimitive?.contentOrNull?.trim() ?: ""
+                        if (tpl.isNotEmpty()) {
+                            map[id] = tpl
+                        }
+                    }
+                    cachedCategoryTemplates = map
+                    categoriesLastSyncedAtMs = System.currentTimeMillis()
+                } catch (_: Throwable) {
+                }
+            }
+            categories
+        }
     }
 
     suspend fun fetchCategoryTopicTemplate(categoryId: Int): String? = withContext(Dispatchers.IO) {
@@ -1991,18 +2933,7 @@ object LinuxDoRepository {
 
     private fun cleanSearchSnippet(raw: String?): String {
         if (raw.isNullOrBlank()) return ""
-        return raw
-            .replace(Regex("<[^>]+>"), "")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-            .replace("&hellip;", "...")
-            .replace("&nbsp;", " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+        return decodeDiscourseHtmlSnippet(raw)
     }
 
     private fun parseSearchResponseRoot(root: JsonObject): List<CommunitySearchResult> {
@@ -2097,111 +3028,45 @@ object LinuxDoRepository {
     }
 
     /**
-     * 全局社区搜索（优先调用全量分页接口 `/search.json?q=...&page=...` 每页返回最多 50 条结果，
-     * 首页失败时自动回退 `/search/query.json?term=...` 或公开话题流兜底）
+     * 全局社区搜索（统一走官方全量分页接口 `/search.json?q=...&page=...` 每页最多 50 条，
+     * 严禁在被限流或拦截时级联并发请求 4 个公开话题流接口加剧 429 风控）
      */
+    suspend fun searchCommunityPage(
+        query: String,
+        order: String? = null,
+        page: Int = 1
+    ): SearchPageResult = withContext(Dispatchers.IO) {
+        val cleanQ = query.trim()
+        if (cleanQ.isBlank()) return@withContext SearchPageResult(items = emptyList(), hasMore = false)
+        val safePage = page.coerceAtLeast(1)
+        val fullQuery = if (!order.isNullOrBlank()) "$cleanQ order:$order" else cleanQ
+        val encoded = java.net.URLEncoder.encode(fullQuery, "UTF-8")
+        val endpoint = "https://linux.do/search.json?q=$encoded&page=$safePage"
+        try {
+            val root = readApiObject(executeHttp(endpoint, method = "GET", preserveFailure = true))
+            val items = parseSearchResponseRoot(root)
+            val grouped = root["grouped_search_result"] as? JsonObject
+            val hasMore = grouped?.get("more_full_page_results")?.jsonPrimitive?.booleanOrNull == true
+            SearchPageResult(items = items, hasMore = hasMore)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (apiErr: ApiReadException) {
+            throw apiErr
+        } catch (err: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, err)
+        }
+    }
+
+    suspend fun searchCommunityPage(
+        query: String,
+        pageNumber: Int
+    ): SearchPageResult = searchCommunityPage(query = query, order = null, page = pageNumber)
+
     suspend fun searchCommunity(
         query: String,
         order: String? = null,
         page: Int = 1
-    ): List<CommunitySearchResult> = withContext(Dispatchers.IO) {
-        val cleanQ = query.trim()
-        if (cleanQ.isBlank()) return@withContext emptyList()
-        val safePage = page.coerceAtLeast(1)
-        val fullQuery = if (!order.isNullOrBlank()) "$cleanQ order:$order" else cleanQ
-        val encoded = java.net.URLEncoder.encode(fullQuery, "UTF-8")
-
-        // 始终优先请求全站搜索分页接口 /search.json（单页返回 50 条），避免默认命中仅返回 5 条预览的 /search/query.json
-        val endpoints = if (safePage == 1) {
-            listOf(
-                "https://linux.do/search.json?q=$encoded&page=1",
-                "https://linux.do/search/query.json?term=$encoded"
-            )
-        } else {
-            listOf(
-                "https://linux.do/search.json?q=$encoded&page=$safePage"
-            )
-        }
-
-        var lastApiError: ApiReadException? = null
-        var receivedValidResults = false
-        for (endpoint in endpoints) {
-            try {
-                val root = readApiObject(executeHttp(endpoint, method = "GET", preserveFailure = true))
-                val parsed = parseSearchResponseRoot(root)
-                if (parsed.isNotEmpty()) return@withContext parsed
-                receivedValidResults = true
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (apiErr: ApiReadException) {
-                if (lastApiError == null || apiErr.kind != ApiFailureKind.Connection) {
-                    lastApiError = apiErr
-                }
-            } catch (err: Exception) {
-                lastApiError = ApiReadException(ApiFailureKind.InvalidPayload, err)
-            }
-        }
-        if (receivedValidResults) return@withContext emptyList()
-
-        // 若因未登录 / Cloudflare 搜索接口 403 / 429 限流导致主搜索接口被拦截，自动通过公开话题流 (latest + top + tag) 进行兜底检索
-        if (lastApiError?.kind in setOf(ApiFailureKind.Authentication, ApiFailureKind.Verification, ApiFailureKind.RateLimited)) {
-            val fallbackPool = LinkedHashMap<Int, TopicSummary>()
-            runCatching {
-                fetchTopics("latest.json").forEach { fallbackPool[it.id] = it }
-            }
-            runCatching {
-                fetchTopics("top.json", topPeriod = "weekly").forEach { fallbackPool.putIfAbsent(it.id, it) }
-            }
-            if (!cleanQ.contains(" ") && cleanQ.length <= 16) {
-                runCatching {
-                    fetchTopics("latest.json", tag = cleanQ.removePrefix("#")).forEach { fallbackPool.putIfAbsent(it.id, it) }
-                }
-            }
-            if (fallbackPool.isNotEmpty()) {
-                val keywords = cleanQ.lowercase()
-                    .removePrefix("@")
-                    .removePrefix("#")
-                    .split(Regex("\\s+"))
-                    .filter { it.isNotBlank() }
-                val matched = fallbackPool.values.filter { t ->
-                    val hay = buildString {
-                        append(t.title).append(' ')
-                        append(t.excerpt.orEmpty()).append(' ')
-                        append(t.originalPoster.username).append(' ')
-                        append(t.originalPoster.name.orEmpty()).append(' ')
-                        append(t.categoryName).append(' ')
-                        t.tags.forEach { append(it).append(' ') }
-                    }.lowercase()
-                    keywords.all { kw -> hay.contains(kw) }
-                }
-                val sorted = when (order) {
-                    "latest" -> matched
-                    "likes" -> matched.sortedByDescending { it.likeCount }
-                    else -> matched.sortedByDescending {
-                        val titleHit = if (it.title.contains(cleanQ, ignoreCase = true)) 10000 else 0
-                        titleHit + it.likeCount * 3 + it.postsCount
-                    }
-                }
-                return@withContext sorted.map { t ->
-                    CommunitySearchResult(
-                        topicId = t.id,
-                        postNumber = 1,
-                        title = t.title,
-                        blurb = t.excerpt.orEmpty().ifBlank { t.tags.joinToString(" ") { "#$it" } },
-                        username = t.originalPoster.username,
-                        avatarTemplate = t.originalPoster.avatarTemplate,
-                        createdAtText = t.lastPostedAt,
-                        categoryName = t.categoryName,
-                        categoryColorHex = t.categoryColorHex,
-                        likeCount = t.likeCount,
-                        postsCount = t.postsCount
-                    )
-                }
-            }
-        }
-
-        throw lastApiError ?: ApiReadException(ApiFailureKind.Connection)
-    }
+    ): List<CommunitySearchResult> = searchCommunityPage(query = query, order = order, page = page).items
 
     /**
      * 一键将全部未读通知标记为已读 (`PUT /notifications/mark-read.json`)
@@ -2211,6 +3076,23 @@ object LinuxDoRepository {
             url = "https://linux.do/notifications/mark-read.json",
             method = "PUT",
             formParams = emptyMap()
+        )
+        val ok = res != null && res.first in 200..299
+        if (ok) {
+            UserApiKeyAuthManager.updateCachedUnreadNotifications(0)
+        }
+        ok
+    }
+
+    /**
+     * 将单条未读通知标记为已读 (`PUT /notifications/mark-read.json` + `id`)
+     */
+    suspend fun markSingleNotificationRead(notificationId: Int): Boolean = withContext(Dispatchers.IO) {
+        if (notificationId <= 0) return@withContext false
+        val res = executeHttp(
+            url = "https://linux.do/notifications/mark-read.json",
+            method = "PUT",
+            formParams = mapOf("id" to notificationId.toString())
         )
         res != null && res.first in 200..299
     }
@@ -2372,8 +3254,13 @@ object LinuxDoRepository {
         val uname = uObj?.get("username")?.jsonPrimitive?.contentOrNull
             ?: bObj["username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo"
         val dName = uObj?.get("name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-        val rawAvatar = uObj?.get("avatar_template")?.jsonPrimitive?.contentOrNull
-            ?: bObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
+        val rawAvatar = uObj?.get("avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: bObj["avatar_template"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: getCachedUserAvatar(uname)
+            ?: ""
+        if (rawAvatar.isNotBlank()) {
+            cacheUserAvatar(uname, rawAvatar)
+        }
         val avatarUrl = if (rawAvatar.isNotBlank()) LinuxDoSiteRules.resolveUrl(rawAvatar) else ""
         val account = UserApiKeyAuthManager.currentUser
         val isMine = if (uid > 0 && account != null && account.userId > 0) uid == account.userId
@@ -2581,7 +3468,7 @@ object LinuxDoRepository {
             else -> "private-messages"
         }
         val pageParam = if (page > 0) "?page=$page" else ""
-        val res = executeHttp("https://linux.do/topics/$mailbox/$username.json$pageParam", method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
+        val res = executeHttp("https://linux.do/topics/$mailbox/${encodeUrlSegment(username)}.json$pageParam", method = "GET", preserveFailure = true) ?: throw ApiReadException(ApiFailureKind.Connection)
         try {
             val root = readApiObject(res)
             (root["topic_list"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)).requireArray("topics")
@@ -2595,6 +3482,70 @@ object LinuxDoRepository {
         }
     }
 
+    internal fun normalizePrivateMessageRecipients(rawRecipients: String): String {
+        return rawRecipients
+            .split(Regex("[,，;；\\s]+"))
+            .map { it.trim().trimStart('@').trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .joinToString(",")
+    }
+
+    /**
+     * 发送站内私信并返回完整结果（含 `enqueued` 待审队列识别与服务端 422 校验错误透传）
+     */
+    suspend fun sendPrivateMessageDetailed(
+        targetUsernames: String,
+        title: String,
+        rawMarkdown: String,
+        draftKey: String? = null
+    ): PrivateMessageSendResult = withContext(Dispatchers.IO) {
+        val normalizedRecipients = normalizePrivateMessageRecipients(targetUsernames)
+        if (normalizedRecipients.isEmpty()) {
+            return@withContext PrivateMessageSendResult(errorMessage = "请至少填写一位有效的收件人用户名")
+        }
+        val params = buildMap {
+            put("title", title.trim())
+            put("raw", rawMarkdown)
+            put("archetype", "private_message")
+            put("target_recipients", normalizedRecipients)
+            if (!draftKey.isNullOrBlank()) {
+                put("draft_key", draftKey)
+            }
+        }
+        try {
+            val res = executeHttp(
+                url = "https://linux.do/posts.json",
+                method = "POST",
+                formParams = params,
+                preserveFailure = true
+            ) ?: return@withContext PrivateMessageSendResult(
+                errorMessage = ApiReadException(ApiFailureKind.Connection).message ?: "网络连接失败"
+            )
+            val obj = requireMutationObject(res)
+            val isEnqueued = obj["action"]?.jsonPrimitive?.contentOrNull == "enqueued" ||
+                (obj["pending_post"] != null && obj["pending_post"] !is JsonNull)
+            if (isEnqueued) {
+                return@withContext PrivateMessageSendResult(enqueued = true)
+            }
+            val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull
+                ?: (obj["post"] as? JsonObject)?.get("topic_id")?.jsonPrimitive?.intOrNull
+            if (topicId != null && topicId > 0) {
+                PrivateMessageSendResult(topicId = topicId)
+            } else {
+                PrivateMessageSendResult(errorMessage = "私信已提交，但未获取到会话编号，请刷新私信箱查看")
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (mutErr: ApiMutationException) {
+            PrivateMessageSendResult(errorMessage = mutErr.message ?: "私信发送失败，请检查内容后重试")
+        } catch (readErr: ApiReadException) {
+            PrivateMessageSendResult(errorMessage = readErr.message)
+        } catch (t: Throwable) {
+            PrivateMessageSendResult(errorMessage = t.message?.takeIf { it.isNotBlank() } ?: "私信发送失败，请稍后重试")
+        }
+    }
+
     /**
      * 发送站内私信 (`POST /posts.json` with `archetype=private_message`)
      */
@@ -2602,28 +3553,12 @@ object LinuxDoRepository {
         targetUsernames: String,
         title: String,
         raw: String
-    ): Int? = withContext(Dispatchers.IO) {
-        val params = mapOf(
-            "title" to title.trim(),
-            "raw" to raw,
-            "archetype" to "private_message",
-            "target_recipients" to targetUsernames.trim()
-        )
-        val res = executeHttp(
-            url = "https://linux.do/posts.json",
-            method = "POST",
-            formParams = params, preserveFailure = true
-        ) ?: throw ApiReadException(ApiFailureKind.Connection)
-        requireMutationObject(res)
-        if (res.first in 200..299 && res.second.trimStart().startsWith("{")) {
-            return@withContext try {
-                val obj = json.parseToJsonElement(res.second).jsonObject
-                obj["topic_id"]?.jsonPrimitive?.intOrNull
-            } catch (_: Throwable) {
-                null
-            }
+    ): Int? {
+        val result = sendPrivateMessageDetailed(targetUsernames = targetUsernames, title = title, rawMarkdown = raw)
+        if (result.errorMessage != null) {
+            throw ApiMutationException(result.errorMessage)
         }
-        null
+        return if (result.enqueued) (result.topicId ?: 0) else result.topicId
     }
 
     /**
@@ -2646,12 +3581,14 @@ object LinuxDoRepository {
         var lastSeenText = ""
         var location = ""
         var websiteName = ""
+        var websiteUrl = ""
         var statusText = ""
         var badgeCount = 0
         var topBadges = emptyList<GrantedBadge>()
         var flair = FlairInfo()
 
-        val userRes = executeHttp("https://linux.do/u/$clean.json", method = "GET") ?: return@withContext null
+        val encodedClean = encodeUrlSegment(clean)
+        val userRes = executeHttp("https://linux.do/u/$encodedClean.json", method = "GET") ?: return@withContext null
         if (userRes.second.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(userRes.second).jsonObject
@@ -2668,7 +3605,7 @@ object LinuxDoRepository {
                     trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1
                     title = uObj["title"]?.jsonPrimitive?.contentOrNull ?: ""
                     bioExcerpt = uObj["bio_excerpt"]?.jsonPrimitive?.contentOrNull
-                        ?.replace(Regex("<[^>]+>"), "")?.trim() ?: ""
+                        ?.let { decodeDiscourseHtmlSnippet(it) } ?: ""
                     primaryGroupName = uObj["primary_group_name"]?.jsonPrimitive?.contentOrNull
                     admin = uObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false
                     moderator = uObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false
@@ -2676,8 +3613,9 @@ object LinuxDoRepository {
                     topBadges = BadgeInjector.readFeaturedBadges(root, uObj)
                     flair = parseFlair(uObj)
                     location = uObj["location"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    websiteUrl = uObj["website"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                     websiteName = (uObj["website_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                        ?: uObj["website"]?.jsonPrimitive?.contentOrNull)?.trim().orEmpty()
+                        ?: websiteUrl.takeIf { it.isNotBlank() })?.trim().orEmpty()
                     val statusObj = uObj["status"] as? JsonObject
                     if (statusObj != null) {
                         val statusDesc = statusObj["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -2709,7 +3647,7 @@ object LinuxDoRepository {
         var solvedCount = 0
 
 
-        val summaryRes = executeHttp("https://linux.do/u/$clean/summary.json", method = "GET")
+        val summaryRes = executeHttp("https://linux.do/u/$encodedClean/summary.json", method = "GET")
         if (summaryRes != null && summaryRes.second.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(summaryRes.second).jsonObject
@@ -2760,6 +3698,7 @@ object LinuxDoRepository {
             lastSeenText = lastSeenText,
             location = location,
             websiteName = websiteName,
+            websiteUrl = websiteUrl,
             statusText = statusText,
             solvedCount = solvedCount,
             badges = topBadges,
@@ -2767,23 +3706,35 @@ object LinuxDoRepository {
         )
     }
 
+    suspend fun updateUserTitleResult(
+        username: String,
+        title: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") {
+            return@withContext Result.failure(ApiReadException(ApiFailureKind.Authentication))
+        }
+        try {
+            val res = executeHttp(
+                url = "https://linux.do/u/${encodeUrlSegment(targetUsername)}.json",
+                method = "PUT",
+                formParams = mapOf("title" to title.trim()),
+                preserveFailure = true
+            )
+            requireMutationSuccess(res)
+            fetchCurrentUserProfile()
+            Result.success(Unit)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
     suspend fun updateUserTitle(
         username: String,
         title: String
-    ): Boolean = withContext(Dispatchers.IO) {
-        val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
-        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext false
-        val res = executeHttp(
-            url = "https://linux.do/u/$targetUsername.json",
-            method = "PUT",
-            formParams = mapOf("title" to title.trim())
-        )
-        if (res != null && res.first in 200..299) {
-            fetchCurrentUserProfile()
-            return@withContext true
-        }
-        false
-    }
+    ): Boolean = updateUserTitleResult(username = username, title = title).isSuccess
 
     private fun parseUserBadgesFromRoot(root: JsonObject): List<GrantedBadge> {
         val badges = BadgeInjector.readBadgeDefinitions(root["badges"]).associateBy { it.id }
@@ -2823,7 +3774,11 @@ object LinuxDoRepository {
         }
         try {
             val cfTlsBoundCookies = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
-            val cookieHeader = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+            val winningCookies = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+            val rawT = winningCookies["_t"]?.value.orEmpty()
+            val hasWebCookie = rawT.isNotBlank() && rawT != "demo_session_token"
+            val apiKey = UserApiKeyAuthManager.getApiKey()?.takeIf { it.isNotBlank() }
+            val cookieHeader = winningCookies
                 .entries
                 .filterNot { it.key == "_t" && it.value.value == "demo_session_token" }
                 .filterNot { it.key in cfTlsBoundCookies }
@@ -2831,6 +3786,10 @@ object LinuxDoRepository {
             val requestHeaders = LinkedHashMap<String, String>().apply {
                 put("Accept", "application/json")
                 put("X-Requested-With", "XMLHttpRequest")
+                if (!hasWebCookie && apiKey != null) {
+                    put("User-Api-Key", apiKey)
+                    put("User-Api-Client-Id", UserApiKeyAuthManager.getClientId())
+                }
                 extraHeaders.forEach { (k, v) -> put(k, v) }
                 UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
                     put("User-Agent", it)
@@ -2921,27 +3880,37 @@ object LinuxDoRepository {
     }
 
     /** Loads the visible catalog in LinuxDo's badge-group order. */
-    suspend fun fetchAllSiteBadges(): List<GrantedBadge> = withContext(Dispatchers.IO) {
-        val root = readApiObject(executeHttp("https://linux.do/badges.json", method = "GET", preserveFailure = true))
-        val groups = (root["badge_groupings"] as? JsonArray).orEmpty()
-            .mapNotNull { it as? JsonObject }
-            .associateBy { it["id"]?.jsonPrimitive?.intOrNull }
-        val result = root.requireArray("badges").mapNotNull { element ->
-            val badge = element as? JsonObject ?: return@mapNotNull null
-            if (badge["listable"]?.jsonPrimitive?.booleanOrNull == false ||
-                badge["enabled"]?.jsonPrimitive?.booleanOrNull == false) return@mapNotNull null
-            val parsed = BadgeInjector.parseGrantedBadge(badge)
-            parsed.copy(
-                isEarned = false,
-                badgeGroupingName = groups[parsed.badgeGroupingId]?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
-            )
-        }.distinctBy { it.id }.sortedBy { badge ->
-            groups[badge.badgeGroupingId]?.get("position")?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE
+    suspend fun fetchAllSiteBadges(force: Boolean = false): List<GrantedBadge> = withContext(Dispatchers.IO) {
+        val ttlMs = 24L * 60L * 60L * 1000L
+        if (!force && cachedSiteBadges.isNotEmpty() && System.currentTimeMillis() - badgesLastSyncedAtMs in 0 until ttlMs) {
+            return@withContext cachedSiteBadges
         }
-        if (result.isNotEmpty()) {
-            cachedSiteBadges = result
+        siteBadgesSyncMutex.withLock {
+            if (!force && cachedSiteBadges.isNotEmpty() && System.currentTimeMillis() - badgesLastSyncedAtMs in 0 until ttlMs) {
+                return@withLock cachedSiteBadges
+            }
+            val root = readApiObject(executeHttp("https://linux.do/badges.json", method = "GET", preserveFailure = true))
+            val groups = (root["badge_groupings"] as? JsonArray).orEmpty()
+                .mapNotNull { it as? JsonObject }
+                .associateBy { it["id"]?.jsonPrimitive?.intOrNull }
+            val result = root.requireArray("badges").mapNotNull { element ->
+                val badge = element as? JsonObject ?: return@mapNotNull null
+                if (badge["listable"]?.jsonPrimitive?.booleanOrNull == false ||
+                    badge["enabled"]?.jsonPrimitive?.booleanOrNull == false) return@mapNotNull null
+                val parsed = BadgeInjector.parseGrantedBadge(badge)
+                parsed.copy(
+                    isEarned = false,
+                    badgeGroupingName = groups[parsed.badgeGroupingId]?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
+                )
+            }.distinctBy { it.id }.sortedBy { badge ->
+                groups[badge.badgeGroupingId]?.get("position")?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE
+            }
+            if (result.isNotEmpty()) {
+                cachedSiteBadges = result
+                badgesLastSyncedAtMs = System.currentTimeMillis()
+            }
+            result
         }
-        result
     }
 
     private fun isTodayDateMonthDay(dateStr: String?, requirePreviousYear: Boolean): Boolean {
@@ -3011,6 +3980,10 @@ object LinuxDoRepository {
         val replyToUsername = replyToUserObj?.get("username")?.jsonPrimitive?.contentOrNull
         val replyToDisplayName = replyToUserObj?.get("name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
         val replyToAvatarTemplate = replyToUserObj?.get("avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: replyToUsername?.let { getCachedUserAvatar(it) }
+        if (!replyToUsername.isNullOrBlank() && !replyToAvatarTemplate.isNullOrBlank()) {
+            cacheUserAvatar(replyToUsername, replyToAvatarTemplate)
+        }
         val reads = pObj["reads"]?.jsonPrimitive?.intOrNull ?: 0
 
         val (rawParsedReactions, rawMyReactionId) = parsePostReactionsAndMine(pObj)
@@ -3049,9 +4022,49 @@ object LinuxDoRepository {
         }
 
         val bookmarkedByMe = pObj["bookmarked"]?.jsonPrimitive?.booleanOrNull ?: false
-        val canEdit = pObj["can_edit"]?.jsonPrimitive?.booleanOrNull ?: true
+        val canEdit = pObj["can_edit"]?.jsonPrimitive?.booleanOrNull
+            ?: pObj["yours"]?.jsonPrimitive?.booleanOrNull
+            ?: false
         val canDelete = pObj["can_delete"]?.jsonPrimitive?.booleanOrNull ?: false
         val rawMarkdown = pObj["raw"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+
+        val pollsArr = pObj["polls"] as? JsonArray
+        val pollsVotesObj = pObj["polls_votes"] as? JsonObject
+        pollsArr?.forEach { pollElem ->
+            val pollObj = pollElem as? JsonObject ?: return@forEach
+            val pollName = pollObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: "poll"
+            val pollStatus = pollObj["status"]?.jsonPrimitive?.contentOrNull
+            val isClosed = pollStatus.equals("closed", ignoreCase = true)
+            val votersCount = pollObj["voters"]?.jsonPrimitive?.intOrNull
+            val votesByOption = (pollObj["options"] as? JsonArray)?.mapNotNull { optElem ->
+                val optObj = optElem as? JsonObject ?: return@mapNotNull null
+                val optId = optObj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                val optVotes = optObj["votes"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+                optId to optVotes
+            }?.toMap().orEmpty()
+            val votedIds = (pollsVotesObj?.get(pollName) as? JsonArray)
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull?.takeIf(String::isNotBlank) }
+                ?.toSet()
+                .orEmpty()
+            val snapKey = "$pid:$pollName"
+            val existingSnap = pollVoteSnapshots[snapKey]
+            val mergedIds = if (votedIds.isNotEmpty()) votedIds else existingSnap?.selectedIds.orEmpty()
+            val mergedVotes = if (votesByOption.isNotEmpty()) votesByOption else existingSnap?.optionVotes.orEmpty()
+            val mergedVoters = votersCount ?: existingSnap?.voters
+            if (mergedIds.isNotEmpty() || mergedVotes.isNotEmpty() || isClosed || mergedVoters != null) {
+                putBounded(
+                    pollVoteSnapshots,
+                    snapKey,
+                    PollVoteSnapshot(
+                        selectedIds = mergedIds,
+                        optionVotes = mergedVotes,
+                        voters = mergedVoters,
+                        hasVoted = mergedIds.isNotEmpty(),
+                        closed = isClosed
+                    )
+                )
+            }
+        }
 
         val grantedBadges = parsePostGrantedBadges(pObj["badges_granted"])
 
@@ -3137,15 +4150,19 @@ object LinuxDoRepository {
             posts.firstOrNull()?.cookedHtml?.let { firstCooked ->
                 val ex = extractPlainExcerptFromHtml(firstCooked)
                 if (ex.isNotBlank()) {
-                    topicExcerptCache[id] = ex
+                    putBounded(topicExcerptCache, id, ex)
                 }
             }
         }
 
+        val detailsObj = root["details"] as? JsonObject
+        val notifLevel = detailsObj?.get("notification_level")?.jsonPrimitive?.intOrNull ?: 1
+        val canEditTopic = detailsObj?.get("can_edit")?.jsonPrimitive?.booleanOrNull == true
         return TopicDetailModel(
             id = id,
             title = title,
-            originalPosterUsername = (root["details"] as? JsonObject)?.get("created_by")?.let { (it as? JsonObject)?.get("username")?.jsonPrimitive?.contentOrNull },
+            originalPosterUsername = detailsObj?.get("created_by")?.let { (it as? JsonObject)?.get("username")?.jsonPrimitive?.contentOrNull },
+            categoryId = categoryId,
             categoryName = catName,
             categoryColorHex = catColor,
             tags = tags,
@@ -3153,6 +4170,9 @@ object LinuxDoRepository {
             likeCount = likeCount,
             postsCount = postsCount,
             highestPostNumber = root["highest_post_number"]?.jsonPrimitive?.intOrNull,
+            lastReadPostNumber = lastReadPostNumber,
+            notificationLevel = notifLevel,
+            canEditTopic = canEditTopic,
             posts = posts,
             streamIds = streamIds,
             bookmarked = bookmarked
@@ -3222,19 +4242,46 @@ object LinuxDoRepository {
                 ?: tObj["created_at"]?.jsonPrimitive?.contentOrNull
 
             val rawPostsCount = tObj["posts_count"]?.jsonPrimitive?.intOrNull ?: 1
+            val rawHighest = maxOf(
+                tObj["highest_post_number"]?.jsonPrimitive?.intOrNull ?: rawPostsCount,
+                rawPostsCount
+            )
             val rawUnseen = tObj["unseen"]?.jsonPrimitive?.booleanOrNull ?: false
-            val rawUnreadPosts = tObj["unread_posts"]?.jsonPrimitive?.intOrNull ?: 0
-            val alreadyReadLocally = isTopicRead(id)
+            val rawUnreadPosts = (tObj["unread_posts"]?.jsonPrimitive?.intOrNull
+                ?: tObj["unread"]?.jsonPrimitive?.intOrNull
+                ?: tObj["new_posts"]?.jsonPrimitive?.intOrNull
+                ?: 0).coerceAtLeast(0)
+            val serverLastRead = tObj["last_read_post_number"]?.jsonPrimitive?.intOrNull
+
+            if (rawUnseen) {
+                if (serverConfirmedReadFloor.remove(id) != null) {
+                    bumpReadTopicsVersion()
+                }
+            } else if (serverLastRead != null && serverLastRead > 0) {
+                val localConfirmed = serverConfirmedReadFloor[id] ?: 0
+                if (serverLastRead >= localConfirmed) {
+                    recordServerConfirmedReadFloor(id, serverLastRead, notify = false, persist = false)
+                }
+            }
+
+            val confirmedFloor = serverConfirmedReadFloor[id]
+            val effectiveUnseen = if (confirmedFloor != null && confirmedFloor >= 1) false else rawUnseen
+            val effectiveUnreadPosts = when {
+                confirmedFloor != null && (serverLastRead == null || confirmedFloor > serverLastRead) ->
+                    minOf(rawUnreadPosts, (rawHighest - confirmedFloor).coerceAtLeast(0))
+                else -> rawUnreadPosts
+            }
 
             val rawExcerpt = tObj["excerpt"]?.jsonPrimitive?.contentOrNull
             val cleanedExcerpt = extractPlainExcerptFromHtml(rawExcerpt).takeIf { it.isNotBlank() }
-                ?.also { topicExcerptCache[id] = it }
+                ?.also { putBounded(topicExcerptCache, id, it) }
                 ?: topicExcerptCache[id]?.takeIf { it.isNotBlank() }
 
             TopicSummary(
                 id = id,
                 title = title,
                 postsCount = rawPostsCount,
+                highestPostNumber = rawHighest,
                 replyCount = tObj["reply_count"]?.jsonPrimitive?.intOrNull ?: 0,
                 views = tObj["views"]?.jsonPrimitive?.intOrNull ?: 0,
                 likeCount = tObj["like_count"]?.jsonPrimitive?.intOrNull ?: 0,
@@ -3245,8 +4292,8 @@ object LinuxDoRepository {
                 lastPostedAt = formatRelativeTime(lastPostedIso),
                 excerpt = cleanedExcerpt,
                 pinned = tObj["pinned"]?.jsonPrimitive?.booleanOrNull ?: false,
-                unseen = if (alreadyReadLocally) false else rawUnseen,
-                unreadPosts = if (alreadyReadLocally) 0 else rawUnreadPosts,
+                unseen = effectiveUnseen,
+                unreadPosts = effectiveUnreadPosts,
                 hasAcceptedAnswer = tObj["has_accepted_answer"]?.jsonPrimitive?.booleanOrNull ?: false,
                 originalPoster = op,
                 participantAvatars = posters
@@ -3262,7 +4309,7 @@ object LinuxDoRepository {
             it.isNotEmpty() && it != "系统" && !consolidatedCountExtractRegex.matches(it)
         } ?: return
         val cleanTpl = avatarTemplate?.trim()?.takeIf { it.isNotEmpty() } ?: return
-        userAvatarCache[cleanName] = cleanTpl
+        putBounded(userAvatarCache, cleanName, cleanTpl)
     }
 
     fun getCachedUserAvatar(username: String): String? {
@@ -3386,20 +4433,10 @@ object LinuxDoRepository {
         if (raw.isEmpty()) return ""
         val hasContentImage = raw.contains("<img", ignoreCase = true) &&
             !Regex("<img[^>]*class\\s*=\\s*[\"'][^\"']*(?:emoji|avatar)[^\"']*[\"']", RegexOption.IGNORE_CASE).containsMatchIn(raw)
-        val stripped = raw
+        val cleanedHtml = raw
             .replace(Regex("<aside[\\s\\S]*?</aside>", RegexOption.IGNORE_CASE), " ")
             .replace(Regex("<div[^>]*class\\s*=\\s*[\"'][^\"']*meta[^\"']*[\"'][\\s\\S]*?</div>", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("<[^>]+>"), " ")
-            .replace("&nbsp;", " ")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&")
-            .replace("&hellip;", "...")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+        val stripped = decodeDiscourseHtmlSnippet(cleanedHtml)
         return when {
             stripped.isNotEmpty() -> if (stripped.length > 160) stripped.take(160) + "..." else stripped
             hasContentImage -> "[图片]"
@@ -3512,10 +4549,13 @@ object LinuxDoRepository {
      * - 话题阅读进度游标 (`last_read_post_number`)
      */
     suspend fun sendTopicTimings(batch: ConsolidatedTimingBatch): Int? = withContext(Dispatchers.IO) {
-        val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || CookieSentinel.resolveWinningCookies().containsKey("_t")
+        val winningCookies = CookieSentinel.resolveWinningCookies()
+        val rawT = winningCookies["_t"]?.value.orEmpty()
+        val hasWebCookie = rawT.isNotBlank() && rawT != "demo_session_token"
+        val hasApiKey = !UserApiKeyAuthManager.getApiKey().isNullOrBlank()
+        val isLoggedIn = UserApiKeyAuthManager.isAuthorized() || hasWebCookie || hasApiKey
         if (!isLoggedIn) {
-            // 未绑定账号时返回 200 交由本地会话统计维护
-            return@withContext 200
+            return@withContext null
         }
 
         val headers = UserPresenceService.buildPresenceHeaders(isBackgroundTimingRequest = true, isLoggedIn = true)
@@ -3524,20 +4564,25 @@ object LinuxDoRepository {
             put("topic_time", batch.topicTimeMs.toString())
             batch.timingsMs.forEach { (number, milliseconds) -> put("timings[$number]", milliseconds.toString()) }
         }
-        executeHttp(
+        val statusCode = executeHttp(
             url = "https://linux.do/topics/timings",
             method = "POST",
             formParams = params,
             extraHeaders = headers,
             preserveFailure = true
         )?.first
+        if (statusCode != null && statusCode in 200..299) {
+            val maxConfirmedFloor = batch.timingsMs.keys.maxOrNull() ?: 0
+            if (maxConfirmedFloor > 0) {
+                recordServerConfirmedReadFloor(batch.topicId, maxConfirmedFloor, notify = true)
+            }
+        }
+        statusCode
     }
 
     /**
-     * 获取 `connect.linux.do` 信任等级周期活跃度报告：
-     * 1. 优先通过同源 CookieManager WebView 通道拉取 `connect.linux.do`（支持自动跟随 `/login` -> `linux.do/oauth2/authorize` 静默换取 Connect 会话）；
-     * 2. 次选直连 `https://connect.linux.do/` 解析 `.tl3-ring` / `.tl3-bar-item` / `<table>` 100 天滚动周期数据；
-     * 3. 当用户为 Lv.1/Lv.2（Connect 页仅展示基础欢迎信息）或尚未完成 Connect OAuth 时，基于 `/u/{username}.json` + `/u/{username}/summary.json` 真实账户数据生成精准进度报告，绝不展示假数据。
+     * 获取 `connect.linux.do` 信任等级概览（可见完整滚动周期数据请直接打开同源 `https://connect.linux.do/` WebView）：
+     * 注意：在已挂载 WebView 的平台严禁通过 OkHttp 直连 `connect.linux.do` 发送 `cf_clearance`，防止跨 TLS 栈污染会话。
      */
     suspend fun fetchConnectTrustLevelReport(): ConnectTrustLevelReport = withContext(Dispatchers.IO) {
         if (!UserApiKeyAuthManager.isAuthorized()) {
@@ -3546,27 +4591,20 @@ object LinuxDoRepository {
                 sessionPostsRead = ScreenTrackEngine.sessionPostsRead
             )
         }
-        // 1. 优先尝试平台 WebView Connect 桥接（共享 CookieManager 与 OAuth2 自动登录态）
-        try {
-            val webHtml = UserApiKeyAuthManager.webViewConnectHtmlFetcher?.invoke()
-            if (!webHtml.isNullOrBlank()) {
-                ConnectStatsParser.parseConnectHtml(webHtml)?.let { return@withContext it }
-            }
-        } catch (_: Throwable) {
-        }
 
-        // 2. 尝试 Ktor 直连 connect.linux.do
-        val client = sharedClient
-        try {
-            val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "connect.linux.do")
-            val response = client.get("https://connect.linux.do/") {
-                header("Accept", "text/html,application/xhtml+xml")
-                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
-                if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+        if (UserApiKeyAuthManager.webViewHttpExecutor == null) {
+            val client = sharedClient
+            try {
+                val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "connect.linux.do", includeCloudflareCookies = false)
+                val response = client.get("https://connect.linux.do/") {
+                    header("Accept", "text/html,application/xhtml+xml")
+                    UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
+                    if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
+                }
+                val html = response.bodyAsText()
+                ConnectStatsParser.parseConnectHtml(html)?.let { return@withContext it }
+            } catch (_: Throwable) {
             }
-            val html = response.bodyAsText()
-            ConnectStatsParser.parseConnectHtml(html)?.let { return@withContext it }
-        } catch (_: Throwable) {
         }
 
         // 3. 拉取当前登录用户的真实个人档案 (`/u/{username}.json` + `/u/{username}/summary.json`)
@@ -3597,6 +4635,102 @@ object LinuxDoRepository {
         )
     }
 
+    private fun extractRecipientsFromDraftElement(element: JsonElement?): String {
+        return when (element) {
+            is JsonPrimitive -> normalizePrivateMessageRecipients(element.contentOrNull.orEmpty())
+            is JsonArray -> {
+                val names = element.mapNotNull { item ->
+                    when (item) {
+                        is JsonPrimitive -> item.contentOrNull
+                        is JsonObject -> item["id"]?.jsonPrimitive?.contentOrNull
+                            ?: item["username"]?.jsonPrimitive?.contentOrNull
+                        else -> null
+                    }
+                }.joinToString(",")
+                normalizePrivateMessageRecipients(names)
+            }
+            else -> ""
+        }
+    }
+
+    private fun parseCloudDraftObject(
+        draftKey: String,
+        sequence: Int,
+        dObj: JsonObject?,
+        outerTitle: String = "",
+        outerCategoryId: Int? = null,
+        outerTopicId: Int? = null,
+        createdAtIso: String? = null
+    ): CloudDraftItem {
+        val isPmDraftKey = draftKey.startsWith("private_message") || draftKey.startsWith("new_private_message")
+        var title = outerTitle
+        var rawReply = ""
+        var draftCategoryId: Int? = outerCategoryId
+        var draftTags: List<String> = emptyList()
+        var replyToPostNumber: Int? = null
+        var action = when {
+            isPmDraftKey -> "privateMessage"
+            draftKey == "new_topic" -> "createTopic"
+            draftKey.startsWith("edit_post_") -> "edit"
+            else -> "reply"
+        }
+        var targetTopicId: Int? = null
+        var targetPostId: Int? = draftKey.removePrefix("edit_post_").takeIf { draftKey.startsWith("edit_post_") }?.toIntOrNull()
+        var recipients = ""
+        if (dObj != null) {
+            if (title.isBlank()) {
+                title = dObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            }
+            rawReply = dObj["reply"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (draftCategoryId == null) {
+                draftCategoryId = dObj["categoryId"]?.jsonPrimitive?.intOrNull
+                    ?: dObj["category_id"]?.jsonPrimitive?.intOrNull
+            }
+            draftTags = parseTagsArray(dObj["tags"] as? JsonArray)
+            val rawAction = dObj["action"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            action = when {
+                isPmDraftKey || rawAction == "privateMessage" -> "privateMessage"
+                draftKey.startsWith("edit_post_") -> "edit"
+                rawAction != null -> rawAction
+                else -> action
+            }
+            targetTopicId = dObj["topicId"]?.jsonPrimitive?.intOrNull
+            if (action.startsWith("edit")) {
+                targetPostId = targetPostId ?: dObj["postId"]?.jsonPrimitive?.intOrNull
+            }
+            replyToPostNumber = dObj["replyToPostNumber"]?.jsonPrimitive?.intOrNull
+                ?: if (action == "reply") dObj["postId"]?.jsonPrimitive?.intOrNull else null
+            recipients = extractRecipientsFromDraftElement(dObj["recipients"])
+                .ifBlank { extractRecipientsFromDraftElement(dObj["target_recipients"]) }
+        }
+        val topicId = outerTopicId
+            ?: targetTopicId
+            ?: draftKey.removePrefix("topic_").takeIf { draftKey.startsWith("topic_") }?.toIntOrNull()
+            ?: 0
+        val createdAt = formatRelativeTime(createdAtIso)
+        val fallbackTitle = when {
+            action == "privateMessage" -> if (recipients.isNotBlank()) "私信 @$recipients" else "未命名私信草稿"
+            topicId > 0 -> "回复话题 #$topicId"
+            else -> "未命名新话题草稿"
+        }
+        return CloudDraftItem(
+            draftKey = draftKey,
+            sequence = sequence,
+            title = title.ifBlank { fallbackTitle },
+            excerpt = rawReply.replace(Regex("<[^>]+>"), "").trim(),
+            topicId = topicId,
+            createdAtText = createdAt,
+            raw = rawReply,
+            categoryId = draftCategoryId,
+            tags = draftTags,
+            replyToPostNumber = replyToPostNumber,
+            action = action,
+            postId = targetPostId,
+            sequenceKnown = true,
+            recipients = recipients
+        )
+    }
+
     /**
      * 拉取云端草稿箱列表 (`GET /drafts.json`)
      */
@@ -3609,52 +4743,23 @@ object LinuxDoRepository {
                 val obj = elem as? JsonObject ?: return@mapNotNull null
                 val draftKey = obj["draft_key"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
                 val seq = obj["sequence"]?.jsonPrimitive?.intOrNull ?: 0
-                val dataStr = obj["data"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                var title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                var rawReply = ""
-                var draftCategoryId: Int? = obj["category_id"]?.jsonPrimitive?.intOrNull
-                var draftTags: List<String> = emptyList()
-                var replyToPostNumber: Int? = null
-                var action = if (draftKey == "new_topic") "createTopic" else if (draftKey.startsWith("edit_post_")) "edit" else "reply"
-                var targetTopicId: Int? = null
-                var targetPostId: Int? = draftKey.removePrefix("edit_post_").takeIf { draftKey.startsWith("edit_post_") }?.toIntOrNull()
-                if (dataStr.trimStart().startsWith("{")) {
-                    runCatching {
-                        val dObj = json.parseToJsonElement(dataStr).jsonObject
-                        if (title.isBlank()) {
-                            title = dObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                        }
-                        rawReply = dObj["reply"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                        if (draftCategoryId == null) {
-                            draftCategoryId = dObj["categoryId"]?.jsonPrimitive?.intOrNull
-                                ?: dObj["category_id"]?.jsonPrimitive?.intOrNull
-                        }
-                        draftTags = parseTagsArray(dObj["tags"] as? JsonArray)
-                        action = dObj["action"]?.jsonPrimitive?.contentOrNull?.takeUnless { draftKey.startsWith("edit_post_") } ?: action
-                        targetTopicId = dObj["topicId"]?.jsonPrimitive?.intOrNull
-                        if (action.startsWith("edit")) targetPostId = targetPostId ?: dObj["postId"]?.jsonPrimitive?.intOrNull
-                        replyToPostNumber = dObj["replyToPostNumber"]?.jsonPrimitive?.intOrNull
-                            ?: if (action == "reply") dObj["postId"]?.jsonPrimitive?.intOrNull else null
+                val dataElem = obj["data"]
+                val dObj: JsonObject? = when (dataElem) {
+                    is JsonObject -> dataElem
+                    is JsonPrimitive -> {
+                        val str = dataElem.contentOrNull.orEmpty().trimStart()
+                        if (str.startsWith("{")) runCatching { json.parseToJsonElement(str).jsonObject }.getOrNull() else null
                     }
+                    else -> null
                 }
-                val topicId = obj["topic_id"]?.jsonPrimitive?.intOrNull
-                    ?: targetTopicId
-                    ?: draftKey.removePrefix("topic_").toIntOrNull()
-                    ?: 0
-                val createdAt = formatRelativeTime(obj["created_at"]?.jsonPrimitive?.contentOrNull)
-                CloudDraftItem(
+                parseCloudDraftObject(
                     draftKey = draftKey,
                     sequence = seq,
-                    title = title.ifBlank { if (topicId > 0) "回复话题 #$topicId" else "未命名新话题草稿" },
-                    excerpt = rawReply.replace(Regex("<[^>]+>"), "").trim(),
-                    topicId = topicId,
-                    createdAtText = createdAt,
-                    raw = rawReply,
-                    categoryId = draftCategoryId,
-                    tags = draftTags,
-                    replyToPostNumber = replyToPostNumber,
-                    action = action,
-                    postId = targetPostId
+                    dObj = dObj,
+                    outerTitle = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    outerCategoryId = obj["category_id"]?.jsonPrimitive?.intOrNull,
+                    outerTopicId = obj["topic_id"]?.jsonPrimitive?.intOrNull,
+                    createdAtIso = obj["created_at"]?.jsonPrimitive?.contentOrNull
                 )
             }
         } catch (cancelled: CancellationException) {
@@ -3683,7 +4788,7 @@ object LinuxDoRepository {
     suspend fun toggleFollowUser(username: String, follow: Boolean = true): Boolean = withContext(Dispatchers.IO) {
         if (username.isBlank()) return@withContext false
         val res = executeHttp(
-            url = "https://linux.do/follow/${username.trim()}.json",
+            url = "https://linux.do/follow/${encodeUrlSegment(username)}.json",
             method = if (follow) "PUT" else "DELETE",
             formParams = emptyMap()
         )
@@ -3693,8 +4798,13 @@ object LinuxDoRepository {
     data class PollVoteSnapshot(
         val selectedIds: Set<String>,
         val optionVotes: Map<String, Int> = emptyMap(),
-        val voters: Int? = null
-    )
+        val voters: Int? = null,
+        val hasVoted: Boolean = selectedIds.isNotEmpty(),
+        val closed: Boolean = false
+    ) {
+        val myVotes: Set<String>
+            get() = selectedIds
+    }
 
     private val pollVoteSnapshots = java.util.concurrent.ConcurrentHashMap<String, PollVoteSnapshot>()
     fun getPollVoteSnapshot(postId: Int, pollName: String): PollVoteSnapshot? = pollVoteSnapshots["$postId:$pollName"]
@@ -3706,7 +4816,7 @@ object LinuxDoRepository {
     }
 
     /**
-     * 帖内原生投票 (`PUT /polls/vote.json`)
+     * 帖内原生投票 / 修改投票 (`PUT /polls/vote.json`)
      */
     suspend fun voteInPoll(postId: Int, pollName: String, options: List<String>): Boolean = withContext(Dispatchers.IO) {
         val params = buildMap {
@@ -3734,9 +4844,60 @@ object LinuxDoRepository {
                 id to count
             }?.toMap().orEmpty()
             val votersCount = pollObj["voters"]?.jsonPrimitive?.intOrNull
-            pollVoteSnapshots["$postId:$pollName"] = PollVoteSnapshot(confirmedIds, votesByOption, votersCount)
+            val isClosed = pollObj["status"]?.jsonPrimitive?.contentOrNull.equals("closed", ignoreCase = true)
+            putBounded(
+                pollVoteSnapshots,
+                "$postId:$pollName",
+                PollVoteSnapshot(
+                    selectedIds = confirmedIds,
+                    optionVotes = votesByOption,
+                    voters = votersCount,
+                    hasVoted = true,
+                    closed = isClosed
+                )
+            )
         }
         ok
+    }
+
+    suspend fun votePoll(postId: Int, pollName: String, options: List<String>): PollVoteSnapshot? {
+        val ok = voteInPoll(postId = postId, pollName = pollName, options = options)
+        return if (ok) getPollVoteSnapshot(postId, pollName) else null
+    }
+
+    /**
+     * 撤回帖内投票 (`DELETE /polls/vote.json`)
+     */
+    suspend fun removePollVote(postId: Int, pollName: String): PollVoteSnapshot? = withContext(Dispatchers.IO) {
+        val params = mapOf(
+            "post_id" to postId.toString(),
+            "poll_name" to pollName
+        )
+        val res = executeHttp(
+            url = "https://linux.do/polls/vote.json",
+            method = "DELETE",
+            formParams = params,
+            preserveFailure = true
+        )
+        val root = requireMutationObject(res)
+        val pollObj = (root["poll"] as? JsonObject) ?: root.takeIf { it.containsKey("options") }
+        val votesByOption = (pollObj?.get("options") as? JsonArray)?.mapNotNull { item ->
+            val obj = item as? JsonObject ?: return@mapNotNull null
+            val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val count = obj["votes"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+            id to count
+        }?.toMap().orEmpty()
+        val votersCount = pollObj?.get("voters")?.jsonPrimitive?.intOrNull
+        val isClosed = pollObj?.get("status")?.jsonPrimitive?.contentOrNull.equals("closed", ignoreCase = true)
+        val snapshot = PollVoteSnapshot(
+            selectedIds = emptySet(),
+            optionVotes = votesByOption,
+            voters = votersCount,
+            hasVoted = false,
+            closed = isClosed
+        )
+        putBounded(pollVoteSnapshots, "$postId:$pollName", snapshot)
+        snapshot
     }
 
     /**
@@ -3834,11 +4995,44 @@ object LinuxDoRepository {
      * - 话题回复：`draftKey = "topic_$topicId"`
      * 返回更新后的 `draft_sequence`
      */
-    suspend fun fetchDraftSequence(draftKey: String): Int = withContext(Dispatchers.IO) {
-        val key = java.net.URLEncoder.encode(draftKey, "UTF-8")
-        val root = readApiObject(executeHttp("https://linux.do/drafts/$key.json", preserveFailure = true))
-        root["draft_sequence"]?.jsonPrimitive?.intOrNull ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
+    /**
+     * 按 `draft_key` 查询单条云端草稿与权威 `draft_sequence` (`GET /drafts/{draftKey}.json`)
+     */
+    suspend fun fetchCloudDraftByKey(draftKey: String): RemoteDraftLookup = withContext(Dispatchers.IO) {
+        val encodedKey = encodeUrlSegment(draftKey)
+        val root = readApiObject(executeHttp("https://linux.do/drafts/$encodedKey.json", preserveFailure = true))
+        val sequence = root["draft_sequence"]?.jsonPrimitive?.intOrNull
+            ?: root["sequence"]?.jsonPrimitive?.intOrNull
+            ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
+        val draftElem = root["draft"]
+        val parsedDraft: CloudDraftItem? = when (draftElem) {
+            null, is JsonNull -> null
+            is JsonObject -> {
+                val item = parseCloudDraftObject(draftKey = draftKey, sequence = sequence, dObj = draftElem)
+                item.takeIf { it.raw.isNotBlank() || it.recipients.isNotBlank() || draftElem["title"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true }
+            }
+            is JsonPrimitive -> {
+                val rawStr = draftElem.contentOrNull?.trim().orEmpty()
+                if (rawStr.isEmpty()) {
+                    null
+                } else if (rawStr.startsWith("{")) {
+                    val dObj = runCatching { json.parseToJsonElement(rawStr).jsonObject }.getOrNull()
+                    dObj?.let { obj ->
+                        val item = parseCloudDraftObject(draftKey = draftKey, sequence = sequence, dObj = obj)
+                        val explicitTitle = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                        item.takeIf { it.raw.isNotBlank() || explicitTitle.isNotBlank() || it.recipients.isNotBlank() }
+                    }
+                } else {
+                    null
+                }
+            }
+            else -> null
+        }
+        RemoteDraftLookup(sequence = sequence, draft = parsedDraft)
     }
+
+    suspend fun fetchDraftSequence(draftKey: String): Int =
+        fetchCloudDraftByKey(draftKey).sequence
 
     suspend fun saveCloudDraft(
         draftKey: String,
@@ -3848,10 +5042,17 @@ object LinuxDoRepository {
         categoryId: Int? = null,
         tags: List<String> = emptyList(),
         replyToPostNumber: Int? = null,
-        action: String = if (draftKey == "new_topic") "createTopic" else "reply",
+        action: String = when {
+            draftKey.startsWith("private_message") || draftKey.startsWith("new_private_message") -> "privateMessage"
+            draftKey == "new_topic" -> "createTopic"
+            draftKey.startsWith("edit_post_") -> "edit"
+            else -> "reply"
+        },
         topicId: Int? = null,
-        postId: Int? = null
+        postId: Int? = null,
+        recipients: String = ""
     ): Int? = withContext(Dispatchers.IO) {
+        val normalizedRecipients = normalizePrivateMessageRecipients(recipients)
         val data = buildJsonObject {
             put("reply", replyRaw)
             put("action", action)
@@ -3861,6 +5062,9 @@ object LinuxDoRepository {
             topicId?.let { put("topicId", it) }
             postId?.let { put("postId", it) }
             replyToPostNumber?.let { put("replyToPostNumber", it) }
+            if (normalizedRecipients.isNotBlank()) {
+                put("recipients", normalizedRecipients)
+            }
         }
         val root = requireMutationObject(executeHttp(
             "https://linux.do/drafts.json", "POST", mapOf("draft_key" to draftKey,
@@ -3881,15 +5085,17 @@ object LinuxDoRepository {
     ): UploadedMediaResult? = withContext(Dispatchers.IO) {
         if (bytes.isEmpty()) return@withContext null
         val b64 = Base64.getEncoder().encodeToString(bytes)
-        val rawBody: String? = PlatformMediaPicker.webViewUploadExecutor?.invoke(fileName, mimeType, b64)?.let { (code, text) ->
-            if (code in 200..299 && text.trimStart().startsWith("{")) text else null
-        } ?: run {
-            try {
+        val webUploadExecutor = PlatformMediaPicker.webViewUploadExecutor
+        val obj: JsonObject = if (webUploadExecutor != null) {
+            val uploadRes = webUploadExecutor(fileName, mimeType, b64)
+            requireMutationObject(uploadRes)
+        } else {
+            val fallbackRes: Pair<Int, String>? = try {
                 val csrfBody = executeHttp("https://linux.do/session/csrf.json", method = "GET")?.second.orEmpty()
                 val csrf = if (csrfBody.trimStart().startsWith("{")) {
                     runCatching { json.parseToJsonElement(csrfBody).jsonObject["csrf"]?.jsonPrimitive?.contentOrNull }.getOrNull()
                 } else null
-                val cookieHeader = CookieSentinel.buildCookieHeader()
+                val cookieHeader = CookieSentinel.buildCookieHeader(includeCloudflareCookies = false)
                 val resp = sharedClient.submitFormWithBinaryData(
                     url = "https://linux.do/uploads.json",
                     formData = formData {
@@ -3908,40 +5114,50 @@ object LinuxDoRepository {
                     header("Accept", "application/json")
                     header("X-Requested-With", "XMLHttpRequest")
                     UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
-                    UserApiKeyAuthManager.getApiKey()?.let {
-                        header("User-Api-Key", it)
-                        header("User-Api-Client-Id", UserApiKeyAuthManager.getClientId())
+                    if (!CookieSentinel.resolveWinningCookies().containsKey("_t")) {
+                        UserApiKeyAuthManager.getApiKey()?.let {
+                            header("User-Api-Key", it)
+                            header("User-Api-Client-Id", UserApiKeyAuthManager.getClientId())
+                        }
                     }
                     if (!csrf.isNullOrBlank()) header("X-CSRF-Token", csrf)
                     if (cookieHeader.isNotEmpty()) header("Cookie", cookieHeader)
                 }
-                val text = resp.bodyAsText()
-                if (resp.status.value in 200..299 && text.trimStart().startsWith("{")) text else null
+                resp.status.value to resp.bodyAsText()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Throwable) {
                 null
             }
+            requireMutationObject(fallbackRes)
         }
-        if (rawBody.isNullOrBlank()) return@withContext null
         try {
-            val obj = json.parseToJsonElement(rawBody).jsonObject
             val shortUrl = obj["short_url"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val fullUrl = obj["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val targetUrl = shortUrl.ifBlank { fullUrl }
             if (targetUrl.isBlank()) return@withContext null
             val origName = obj["original_filename"]?.jsonPrimitive?.contentOrNull?.ifBlank { fileName } ?: fileName
+            val safeName = origName
+                .replace("\r", "")
+                .replace("\n", " ")
+                .replace("[", "(")
+                .replace("]", ")")
+                .replace("|", "-")
+                .trim()
+                .ifBlank { "upload" }
             val width = obj["width"]?.jsonPrimitive?.intOrNull ?: 0
             val height = obj["height"]?.jsonPrimitive?.intOrNull ?: 0
             val humanSize = obj["human_filesize"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val isImage = mimeType.startsWith("image/", ignoreCase = true) || (width > 0 && height > 0)
             val markdown = if (isImage) {
                 if (width > 0 && height > 0) {
-                    "![${origName}|${width}x${height}]($targetUrl)"
+                    "![${safeName}|${width}x${height}]($targetUrl)"
                 } else {
-                    "![${origName}]($targetUrl)"
+                    "![${safeName}]($targetUrl)"
                 }
             } else {
                 val sizeSuffix = if (humanSize.isNotBlank()) " ($humanSize)" else ""
-                "[${origName}|attachment]($targetUrl)$sizeSuffix"
+                "[${safeName}|attachment]($targetUrl)$sizeSuffix"
             }
             UploadedMediaResult(
                 originalFilename = origName,
@@ -3982,36 +5198,45 @@ object LinuxDoRepository {
     /**
      * 动态同步站点全量自定义表情包 (`GET /emojis.json`)，将飞书、B站、贴吧等官方分组注入 `LinuxDoEmojiCatalog`
      */
-    suspend fun syncSiteEmojis(): Boolean = withContext(Dispatchers.IO) {
-        if (LinuxDoEmojiCatalog.hasSyncedServerEmojis()) return@withContext true
-        val res = executeHttp(
-            url = "https://linux.do/emojis.json",
-            method = "GET"
-        ) ?: return@withContext false
-        if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withContext false
-        try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            val parsedGroups = LinkedHashMap<String, List<Pair<String, String>>>()
-            for ((groupName, groupElement) in root) {
-                val arr = groupElement as? JsonArray ?: continue
-                val pairs = arr.mapNotNull { item ->
-                    val obj = item as? JsonObject ?: return@mapNotNull null
-                    val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
-                    val url = obj["url"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
-                    if (name.isNotEmpty() && url.isNotEmpty()) name to url else null
-                }
-                if (pairs.isNotEmpty()) {
-                    parsedGroups[groupName] = pairs
-                }
+    suspend fun syncSiteEmojis(force: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+        val ttlMs = 24L * 60L * 60L * 1000L
+        if (!force && LinuxDoEmojiCatalog.hasSyncedServerEmojis() && System.currentTimeMillis() - emojisLastSyncedAtMs in 0 until ttlMs) {
+            return@withContext true
+        }
+        siteEmojisSyncMutex.withLock {
+            if (!force && LinuxDoEmojiCatalog.hasSyncedServerEmojis() && System.currentTimeMillis() - emojisLastSyncedAtMs in 0 until ttlMs) {
+                return@withLock true
             }
-            if (parsedGroups.isNotEmpty()) {
-                LinuxDoEmojiCatalog.registerDynamicServerEmojis(parsedGroups)
-                true
-            } else {
+            val res = executeHttp(
+                url = "https://linux.do/emojis.json",
+                method = "GET"
+            ) ?: return@withLock false
+            if (res.first !in 200..299 || !res.second.trimStart().startsWith("{")) return@withLock false
+            try {
+                val root = json.parseToJsonElement(res.second).jsonObject
+                val parsedGroups = LinkedHashMap<String, List<Pair<String, String>>>()
+                for ((groupName, groupElement) in root) {
+                    val arr = groupElement as? JsonArray ?: continue
+                    val pairs = arr.mapNotNull { item ->
+                        val obj = item as? JsonObject ?: return@mapNotNull null
+                        val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
+                        val url = obj["url"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
+                        if (name.isNotEmpty() && url.isNotEmpty()) name to url else null
+                    }
+                    if (pairs.isNotEmpty()) {
+                        parsedGroups[groupName] = pairs
+                    }
+                }
+                if (parsedGroups.isNotEmpty()) {
+                    LinuxDoEmojiCatalog.registerDynamicServerEmojis(parsedGroups)
+                    emojisLastSyncedAtMs = System.currentTimeMillis()
+                    true
+                } else {
+                    false
+                }
+            } catch (_: Throwable) {
                 false
             }
-        } catch (_: Throwable) {
-            false
         }
     }
 
@@ -4042,26 +5267,28 @@ object LinuxDoRepository {
     }
 
     /**
-     * 保存个人资料与偏好设置 (`PUT /u/{username}.json`)
+     * 保存个人资料与偏好设置 (`PUT /u/{username}.json`)，透传服务端校验失败原因
      */
-    suspend fun updateUserProfileInfo(
+    suspend fun updateUserProfileInfoResult(
         username: String,
-        displayName: String,
-        bioRaw: String,
-        title: String,
-        location: String = "",
-        website: String = "",
+        displayName: String? = null,
+        bioRaw: String? = null,
+        title: String? = null,
+        location: String? = null,
+        website: String? = null,
         hidePresence: Boolean? = null,
         allowPrivateMessages: Boolean? = null
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
-        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext false
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") {
+            return@withContext Result.failure(ApiReadException(ApiFailureKind.Authentication))
+        }
         val params = LinkedHashMap<String, String>().apply {
-            put("name", displayName.trim())
-            put("bio_raw", bioRaw)
-            put("title", title.trim())
-            put("location", location.trim())
-            put("website", website.trim())
+            if (displayName != null) put("name", displayName.trim())
+            if (bioRaw != null) put("bio_raw", bioRaw)
+            if (title != null) put("title", title.trim())
+            if (location != null) put("location", location.trim())
+            if (website != null) put("website", website.trim())
             if (hidePresence != null) {
                 put("hide_profile_and_presence", hidePresence.toString())
             }
@@ -4069,63 +5296,122 @@ object LinuxDoRepository {
                 put("allow_private_messages", allowPrivateMessages.toString())
             }
         }
-        val res = executeHttp(
-            url = "https://linux.do/u/$targetUsername.json",
-            method = "PUT",
-            formParams = params
-        )
-        if (res != null && res.first in 200..299) {
+        try {
+            val res = executeHttp(
+                url = "https://linux.do/u/${encodeUrlSegment(targetUsername)}.json",
+                method = "PUT",
+                formParams = params,
+                preserveFailure = true
+            )
+            requireMutationSuccess(res)
             fetchCurrentUserProfile()
-            return@withContext true
+            Result.success(Unit)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            Result.failure(t)
         }
-        false
     }
 
+    suspend fun updateUserProfileInfo(
+        username: String,
+        displayName: String? = null,
+        bioRaw: String? = null,
+        title: String? = null,
+        location: String? = null,
+        website: String? = null,
+        hidePresence: Boolean? = null,
+        allowPrivateMessages: Boolean? = null
+    ): Boolean = updateUserProfileInfoResult(
+        username = username,
+        displayName = displayName,
+        bioRaw = bioRaw,
+        title = title,
+        location = location,
+        website = website,
+        hidePresence = hidePresence,
+        allowPrivateMessages = allowPrivateMessages
+    ).isSuccess
+
     /**
-     * 读取个人账号与偏好设置 (`GET /u/{username}.json`)
+     * 读取个人账号与偏好设置 (`GET /u/{username}.json` + `/user-badges/{username}.json?grouped=true`)
      */
     suspend fun fetchUserAccountPreferences(username: String): UserAccountPreferencesSnapshot? = withContext(Dispatchers.IO) {
         val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
-        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext null
-        val res = executeHttp("https://linux.do/u/${targetUsername.trim()}.json", method = "GET") ?: return@withContext null
-        if (!res.second.trimStart().startsWith("{")) return@withContext null
-        try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            val u = root["user"] as? JsonObject ?: return@withContext null
-            val uOpt = u["user_option"] as? JsonObject
-            val badgeTitles = parseUserBadgesFromRoot(root)
-                .filter { it.allowTitle }
-                .map { it.name.trim() }
-                .filter { it.isNotEmpty() }
-            val userAuthTokens = (u["user_auth_tokens"] as? JsonArray)?.size ?: 0
-            val associatedAccounts = (u["associated_accounts"] as? JsonArray).orEmpty().mapNotNull { elem ->
-                val obj = elem as? JsonObject ?: return@mapNotNull null
-                val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                val desc = obj["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                if (name.isNotBlank()) "$name${if (desc.isNotBlank()) " ($desc)" else ""}" else null
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
+        val encodedTarget = encodeUrlSegment(targetUsername)
+        val (res, userBadgesRes) = coroutineScope {
+            val dUser = async {
+                executeHttp("https://linux.do/u/$encodedTarget.json", method = "GET", preserveFailure = true)
             }
-            UserAccountPreferencesSnapshot(
-                username = u["username"]?.jsonPrimitive?.contentOrNull ?: targetUsername,
-                displayName = u["name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                email = u["email"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                bioRaw = u["bio_raw"]?.jsonPrimitive?.contentOrNull
-                    ?: u["bio_excerpt"]?.jsonPrimitive?.contentOrNull?.replace(Regex("<[^>]+>"), "")?.trim().orEmpty(),
-                title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                location = u["location"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                website = u["website"]?.jsonPrimitive?.contentOrNull
-                    ?: u["website_name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                trustLevel = u["trust_level"]?.jsonPrimitive?.intOrNull ?: 1,
-                createdAtText = u["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty().take(10),
-                twoFactorEnabled = u["second_factor_enabled"]?.jsonPrimitive?.booleanOrNull == true,
-                hideProfileAndPresence = uOpt?.get("hide_profile_and_presence")?.jsonPrimitive?.booleanOrNull == true,
-                allowPrivateMessages = uOpt?.get("allow_private_messages")?.jsonPrimitive?.booleanOrNull != false,
-                activeDeviceCount = userAuthTokens.coerceAtLeast(1),
-                associatedAccounts = associatedAccounts,
-                availableTitles = badgeTitles.distinct()
-            )
-        } catch (_: Throwable) {
-            null
+            val dBadges = async {
+                runCatching {
+                    executeHttp("https://linux.do/user-badges/$encodedTarget.json?grouped=true", method = "GET")
+                }.getOrNull()
+            }
+            dUser.await() to dBadges.await()
         }
+        val nonNullRes = res ?: throw ApiReadException(ApiFailureKind.Connection)
+        val root = readApiObject(nonNullRes)
+        val u = root["user"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
+        val uOpt = u["user_option"] as? JsonObject
+        val badgeTitlesFromUser = parseUserBadgesFromRoot(root)
+            .filter { it.allowTitle }
+            .map { it.name.trim() }
+            .filter { it.isNotEmpty() }
+        val badgeTitlesFromEndpoint = if (userBadgesRes != null &&
+            userBadgesRes.first in 200..299 &&
+            userBadgesRes.second.trimStart().startsWith("{")
+        ) {
+            runCatching {
+                val bRoot = json.parseToJsonElement(userBadgesRes.second).jsonObject
+                val directDefs = BadgeInjector.readBadgeDefinitions(bRoot["badges"])
+                    .filter { it.allowTitle }
+                    .map { it.name.trim() }
+                val grantedDefs = parseUserBadgesFromRoot(bRoot)
+                    .filter { it.allowTitle }
+                    .map { it.name.trim() }
+                (directDefs + grantedDefs).filter { it.isNotEmpty() }
+            }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
+        val groupTitles = (u["groups"] as? JsonArray).orEmpty().mapNotNull { gElem ->
+            val gObj = gElem as? JsonObject ?: return@mapNotNull null
+            gObj["title"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+        }
+        val currentTitle = u["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val mergedTitles = buildList {
+            addAll(badgeTitlesFromEndpoint)
+            addAll(badgeTitlesFromUser)
+            addAll(groupTitles)
+            if (currentTitle.isNotEmpty()) add(currentTitle)
+        }.distinct()
+        val userAuthTokens = (u["user_auth_tokens"] as? JsonArray)?.size ?: 0
+        val associatedAccounts = (u["associated_accounts"] as? JsonArray).orEmpty().mapNotNull { elem ->
+            val obj = elem as? JsonObject ?: return@mapNotNull null
+            val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val desc = obj["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            if (name.isNotBlank()) "$name${if (desc.isNotBlank()) " ($desc)" else ""}" else null
+        }
+        UserAccountPreferencesSnapshot(
+            username = u["username"]?.jsonPrimitive?.contentOrNull ?: targetUsername,
+            displayName = u["name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            email = u["email"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            // 严禁将已截断去格式的 bio_excerpt 回退当作可编辑 Markdown bio_raw，防止覆盖丢失原始排版
+            bioRaw = u["bio_raw"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            title = currentTitle,
+            location = u["location"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            website = u["website"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            trustLevel = u["trust_level"]?.jsonPrimitive?.intOrNull ?: 1,
+            createdAtText = u["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty().take(10),
+            twoFactorEnabled = u["second_factor_enabled"]?.jsonPrimitive?.booleanOrNull == true,
+            hideProfileAndPresence = uOpt?.get("hide_profile_and_presence")?.jsonPrimitive?.booleanOrNull == true,
+            allowPrivateMessages = uOpt?.get("allow_private_messages")?.jsonPrimitive?.booleanOrNull != false,
+            activeDeviceCount = userAuthTokens.coerceAtLeast(1),
+            associatedAccounts = associatedAccounts,
+            availableTitles = mergedTitles
+        )
     }
 
     /**
@@ -4136,12 +5422,58 @@ object LinuxDoRepository {
         followers: Boolean = false
     ): List<FollowUserEntry> = withContext(Dispatchers.IO) {
         val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
-        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext emptyList()
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
         val kind = if (followers) "followers" else "following"
-        val res = executeHttp("https://linux.do/u/${targetUsername.trim()}/follow/$kind.json", method = "GET")
-            ?: return@withContext emptyList()
-        val trimmed = res.second.trimStart()
-        if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return@withContext emptyList()
+        val myUsername = UserApiKeyAuthManager.currentUser?.username?.takeIf {
+            it.isNotBlank() && it != "linuxdo_user"
+        }
+        val needMutualCheck = UserApiKeyAuthManager.isAuthorized() &&
+            myUsername != null &&
+            (followers || !targetUsername.equals(myUsername, ignoreCase = true))
+        val (res, myFollowingSet) = coroutineScope {
+            val dMain = async {
+                executeHttp("https://linux.do/u/${encodeUrlSegment(targetUsername)}/follow/$kind.json", method = "GET", preserveFailure = true)
+            }
+            val dMine = async {
+                if (!needMutualCheck) {
+                    emptySet()
+                } else {
+                    runCatching {
+                        val mineRes = executeHttp(
+                            "https://linux.do/u/${encodeUrlSegment(myUsername)}/follow/following.json",
+                            method = "GET"
+                        )
+                        val mineTrimmed = mineRes?.second?.trimStart().orEmpty()
+                        if (mineRes != null && mineRes.first in 200..299 &&
+                            (mineTrimmed.startsWith("{") || mineTrimmed.startsWith("["))
+                        ) {
+                            val mineElem = json.parseToJsonElement(mineTrimmed)
+                            val mineArr: JsonArray = when (mineElem) {
+                                is JsonArray -> mineElem
+                                is JsonObject -> (mineElem["users"] as? JsonArray)
+                                    ?: (mineElem["following"] as? JsonArray)
+                                    ?: (mineElem["follow"] as? JsonArray)
+                                    ?: JsonArray(emptyList())
+                                else -> JsonArray(emptyList())
+                            }
+                            mineArr.mapNotNull { item ->
+                                (item as? JsonObject)?.get("username")?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()
+                                    ?.takeIf { it.isNotEmpty() }
+                            }.toSet()
+                        } else {
+                            emptySet()
+                        }
+                    }.getOrDefault(emptySet())
+                }
+            }
+            dMain.await() to dMine.await()
+        }
+        val nonNullRes = res ?: throw ApiReadException(ApiFailureKind.Connection)
+        if (nonNullRes.first !in 200..299) {
+            readApiObject(nonNullRes)
+        }
+        val trimmed = nonNullRes.second.trimStart()
+        if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) throw ApiReadException(ApiFailureKind.InvalidPayload)
         try {
             val elem = json.parseToJsonElement(trimmed)
             val arr: JsonArray = when (elem) {
@@ -4152,6 +5484,7 @@ object LinuxDoRepository {
                     ?: JsonArray(emptyList())
                 else -> JsonArray(emptyList())
             }
+            val viewingOwnFollowing = !followers && (myUsername == null || targetUsername.equals(myUsername, ignoreCase = true))
             arr.mapNotNull { item ->
                 val obj = item as? JsonObject ?: return@mapNotNull null
                 val uname = obj["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
@@ -4164,6 +5497,9 @@ object LinuxDoRepository {
                 } else ""
                 val animRaw = obj["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 val animatedAvatar = animRaw?.let { if (it.startsWith("http")) it else "https://linux.do$it" }
+                val isFollowing = viewingOwnFollowing ||
+                    (uname.lowercase() in myFollowingSet) ||
+                    (obj["is_following"]?.jsonPrimitive?.booleanOrNull == true)
                 FollowUserEntry(
                     id = uid,
                     username = uname,
@@ -4172,78 +5508,118 @@ object LinuxDoRepository {
                     animatedAvatar = animatedAvatar,
                     title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                     trustLevel = obj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1,
-                    isFollowing = !followers || (obj["is_following"]?.jsonPrimitive?.booleanOrNull == true)
+                    isFollowing = isFollowing
                 )
             }
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ApiReadException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiReadException(ApiFailureKind.InvalidPayload, error)
+        }
+    }
+
+    private fun parseFollowFeedActivityItems(postsArr: JsonArray): List<UserActivityItem> {
+        return postsArr.mapNotNull { elem ->
+            val obj = elem as? JsonObject ?: return@mapNotNull null
+            val topicObj = obj["topic"] as? JsonObject
+            val tid = obj["topic_id"]?.jsonPrimitive?.intOrNull
+                ?: topicObj?.get("id")?.jsonPrimitive?.intOrNull
+                ?: return@mapNotNull null
+            val pnum = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
+            val rawTitle = obj["title"]?.jsonPrimitive?.contentOrNull
+                ?: topicObj?.get("title")?.jsonPrimitive?.contentOrNull
+                ?: topicObj?.get("fancy_title")?.jsonPrimitive?.contentOrNull
+            val title = rawTitle?.let { decodeDiscourseHtmlSnippet(it) }?.takeIf { it.isNotBlank() } ?: "话题 #$tid"
+            val excerptRaw = obj["excerpt"]?.jsonPrimitive?.contentOrNull
+                ?: obj["cooked"]?.jsonPrimitive?.contentOrNull
+                ?: ""
+            val excerpt = decodeDiscourseHtmlSnippet(excerptRaw)
+            val actorObj = obj["user"] as? JsonObject
+            val actorName = obj["username"]?.jsonPrimitive?.contentOrNull
+                ?: actorObj?.get("username")?.jsonPrimitive?.contentOrNull
+                ?: ""
+            val catId = obj["category_id"]?.jsonPrimitive?.intOrNull
+                ?: topicObj?.get("category_id")?.jsonPrimitive?.intOrNull
+                ?: 4
+            val (catName, _) = resolveCategoryMeta(catId)
+            val rawCreated = obj["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val createdAt = formatRelativeTime(rawCreated).ifBlank { rawCreated.take(10) }
+            UserActivityItem(
+                id = obj["id"]?.jsonPrimitive?.intOrNull ?: tid,
+                topicId = tid,
+                postNumber = pnum,
+                title = if (actorName.isNotBlank()) "[$actorName] $title" else title,
+                excerpt = excerpt,
+                actionType = if (pnum <= 1) 4 else 5,
+                createdAtText = createdAt,
+                categoryName = catName
+            )
         }
     }
 
     /**
-     * 获取关注用户的最新动态 (`GET /u/{username}/follow/feed.json`)
+     * 获取关注用户的最新动态（优先请求 `discourse-follow` 真实接口 `GET /follow/posts/{username}.json?limit=30`，兼容 `/u/{username}/follow/feed.json`）
      */
     suspend fun fetchUserFollowFeed(username: String, page: Int = 0): List<UserActivityItem> = withContext(Dispatchers.IO) {
         val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
-        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") return@withContext emptyList()
+        if (targetUsername.isBlank() || targetUsername == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)
         val cleanPage = page.coerceAtLeast(0)
+        val cursorPrefix = "${targetUsername.trim().lowercase()}:"
+        val cursorQuery = if (cleanPage == 0) {
+            userFollowFeedActivityCursors.keys.removeIf { it.startsWith(cursorPrefix) }
+            ""
+        } else {
+            val cursor = userFollowFeedActivityCursors["$cursorPrefix$cleanPage"]
+            if (cursor == "__EXHAUSTED__") return@withContext emptyList()
+            if (!cursor.isNullOrBlank()) "&created_before=${encodeUrlSegment(cursor)}" else null
+        }
+
+        if (cleanPage == 0 || cursorQuery != null) {
+            val postsUrl = "https://linux.do/follow/posts/${encodeUrlSegment(targetUsername)}.json?limit=30${cursorQuery.orEmpty()}"
+            val postsRes = executeHttp(postsUrl, method = "GET", preserveFailure = true)
+            if (postsRes != null && postsRes.first in 200..299 && postsRes.second.trimStart().startsWith("{")) {
+                val parsed = runCatching {
+                    val root = json.parseToJsonElement(postsRes.second).jsonObject
+                    val postsArr = (root["posts"] as? JsonArray) ?: (root["feed"] as? JsonArray)
+                    if (postsArr != null) {
+                        val hasMore = (root["extras"] as? JsonObject)?.get("has_more")?.jsonPrimitive?.booleanOrNull == true
+                        val lastCreatedAt = (postsArr.lastOrNull() as? JsonObject)
+                            ?.get("created_at")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        val nextKey = "$cursorPrefix${cleanPage + 1}"
+                        if (hasMore && lastCreatedAt != null) {
+                            userFollowFeedActivityCursors[nextKey] = lastCreatedAt
+                        } else {
+                            userFollowFeedActivityCursors[nextKey] = "__EXHAUSTED__"
+                        }
+                        parseFollowFeedActivityItems(postsArr)
+                    } else null
+                }.getOrNull()
+                if (parsed != null) return@withContext parsed
+            } else if (postsRes != null && postsRes.first != 404) {
+                // Propagate real auth / permission / rate-limit errors if legacy endpoint isn't mocked
+                if (postsRes.first in listOf(401, 403, 429) || postsRes.first in 500..599) {
+                    readApiObject(postsRes)
+                }
+            }
+        }
+
         val offsetParam = if (cleanPage > 0) "?offset=${cleanPage * 20}" else ""
-        val res = executeHttp("https://linux.do/u/${targetUsername.trim()}/follow/feed.json$offsetParam", method = "GET")
-        if (res != null && res.second.trimStart().startsWith("{")) {
+        val res = executeHttp("https://linux.do/u/${encodeUrlSegment(targetUsername)}/follow/feed.json$offsetParam", method = "GET")
+        if (res != null && res.first in 200..299 && res.second.trimStart().startsWith("{")) {
             try {
                 val root = json.parseToJsonElement(res.second).jsonObject
                 val postsArr = (root["posts"] as? JsonArray)
                     ?: (root["user_actions"] as? JsonArray)
                     ?: (root["feed"] as? JsonArray)
-                if (postsArr != null && postsArr.isNotEmpty()) {
-                    return@withContext postsArr.mapNotNull { elem ->
-                        val obj = elem as? JsonObject ?: return@mapNotNull null
-                        val tid = obj["topic_id"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
-                        val pnum = obj["post_number"]?.jsonPrimitive?.intOrNull ?: 1
-                        val title = obj["title"]?.jsonPrimitive?.contentOrNull
-                            ?: (obj["topic"] as? JsonObject)?.get("title")?.jsonPrimitive?.contentOrNull
-                            ?: "话题 #$tid"
-                        val excerptRaw = obj["excerpt"]?.jsonPrimitive?.contentOrNull
-                            ?: obj["cooked"]?.jsonPrimitive?.contentOrNull
-                            ?: ""
-                        val excerpt = excerptRaw.replace(Regex("<[^>]+>"), "").trim()
-                        val actorObj = obj["user"] as? JsonObject
-                        val actorName = obj["username"]?.jsonPrimitive?.contentOrNull
-                            ?: actorObj?.get("username")?.jsonPrimitive?.contentOrNull
-                            ?: ""
-                        val catId = obj["category_id"]?.jsonPrimitive?.intOrNull ?: 4
-                        val (catName, _) = resolveCategoryMeta(catId)
-                        val createdAt = obj["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty().take(10)
-                        UserActivityItem(
-                            id = obj["id"]?.jsonPrimitive?.intOrNull ?: tid,
-                            topicId = tid,
-                            postNumber = pnum,
-                            title = if (actorName.isNotBlank()) "[$actorName] $title" else title,
-                            excerpt = excerpt,
-                            actionType = if (pnum <= 1) 4 else 5,
-                            createdAtText = createdAt,
-                            categoryName = catName
-                        )
-                    }
+                if (postsArr != null) {
+                    return@withContext parseFollowFeedActivityItems(postsArr)
                 }
             } catch (_: Throwable) {
             }
         }
-        val fallbackTopics = runCatching {
-            fetchTopics(path = "/follow.json", categoryId = null, page = cleanPage)
-        }.getOrDefault(emptyList())
-        fallbackTopics.map { t ->
-            UserActivityItem(
-                id = t.id,
-                topicId = t.id,
-                postNumber = 1,
-                title = t.title,
-                excerpt = t.excerpt.orEmpty(),
-                actionType = 4,
-                createdAtText = t.lastPostedAt,
-                categoryName = t.categoryName
-            )
-        }
+        emptyList()
     }
 
     /**
@@ -4252,49 +5628,45 @@ object LinuxDoRepository {
     suspend fun fetchCommunityLeaderboard(period: String = "weekly", page: Int = 0): List<LeaderboardUserEntry> = withContext(Dispatchers.IO) {
         val cleanPage = page.coerceAtLeast(0)
         val res = executeHttp(
-            url = "https://linux.do/directory_items.json?period=$period&order=likes_received&page=$cleanPage",
-            method = "GET"
-        ) ?: return@withContext emptyList()
-        if (!res.second.trimStart().startsWith("{")) return@withContext emptyList()
-        try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            val arr = root["directory_items"] as? JsonArray ?: return@withContext emptyList()
-            arr.mapIndexedNotNull { idx, elem ->
-                val obj = elem as? JsonObject ?: return@mapIndexedNotNull null
-                val u = obj["user"] as? JsonObject ?: return@mapIndexedNotNull null
-                val uname = u["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
-                val uid = u["id"]?.jsonPrimitive?.intOrNull ?: obj["id"]?.jsonPrimitive?.intOrNull ?: idx
-                val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
-                val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                val avatarUrl = if (tpl.isNotBlank()) {
-                    val sized = tpl.replace("{size}", "120")
-                    if (sized.startsWith("http")) sized else "https://linux.do$sized"
-                } else ""
-                val likesReceived = obj["likes_received"]?.jsonPrimitive?.intOrNull ?: 0
-                val likesGiven = obj["likes_given"]?.jsonPrimitive?.intOrNull ?: 0
-                val postCount = obj["post_count"]?.jsonPrimitive?.intOrNull ?: 0
-                val topicCount = obj["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
-                val daysVisited = obj["days_visited"]?.jsonPrimitive?.intOrNull ?: 0
-                val cheers = obj["cheers"]?.jsonPrimitive?.intOrNull
-                    ?: obj["gamification_score"]?.jsonPrimitive?.intOrNull
-                    ?: (likesReceived * 5 + postCount * 2 + topicCount * 5)
-                LeaderboardUserEntry(
-                    rank = cleanPage * 50 + idx + 1,
-                    id = uid,
-                    username = uname,
-                    displayName = dname,
-                    avatarUrl = avatarUrl,
-                    title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                    likesReceived = likesReceived,
-                    likesGiven = likesGiven,
-                    postCount = postCount,
-                    topicCount = topicCount,
-                    daysVisited = daysVisited,
-                    score = cheers
-                )
-            }
-        } catch (_: Throwable) {
-            emptyList()
+            url = "https://linux.do/directory_items.json?period=${encodeUrlSegment(period)}&order=likes_received&page=$cleanPage",
+            method = "GET",
+            preserveFailure = true
+        ) ?: throw ApiReadException(ApiFailureKind.Connection)
+        val root = readApiObject(res)
+        val arr = root["directory_items"] as? JsonArray ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
+        arr.mapIndexedNotNull { idx, elem ->
+            val obj = elem as? JsonObject ?: return@mapIndexedNotNull null
+            val u = obj["user"] as? JsonObject ?: return@mapIndexedNotNull null
+            val uname = u["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
+            val uid = u["id"]?.jsonPrimitive?.intOrNull ?: obj["id"]?.jsonPrimitive?.intOrNull ?: idx
+            val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
+            val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val avatarUrl = if (tpl.isNotBlank()) {
+                val sized = tpl.replace("{size}", "120")
+                if (sized.startsWith("http")) sized else "https://linux.do$sized"
+            } else ""
+            val likesReceived = obj["likes_received"]?.jsonPrimitive?.intOrNull ?: 0
+            val likesGiven = obj["likes_given"]?.jsonPrimitive?.intOrNull ?: 0
+            val postCount = obj["post_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val topicCount = obj["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val daysVisited = obj["days_visited"]?.jsonPrimitive?.intOrNull ?: 0
+            val cheers = obj["cheers"]?.jsonPrimitive?.intOrNull
+                ?: obj["gamification_score"]?.jsonPrimitive?.intOrNull
+                ?: (likesReceived * 5 + postCount * 2 + topicCount * 5)
+            LeaderboardUserEntry(
+                rank = cleanPage * 50 + idx + 1,
+                id = uid,
+                username = uname,
+                displayName = dname,
+                avatarUrl = avatarUrl,
+                title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                likesReceived = likesReceived,
+                likesGiven = likesGiven,
+                postCount = postCount,
+                topicCount = topicCount,
+                daysVisited = daysVisited,
+                score = cheers
+            )
         }
     }
 
@@ -4302,76 +5674,74 @@ object LinuxDoRepository {
      * 获取关于社区及管理团队信息 (`GET /about.json`)
      */
     suspend fun fetchCommunityAboutInfo(): CommunityAboutData? = withContext(Dispatchers.IO) {
-        val res = executeHttp("https://linux.do/about.json", method = "GET") ?: return@withContext null
-        if (!res.second.trimStart().startsWith("{")) return@withContext null
-        try {
-            val root = json.parseToJsonElement(res.second).jsonObject
-            val about = root["about"] as? JsonObject ?: return@withContext null
-            val stats = about["stats"] as? JsonObject
-            val usersById = LinkedHashMap<Int, FollowUserEntry>()
-            fun parseUserObj(u: JsonObject): FollowUserEntry? {
-                val uid = u["id"]?.jsonPrimitive?.intOrNull ?: return null
-                val uname = u["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-                val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
-                val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                val avatarUrl = if (tpl.isNotBlank()) {
-                    val sized = tpl.replace("{size}", "120")
-                    if (sized.startsWith("http")) sized else "https://linux.do$sized"
-                } else ""
-                val animRaw = u["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                return FollowUserEntry(
-                    id = uid,
-                    username = uname,
-                    displayName = dname,
-                    avatarUrl = avatarUrl,
-                    animatedAvatar = animRaw?.let { if (it.startsWith("http")) it else "https://linux.do$it" },
-                    title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                    trustLevel = u["trust_level"]?.jsonPrimitive?.intOrNull ?: 4
-                )
-            }
-            (root["users"] as? JsonArray)?.forEach { elem ->
-                (elem as? JsonObject)?.let(::parseUserObj)?.let { usersById[it.id] = it }
-            }
-            val admins = buildList {
-                (about["admins"] as? JsonArray)?.forEach { elem ->
-                    (elem as? JsonObject)?.let(::parseUserObj)?.let { add(it) }
-                }
-                if (isEmpty()) {
-                    (about["admin_ids"] as? JsonArray)?.forEach { idElem ->
-                        idElem.jsonPrimitive.intOrNull?.let { usersById[it] }?.let { add(it) }
-                    }
-                }
-            }.distinctBy { it.username }
-            val moderators = buildList {
-                (about["moderators"] as? JsonArray)?.forEach { elem ->
-                    (elem as? JsonObject)?.let(::parseUserObj)?.let { add(it) }
-                }
-                if (isEmpty()) {
-                    (about["moderator_ids"] as? JsonArray)?.forEach { idElem ->
-                        idElem.jsonPrimitive.intOrNull?.let { usersById[it] }?.let { add(it) }
-                    }
-                }
-            }.distinctBy { it.username }
-            CommunityAboutData(
-                title = about["title"]?.jsonPrimitive?.contentOrNull ?: "LINUX DO",
-                description = about["description"]?.jsonPrimitive?.contentOrNull
-                    ?: "新的理想型社区 · 真诚、友善、团结、专业",
-                topicCount = stats?.get("topics_count")?.jsonPrimitive?.intOrNull
-                    ?: stats?.get("topic_count")?.jsonPrimitive?.intOrNull ?: 0,
-                postCount = stats?.get("posts_count")?.jsonPrimitive?.intOrNull
-                    ?: stats?.get("post_count")?.jsonPrimitive?.intOrNull ?: 0,
-                userCount = stats?.get("users_count")?.jsonPrimitive?.intOrNull
-                    ?: stats?.get("user_count")?.jsonPrimitive?.intOrNull ?: 0,
-                activeUsers7Days = stats?.get("active_users_7_days")?.jsonPrimitive?.intOrNull ?: 0,
-                activeUsers30Days = stats?.get("active_users_30_days")?.jsonPrimitive?.intOrNull ?: 0,
-                likeCount = stats?.get("likes_count")?.jsonPrimitive?.intOrNull
-                    ?: stats?.get("like_count")?.jsonPrimitive?.intOrNull ?: 0,
-                admins = admins,
-                moderators = moderators
+        val res = executeHttp("https://linux.do/about.json", method = "GET", preserveFailure = true)
+            ?: throw ApiReadException(ApiFailureKind.Connection)
+        val root = readApiObject(res)
+        val about = root["about"] as? JsonObject ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
+        val stats = about["stats"] as? JsonObject
+        val usersById = LinkedHashMap<Int, FollowUserEntry>()
+        fun parseUserObj(u: JsonObject): FollowUserEntry? {
+            val uid = u["id"]?.jsonPrimitive?.intOrNull ?: return null
+            val uname = u["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
+            val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val avatarUrl = if (tpl.isNotBlank()) {
+                val sized = tpl.replace("{size}", "120")
+                if (sized.startsWith("http")) sized else "https://linux.do$sized"
+            } else ""
+            val animRaw = u["animated_avatar"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            return FollowUserEntry(
+                id = uid,
+                username = uname,
+                displayName = dname,
+                avatarUrl = avatarUrl,
+                animatedAvatar = animRaw?.let { if (it.startsWith("http")) it else "https://linux.do$it" },
+                title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                trustLevel = u["trust_level"]?.jsonPrimitive?.intOrNull ?: 4
             )
-        } catch (_: Throwable) {
-            null
         }
+        (root["users"] as? JsonArray)?.forEach { elem ->
+            (elem as? JsonObject)?.let(::parseUserObj)?.let { usersById[it.id] = it }
+        }
+        val admins = buildList {
+            (about["admins"] as? JsonArray)?.forEach { elem ->
+                (elem as? JsonObject)?.let(::parseUserObj)?.let { add(it) }
+            }
+            if (isEmpty()) {
+                (about["admin_ids"] as? JsonArray)?.forEach { idElem ->
+                    idElem.jsonPrimitive.intOrNull?.let { usersById[it] }?.let { add(it) }
+                }
+            }
+        }.distinctBy { it.username }
+        val moderators = buildList {
+            (about["moderators"] as? JsonArray)?.forEach { elem ->
+                (elem as? JsonObject)?.let(::parseUserObj)?.let { add(it) }
+            }
+            if (isEmpty()) {
+                (about["moderator_ids"] as? JsonArray)?.forEach { idElem ->
+                    idElem.jsonPrimitive.intOrNull?.let { usersById[it] }?.let { add(it) }
+                }
+            }
+        }.distinctBy { it.username }
+        CommunityAboutData(
+            title = about["title"]?.jsonPrimitive?.contentOrNull ?: "LINUX DO",
+            description = decodeDiscourseHtmlSnippet(
+                about["description"]?.jsonPrimitive?.contentOrNull
+                    ?: "新的理想型社区 · 真诚、友善、团结、专业"
+            ),
+            topicCount = stats?.get("topics_count")?.jsonPrimitive?.intOrNull
+                ?: stats?.get("topic_count")?.jsonPrimitive?.intOrNull ?: 0,
+            postCount = stats?.get("posts_count")?.jsonPrimitive?.intOrNull
+                ?: stats?.get("post_count")?.jsonPrimitive?.intOrNull ?: 0,
+            userCount = stats?.get("users_count")?.jsonPrimitive?.intOrNull
+                ?: stats?.get("user_count")?.jsonPrimitive?.intOrNull ?: 0,
+            activeUsers7Days = stats?.get("active_users_7_days")?.jsonPrimitive?.intOrNull ?: 0,
+            activeUsers30Days = stats?.get("active_users_30_days")?.jsonPrimitive?.intOrNull ?: 0,
+            likeCount = stats?.get("likes_count")?.jsonPrimitive?.intOrNull
+                ?: stats?.get("like_count")?.jsonPrimitive?.intOrNull ?: 0,
+            admins = admins,
+            moderators = moderators
+        )
     }
 }
 
@@ -4458,6 +5828,13 @@ data class MentionCandidate(
     val isGroup: Boolean
 )
 
+typealias TopicPollSnapshot = LinuxDoRepository.PollVoteSnapshot
+
+data class RemoteDraftLookup(
+    val sequence: Int,
+    val draft: CloudDraftItem?
+)
+
 data class CloudDraftItem(
     val draftKey: String,
     val sequence: Int,
@@ -4471,5 +5848,6 @@ data class CloudDraftItem(
     val replyToPostNumber: Int? = null,
     val action: String = "reply",
     val postId: Int? = null,
-    val sequenceKnown: Boolean = true
+    val sequenceKnown: Boolean = true,
+    val recipients: String = ""
 )

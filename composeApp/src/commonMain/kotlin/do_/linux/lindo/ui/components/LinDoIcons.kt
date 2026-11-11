@@ -163,6 +163,40 @@ object LinDoIcons {
         }
     }
 
+    val Minus: ImageVector by lazy {
+        lucideIcon("Minus") {
+            strokePath(2.2f) {
+                moveTo(5.5f, 12f)
+                horizontalLineTo(18.5f)
+            }
+        }
+    }
+
+    val Inbox: ImageVector by lazy {
+        lucideIcon("Inbox") {
+            strokePath(1.8f) {
+                moveTo(22f, 12f)
+                horizontalLineTo(16f)
+                lineTo(14f, 15f)
+                horizontalLineTo(10f)
+                lineTo(8f, 12f)
+                horizontalLineTo(2f)
+                moveTo(5.45f, 5.11f)
+                lineTo(2f, 12f)
+                verticalLineTo(18f)
+                curveTo(2f, 19.1f, 2.9f, 20f, 4f, 20f)
+                horizontalLineTo(20f)
+                curveTo(21.1f, 20f, 22f, 19.1f, 22f, 18f)
+                verticalLineTo(12f)
+                lineTo(18.55f, 5.11f)
+                curveTo(18.22f, 4.43f, 17.53f, 4f, 16.76f, 4f)
+                horizontalLineTo(7.24f)
+                curveTo(6.47f, 4f, 5.78f, 4.43f, 5.45f, 5.11f)
+                close()
+            }
+        }
+    }
+
     val Bell: ImageVector by lazy {
         lucideIcon("Bell") {
             strokePath(1.85f) {

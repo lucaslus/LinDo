@@ -1,0 +1,1009 @@
+package do_.linux.lindo
+
+import androidx.compose.ui.graphics.Color
+import do_.linux.lindo.core.compose.ComposerAction
+import do_.linux.lindo.core.compose.ComposerDraft
+import do_.linux.lindo.core.compose.ComposerDraftSession
+import do_.linux.lindo.core.compose.LocalComposerDrafts
+import do_.linux.lindo.core.compose.toCloudItem
+import do_.linux.lindo.core.connect.ScreenTrackEngine
+import do_.linux.lindo.core.connect.UserPresenceService
+import do_.linux.lindo.core.model.PostItemModel
+import do_.linux.lindo.core.model.PrivateMessageSendOutcome
+import do_.linux.lindo.core.model.TopicUser
+import do_.linux.lindo.core.model.UserFullProfileSummary
+import do_.linux.lindo.core.model.UserNotificationItem
+import do_.linux.lindo.core.model.resolveJumpPostIndex
+import do_.linux.lindo.core.network.ApiFailureKind
+import do_.linux.lindo.core.network.ApiMutationException
+import do_.linux.lindo.core.network.ApiReadException
+import do_.linux.lindo.core.network.AuthenticatedUserProfile
+import do_.linux.lindo.core.network.CloudDraftItem
+import do_.linux.lindo.core.network.CookieSentinel
+import do_.linux.lindo.core.network.LinuxDoRepository
+import do_.linux.lindo.core.network.PlatformMediaPicker
+import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import do_.linux.lindo.core.network.readApiObject
+import do_.linux.lindo.core.render.DiscourseAstParser
+import do_.linux.lindo.core.render.MarkdownPreview
+import do_.linux.lindo.core.render.PostBlockNode
+import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
+import do_.linux.lindo.core.site.LinuxDoSiteRules
+import do_.linux.lindo.ui.FeedSortFilter
+import do_.linux.lindo.ui.buildWorkbenchPollBbCode
+import do_.linux.lindo.ui.components.LinDoIcons
+import do_.linux.lindo.ui.insertSnippetAtCursorWithMentionBoundary
+import do_.linux.lindo.ui.mergeCloudAndLocalDraftLists
+import do_.linux.lindo.ui.optimizePanguSpacingText
+import do_.linux.lindo.ui.parseSmartTopicUrlTarget
+import do_.linux.lindo.ui.resolveDraftKindLabel
+import do_.linux.lindo.ui.resolveNotificationIcon
+import do_.linux.lindo.ui.stripWebOneQueryParam
+import do_.linux.lindo.ui.toggleMarkdownLinePrefix
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import java.util.UUID
+import kotlin.math.abs
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class Round3BugFixesRegressionTest {
+
+    private var savedHttpExecutor = UserApiKeyAuthManager.webViewHttpExecutor
+    private var savedUploadExecutor = PlatformMediaPicker.webViewUploadExecutor
+    private var savedAuthCallback = UserApiKeyAuthManager.onAuthStateChanged
+    private var savedPersistSession = UserApiKeyAuthManager.onPersistSession
+    private var savedLogoutClear = UserApiKeyAuthManager.onLogoutPlatformClear
+
+    @BeforeTest
+    fun setUp() {
+        savedHttpExecutor = UserApiKeyAuthManager.webViewHttpExecutor
+        savedUploadExecutor = PlatformMediaPicker.webViewUploadExecutor
+        savedAuthCallback = UserApiKeyAuthManager.onAuthStateChanged
+        savedPersistSession = UserApiKeyAuthManager.onPersistSession
+        savedLogoutClear = UserApiKeyAuthManager.onLogoutPlatformClear
+
+        UserApiKeyAuthManager.onAuthStateChanged = null
+        UserApiKeyAuthManager.onPersistSession = null
+        UserApiKeyAuthManager.onLogoutPlatformClear = null
+        UserApiKeyAuthManager.logout()
+        CookieSentinel.clearAll()
+        LinuxDoRepository.clearUserSessionCaches()
+        ScreenTrackEngine.resetForTest()
+        UserPresenceService.setAppForeground(true)
+    }
+
+    @AfterTest
+    fun tearDown() {
+        UserApiKeyAuthManager.webViewHttpExecutor = savedHttpExecutor
+        PlatformMediaPicker.webViewUploadExecutor = savedUploadExecutor
+        UserApiKeyAuthManager.onAuthStateChanged = null
+        UserApiKeyAuthManager.onPersistSession = null
+        UserApiKeyAuthManager.onLogoutPlatformClear = null
+        UserApiKeyAuthManager.logout()
+        CookieSentinel.clearAll()
+        LinuxDoRepository.clearUserSessionCaches()
+        ScreenTrackEngine.resetForTest()
+        UserApiKeyAuthManager.onAuthStateChanged = savedAuthCallback
+        UserApiKeyAuthManager.onPersistSession = savedPersistSession
+        UserApiKeyAuthManager.onLogoutPlatformClear = savedLogoutClear
+    }
+
+    private suspend fun withMockHttp(
+        handler: suspend (url: String, method: String, form: Map<String, String>?, headers: Map<String, String>) -> Pair<Int, String>?,
+        block: suspend () -> Unit
+    ) {
+        val prev = UserApiKeyAuthManager.webViewHttpExecutor
+        try {
+            UserApiKeyAuthManager.webViewHttpExecutor = handler
+            block()
+        } finally {
+            UserApiKeyAuthManager.webViewHttpExecutor = prev
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-01: Guest -> Login increments sessionGeneration & invalidates /site.json
+    // -------------------------------------------------------------------------
+    @Test
+    fun h01_guestCategorySyncInvalidatedUponLoginAllowsLvSubcategories() = runTest {
+        var siteSyncCalls = 0
+        var loggedIn = false
+        withMockHttp({ url, _, _, _ ->
+            when {
+                url.endsWith("/site.json") -> {
+                    siteSyncCalls++
+                    if (!loggedIn) {
+                        200 to """{"categories":[{"id":4,"name":"开发调优","slug":"develop","color":"32C3C3"}]}"""
+                    } else {
+                        200 to """
+                            {"categories":[
+                                {"id":4,"name":"开发调优","slug":"develop","color":"32C3C3"},
+                                {"id":20,"name":"开发调优, Lv1","slug":"develop-lv1","color":"32C3C3","parent_category_id":4,"read_restricted":true}
+                            ]}
+                        """.trimIndent()
+                    }
+                }
+                url.contains("/c/develop/develop-lv1/20") || url.contains("/c/develop-lv1/20") -> {
+                    200 to """{"users":[{"id":1,"username":"alice","avatar_template":"/a/{size}.png"}],"topic_list":{"topics":[{"id":901,"title":"Lv1 专属讨论","category_id":20,"posters":[{"user_id":1}]}]}}"""
+                }
+                else -> 404 to """{"errors":["not found"]}"""
+            }
+        }) {
+            LinuxDoRepository.syncSiteCategories(force = true)
+            assertEquals(1, siteSyncCalls)
+            val guestErr = assertFailsWith<ApiReadException> {
+                LinuxDoRepository.fetchTopics(path = "latest.json", categoryId = 20)
+            }
+            assertEquals(ApiFailureKind.PermissionDenied, guestErr.kind)
+
+            val genBeforeLogin = UserApiKeyAuthManager.sessionGeneration
+            loggedIn = true
+            UserApiKeyAuthManager.onSessionAuthenticated(
+                profile = AuthenticatedUserProfile(userId = 7, username = "alice", displayName = "Alice", trustLevel = 2),
+                rawCookies = "_t=valid_cookie_token"
+            )
+            assertTrue(UserApiKeyAuthManager.sessionGeneration > genBeforeLogin)
+
+            val topics = LinuxDoRepository.fetchTopics(path = "latest.json", categoryId = 20)
+            assertEquals(2, siteSyncCalls, "Login must invalidate Guest /site.json cache and re-sync Lv subcategories")
+            assertEquals(1, topics.size)
+            assertEquals(901, topics.single().id)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-02: Expired / revoked server session evicts auth without resurrection
+    // -------------------------------------------------------------------------
+    @Test
+    fun h02_revokedServerSessionEvictsAuthWithoutResurrectingFromPublicProfile() = runTest {
+        UserApiKeyAuthManager.restorePersistedSession(
+            profile = AuthenticatedUserProfile(userId = 7, username = "alice", displayName = "Alice"),
+            apiKey = null,
+            rawCookies = "_t=stale_revoked_cookie; cf_clearance=keep_cf_token"
+        )
+        assertTrue(UserApiKeyAuthManager.isAuthorized())
+
+        var publicUserCalled = false
+        withMockHttp({ url, _, _, _ ->
+            when {
+                url.contains("/session/current.json") -> 404 to """{"errors":["not logged in"]}"""
+                url.contains("/u/alice.json") -> {
+                    publicUserCalled = true
+                    200 to """{"user":{"id":7,"username":"alice","name":"Alice","trust_level":2}}"""
+                }
+                else -> 404 to "{}"
+            }
+        }) {
+            val profile = LinuxDoRepository.fetchCurrentUserProfile()
+            assertNull(profile, "404 on /session/current.json must never fall back to public /u/{username}.json")
+            assertFalse(publicUserCalled)
+            assertFalse(UserApiKeyAuthManager.isAuthorized())
+            assertNull(UserApiKeyAuthManager.currentUser)
+            assertTrue(CookieSentinel.resolveWinningCookies().containsKey("cf_clearance"))
+            assertFalse(CookieSentinel.resolveWinningCookies().containsKey("_t"))
+        }
+
+        // Also verify 401 / 403 not_logged_in on readApiObject invalidates authorized session once,
+        // and does NOT loop when in Guest mode.
+        UserApiKeyAuthManager.onSessionAuthenticated(
+            profile = AuthenticatedUserProfile(userId = 8, username = "bob", displayName = "Bob"),
+            rawCookies = "_t=bob_token"
+        )
+        assertTrue(UserApiKeyAuthManager.isAuthorized())
+        assertFailsWith<ApiReadException> {
+            readApiObject(403 to """{"errors":["您需要登录才能执行此操作"],"error_type":"not_logged_in"}""")
+        }
+        assertFalse(UserApiKeyAuthManager.isAuthorized(), "403 not_logged_in must invalidate stale client auth state")
+
+        var guestLogoutTriggered = false
+        UserApiKeyAuthManager.onAuthStateChanged = { guestLogoutTriggered = true }
+        assertFailsWith<ApiReadException> {
+            readApiObject(401 to """{"errors":["unauthenticated"]}""")
+        }
+        assertFalse(guestLogoutTriggered, "Guest 401 must not trigger redundant logout loops")
+
+        // Also verify authoritative empty CookieManager sync evicts _t & user
+        UserApiKeyAuthManager.onSessionAuthenticated(
+            profile = AuthenticatedUserProfile(userId = 9, username = "carol", displayName = "Carol"),
+            rawCookies = "_t=carol_token"
+        )
+        assertTrue(UserApiKeyAuthManager.isAuthorized())
+        CookieSentinel.syncFromAuthoritativeBrowserCookieString("", domain = "linux.do")
+        assertFalse(CookieSentinel.resolveWinningCookies().containsKey("_t"))
+        assertFalse(UserApiKeyAuthManager.isAuthorized())
+    }
+
+    // -------------------------------------------------------------------------
+    // H-03: redeemOtpSilently rethrows CancellationException & hydrates profile first
+    // -------------------------------------------------------------------------
+    @Test
+    fun h03_redeemOtpSilentlyRethrowsCancellationAndPopulatesProfileBeforeCallback() = runTest {
+        withMockHttp({ _, _, _, _ -> throw CancellationException("cancelled") }) {
+            assertFailsWith<CancellationException> {
+                LinuxDoRepository.redeemOtpSilently("otp_token_123")
+            }
+        }
+
+        UserApiKeyAuthManager.setApiKey("temp_api_key_before_otp")
+        var observedUsernameInsideCallback: String? = null
+        var observedApiKeyInsideCallback: String? = "non_null"
+        var callbackCount = 0
+        UserApiKeyAuthManager.onAuthStateChanged = {
+            callbackCount++
+            observedUsernameInsideCallback = UserApiKeyAuthManager.currentUser?.username
+            observedApiKeyInsideCallback = UserApiKeyAuthManager.getApiKey()
+        }
+
+        withMockHttp({ url, method, _, _ ->
+            when {
+                url.contains("/session/otp/") && method == "POST" -> {
+                    CookieSentinel.ingestRawCookieString("_t=fresh_otp_session", domain = "linux.do")
+                    200 to "{}"
+                }
+                url.contains("/session/current.json") -> {
+                    200 to """{"current_user":{"id":42,"username":"otp_user","name":"OTP User","avatar_template":"/u/{size}.png","trust_level":3}}"""
+                }
+                else -> 200 to "{}"
+            }
+        }) {
+            val ok = LinuxDoRepository.redeemOtpSilently("valid_otp_999")
+            assertTrue(ok)
+            assertEquals("otp_user", observedUsernameInsideCallback)
+            assertNull(observedApiKeyInsideCallback)
+            assertEquals(1, callbackCount)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-04: Key-only User-Api-Key auth sets isAuthorized() & sends headers
+    // -------------------------------------------------------------------------
+    @Test
+    fun h04_userApiKeyOnlyAuthIsAuthorizedAndInjectsHeadersEvenOverWebViewExecutor() = runTest {
+        val (authUrl, _) = UserApiKeyAuthManager.generateAuthorizationUrl()
+        assertTrue(authUrl.contains("scopes=read,write,one_time_password"))
+
+        UserApiKeyAuthManager.setApiKey("live_user_api_key_xyz")
+        assertNull(UserApiKeyAuthManager.currentUser)
+        assertFalse(CookieSentinel.resolveWinningCookies().containsKey("_t"))
+        assertTrue(UserApiKeyAuthManager.isAuthorized(), "Key-only session must be recognized as authorized")
+
+        var capturedHeaders: Map<String, String> = emptyMap()
+        withMockHttp({ url, _, _, headers ->
+            capturedHeaders = headers
+            if (url.contains("/session/current.json")) {
+                200 to """{"current_user":{"id":77,"username":"key_only_user","name":"Key Only","trust_level":2}}"""
+            } else {
+                200 to "{}"
+            }
+        }) {
+            val summary = LinuxDoRepository.fetchCurrentUserProfile()
+            assertNotNull(summary)
+            assertEquals("key_only_user", summary.username)
+            assertEquals("live_user_api_key_xyz", capturedHeaders["User-Api-Key"])
+            assertEquals(UserApiKeyAuthManager.getClientId(), capturedHeaders["User-Api-Client-Id"])
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-05 & H-06: Reactive confirmed read floor tracks new replies accurately
+    // -------------------------------------------------------------------------
+    @Test
+    fun h06_reactiveReadFloorTracksNewRepliesAndBumpsVersion() {
+        val v0 = LinuxDoRepository.readTopicsVersion
+        assertFalse(LinuxDoRepository.isTopicConfirmedReadReactive(topicId = 501, highestPostNumber = 3))
+
+        LinuxDoRepository.recordServerConfirmedReadFloor(topicId = 501, floor = 3, notify = false, persist = false)
+        assertTrue(LinuxDoRepository.readTopicsVersion > v0)
+        assertTrue(LinuxDoRepository.isTopicConfirmedReadReactive(topicId = 501, highestPostNumber = 3))
+
+        // New replies arrive on server raising highestPostNumber to 15 -> topic has unread posts again
+        assertFalse(LinuxDoRepository.isTopicConfirmedReadReactive(topicId = 501, highestPostNumber = 15))
+
+        LinuxDoRepository.recordServerConfirmedReadFloor(topicId = 501, floor = 15, notify = false, persist = false)
+        assertTrue(LinuxDoRepository.isTopicConfirmedReadReactive(topicId = 501, highestPostNumber = 15))
+    }
+
+    // -------------------------------------------------------------------------
+    // H-07: Real `discourse-follow` Following feed + cursor pagination + filters
+    // -------------------------------------------------------------------------
+    @Test
+    fun h07_followTabFetchesRealDiscourseFollowFeedWithCursorPaginationAndFilters() = runTest {
+        assertEquals("关注", FeedSortFilter.FOLLOW.label)
+        assertEquals("follow.json", FeedSortFilter.FOLLOW.apiPath)
+
+        UserApiKeyAuthManager.onSessionAuthenticated(
+            profile = AuthenticatedUserProfile(userId = 10, username = "alice", displayName = "Alice"),
+            rawCookies = "_t=alice_cookie"
+        )
+
+        val requestedUrls = mutableListOf<String>()
+        withMockHttp({ url, _, _, _ ->
+            requestedUrls += url
+            when {
+                url.contains("/follow/posts/alice.json") && !url.contains("created_before=") -> {
+                    200 to """
+                        {
+                          "posts": [
+                            {
+                              "id": 1001,
+                              "topic_id": 300,
+                              "post_number": 2,
+                              "created_at": "2026-11-11T08:00:00.000Z",
+                              "excerpt": "First followed post",
+                              "category_id": 4,
+                              "user": {"id": 2, "username": "mentor", "avatar_template": "/a/{size}.png"},
+                              "topic": {"id": 300, "title": "Followed Topic A", "slug": "topic-a", "posts_count": 5, "tags": ["kotlin"]}
+                            },
+                            {
+                              "id": 1002,
+                              "topic_id": 300,
+                              "post_number": 1,
+                              "created_at": "2026-11-11T07:30:00.000Z",
+                              "excerpt": "Duplicate topic post",
+                              "category_id": 4,
+                              "user": {"id": 2, "username": "mentor", "avatar_template": "/a/{size}.png"},
+                              "topic": {"id": 300, "title": "Followed Topic A", "slug": "topic-a", "posts_count": 5, "tags": ["kotlin"]}
+                            },
+                            {
+                              "id": 1003,
+                              "topic_id": 301,
+                              "post_number": 1,
+                              "created_at": "2026-11-11T07:00:00.000Z",
+                              "excerpt": "Second followed topic",
+                              "category_id": 14,
+                              "user": {"id": 3, "username": "builder", "avatar_template": "/b/{size}.png"},
+                              "topic": {"id": 301, "title": "Followed Topic B", "slug": "topic-b", "posts_count": 2, "tags": ["rust"]}
+                            }
+                          ],
+                          "extras": {"has_more": true}
+                        }
+                    """.trimIndent()
+                }
+                url.contains("/follow/posts/alice.json") && url.contains("created_before=2026-11-11T07%3A00%3A00.000Z") -> {
+                    200 to """
+                        {
+                          "posts": [
+                            {
+                              "id": 990,
+                              "topic_id": 299,
+                              "post_number": 1,
+                              "created_at": "2026-11-11T06:00:00.000Z",
+                              "excerpt": "Older followed post",
+                              "category_id": 4,
+                              "user": {"id": 2, "username": "mentor", "avatar_template": "/a/{size}.png"},
+                              "topic": {"id": 299, "title": "Older Topic", "slug": "older", "posts_count": 1}
+                            }
+                          ],
+                          "extras": {"has_more": false}
+                        }
+                    """.trimIndent()
+                }
+                else -> 404 to """{"errors":["not found"]}"""
+            }
+        }) {
+            val page0 = LinuxDoRepository.fetchTopics(path = "follow.json", page = 0)
+            assertEquals(listOf(300, 301), page0.map { it.id }, "Topics with multiple recent posts must be deduplicated")
+
+            val page1 = LinuxDoRepository.fetchTopics(path = "follow.json", page = 1)
+            assertEquals(listOf(299), page1.map { it.id })
+
+            val urlsBeforePage2 = requestedUrls.size
+            val page2 = LinuxDoRepository.fetchTopics(path = "follow.json", page = 2)
+            assertTrue(page2.isEmpty(), "When extras.has_more is false, next page must terminate cleanly")
+            assertEquals(urlsBeforePage2, requestedUrls.size, "No extra HTTP request when cursor ended")
+
+            val filteredByTag = LinuxDoRepository.fetchTopics(path = "follow.json", page = 0, tag = "rust")
+            assertEquals(listOf(301), filteredByTag.map { it.id })
+
+            val filteredByCat = LinuxDoRepository.fetchTopics(path = "follow.json", page = 0, categoryId = 4)
+            assertEquals(listOf(300), filteredByCat.map { it.id })
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-08, H-09, M-07, L-03: TopicDetail canEditTopic, canEdit default & floor jump
+    // -------------------------------------------------------------------------
+    @Test
+    fun h08_h09_m07_topicDetailCanEditMetadataAndNearestFloorResolution() = runTest {
+        withMockHttp({ url, _, _, _ ->
+            if (url.contains("/t/777.json")) {
+                200 to """
+                    {
+                      "id": 777,
+                      "title": "元数据编辑测试",
+                      "category_id": 14,
+                      "posts_count": 3,
+                      "details": {"can_edit": true},
+                      "post_stream": {
+                        "stream": [10, 11, 12],
+                        "posts": [
+                          {"id": 10, "post_number": 1, "username": "other_author", "cooked": "<p>op</p>", "yours": false},
+                          {"id": 11, "post_number": 3, "username": "alice", "cooked": "<p>r3</p>", "yours": true, "can_edit": true},
+                          {"id": 12, "post_number": 6, "username": "bob", "cooked": "<p>r6</p>", "yours": false}
+                        ]
+                      }
+                    }
+                """.trimIndent()
+            } else 404 to "{}"
+        }) {
+            val detail = LinuxDoRepository.fetchTopicDetail(777)
+            assertNotNull(detail)
+            assertTrue(detail.canEditTopic, "details.can_edit must map to TopicDetailModel.canEditTopic")
+            assertEquals(14, detail.categoryId)
+            assertFalse(detail.posts[0].canEdit, "Missing can_edit when yours=false must never default to true")
+            assertTrue(detail.posts[1].canEdit)
+
+            // M-07: Deleted floor #4 falls back to nearest floor (#6 at index 2) when allowNearestFallback = true
+            assertNull(resolveJumpPostIndex(detail.posts, targetPostNumber = 4, allowNearestFallback = false))
+            assertEquals(2, resolveJumpPostIndex(detail.posts, targetPostNumber = 4, allowNearestFallback = true))
+            assertEquals(2, resolveJumpPostIndex(detail.posts, targetPostNumber = 99, allowNearestFallback = true))
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-10: Poll AST min/max on `number`/`regular` polls & vote / removePollVote
+    // -------------------------------------------------------------------------
+    @Test
+    fun h10_pollAstMinMaxForNumberTypeAndVoteRemoval() = runTest {
+        val numberPollHtml = """
+            <div class="poll" data-poll-name="score_poll" data-poll-type="number" data-poll-min="2" data-poll-max="10">
+              <div class="poll-container"><ul>
+                <li data-poll-option-id="opt2">2</li>
+                <li data-poll-option-id="opt10">10</li>
+              </ul></div>
+            </div>
+        """.trimIndent()
+        val pollNode = DiscourseAstParser.parseCookedHtml(numberPollHtml).filterIsInstance<PostBlockNode.Poll>().single()
+        assertFalse(pollNode.multiple)
+        assertEquals(1, pollNode.min, "Single-choice number poll must require 1 option, not data-poll-min numeric value")
+        assertEquals(1, pollNode.max, "Single-choice number poll must cap selection at 1, not data-poll-max=10")
+
+        var observedDelete = false
+        withMockHttp({ url, method, form, _ ->
+            when {
+                url.endsWith("/polls/vote.json") && method == "PUT" -> {
+                    assertEquals("99", form?.get("post_id"))
+                    assertEquals("score_poll", form?.get("poll_name"))
+                    200 to """{"poll":{"name":"score_poll","voters":5,"options":[{"id":"opt10","votes":5}]," status":"open"},"vote":["opt10"]}"""
+                }
+                url.endsWith("/polls/vote.json") && method == "DELETE" -> {
+                    observedDelete = true
+                    assertEquals("99", form?.get("post_id"))
+                    200 to """{"poll":{"name":"score_poll","voters":4,"options":[{"id":"opt10","votes":4}],"status":"open"}}"""
+                }
+                else -> 404 to "{}"
+            }
+        }) {
+            val voted = LinuxDoRepository.votePoll(99, "score_poll", listOf("opt10"))
+            assertNotNull(voted)
+            assertTrue(voted.hasVoted)
+            assertEquals(setOf("opt10"), voted.selectedIds)
+
+            val removed = LinuxDoRepository.removePollVote(99, "score_poll")
+            assertTrue(observedDelete)
+            assertNotNull(removed)
+            assertFalse(removed.hasVoted)
+            assertTrue(removed.selectedIds.isEmpty())
+            assertEquals(4, removed.optionVotes["opt10"])
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-11: Private message cloud drafts preserve action & recipients
+    // -------------------------------------------------------------------------
+    @Test
+    fun h11_privateMessageCloudDraftPreservesRecipientsAndKindLabel() = runTest {
+        var savedPayloadJson: String? = null
+        val pmData = buildJsonObject {
+            put("reply", "你好，私信草稿正文")
+            put("action", "privateMessage")
+            put("title", "私信主题")
+            put("recipients", buildJsonArray {
+                add(kotlinx.serialization.json.JsonPrimitive("bob"))
+                add(kotlinx.serialization.json.JsonPrimitive("carol"))
+            })
+        }.toString()
+        withMockHttp({ url, method, form, _ ->
+            when {
+                url.endsWith("/drafts.json") && method == "POST" -> {
+                    savedPayloadJson = form?.get("data")
+                    200 to """{"draft_sequence":4}"""
+                }
+                url.endsWith("/drafts.json") && method == "GET" -> {
+                    200 to buildJsonObject {
+                        put("drafts", buildJsonArray {
+                            add(buildJsonObject {
+                                put("draft_key", "new_private_message")
+                                put("sequence", 4)
+                                put("data", pmData)
+                            })
+                        })
+                    }.toString()
+                }
+                else -> 404 to "{}"
+            }
+        }) {
+            val seq = LinuxDoRepository.saveCloudDraft(
+                draftKey = "new_private_message",
+                sequence = 3,
+                replyRaw = "你好，私信草稿正文",
+                title = "私信主题",
+                recipients = "@bob， carol ; @bob"
+            )
+            assertEquals(4, seq)
+            val wireObj = Json.parseToJsonElement(assertNotNull(savedPayloadJson)).jsonObject
+            assertEquals("privateMessage", wireObj["action"]?.jsonPrimitive?.content)
+            assertEquals("bob,carol", wireObj["recipients"]?.jsonPrimitive?.content)
+
+            val fetched = LinuxDoRepository.fetchCloudDrafts().single()
+            assertEquals("privateMessage", fetched.action)
+            assertEquals("bob,carol", fetched.recipients)
+            assertEquals("私信", resolveDraftKindLabel(fetched))
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-12: Remote draft hydration, conflict detection & offline discard
+    // -------------------------------------------------------------------------
+    @Test
+    fun h12_composerDraftRemoteHydrationConflictDetectionAndOfflineDiscard() = runTest {
+        val owner = "user-${UUID.randomUUID()}"
+        val remoteDraftJson = buildJsonObject {
+            put("reply", "来自网页端的草稿内容")
+            put("action", "reply")
+            put("topicId", 42)
+        }.toString()
+
+        // 1. Untouched local draft auto-hydrates remote Web draft
+        withMockHttp({ url, _, _, _ ->
+            if (url.contains("/drafts/topic_42.json")) {
+                200 to buildJsonObject {
+                    put("draft_sequence", 11)
+                    put("draft", remoteDraftJson)
+                }.toString()
+            } else 404 to "{}"
+        }) {
+            val emptySession = ComposerDraftSession(
+                ComposerDraft(owner = owner, key = "topic_42", action = ComposerAction.REPLY, topicId = 42)
+            )
+            val conflict = emptySession.prepareWithRemote()
+            assertNull(conflict)
+            assertEquals("来自网页端的草稿内容", emptySession.current.raw)
+            assertEquals(11, emptySession.savedSequence)
+            assertTrue(emptySession.existsOnServer)
+        }
+
+        // 2. Local edited draft vs differing remote draft surfaces conflict without overwriting local or stamping sequence prematurely
+        val owner2 = "user-${UUID.randomUUID()}"
+        val localEdited = ComposerDraft(
+            owner = owner2,
+            key = "topic_42",
+            action = ComposerAction.REPLY,
+            raw = "本机离线修改内容",
+            topicId = 42
+        )
+        LocalComposerDrafts.save(localEdited)
+        var syncedSeqSent: String? = null
+        withMockHttp({ url, method, form, _ ->
+            when {
+                url.contains("/drafts/topic_42.json") && method == "GET" -> {
+                    200 to buildJsonObject {
+                        put("draft_sequence", 15)
+                        put("draft", remoteDraftJson)
+                    }.toString()
+                }
+                url.endsWith("/drafts.json") && method == "POST" -> {
+                    syncedSeqSent = form?.get("sequence")
+                    200 to """{"draft_sequence":16}"""
+                }
+                else -> 404 to "{}"
+            }
+        }) {
+            val conflictSession = ComposerDraftSession(localEdited)
+            val conflict = conflictSession.prepareWithRemote()
+            assertNotNull(conflict, "Differing remote & local drafts must surface conflict item")
+            assertEquals("来自网页端的草稿内容", conflict.raw)
+            assertEquals("本机离线修改内容", conflictSession.current.raw)
+            assertNull(LocalComposerDrafts.sequence(owner2, "topic_42"), "Must not stamp remote sequence before user resolves conflict")
+
+            // User chooses to keep local over remote
+            conflictSession.keepLocalOverRemote(conflict.sequence)
+            assertTrue(conflictSession.sync())
+            assertEquals("15", syncedSeqSent)
+        }
+
+        // 3. Offline discard removes local draft immediately and returns true without trapping user
+        val owner3 = "user-${UUID.randomUUID()}"
+        val offlineDraft = ComposerDraft(owner3, "new_topic", ComposerAction.NEW_TOPIC, raw = "offline body", title = "offline title", sequence = 3)
+        LocalComposerDrafts.save(offlineDraft)
+        withMockHttp({ _, _, _, _ -> null }) {
+            val session = ComposerDraftSession(offlineDraft, initialExistsOnServer = true)
+            assertTrue(session.discard(), "Offline discard must clear local state and allow closing sheet")
+            assertNull(LocalComposerDrafts.get(owner3, "new_topic"))
+        }
+
+        // 4. DraftsSheet merge keeps unsynced local draft (!sequenceKnown) alongside cloud list
+        val owner4 = "user-${UUID.randomUUID()}"
+        val unsyncedLocal = ComposerDraft(owner4, "topic_88", ComposerAction.REPLY, raw = "最新未同步本地内容", topicId = 88)
+        LocalComposerDrafts.save(unsyncedLocal)
+        val cloudList = listOf(
+            CloudDraftItem(draftKey = "topic_88", sequence = 5, title = "话题 #88", excerpt = "旧云端", topicId = 88, createdAtText = "1m", raw = "旧云端")
+        )
+        val merged = mergeCloudAndLocalDraftLists(owner4, cloudList, listOf(unsyncedLocal.toCloudItem()))
+        assertEquals("最新未同步本地内容", merged.single().raw)
+        assertFalse(merged.single().sequenceKnown)
+    }
+
+    // -------------------------------------------------------------------------
+    // H-13: Workbench Pangu protection, Poll BBCode, Heading toggle, @mention & Categories
+    // -------------------------------------------------------------------------
+    @Test
+    fun h13_workbenchPanguPollBbCodeHeadingToggleMentionBoundaryAndPostableCategories() {
+        val rawMarkdown = "在Linux中使用Kotlin开发2026应用，参考[文档v2](https://linux.do/t/测试123/99)和![截图1|690x388](upload://abc123XYZ.png)以及`代码abc123`联系@张三123"
+        val spaced = optimizePanguSpacingText(rawMarkdown)
+        assertTrue(spaced.startsWith("在 Linux 中使用 Kotlin 开发 2026 应用"))
+        assertTrue(spaced.contains("[文档v2](https://linux.do/t/测试123/99)"), "Markdown link must not be broken by Pangu")
+        assertTrue(spaced.contains("![截图1|690x388](upload://abc123XYZ.png)"), "Upload image dimensions & URL must stay intact")
+        assertTrue(spaced.contains("`代码abc123`"), "Inline code must stay intact")
+        assertTrue(spaced.contains("@张三123"), "@mention handle must stay intact")
+
+        val numberPollBb = buildWorkbenchPollBbCode(
+            pollType = "number",
+            pollResults = "always",
+            pollPublic = true,
+            pollTitle = "打分投票",
+            options = emptyList(),
+            numMin = 1,
+            numMax = 10,
+            numStep = 2
+        )
+        assertEquals(
+            "\n[poll type=number results=always min=1 max=10 step=2 public=true]\n# 打分投票\n[/poll]\n",
+            numberPollBb
+        )
+        assertNull(buildWorkbenchPollBbCode("regular", "always", false, "单选", listOf("仅一项")))
+
+        // Heading replacement instead of stacking `## # 标题`
+        val (h2Text, _) = toggleMarkdownLinePrefix("# 一级标题", cursorPos = 2, prefix = "## ")
+        assertEquals("## 一级标题", h2Text)
+        val (plainText, _) = toggleMarkdownLinePrefix(h2Text, cursorPos = 2, prefix = "## ")
+        assertEquals("一级标题", plainText)
+
+        // Email address must not be treated as @mention replacement target
+        val emailInput = "请发邮件至 contact@linux"
+        val (afterEmailInsert, _) = insertSnippetAtCursorWithMentionBoundary(
+            text = emailInput,
+            selectionMin = emailInput.length,
+            selectionMax = emailInput.length,
+            snippet = "@linuxdo ",
+            replaceMention = true
+        )
+        assertEquals("请发邮件至 contact@linux@linuxdo ", afterEmailInsert)
+
+        val mentionInput = "你好 @lin"
+        val (afterMentionInsert, _) = insertSnippetAtCursorWithMentionBoundary(
+            text = mentionInput,
+            selectionMin = mentionInput.length,
+            selectionMax = mentionInput.length,
+            snippet = "@linuxdo ",
+            replaceMention = true
+        )
+        assertEquals("你好 @linuxdo ", afterMentionInsert)
+
+        // Unverified default subcategories must never appear in postable subcategory list before /site.json verification
+        assertTrue(LinuxDoRepository.getPostableSubCategoriesForParent(4).isEmpty())
+    }
+
+    // -------------------------------------------------------------------------
+    // M-01 & M-03: ScreenTrackEngine session reset, FIFO queue & retry cap
+    // -------------------------------------------------------------------------
+    @Test
+    fun m01_m03_screenTrackSessionResetFifoQueueAndBoundedRetries() {
+        val t0 = 1_000_000L
+        ScreenTrackEngine.consolidateBatch(101, 1200, mapOf(1 to 1200))
+        ScreenTrackEngine.consolidateBatch(202, 1500, mapOf(1 to 1500))
+        assertEquals(2, ScreenTrackEngine.pendingBatchesCount)
+
+        // Entering topic 303 and running a sub-1s non-rush tick must return null and NOT pop consolidatedQueue
+        ScreenTrackEngine.onTopicEntered(303, setOf(1), t0 + 2_000)
+        assertNull(ScreenTrackEngine.tick(t0 + 2_500))
+        assertEquals(2, ScreenTrackEngine.pendingBatchesCount)
+
+        // FIFO order: topic 101 pops first, topic 202 second
+        val firstPop = assertNotNull(ScreenTrackEngine.popNextSendableBatch(t0 + 3_100))
+        assertEquals(101, firstPop.topicId)
+        // Simulate transient 502 on topic 101 -> moves to tail behind topic 202
+        ScreenTrackEngine.onBatchSendResult(firstPop, statusCode = 502, nowMs = t0 + 3_100)
+        val afterBackoff = t0 + 10_000L
+        val secondPop = assertNotNull(ScreenTrackEngine.popNextSendableBatch(afterBackoff))
+        assertEquals(202, secondPop.topicId, "Failing topic must move to tail so other topics are not starved")
+        // Permanent 422 drops immediately without re-queuing
+        ScreenTrackEngine.onBatchSendResult(secondPop, statusCode = 422, nowMs = afterBackoff)
+        assertEquals(1, ScreenTrackEngine.pendingBatchesCount)
+
+        // Topic 101 already failed once; after 2 more transient failures (total 3 = MAX_TOPIC_RETRIES), it is dropped
+        val retry2 = assertNotNull(ScreenTrackEngine.popNextSendableBatch(afterBackoff + 20_000))
+        assertEquals(101, retry2.topicId)
+        ScreenTrackEngine.onBatchSendResult(retry2, statusCode = 503, nowMs = afterBackoff + 20_000)
+        val retry3 = assertNotNull(ScreenTrackEngine.popNextSendableBatch(afterBackoff + 50_000))
+        assertEquals(101, retry3.topicId)
+        ScreenTrackEngine.onBatchSendResult(retry3, statusCode = 503, nowMs = afterBackoff + 50_000)
+        assertEquals(0, ScreenTrackEngine.pendingBatchesCount, "Poison batch must drop after reaching MAX_TOPIC_RETRIES")
+
+        // Session reset clears everything
+        ScreenTrackEngine.consolidateBatch(404, 1000, mapOf(1 to 1000))
+        ScreenTrackEngine.resetSessionState()
+        assertEquals(0, ScreenTrackEngine.pendingBatchesCount)
+    }
+
+    // -------------------------------------------------------------------------
+    // M-02: Smart URL web=1 query stripping & trailing-slash / `/last` topic match
+    // -------------------------------------------------------------------------
+    @Test
+    fun m02_smartUrlStripsWebOnePreservingQueryAndFragmentAndMatchesTopicUrls() {
+        assertEquals(
+            true to "https://linux.do/t/topic/123?u=alice&page=2#post_5",
+            stripWebOneQueryParam("https://linux.do/t/topic/123?u=alice&web=1&page=2#post_5")
+        )
+        assertEquals(
+            true to "https://linux.do/t/topic/123#bottom",
+            stripWebOneQueryParam("https://linux.do/t/topic/123?web=1#bottom")
+        )
+        assertEquals(
+            false to "https://linux.do/t/topic/123?page=2",
+            stripWebOneQueryParam("https://linux.do/t/topic/123?page=2")
+        )
+
+        assertEquals(123 to null, parseSmartTopicUrlTarget("https://linux.do/t/some-slug/123/"))
+        assertEquals(123 to 8, parseSmartTopicUrlTarget("https://linux.do/t/some-slug/123/8/"))
+        assertEquals(123 to 999_999, parseSmartTopicUrlTarget("https://linux.do/t/some-slug/123/last"))
+        assertEquals(123 to 999_999, parseSmartTopicUrlTarget("https://linux.do/t/123/last?u=bob"))
+    }
+
+    // -------------------------------------------------------------------------
+    // M-06: Plain-text `/raw/{topicId}/{postNumber}` fallback & `updateTopicMetadata`
+    // -------------------------------------------------------------------------
+    @Test
+    fun m06_fetchPostRawMarkdownPlainTextFallbackAndUpdateTopicMetadata() = runTest {
+        var rawAcceptHeader: String? = null
+        var putUrl: String? = null
+        var putForm: Map<String, String>? = null
+
+        withMockHttp({ url, method, form, headers ->
+            when {
+                url.endsWith("/posts/55.json") -> 200 to """{"id":55,"cooked":"<p>only cooked</p>"}"""
+                url.endsWith("/raw/10/1") -> {
+                    rawAcceptHeader = headers["Accept"]
+                    200 to "# 原始标题\n\n这是纯文本 Markdown 内容"
+                }
+                url.endsWith("/raw/10/2") -> 200 to "<!DOCTYPE html><html><title>Just a moment...</title></html>"
+                url.endsWith("/t/-/10.json") && method == "PUT" -> {
+                    putUrl = url
+                    putForm = form
+                    200 to """{"basic_topic":{"id":10,"title":"新标题"}}"""
+                }
+                else -> 404 to "{}"
+            }
+        }) {
+            val md = LinuxDoRepository.fetchPostRawMarkdown(postId = 55, topicId = 10, postNumber = 1)
+            assertEquals("# 原始标题\n\n这是纯文本 Markdown 内容", md)
+            assertEquals("text/plain", rawAcceptHeader)
+
+            val challengeMd = LinuxDoRepository.fetchPostRawMarkdown(postId = 55, topicId = 10, postNumber = 2)
+            assertNull(challengeMd, "HTML challenge page must never be treated as post Markdown")
+
+            assertTrue(LinuxDoRepository.updateTopicMetadata(10, " 新标题 ", 14, listOf("kotlin", "kmp")))
+            assertEquals("https://linux.do/t/-/10.json", putUrl)
+            assertEquals("新标题", putForm?.get("title"))
+            assertEquals("14", putForm?.get("category_id"))
+            assertEquals("kotlin", putForm?.get("tags[0]"))
+            assertEquals("kmp", putForm?.get("tags[1]"))
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // M-08 & M-09: Notifications plugin types, unread cache & PM delivery outcomes
+    // -------------------------------------------------------------------------
+    @Test
+    fun m08_m09_notificationsPluginTypesUnreadCacheAndPrivateMessageDelivery() = runTest {
+        UserApiKeyAuthManager.fullProfileCache = UserFullProfileSummary(
+            username = "alice",
+            displayName = "Alice",
+            avatarTemplate = "",
+            trustLevel = 2,
+            unreadNotifications = 5
+        )
+        UserApiKeyAuthManager.updateCachedUnreadNotifications(0)
+        assertEquals(0, UserApiKeyAuthManager.fullProfileCache?.unreadNotifications)
+
+        val nFollow = UserNotificationItem(id = 1, notificationType = 800, read = false, createdAtText = "1m", title = "", actingUsername = "bob")
+        val nFollowTopic = UserNotificationItem(id = 2, notificationType = 801, read = false, createdAtText = "1m", title = "新帖", actingUsername = "bob")
+        val nFollowPost = UserNotificationItem(id = 3, notificationType = 802, read = false, createdAtText = "1m", title = "新回复", actingUsername = "bob")
+        val nBoost = UserNotificationItem(id = 4, notificationType = 803, read = false, createdAtText = "1m", title = "助力", actingUsername = "bob")
+        assertEquals("关注了你", nFollow.typeLabel)
+        assertEquals("发布了新话题", nFollowTopic.typeLabel)
+        assertEquals("发表了新回复", nFollowPost.typeLabel)
+        assertEquals(LinDoIcons.User, resolveNotificationIcon(nFollow))
+        assertEquals(LinDoIcons.FileText, resolveNotificationIcon(nFollowTopic))
+        assertEquals(LinDoIcons.Reply, resolveNotificationIcon(nFollowPost))
+        assertEquals(LinDoIcons.BoostRocket, resolveNotificationIcon(nBoost))
+
+        var capturedRecipients: String? = null
+        var mode = "sent"
+        withMockHttp({ url, method, form, _ ->
+            if (url.endsWith("/posts.json") && method == "POST") {
+                capturedRecipients = form?.get("target_recipients")
+                when (mode) {
+                    "sent" -> 200 to """{"post":{"id":1,"topic_id":888}}"""
+                    "enqueued" -> 200 to """{"action":"enqueued","pending_post":{"id":9}}"""
+                    else -> 422 to """{"errors":["对方已关闭私信接收"]}"""
+                }
+            } else 404 to "{}"
+        }) {
+            val sent = LinuxDoRepository.sendPrivateMessageDetailed("@bob， carol ; @bob", "问候", "你好呀")
+            assertEquals("bob,carol", capturedRecipients)
+            assertEquals(PrivateMessageSendOutcome.SENT, sent.outcome)
+            assertEquals(888, sent.topicId)
+
+            mode = "enqueued"
+            val enqueued = LinuxDoRepository.sendPrivateMessageDetailed("bob", "审核私信", "需要审核的正文")
+            assertEquals(PrivateMessageSendOutcome.ENQUEUED, enqueued.outcome)
+            assertTrue(enqueued.isSuccess)
+
+            mode = "rejected"
+            val rejected = LinuxDoRepository.sendPrivateMessageDetailed("bob", "失败私信", "正文")
+            assertEquals(PrivateMessageSendOutcome.FAILED, rejected.outcome)
+            assertEquals("对方已关闭私信接收", rejected.errorMessage)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // M-10 & M-11: Titles, mutual followers, bookmark delete, search hasMore & upload sanitize
+    // -------------------------------------------------------------------------
+    @Test
+    fun m10_m11_accountTitlesMutualFollowersBookmarkDeleteSearchHasMoreAndUploadSanitize() = runTest {
+        UserApiKeyAuthManager.onSessionAuthenticated(
+            profile = AuthenticatedUserProfile(userId = 1, username = "alice", displayName = "Alice"),
+            rawCookies = "_t=alice_cookie"
+        )
+
+        var deletedBookmarkUrl: String? = null
+        withMockHttp({ url, method, _, _ ->
+            when {
+                url.endsWith("/u/alice.json") && method == "GET" -> {
+                    200 to """
+                        {
+                          "user": {
+                            "id": 1,
+                            "username": "alice",
+                            "name": "Alice",
+                            "title": "破界者",
+                            "bio_excerpt": "不应被当成bio_raw的截断摘要",
+                            "groups": [{"id": 10, "name": "g-merchant", "title": "认证商家"}],
+                            "user_option": {"hide_profile_and_presence": false, "allow_private_messages": true}
+                          }
+                        }
+                    """.trimIndent()
+                }
+                url.contains("/user-badges/alice.json") -> {
+                    200 to """{"badges":[{"id":5,"name":"百日筑基","allow_title":true},{"id":6,"name":"普通徽章","allow_title":false}]}"""
+                }
+                url.endsWith("/u/alice.json") && method == "PUT" -> {
+                    422 to """{"errors":["个人网站格式不正确"]}"""
+                }
+                url.endsWith("/u/alice/follow/followers.json") -> {
+                    200 to """{"users":[{"id":2,"username":"bob","avatar_template":"/b.png"},{"id":3,"username":"stranger","avatar_template":"/s.png"}]}"""
+                }
+                url.endsWith("/u/alice/follow/following.json") -> {
+                    200 to """{"users":[{"id":2,"username":"bob","avatar_template":"/b.png"}]}"""
+                }
+                url.endsWith("/bookmarks/321.json") && method == "DELETE" -> {
+                    deletedBookmarkUrl = url
+                    200 to """{"success":"OK"}"""
+                }
+                url.contains("/search.json") -> {
+                    200 to """
+                        {
+                          "posts": [{"id":1,"topic_id":50,"post_number":1,"blurb":"hit","username":"bob"}],
+                          "topics": [{"id":50,"title":"Search Topic","posts_count":2}],
+                          "grouped_search_result": {"more_full_page_results": true}
+                        }
+                    """.trimIndent()
+                }
+                else -> 404 to "{}"
+            }
+        }) {
+            val prefs = assertNotNull(LinuxDoRepository.fetchUserAccountPreferences("alice"))
+            assertEquals(listOf("百日筑基", "认证商家", "破界者"), prefs.availableTitles)
+            assertEquals("", prefs.bioRaw, "Missing bio_raw must not be overwritten with truncated bio_excerpt")
+
+            val saveRes = LinuxDoRepository.updateUserProfileInfoResult("alice", website = "not-a-url")
+            assertTrue(saveRes.isFailure)
+            assertTrue(saveRes.exceptionOrNull()?.message?.contains("个人网站格式不正确") == true)
+
+            val followers = LinuxDoRepository.fetchUserFollowList("alice", followers = true)
+            assertEquals(2, followers.size)
+            assertTrue(followers.first { it.username == "bob" }.isFollowing, "Mutual follower must be marked isFollowing=true")
+            assertFalse(followers.first { it.username == "stranger" }.isFollowing)
+
+            assertTrue(LinuxDoRepository.deleteBookmark(321))
+            assertEquals("https://linux.do/bookmarks/321.json", deletedBookmarkUrl)
+
+            val searchPage = LinuxDoRepository.searchCommunityPage(query = "kotlin", page = 1)
+            assertEquals(1, searchPage.items.size)
+            assertTrue(searchPage.hasMore)
+        }
+
+        // M-11: Filename bracket/pipe sanitization in upload Markdown
+        PlatformMediaPicker.webViewUploadExecutor = { _, _, _ ->
+            200 to """{"original_filename":"my[shot]|v2].png","short_url":"upload://img123.png","url":"/uploads/img123.png","width":800,"height":600,"human_filesize":"42 KB"}"""
+        }
+        val uploaded = assertNotNull(
+            LinuxDoRepository.uploadMediaToLinuxDo("my[shot]|v2].png", "image/png", byteArrayOf(1, 2, 3))
+        )
+        assertFalse(uploaded.markdownSnippet.substringBefore("](").drop(2).any { it in setOf('[', ']', '|') && it != '|' })
+        assertEquals("![my(shot)-v2).png|800x600](upload://img123.png)", uploaded.markdownSnippet)
+    }
+
+    // -------------------------------------------------------------------------
+    // L-01, L-02, L-03: AST image linkUrls, safeUrl, whitespace code, emoji `:8080:`, nested quotes & CSS 8-digit hex
+    // -------------------------------------------------------------------------
+    @Test
+    fun l01_l02_l03_astImageLinksCodeWhitespaceEmojiNumericPortNestedQuotesAndCssHexAlpha() {
+        // L-01: Linked badge/banner image keeps external href in linkUrls while lightbox image keeps null
+        val linkedImgHtml = """
+            <p><a href="https://github.com/linux-do"><img src="https://linux.do/uploads/badge.png" alt="GitHub"></a></p>
+            <p><a class="lightbox" href="https://linux.do/uploads/full.png"><img src="https://linux.do/uploads/thumb.png" alt="photo"></a></p>
+            <p>分隔符<code>   </code>结束</p>
+        """.trimIndent()
+        val nodes = DiscourseAstParser.parseCookedHtml(linkedImgHtml)
+        val gallery = nodes.filterIsInstance<PostBlockNode.ImageGallery>().single()
+        assertEquals(2, gallery.urls.size)
+        assertEquals(listOf("https://github.com/linux-do", null), gallery.linkUrls)
+
+        val para = nodes.filterIsInstance<PostBlockNode.Paragraph>().single()
+        val codeRun = para.rich.runs.first { it.code }
+        assertEquals("   ", codeRun.text, "Inline <code> containing spaces must not be stripped")
+
+        val encodedUrl = DiscourseAstParser.safeUrl("https://example.com/search?q=a|b c[1]")
+        assertEquals("https://example.com/search?q=a%7Cb%20c%5B1%5D", encodedUrl)
+
+        // L-02: Numeric `:8080:` must not become a broken custom emoji image, and nested `[quote]` renders cleanly
+        assertFalse(LinuxDoEmojiCatalog.isCustomImageEmoji("8080"))
+        val renderedPort = MarkdownPreview.render("本地服务端口:8080:已开放，开心 :smile:")
+        assertFalse(renderedPort.contains("8080.png"), "Numeric :8080: must remain literal text")
+        assertTrue(renderedPort.contains("本地服务端口:8080:已开放"))
+        assertTrue(renderedPort.contains("class=\"emoji\""))
+
+        val nestedQuotesHtml = MarkdownPreview.render(
+            "[quote=\"alice, post:1, topic:9\"]外层内容\n[quote=\"bob, post:2, topic:9\"]内层内容[/quote]\n外层结尾[/quote]"
+        )
+        val parsedNested = DiscourseAstParser.parseCookedHtml(nestedQuotesHtml)
+        val outerQuote = parsedNested.filterIsInstance<PostBlockNode.QuoteBlock>().single()
+        assertEquals("alice", outerQuote.username)
+        val innerQuote = outerQuote.children.filterIsInstance<PostBlockNode.QuoteBlock>().single()
+        assertEquals("bob", innerQuote.username)
+
+        // L-03: CSS 8-digit #RRGGBBAA & "transparent"
+        assertEquals(Color.Transparent, LinuxDoSiteRules.parseHexColor("transparent"))
+        val semiRed = LinuxDoSiteRules.parseHexColor("#FF000080")
+        assertTrue(abs(semiRed.red - 1f) < 0.01f)
+        assertTrue(abs(semiRed.green - 0f) < 0.01f)
+        assertTrue(abs(semiRed.blue - 0f) < 0.01f)
+        assertTrue(abs(semiRed.alpha - (0x80 / 255f)) < 0.01f, "CSS #RRGGBBAA must place trailing AA into alpha channel")
+    }
+}

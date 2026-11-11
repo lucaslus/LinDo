@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -134,12 +135,7 @@ internal fun LinDoNotificationRow(
                     enableAnimations = false
                 )
             } else {
-                val icon = when {
-                    item.isGroupedReply || item.notificationType in setOf(1, 2, 3, 6, 9, 29, 30, 33) -> LinDoIcons.MessageCircle
-                    item.badgeId > 0 || item.notificationType == 12 -> LinDoIcons.AwardBadge
-                    item.notificationType in setOf(5, 19, 25) -> LinDoIcons.Heart
-                    else -> LinDoIcons.Bell
-                }
+                val icon = resolveNotificationIcon(item)
                 Box(
                     modifier = Modifier
                         .size(36.dp)
@@ -186,4 +182,17 @@ internal fun LinDoNotificationRow(
         }
     }
     HorizontalDivider(Modifier.padding(start = 68.dp, end = 16.dp), thickness = 0.5.dp, color = palette.hairline)
+}
+
+internal fun resolveNotificationIcon(item: UserNotificationItem): ImageVector = when {
+    item.notificationType in setOf(36, 800) -> LinDoIcons.User
+    item.notificationType in setOf(17, 37, 801) -> LinDoIcons.FileText
+    item.notificationType in setOf(38, 802) -> LinDoIcons.Reply
+    item.notificationType in setOf(40, 803) ||
+        item.typeLabel.contains("助力") ||
+        item.typeLabel.contains("boost", ignoreCase = true) -> LinDoIcons.BoostRocket
+    item.isGroupedReply || item.notificationType in setOf(1, 2, 3, 6, 9, 29, 30, 33) -> LinDoIcons.MessageCircle
+    item.badgeId > 0 || item.notificationType == 12 -> LinDoIcons.AwardBadge
+    item.notificationType in setOf(5, 19, 25) -> LinDoIcons.Heart
+    else -> LinDoIcons.Bell
 }

@@ -67,9 +67,10 @@ internal fun TopicFloorNavigator(
     onJump: (floor: Int, exact: Boolean) -> Unit
 ) {
     val palette = LocalPalette.current
-    var targetFloor by remember { mutableIntStateOf(currentFloor.coerceIn(1, lastFloor)) }
+    val safeLastFloor = lastFloor.coerceAtLeast(1)
+    var targetFloor by remember { mutableIntStateOf(currentFloor.coerceIn(1, safeLastFloor)) }
     var enteringFloor by remember { mutableStateOf(false) }
-    val target = targetFloor.coerceIn(1, lastFloor)
+    val target = targetFloor.coerceIn(1, safeLastFloor)
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -77,86 +78,111 @@ internal fun TopicFloorNavigator(
         containerColor = palette.cardSurface,
         contentColor = palette.inkPrimary
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "楼层导航", Modifier.weight(1f), fontSize = 17.sp, fontWeight = FontWeight.Bold
-                )
-                Box(
-                    modifier = Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .clickable(onClick = onDismiss),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(LinDoIcons.Close, "关闭楼层导航", Modifier.size(16.dp), tint = palette.inkSecondary)
-                }
-            }
-            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-
-            if (lastFloor > 1) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(onClick = { onJump(1, false) }) {
-                        Icon(LinDoIcons.ChevronUp, "回到首楼", Modifier.size(20.dp), tint = palette.activeChipText)
-                    }
-                    TextButton(
-                        modifier = Modifier.weight(1f),
-                        onClick = { enteringFloor = !enteringFloor }
+        LinDoScaledPopupContent {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (safeLastFloor > 1) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            if (enteringFloor) "返回进度条" else "第 $target / $lastFloor 楼",
-                            color = palette.inkPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold
-                        )
-                        if (!enteringFloor) {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { enteringFloor = !enteringFloor }
+                                .padding(vertical = 4.dp, horizontal = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Text(
+                                text = "$target / $safeLastFloor 楼",
+                                color = palette.inkPrimary,
+                                fontSize = 15.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                             Icon(
-                                LinDoIcons.Edit, "输入楼号",
-                                Modifier.padding(start = 6.dp).size(14.dp), tint = palette.inkSecondary
+                                imageVector = if (enteringFloor) LinDoIcons.Sliders else LinDoIcons.Edit,
+                                contentDescription = if (enteringFloor) "返回滑块" else "输入楼号",
+                                modifier = Modifier.size(13.5.dp),
+                                tint = palette.inkSecondary
                             )
                         }
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = { onJump(1, false) },
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("首楼", color = palette.inkSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        }
+                        TextButton(
+                            onClick = { onJump(safeLastFloor, false) },
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("末楼", color = palette.inkSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        }
+                        if (!enteringFloor) {
+                            TextButton(
+                                onClick = { onJump(target, true) },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("跳转", color = palette.activeChipText, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable(onClick = onDismiss),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(LinDoIcons.Close, "关闭楼层导航", Modifier.size(15.dp), tint = palette.inkSecondary)
+                        }
                     }
-                    IconButton(onClick = { onJump(lastFloor, false) }) {
-                        Icon(LinDoIcons.ChevronDown, "直达末楼", Modifier.size(20.dp), tint = palette.activeChipText)
-                    }
-                }
 
-                if (enteringFloor) {
-                    ExactFloorInput(target, lastFloor, onJump = { onJump(it, true) })
+                    if (enteringFloor) {
+                        ExactFloorInput(target, safeLastFloor, onJump = { onJump(it, true) })
+                    } else {
+                        val sliderColors = SliderDefaults.colors(
+                            thumbColor = palette.brandGold,
+                            activeTrackColor = palette.brandGold,
+                            inactiveTrackColor = palette.inkTertiary.copy(alpha = 0.35f)
+                        )
+                        Slider(
+                            value = target.toFloat(),
+                            onValueChange = { targetFloor = it.roundToInt() },
+                            valueRange = 1f..safeLastFloor.toFloat(),
+                            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "目标楼层" },
+                            colors = sliderColors,
+                            track = {
+                                SliderDefaults.Track(
+                                    sliderState = it, modifier = Modifier.height(4.dp),
+                                    colors = sliderColors, drawStopIndicator = null
+                                )
+                            }
+                        )
+                    }
                 } else {
-                    val sliderColors = SliderDefaults.colors(
-                        thumbColor = palette.brandGold,
-                        activeTrackColor = palette.brandGold,
-                        inactiveTrackColor = palette.inkTertiary.copy(alpha = 0.35f)
-                    )
-                    Slider(
-                        value = target.toFloat(),
-                        onValueChange = { targetFloor = it.roundToInt() },
-                        valueRange = 1f..lastFloor.toFloat(),
-                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "目标楼层" },
-                        colors = sliderColors,
-                        track = {
-                            SliderDefaults.Track(
-                                sliderState = it, modifier = Modifier.height(4.dp),
-                                colors = sliderColors, drawStopIndicator = null
-                            )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("1 / 1 楼", Modifier.weight(1f), color = palette.inkSecondary, fontSize = 13.5.sp)
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable(onClick = onDismiss),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(LinDoIcons.Close, "关闭楼层导航", Modifier.size(15.dp), tint = palette.inkSecondary)
                         }
-                    )
-                    TextButton(
-                        onClick = { onJump(target, true) },
-                        modifier = Modifier.align(Alignment.End)
-                    ) { Text("前往第 $target 楼", color = palette.activeChipText, fontWeight = FontWeight.SemiBold) }
+                    }
                 }
-            } else {
-                Text("只有首楼", Modifier.padding(bottom = 12.dp), color = palette.inkSecondary, fontSize = 13.sp)
             }
         }
     }
@@ -165,13 +191,14 @@ internal fun TopicFloorNavigator(
 @Composable
 private fun ExactFloorInput(initialFloor: Int, lastFloor: Int, onJump: (Int) -> Unit) {
     val palette = LocalPalette.current
+    val safeLastFloor = lastFloor.coerceAtLeast(1)
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     var input by remember {
-        val initial = initialFloor.toString()
+        val initial = initialFloor.coerceIn(1, safeLastFloor).toString()
         mutableStateOf(TextFieldValue(initial, TextRange(0, initial.length)))
     }
-    val selected = input.text.toIntOrNull()?.takeIf { it in 1..lastFloor }
+    val selected = input.text.toIntOrNull()?.takeIf { it in 1..safeLastFloor }
     val style = TextStyle(color = palette.inkPrimary, fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium)
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
@@ -204,7 +231,7 @@ private fun ExactFloorInput(initialFloor: Int, lastFloor: Int, onJump: (Int) -> 
             decorationBox = { inner ->
                 LinDoInputDecoration(
                     empty = input.text.isEmpty(),
-                    placeholder = "输入楼层 (1–$lastFloor)",
+                    placeholder = "输入楼层 (1–$safeLastFloor)",
                     textStyle = style,
                     placeholderColor = palette.inkSecondary,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
