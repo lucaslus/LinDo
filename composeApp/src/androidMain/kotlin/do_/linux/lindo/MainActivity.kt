@@ -93,6 +93,13 @@ import do_.linux.lindo.ui.LocalLinDoDarkTheme
 import do_.linux.lindo.ui.LinDoWelcomeScreen
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
+import do_.linux.lindo.core.copy.DebugPreviewScene
+import do_.linux.lindo.core.copy.LinDoAuthCopy
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoMessagesCopy
+import do_.linux.lindo.core.copy.LinDoNetworkCopy
+import do_.linux.lindo.core.diagnostics.DiagnosticCategory
+import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
 import do_.linux.lindo.ui.PlatformWebLoginHost
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -209,6 +216,47 @@ class MainActivity : ComponentActivity() {
     private var lastPausedAtEpochMs: Long = 0L
     private var pendingMediaPickCallback: ((fileName: String, mimeType: String, bytes: ByteArray) -> Unit)? = null
     private var pendingWebFileChooserCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingLogExportContent: String? = null
+    private var pendingLogExportCallback: ((Boolean, String) -> Unit)? = null
+
+    private val logExportDocumentLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri: Uri? ->
+        val content = pendingLogExportContent
+        val cb = pendingLogExportCallback
+        pendingLogExportContent = null
+        pendingLogExportCallback = null
+        if (cb == null) return@registerForActivityResult
+        if (uri == null || content == null) {
+            cb(false, LinDoMessagesCopy.EXPORT_CANCELLED.text)
+            return@registerForActivityResult
+        }
+        activityScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(content.toByteArray(Charsets.UTF_8))
+                    out.flush()
+                } ?: error(LinDoMessagesCopy.CANNOT_WRITE_TARGET_FILE.text)
+            }
+            withContext(Dispatchers.Main) {
+                if (result.isSuccess) {
+                    LinDoDiagnosticLogger.info(
+                        DiagnosticCategory.SYSTEM,
+                        "LogExport",
+                        "Exported diagnostic report via SAF (${content.length} chars)"
+                    )
+                    cb(true, LinDoMessagesCopy.EXPORT_SUCCESS_ANDROID.text)
+                } else {
+                    cb(
+                        false,
+                        LinDoMessagesCopy.EXPORT_FAILED_REASON.format(
+                            result.exceptionOrNull()?.message ?: LinDoMessagesCopy.WRITE_ERROR_SHORT.text
+                        )
+                    )
+                }
+            }
+        }
+    }
 
     private val webFileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val callback = pendingWebFileChooserCallback
@@ -307,7 +355,7 @@ class MainActivity : ComponentActivity() {
                     oversize -> {
                         android.widget.Toast.makeText(
                             this@MainActivity,
-                            "附件超过 20MB 上限，请压缩后再上传",
+                            LinDoMessagesCopy.ATTACHMENT_OVER_20MB.text,
                             android.widget.Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -318,7 +366,7 @@ class MainActivity : ComponentActivity() {
                     else -> {
                         android.widget.Toast.makeText(
                             this@MainActivity,
-                            "无法读取所选附件，请重试",
+                            LinDoMessagesCopy.CANNOT_READ_ATTACHMENT.text,
                             android.widget.Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -444,6 +492,24 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = initialBarStyle
         )
         super.onCreate(savedInstanceState)
+        LinDoDiagnosticLogger.configurePersistence(
+            directory = java.io.File(filesDir, "logs"),
+            platformInfo = "Android SDK ${android.os.Build.VERSION.SDK_INT} (${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL})"
+        )
+        LinDoDiagnosticLogger.installUncaughtExceptionHandler()
+        LinDoDiagnosticLogger.exportSaveHandler = { suggestedFileName, content, onResult ->
+            runOnUiThread {
+                try {
+                    pendingLogExportContent = content
+                    pendingLogExportCallback = onResult
+                    logExportDocumentLauncher.launch(suggestedFileName)
+                } catch (err: Throwable) {
+                    pendingLogExportContent = null
+                    pendingLogExportCallback = null
+                    onResult(false, LinDoMessagesCopy.CANNOT_OPEN_FILE_PICKER.format(err.message ?: err::class.simpleName))
+                }
+            }
+        }
         requestHighRefreshRateDisplay()
         var appIcon by mutableStateOf(iconManager.initialIcon())
         activityScope.launch { iconManager.finishRestart()?.let { appIcon = it } }
@@ -546,6 +612,7 @@ class MainActivity : ComponentActivity() {
                     remove("user_id")
                     remove("user_title")
                     remove("trust_level")
+                    remove("unread_notifications")
                     remove("read_topic_posts")
                     remove("composer_drafts")
                     if (remainingCookies.isBlank()) {
@@ -637,50 +704,101 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             val currentIntent = remember(debugPreviewGeneration) { intent }
-            val debugPreview = if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0)
-                currentIntent.getStringExtra("lindo.preview") else null
+            val isDebuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+            val previewScene = if (isDebuggable) {
+                DebugPreviewScene.fromKey(
+                    currentIntent?.getStringExtra("lindo.preview")
+                        ?: currentIntent?.getStringExtra("lindo_preview")
+                )
+            } else {
+                null
+            }
             val closePreview: () -> Unit = {
                 intent.removeExtra("lindo.preview")
+                intent.removeExtra("lindo_preview")
                 intent.removeExtra("lindo.brand_preview")
                 debugPreviewGeneration++
             }
-            if (debugPreview == "icon") {
-                InstalledIconPreview(iconManager.component(appIcon))
-            } else if (debugPreview == "welcome") {
-                var dark by remember { mutableStateOf(false) }
-                LaunchedEffect(dark) { updateSystemBars(dark) }
-                LinDoWelcomeScreen(isDark = dark, onPrimaryWebLogin = closePreview,
-                    onBrowserOneClickAuth = closePreview, onToggleDark = { dark = !dark },
-                    onOpenAppIcon = closePreview, onGuestBrowse = closePreview)
-            } else if (debugPreview in listOf("rich", "search", "bookmarks", "notifications", "drafts", "history", "activity", "messages")) {
-                var openedLink by remember { mutableStateOf<String?>(null) }
-                val cooked = remember { java.io.File(filesDir, "lindo-rich-preview.html").takeIf { it.isFile && it.length() < 262144 }?.readText().orEmpty() }
-                if (openedLink != null) AndroidWebLoginModal(openedLink!!, { openedLink = null }, { openedLink = null }, ::launchWebFileChooser)
-                else LinDoReadRegressionPreview(debugPreview!!, cooked, closePreview, { openedLink = it })
-            } else if (debugPreview in listOf("web", "web_crash", "connect")) {
-                AndroidWebLoginModal(initialUrl = when (debugPreview) {
-                    "web_crash" -> "chrome://crash"
-                    "connect" -> "https://connect.linux.do/"
-                    else -> "https://linux.do/"
-                },
-                    onDismiss = closePreview, onLoginSuccess = closePreview, onLaunchFileChooser = ::launchWebFileChooser)
-            } else if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
-                currentIntent.getBooleanExtra("lindo.brand_preview", false)) {
-                LinDoMascotGallery(onClose = {
-                    closePreview()
-                }, onThemeChanged = updateSystemBars, systemAnimationsEnabled = systemAnimationsEnabled)
-            } else {
-                LinDoApp(
-                    onThemeChanged = updateSystemBars,
-                    systemAnimationsEnabled = systemAnimationsEnabled,
-                    appIcon = appIcon,
-                    onApplyAppIcon = { iconManager.apply(appIcon, it) },
-                    imageCacheDir = java.io.File(cacheDir, "lindo_image_cache"),
-                    addPlatformImageDecoders = {
-                        if (android.os.Build.VERSION.SDK_INT >= 28) add(coil3.gif.AnimatedImageDecoder.Factory())
-                        else add(coil3.gif.GifDecoder.Factory())
+            when (previewScene) {
+                DebugPreviewScene.ICON -> {
+                    InstalledIconPreview(iconManager.component(appIcon))
+                }
+                DebugPreviewScene.WELCOME -> {
+                    var dark by remember { mutableStateOf(false) }
+                    LaunchedEffect(dark) { updateSystemBars(dark) }
+                    LinDoWelcomeScreen(
+                        isDark = dark,
+                        onPrimaryWebLogin = closePreview,
+                        onBrowserOneClickAuth = closePreview,
+                        onToggleDark = { dark = !dark },
+                        onOpenAppIcon = closePreview,
+                        onGuestBrowse = closePreview
+                    )
+                }
+                DebugPreviewScene.RICH,
+                DebugPreviewScene.SEARCH,
+                DebugPreviewScene.BOOKMARKS,
+                DebugPreviewScene.NOTIFICATIONS,
+                DebugPreviewScene.DRAFTS,
+                DebugPreviewScene.HISTORY,
+                DebugPreviewScene.ACTIVITY,
+                DebugPreviewScene.MESSAGES -> {
+                    var openedLink by remember { mutableStateOf<String?>(null) }
+                    val cooked = remember {
+                        java.io.File(filesDir, "lindo-rich-preview.html")
+                            .takeIf { it.isFile && it.length() < 262144 }
+                            ?.readText()
+                            .orEmpty()
                     }
-                )
+                    if (openedLink != null) {
+                        AndroidWebLoginModal(openedLink!!, { openedLink = null }, { openedLink = null }, ::launchWebFileChooser)
+                    } else {
+                        LinDoReadRegressionPreview(previewScene.wireKey, cooked, closePreview, { openedLink = it })
+                    }
+                }
+                DebugPreviewScene.WEB,
+                DebugPreviewScene.WEB_CRASH,
+                DebugPreviewScene.CONNECT -> {
+                    val targetUrl = when (previewScene) {
+                        DebugPreviewScene.WEB_CRASH -> "chrome://crash"
+                        DebugPreviewScene.CONNECT -> "https://connect.linux.do/"
+                        else -> "https://linux.do/"
+                    }
+                    AndroidWebLoginModal(
+                        initialUrl = targetUrl,
+                        onDismiss = closePreview,
+                        onLoginSuccess = closePreview,
+                        onLaunchFileChooser = ::launchWebFileChooser
+                    )
+                }
+                null -> {
+                    if (isDebuggable && currentIntent?.getBooleanExtra("lindo.brand_preview", false) == true) {
+                        LinDoMascotGallery(
+                            onClose = closePreview,
+                            onThemeChanged = updateSystemBars,
+                            systemAnimationsEnabled = systemAnimationsEnabled
+                        )
+                    } else {
+                        LinDoApp(
+                            onThemeChanged = updateSystemBars,
+                            systemAnimationsEnabled = systemAnimationsEnabled,
+                            appIcon = appIcon,
+                            onApplyAppIcon = { iconManager.apply(appIcon, it) },
+                            imageCacheDir = java.io.File(cacheDir, "lindo_image_cache"),
+                            onUnreadStateChanged = { unreadCount, _ ->
+                                runCatching {
+                                    if (UserApiKeyAuthManager.isAuthorized()) {
+                                        prefs.edit().putInt("unread_notifications", unreadCount.coerceAtLeast(0)).apply()
+                                    }
+                                }
+                            },
+                            addPlatformImageDecoders = {
+                                if (android.os.Build.VERSION.SDK_INT >= 28) add(coil3.gif.AnimatedImageDecoder.Factory())
+                                else add(coil3.gif.GifDecoder.Factory())
+                            }
+                        )
+                    }
+                }
             }
         }
 
@@ -1293,7 +1411,7 @@ class MainActivity : ComponentActivity() {
                         const cachedCsrf = window.__lindoCsrf || (metaCsrf && metaCsrf.content);
                         const token = cachedCsrf || (await refreshCsrfToken(false));
                         if (!token) {
-                            const body = csrfLastBody || JSON.stringify({errors: ['暂时无法验证会话，请检查网络或登录状态']});
+                            const body = csrfLastBody || JSON.stringify({errors: [${JSONObject.quote(LinDoNetworkCopy.JS_BRIDGE_VERIFY_SESSION_FAILED.text)}]});
                             reportHttp(csrfLastStatus || 0, body, csrfLastMitigated);
                             return;
                         }
@@ -2071,6 +2189,11 @@ class MainActivity : ComponentActivity() {
                 apiKey = savedApiKey,
                 rawCookies = authoritativeCookies
             )
+            if (UserApiKeyAuthManager.isAuthorized()) {
+                prefs.getInt("unread_notifications", 0)
+                    .takeIf { it > 0 }
+                    ?.let { UserApiKeyAuthManager.updateCachedUnreadNotifications(it) }
+            }
         }
     }
 
@@ -2124,6 +2247,7 @@ class MainActivity : ComponentActivity() {
                 editor.putString("animated_avatar", user.animatedAvatar)
                 editor.putString("user_title", user.userTitle)
                 editor.putInt("trust_level", user.trustLevel)
+                editor.putInt("unread_notifications", UserApiKeyAuthManager.cachedUnreadNotificationCount)
             } else {
                 editor.remove("user_id")
                 editor.remove("username")
@@ -2132,6 +2256,11 @@ class MainActivity : ComponentActivity() {
                 editor.remove("animated_avatar")
                 editor.remove("user_title")
                 editor.remove("trust_level")
+                if (UserApiKeyAuthManager.isAuthorized()) {
+                    editor.putInt("unread_notifications", UserApiKeyAuthManager.cachedUnreadNotificationCount)
+                } else {
+                    editor.remove("unread_notifications")
+                }
             }
             editor.apply()
         }
@@ -2447,6 +2576,27 @@ private val AUTO_SUBMIT_OTP_FORM_JS = """
         } catch (e) {}
     })();
 """.trimIndent()
+
+private enum class WebModalTitleKind(val titleCopy: LinDoAuthCopy?) {
+    LOGIN_AND_VERIFY(LinDoAuthCopy.WEB_MODAL_LOGIN_AND_VERIFY_TITLE),
+    VERIFY_RETURN(LinDoAuthCopy.WEB_MODAL_VERIFY_RETURN_TITLE),
+    CONNECT(LinDoAuthCopy.WEB_MODAL_CONNECT_TITLE),
+    CREDIT(LinDoAuthCopy.WEB_MODAL_CREDIT_TITLE),
+    HOST_OR_DEFAULT(null);
+
+    fun resolveTitle(host: String): String =
+        titleCopy?.text ?: host.ifBlank { LinDoCommonCopy.LINUX_DO.text }
+
+    companion object {
+        fun resolve(isLoginFlow: Boolean, host: String, path: String): WebModalTitleKind = when {
+            isLoginFlow -> LOGIN_AND_VERIFY
+            host.equals("linux.do", ignoreCase = true) && (path.isEmpty() || path == "/") -> VERIFY_RETURN
+            host.equals("connect.linux.do", ignoreCase = true) -> CONNECT
+            host.equals("credit.linux.do", ignoreCase = true) -> CREDIT
+            else -> HOST_OR_DEFAULT
+        }
+    }
+}
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -2787,13 +2937,7 @@ private fun AndroidWebLoginModal(
         val parsed = runCatching { Uri.parse(initialUrl) }.getOrNull()
         val host = parsed?.host.orEmpty()
         val path = parsed?.path.orEmpty()
-        when {
-            isLoginFlow -> "LINUX DO 登录与安全验证"
-            host.equals("linux.do", ignoreCase = true) && (path.isEmpty() || path == "/") -> "LINUX DO 安全验证 · 完成后点左上角返回"
-            host.equals("connect.linux.do", ignoreCase = true) -> "LINUX DO Connect"
-            host.equals("credit.linux.do", ignoreCase = true) -> "LINUX DO 社区积分"
-            else -> host.ifBlank { "LINUX DO" }
-        }
+        WebModalTitleKind.resolve(isLoginFlow = isLoginFlow, host = host, path = path).resolveTitle(host)
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -2816,7 +2960,7 @@ private fun AndroidWebLoginModal(
                 androidx.compose.material3.IconButton(onClick = onDismiss) {
                     androidx.compose.material3.Icon(
                         imageVector = do_.linux.lindo.ui.components.LinDoIcons.Close,
-                        contentDescription = "关闭网页",
+                        contentDescription = LinDoAuthCopy.CLOSE_WEB_PAGE.text,
                         modifier = Modifier.size(18.dp),
                         tint = barFg
                     )
@@ -2833,7 +2977,7 @@ private fun AndroidWebLoginModal(
                 androidx.compose.material3.IconButton(onClick = ::retryPage) {
                     androidx.compose.material3.Icon(
                         imageVector = do_.linux.lindo.ui.components.LinDoIcons.Refresh,
-                        contentDescription = "刷新网页",
+                        contentDescription = LinDoAuthCopy.REFRESH_WEB_PAGE.text,
                         modifier = Modifier.size(16.5.dp),
                         tint = barSubFg
                     )
@@ -2897,7 +3041,7 @@ private fun AndroidWebLoginModal(
                                     if (webViewRef === view) {
                                         webViewRef = null
                                         rendererGone = true
-                                        pageLoadError = "网页已停止运行"
+                                        pageLoadError = LinDoAuthCopy.WEB_MODAL_CRASHED.text
                                     }
                                     releaseNativeWebView(view, rendererGone = true)
                                     return true
@@ -2908,7 +3052,7 @@ private fun AndroidWebLoginModal(
                                         val failedUrl = request.url.toString()
                                         if (failedUrl == pendingUrl || failedUrl == view?.url || request.isRedirect) {
                                             pendingUrl = failedUrl
-                                            pageLoadError = "网络连接失败"
+                                            pageLoadError = LinDoCommonCopy.NETWORK_CONNECTION_FAILED.text
                                         }
                                     }
                                 }

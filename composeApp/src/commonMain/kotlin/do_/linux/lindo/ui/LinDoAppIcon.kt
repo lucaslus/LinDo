@@ -30,12 +30,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoCopyEntry
+import do_.linux.lindo.core.copy.LinDoMessagesCopy
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_brand_mark
 import lindo.composeapp.generated.resources.lindo_expression_happy
@@ -46,26 +51,38 @@ import lindo.composeapp.generated.resources.lindo_linuxdo_mark
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.painterResource
 
-internal enum class LinDoIconBackground(val key: String, val label: String, val color: Color) {
-    White("white", "白底", Color.White),
-    Black("black", "黑底", Color(0xFF121212)),
-    Amber("amber", "经典金底", Color(0xFFF6B73C))
+internal enum class LinDoIconBackground(
+    val key: String,
+    val labelCopy: LinDoMessagesCopy,
+    val color: Color
+) {
+    White("white", LinDoMessagesCopy.ICON_BG_LIGHT, Color.White),
+    Black("black", LinDoMessagesCopy.ICON_BG_DARK, Color(0xFF121212)),
+    Amber("amber", LinDoMessagesCopy.ICON_BG_CLASSIC, Color(0xFFF6B73C));
+
+    val label: String get() = labelCopy.text
 }
 
 internal enum class LinDoIconArtwork(
     val key: String,
-    val label: String,
+    val labelCopy: LinDoCopyEntry,
     val expression: DrawableResource? = null
 ) {
-    Happy("happy", "开心", Res.drawable.lindo_expression_happy),
-    Classic("classic", "经典"),
-    Wink("wink", "眨眼", Res.drawable.lindo_expression_wink),
-    Surprised("surprised", "惊讶", Res.drawable.lindo_expression_surprised),
-    Sleepy("sleepy", "困困", Res.drawable.lindo_expression_sleepy),
-    Official("official", "LINUX DO");
+    Happy("happy", LinDoMessagesCopy.ICON_ART_HAPPY, Res.drawable.lindo_expression_happy),
+    Classic("classic", LinDoMessagesCopy.ICON_ART_CLASSIC),
+    Wink("wink", LinDoMessagesCopy.ICON_ART_WINK, Res.drawable.lindo_expression_wink),
+    Surprised("surprised", LinDoMessagesCopy.ICON_ART_SURPRISED, Res.drawable.lindo_expression_surprised),
+    Sleepy("sleepy", LinDoMessagesCopy.ICON_ART_SLEEPY, Res.drawable.lindo_expression_sleepy),
+    Official("official", LinDoCommonCopy.LINUX_DO);
+
+    val label: String get() = labelCopy.text
 
     val description: String
-        get() = if (this == Official) "LINUX DO 标志" else "零度娘（$label）"
+        get() = if (this == Official) {
+            LinDoMessagesCopy.ICON_DESC_LOGO.text
+        } else {
+            LinDoMessagesCopy.ICON_DESC_MASCOT.format(label)
+        }
 
     val backgrounds: List<LinDoIconBackground>
         get() = if (this == Classic) LinDoIconBackground.entries
@@ -126,16 +143,16 @@ internal fun LinDoAppIconPage(
     var applyFailed by remember { mutableStateOf(false) }
     val palette = LocalPalette.current
     LinDoFullScreenPage(onBack = onDismiss) {
-        LinDoPageTopBar(title = "应用图标", onBack = onDismiss) {
+        LinDoPageTopBar(title = LinDoMessagesCopy.ROW_APP_ICON.text, onBack = onDismiss) {
             TextButton(enabled = pending != current, onClick = { applyFailed = !onApply(pending) }) {
-                Text("应用并重启")
+                Text(LinDoMessagesCopy.APPLY_ICON_AND_RESTART.text)
             }
         }
         Column(
             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text("图案", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+            Text(LinDoMessagesCopy.ICON_SECTION_ARTWORK.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
             Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 LinDoIconArtwork.entries.chunked(3).forEach { row ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -146,6 +163,7 @@ internal fun LinDoAppIconPage(
                             val choice = LinDoAppIcon(artwork, background)
                             Column(
                                 modifier = Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+                                    .pointerHoverIcon(PointerIcon.Hand)
                                     .selectable(selected, role = Role.RadioButton, onClick = {
                                         pending = choice
                                         applyFailed = false
@@ -170,7 +188,7 @@ internal fun LinDoAppIconPage(
                     }
                 }
             }
-            Text("底色", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+            Text(LinDoMessagesCopy.ICON_SECTION_BACKGROUND.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
             Row(
                 Modifier.fillMaxWidth().selectableGroup(),
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -179,6 +197,7 @@ internal fun LinDoAppIconPage(
                     val selected = pending.background == background
                     Row(
                         modifier = Modifier.weight(1f, fill = false).heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
+                            .pointerHoverIcon(PointerIcon.Hand)
                             .selectable(selected, role = Role.RadioButton, onClick = {
                                 pending = pending.copy(background = background)
                                 applyFailed = false
@@ -203,7 +222,7 @@ internal fun LinDoAppIconPage(
                 }
             }
             if (applyFailed) {
-                Text("切换图标失败", fontSize = 12.sp, lineHeight = 18.sp, color = MaterialTheme.colorScheme.error)
+                Text(LinDoMessagesCopy.SWITCH_ICON_FAILED.text, fontSize = 12.sp, lineHeight = 18.sp, color = MaterialTheme.colorScheme.error)
             }
         }
     }

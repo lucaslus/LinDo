@@ -2,6 +2,7 @@ package do_.linux.lindo
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -9,6 +10,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
@@ -31,6 +33,12 @@ import do_.linux.lindo.core.compose.LocalComposerDrafts
 import do_.linux.lindo.core.connect.ConsolidatedTimingBatch
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoCopyEntry
+import do_.linux.lindo.core.copy.LinDoFeedCopy
+import do_.linux.lindo.core.copy.LinDoMessagesCopy
+import do_.linux.lindo.core.diagnostics.DiagnosticCategory
+import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.LinuxDoRepository
@@ -113,11 +121,26 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sign
 
-internal val IS_MAC_OS: Boolean =
-    System.getProperty("os.name").orEmpty().contains("Mac", ignoreCase = true)
+internal enum class DesktopOsKind(val defaultUserAgent: String) {
+    MACOS("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    WINDOWS("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    LINUX("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
 
-internal val IS_WINDOWS: Boolean =
-    System.getProperty("os.name").orEmpty().contains("Windows", ignoreCase = true)
+    companion object {
+        val current: DesktopOsKind = run {
+            val osName = System.getProperty("os.name").orEmpty()
+            when {
+                osName.contains("Mac", ignoreCase = true) -> MACOS
+                osName.contains("Windows", ignoreCase = true) -> WINDOWS
+                else -> LINUX
+            }
+        }
+    }
+}
+
+internal val IS_MAC_OS: Boolean = DesktopOsKind.current == DesktopOsKind.MACOS
+
+internal val IS_WINDOWS: Boolean = DesktopOsKind.current == DesktopOsKind.WINDOWS
 
 private val SUPPORTS_POSIX: Boolean = runCatching {
     FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
@@ -132,14 +155,7 @@ internal const val DESKTOP_DEFAULT_WINDOW_WIDTH_DP = 1240
 internal const val DESKTOP_DEFAULT_WINDOW_HEIGHT_DP = 820
 private const val MAX_DESKTOP_UPLOAD_BYTES = 20L * 1024L * 1024L
 
-internal fun defaultDesktopUserAgent(): String = when {
-    IS_MAC_OS ->
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    IS_WINDOWS ->
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    else ->
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-}
+internal fun defaultDesktopUserAgent(): String = DesktopOsKind.current.defaultUserAgent
 
 internal fun extractDeepLinkArg(args: Array<String>): String? {
     for (raw in args) {
@@ -619,6 +635,12 @@ private object DesktopStateStore {
             apiKey = savedApiKey,
             rawCookies = savedCookies
         )
+        if (UserApiKeyAuthManager.isAuthorized()) {
+            props.getProperty("unread_notifications")
+                ?.toIntOrNull()
+                ?.takeIf { it > 0 }
+                ?.let { UserApiKeyAuthManager.updateCachedUnreadNotifications(it) }
+        }
 
         LocalComposerDrafts.restore(props.getProperty("composer_drafts"))
         LocalComposerDrafts.onPersist = { encoded ->
@@ -648,7 +670,7 @@ private object DesktopStateStore {
                 runCatching {
                     val dialog = FileDialog(
                         currentMainWindow as? Frame,
-                        "选择要上传的图片或附件",
+                        LinDoMessagesCopy.PICK_ATTACHMENT_DIALOG_TITLE.text,
                         FileDialog.LOAD
                     )
                     if (mimeType.startsWith("image/", ignoreCase = true)) {
@@ -760,6 +782,7 @@ private object DesktopStateStore {
                     putOrRemove("animated_avatar", currentProfile.animatedAvatar)
                     putOrRemove("user_title", currentProfile.userTitle)
                     setProperty("trust_level", currentProfile.trustLevel.toString())
+                    setProperty("unread_notifications", UserApiKeyAuthManager.cachedUnreadNotificationCount.toString())
                 } else {
                     remove("user_id")
                     remove("username")
@@ -768,6 +791,7 @@ private object DesktopStateStore {
                     remove("animated_avatar")
                     remove("user_title")
                     remove("trust_level")
+                    remove("unread_notifications")
                 }
                 putOrRemove("raw_cookies", cookies.takeIf { it.isNotBlank() })
             }
@@ -782,6 +806,7 @@ private object DesktopStateStore {
                 remove("user_id")
                 remove("user_title")
                 remove("trust_level")
+                remove("unread_notifications")
                 remove("read_topic_posts")
                 remove("composer_drafts")
                 val remaining = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
@@ -964,16 +989,19 @@ private class SmoothFrameWheelEvent(
 )
 
 /**
- * 144Hz+ 高刷平滑滚轮引擎：
+ * 120Hz–240Hz VSync 帧锁平滑滚轮引擎：
  *
- * 根因修复：OpenJDK macOS (`CPlatformResponder$DeltaAccumulator`) 在使用实体鼠标滚轮（`SCROLL_PHASE_UNSUPPORTED`）时，
- * 会同时发出 `wheelRotation = ±1` 与极小的 `preciseWheelRotation = ±0.1`、`scrollAmount = 1`。
- * Compose Desktop (`DesktopScrollable.desktop.kt`) 检查 `abs(precise - wheelRotation) > 0.001` 为 true，
- * 误判实体鼠标滚轮为触控板而关闭平滑插值，且每格仅步进 `0.1 * 10dp = 1dp`，在 144Hz 屏幕上呈现明显顿挫。
+ * 根因修复：
+ * 1. OpenJDK macOS (`CPlatformResponder$DeltaAccumulator`) 在使用实体刻度鼠标滚轮（`SCROLL_PHASE_UNSUPPORTED`）时，
+ *    固定发出 `wheelRotation = ±1` 且 `preciseWheelRotation = wheelRotation * 0.1`、`scrollAmount = 1`。
+ *    Compose Desktop (`DesktopScrollable.desktop.kt`) 检查 `abs(precise - wheelRotation) > 0.001` 为 true，
+ *    误判实体鼠标滚轮为触控板而关闭平滑插值，每格仅步进 `0.1 * 10dp = 1dp`。
+ * 2. 反之，Apple 原生触控板 / Magic Mouse / Windows Precision Touchpad 已经具备系统内核级 120Hz/144Hz 像素惯性曲线，
+ *    若被二次定时拦截（哪怕只有首帧 `abs(precise) >= 0.5` 时误拦截），就会因 `ScheduledExecutorService` 与 Metal/DirectX VSync 异频拍频而产生明显掉帧感！
  *
- * 本引擎通过标准 `EventQueue` 在事件到达组件前精准区分：
- * 1. 原生触控板连续手势（首帧 `wheelRotation == 0 && abs(precise) < 0.5` 或帧间隔 `<= 14ms`）—— 零延迟原样直通；
- * 2. 实体鼠标离散滚轮刻度 —— 吸收原始跳变刻度，按显示器真实刷新率（144Hz–240Hz）以纳米级 `dt` 指数阻尼积分驱动子像素平滑滚动。
+ * 本引擎因此严格分离两条通道：
+ * - **原生触控板 / Magic Mouse / Precision Touchpad**：100% 零拦截、零延迟原样直通 Skiko VSync 管线；
+ * - **仅限实体刻度鼠标滚轮**（严格满足 `isDiscreteMouseWheelNotch` 硬件特征）：由 Compose `withFrameNanos` 严格锁定显示器真实 VSync 帧驱动子像素阻尼平滑，彻底废除异步线程池定时器拍频抖动。
  */
 internal object DesktopSmoothWheelEngine {
     private var installed = false
@@ -981,19 +1009,10 @@ internal object DesktopSmoothWheelEngine {
     @Volatile
     private var trackedWindow: AwtWindow? = null
 
-    private val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
-        Thread(runnable, "lindo-high-hz-wheel-driver").apply {
-            isDaemon = true
-            priority = Thread.MAX_PRIORITY - 1
-        }
-    }
-
-    private var frameTask: ScheduledFuture<*>? = null
-    private var activeFramePeriodNs: Long = 0L
     private var activeTargetHz: Int = if (IS_MAC_OS) 120 else 60
-    private val edtDispatchPending = AtomicBoolean(false)
+    private var vsyncDemandTick by mutableIntStateOf(0)
 
-    // 以下状态仅在 AWT EventDispatchThread 访问
+    // 以下状态仅在 AWT EventDispatchThread（亦即 Compose Desktop UI 主线程）访问
     private var remainingUnitsY: Double = 0.0
     private var remainingUnitsX: Double = 0.0
     private var lastFrameNano: Long = 0L
@@ -1028,6 +1047,21 @@ internal object DesktopSmoothWheelEngine {
         }
     }
 
+    @Composable
+    fun VSyncDriver() {
+        val demand = vsyncDemandTick
+        if (demand <= 0) return
+        LaunchedEffect(demand) {
+            lastFrameNano = 0L
+            while (true) {
+                val keepGoing = withFrameNanos { frameTimeNanos ->
+                    stepOnVsyncFrame(frameTimeNanos)
+                }
+                if (!keepGoing) break
+            }
+        }
+    }
+
     internal fun clampRefreshRateHz(reported: Int, isMacOs: Boolean = IS_MAC_OS): Int {
         return if (reported == DisplayMode.REFRESH_RATE_UNKNOWN || reported <= 0) {
             if (isMacOs) 120 else 60
@@ -1039,6 +1073,27 @@ internal object DesktopSmoothWheelEngine {
     internal fun isTrackpadInitialFrame(rawInt: Int, rawPrecise: Double): Boolean {
         val absPrecise = abs(rawPrecise)
         return rawInt == 0 && absPrecise in 1e-4..0.49
+    }
+
+    /**
+     * 精准判定是否为「实体离散刻度鼠标滚轮」事件：
+     * - macOS (`CPlatformResponder.java`): 仅当底层 `scrollPhase == SCROLL_PHASE_UNSUPPORTED`（非触控板/非 Magic Mouse）时，
+     *   OpenJDK 才会合成 `rawInt != 0` 且 `rawPrecise == rawInt * 0.1` 的固定比例刻度；其余任何连续像素浮点值均为原生触控板，必须零拦截直通！
+     * - Windows / Linux: 实体滚轮刻度必为整数步进 (`rawInt != 0 && abs(rawPrecise - rawInt) < 1e-3`)，Precision Touchpad 小数帧全部直通。
+     */
+    internal fun isDiscreteMouseWheelNotch(
+        rawInt: Int,
+        rawPrecise: Double,
+        dtMs: Long,
+        trackpadActive: Boolean,
+        isMacOs: Boolean = IS_MAC_OS
+    ): Boolean {
+        if (trackpadActive || rawInt == 0) return false
+        return if (isMacOs) {
+            abs(rawPrecise - rawInt * 0.1) < 1e-3 && dtMs >= 14L
+        } else {
+            abs(rawPrecise - rawInt.toDouble()) < 1e-3 && dtMs >= 10L
+        }
     }
 
     internal fun computeWheelStepDelta(
@@ -1059,7 +1114,7 @@ internal object DesktopSmoothWheelEngine {
                 direction * absPrecise * velocity
             } else {
                 // MacOSCocoaConfig 每 1.0 precise 单位 (scrollAmount=1) 对应 10dp；
-                // 单格慢速滚轮映射约 6.0 单位 (~60dp)，连续快速拨动平滑加速至 ~150dp/格。
+                // 单格慢速滚轮映射约 5.4 单位 (~54dp)，连续快速拨动平滑加速。
                 val normalizedNotch = max(1.0, absPrecise / 0.12).coerceAtMost(3.2)
                 val step = (5.4 + (normalizedNotch - 1.0) * 1.8) * velocity
                 direction * step.coerceAtMost(26.0)
@@ -1110,16 +1165,24 @@ internal object DesktopSmoothWheelEngine {
             return false
         }
 
-        // 精准识别 Apple 触控板 / Windows Precision Touchpad 连续手势：
-        // 触控板小位移首帧 wheelRotation == 0 而 precise in 1e-4..0.49，零延迟原样直通 Compose 原生滚动
-        val isTrackpadInitialSignature = isTrackpadInitialFrame(rawInt, rawPrecise)
-        if (dtMs > 130L) {
-            trackpadGestureActive = isTrackpadInitialSignature
-        } else if (isTrackpadInitialSignature || (IS_MAC_OS && dtMs <= 13L && abs(rawPrecise - rawInt) <= 0.501)) {
+        // 更新触控板连续手势窗口状态（160ms 内保持原生触控板直通锁）
+        val looksLikeContinuousTrackpad = if (IS_MAC_OS) {
+            rawInt == 0 || abs(rawPrecise - rawInt * 0.1) >= 1e-3
+        } else {
+            isTrackpadInitialFrame(rawInt, rawPrecise) || abs(rawPrecise - rawInt.toDouble()) >= 1e-3
+        }
+        if (dtMs > 160L) {
+            trackpadGestureActive = looksLikeContinuousTrackpad
+        } else if (looksLikeContinuousTrackpad) {
             trackpadGestureActive = true
         }
 
-        if (trackpadGestureActive) {
+        if (!isDiscreteMouseWheelNotch(rawInt, rawPrecise, dtMs, trackpadGestureActive, IS_MAC_OS)) {
+            if (remainingUnitsY != 0.0 || remainingUnitsX != 0.0) {
+                remainingUnitsY = 0.0
+                remainingUnitsX = 0.0
+                vsyncDemandTick = 0
+            }
             return false
         }
 
@@ -1164,63 +1227,29 @@ internal object DesktopSmoothWheelEngine {
             remainingUnitsY = (remainingUnitsY + deltaUnits).coerceIn(-140.0, 140.0)
         }
 
-        ensureHighRefreshLoopRunning(targetWindow)
+        activeTargetHz = resolveTargetRefreshHz(targetWindow)
+        vsyncDemandTick = if (vsyncDemandTick >= 1_000_000) 1 else vsyncDemandTick + 1
         return true
     }
 
-    private fun ensureHighRefreshLoopRunning(window: AwtWindow) {
-        val hz = resolveTargetRefreshHz(window)
-        activeTargetHz = hz
-        val periodNs = (1_000_000_000L / hz).coerceIn(4_166_666L, 16_666_667L)
-        val currentTask = frameTask
-        if (currentTask != null && !currentTask.isDone && activeFramePeriodNs == periodNs) {
-            return
-        }
-        currentTask?.cancel(false)
-        activeFramePeriodNs = periodNs
-        lastFrameNano = System.nanoTime()
-        frameTask = scheduler.scheduleAtFixedRate(
-            {
-                if (edtDispatchPending.compareAndSet(false, true)) {
-                    SwingUtilities.invokeLater {
-                        try {
-                            stepOnEdt()
-                        } finally {
-                            edtDispatchPending.set(false)
-                        }
-                    }
-                }
-            },
-            0L,
-            periodNs,
-            TimeUnit.NANOSECONDS
-        )
-    }
-
-    private fun stopLoopOnEdt() {
-        frameTask?.cancel(false)
-        frameTask = null
-        lastFrameNano = 0L
-    }
-
-    private fun stepOnEdt() {
+    private fun stepOnVsyncFrame(frameTimeNanos: Long): Boolean {
         val comp = anchorComponent
         if (comp == null || !comp.isShowing) {
             remainingUnitsY = 0.0
             remainingUnitsX = 0.0
-            stopLoopOnEdt()
-            return
+            lastFrameNano = 0L
+            vsyncDemandTick = 0
+            return false
         }
 
-        val nowNano = System.nanoTime()
         val dtSec = if (lastFrameNano == 0L) {
             1.0 / activeTargetHz.coerceIn(60, 240).toDouble()
         } else {
-            ((nowNano - lastFrameNano) / 1_000_000_000.0).coerceIn(0.001, 0.032)
+            ((frameTimeNanos - lastFrameNano) / 1_000_000_000.0).coerceIn(0.002, 0.032)
         }
-        lastFrameNano = nowNano
+        lastFrameNano = frameTimeNanos
 
-        // 指数弹簧阻尼系数 k = 22.0：在 144Hz 下每帧推进约 14.1%，丝滑贴合人眼高刷惯性曲线
+        // 指数弹簧阻尼系数 k = 22.0：锁定真实 VSync 帧间隔推进子像素步长
         val alpha = 1.0 - exp(-dtSec * 22.0)
 
         var active = false
@@ -1251,8 +1280,10 @@ internal object DesktopSmoothWheelEngine {
         }
 
         if (!active) {
-            stopLoopOnEdt()
+            lastFrameNano = 0L
+            vsyncDemandTick = 0
         }
+        return active
     }
 
     private fun dispatchSyntheticWheelStep(comp: Component, units: Double, horizontal: Boolean) {
@@ -1280,6 +1311,24 @@ internal object DesktopSmoothWheelEngine {
             preciseWheelRotation = safeUnits
         )
         runCatching { comp.dispatchEvent(synthetic) }
+    }
+}
+
+private enum class DesktopTrayMenuItemKind(
+    val defaultLabelCopy: LinDoCopyEntry,
+    val separatorAfter: Boolean = false
+) {
+    OPEN_MAIN(LinDoMessagesCopy.TRAY_OPEN_LINDO),
+    MESSAGES(LinDoFeedCopy.NOTIFICATIONS_DESC),
+    PUBLISH_TOPIC(LinDoMessagesCopy.TRAY_PUBLISH_NEW_TOPIC, separatorAfter = true),
+    QUIT(LinDoMessagesCopy.TRAY_QUIT_LINDO);
+
+    fun formatLabel(unreadCount: Int = 0): String {
+        if (this == MESSAGES && unreadCount > 0) {
+            val badge = if (unreadCount > 99) LinDoCommonCopy.BADGE_OVERFLOW_99.text else unreadCount.toString()
+            return LinDoMessagesCopy.TRAY_MESSAGES_UNREAD_ITEM.format(badge)
+        }
+        return defaultLabelCopy.text
     }
 }
 
@@ -1325,36 +1374,39 @@ internal object DesktopTrayController {
         if (trayIcon != null) return true
         return runCatching {
             val popup = PopupMenu()
-            val menuFont = if (IS_WINDOWS) Font("Microsoft YaHei UI", Font.PLAIN, 12) else null
+            val menuFont = if (DesktopOsKind.current == DesktopOsKind.WINDOWS) {
+                Font("Microsoft YaHei UI", Font.PLAIN, 12)
+            } else {
+                null
+            }
             if (menuFont != null) {
                 popup.font = menuFont
             }
-            val openItem = MenuItem("打开 Lindo").apply {
-                if (menuFont != null) font = menuFont
-                addActionListener { SwingUtilities.invokeLater(onOpenMainWindow) }
+            var messagesItemRef: MenuItem? = null
+            DesktopTrayMenuItemKind.entries.forEach { itemKind ->
+                val action: () -> Unit = when (itemKind) {
+                    DesktopTrayMenuItemKind.OPEN_MAIN -> onOpenMainWindow
+                    DesktopTrayMenuItemKind.MESSAGES -> onOpenMessages
+                    DesktopTrayMenuItemKind.PUBLISH_TOPIC -> onOpenPublish
+                    DesktopTrayMenuItemKind.QUIT -> onQuitApp
+                }
+                val item = MenuItem(itemKind.formatLabel()).apply {
+                    if (menuFont != null) font = menuFont
+                    addActionListener { SwingUtilities.invokeLater(action) }
+                }
+                if (itemKind == DesktopTrayMenuItemKind.MESSAGES) {
+                    messagesItemRef = item
+                }
+                popup.add(item)
+                if (itemKind.separatorAfter) {
+                    popup.addSeparator()
+                }
             }
-            val messagesItem = MenuItem("消息通知").apply {
-                if (menuFont != null) font = menuFont
-                addActionListener { SwingUtilities.invokeLater(onOpenMessages) }
-            }
-            val publishItem = MenuItem("发布新话题...").apply {
-                if (menuFont != null) font = menuFont
-                addActionListener { SwingUtilities.invokeLater(onOpenPublish) }
-            }
-            val quitItem = MenuItem("退出 Lindo").apply {
-                if (menuFont != null) font = menuFont
-                addActionListener { SwingUtilities.invokeLater(onQuitApp) }
-            }
-            popup.add(openItem)
-            popup.add(messagesItem)
-            popup.add(publishItem)
-            popup.addSeparator()
-            popup.add(quitItem)
 
             val initialImage = buildMultiResTrayImage(unreadCount = 0)
-            val icon = TrayIcon(initialImage, "Lindo — Linux.do 原生客户端", popup).apply {
-                isImageAutoSize = !IS_MAC_OS
-                if (IS_MAC_OS) {
+            val icon = TrayIcon(initialImage, LinDoMessagesCopy.TRAY_TOOLTIP_DEFAULT.text, popup).apply {
+                isImageAutoSize = DesktopOsKind.current != DesktopOsKind.MACOS
+                if (DesktopOsKind.current == DesktopOsKind.MACOS) {
                     addActionListener {
                         dispatchDebouncedOpen(onOpenMainWindow, onOpenMessages)
                     }
@@ -1370,7 +1422,7 @@ internal object DesktopTrayController {
             }
             SystemTray.getSystemTray().add(icon)
             trayIcon = icon
-            unreadMenuItem = messagesItem
+            unreadMenuItem = messagesItemRef
             lastRenderedUnread = 0
             true
         }.getOrDefault(false)
@@ -1385,12 +1437,15 @@ internal object DesktopTrayController {
                 if (taskbar.isSupported(Taskbar.Feature.ICON_BADGE_TEXT)) {
                     val badgeText = when {
                         normalized <= 0 -> null
-                        normalized > 99 -> "99+"
+                        normalized > 99 -> LinDoCommonCopy.BADGE_OVERFLOW_99.text
                         else -> normalized.toString()
                     }
                     taskbar.setIconBadge(badgeText)
                 }
-                if (IS_WINDOWS && targetWindow != null && taskbar.isSupported(Taskbar.Feature.ICON_BADGE_IMAGE_WINDOW)) {
+                if (DesktopOsKind.current == DesktopOsKind.WINDOWS &&
+                    targetWindow != null &&
+                    taskbar.isSupported(Taskbar.Feature.ICON_BADGE_IMAGE_WINDOW)
+                ) {
                     val badgeImg = renderWindowsTaskbarBadgeImage(normalized)
                     SwingUtilities.invokeLater {
                         runCatching {
@@ -1410,15 +1465,11 @@ internal object DesktopTrayController {
             runCatching {
                 icon.image = buildMultiResTrayImage(normalized)
                 icon.toolTip = buildString {
-                    append("Lindo")
-                    if (!username.isNullOrBlank()) append(" · @$username")
-                    if (normalized > 0) append("（${normalized} 条未读消息）")
+                    append(LinDoCommonCopy.APP_NAME.text)
+                    if (!username.isNullOrBlank()) append(" · ${LinDoCommonCopy.AT_USERNAME.format(username)}")
+                    if (normalized > 0) append(LinDoMessagesCopy.TRAY_UNREAD_SUFFIX.format(normalized))
                 }
-                unreadMenuItem?.label = if (normalized > 0) {
-                    "消息通知（${if (normalized > 99) "99+" else normalized} 条未读）"
-                } else {
-                    "消息通知"
-                }
+                unreadMenuItem?.label = DesktopTrayMenuItemKind.MESSAGES.formatLabel(normalized)
             }
         }
     }
@@ -1450,7 +1501,7 @@ internal object DesktopTrayController {
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
             g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
-            val label = if (unreadCount > 99) "99+" else unreadCount.toString()
+            val label = if (unreadCount > 99) LinDoCommonCopy.BADGE_OVERFLOW_99.text else unreadCount.toString()
             val inset = (sizePx * 0.06f).coerceAtLeast(1f)
             val d = sizePx - inset * 2f
             g.color = Color(0xFF, 0xFF, 0xFF, 235)
@@ -1497,7 +1548,7 @@ internal object DesktopTrayController {
 
             if (unreadCount > 0) {
                 val label = when {
-                    unreadCount > 9 -> "9+"
+                    unreadCount > 9 -> LinDoCommonCopy.BADGE_OVERFLOW_9.text
                     else -> unreadCount.toString()
                 }
                 val badgeH = (10.5f * scale).roundToInt().coerceAtLeast(10)
@@ -1625,6 +1676,21 @@ private fun flushDesktopStateBeforeQuit() {
 }
 
 fun main(args: Array<String> = emptyArray()) {
+    // 在 Skiko / AWT 初始化前注入高刷渲染与 GPU 缓存调优参数：
+    // 消除 macOS Metal / Windows DirectX 在连续触控板/滚轮重绘时等待上一帧 VSync 导致的 60fps 减半锁帧
+    if (System.getProperty("skiko.vsync.enabled") == null) {
+        System.setProperty("skiko.vsync.enabled", "true")
+    }
+    if (System.getProperty("skiko.rendering.macos.waitForPreviousFrameVsyncOnRedrawImmediately") == null) {
+        System.setProperty("skiko.rendering.macos.waitForPreviousFrameVsyncOnRedrawImmediately", "false")
+    }
+    if (System.getProperty("skiko.rendering.windows.waitForVsyncOnRedrawImmediately") == null) {
+        System.setProperty("skiko.rendering.windows.waitForVsyncOnRedrawImmediately", "false")
+    }
+    if (System.getProperty("skiko.gpu.resourceCacheLimit") == null) {
+        System.setProperty("skiko.gpu.resourceCacheLimit", "268435456")
+    }
+
     val initialDeepLink = extractDeepLinkArg(args)
     var reopenMainWindowAction: (() -> Unit)? = null
     var quitApplicationAction: (() -> Unit)? = null
@@ -1645,18 +1711,67 @@ fun main(args: Array<String> = emptyArray()) {
         return
     }
 
+    val logsDir = File(DesktopStateStore.stateDir, "logs")
+    val desktopPlatformSummary = buildString {
+        append(System.getProperty("os.name").orEmpty())
+        append(' ')
+        append(System.getProperty("os.version").orEmpty())
+        append(" (")
+        append(System.getProperty("os.arch").orEmpty())
+        append(", JVM ")
+        append(System.getProperty("java.version").orEmpty())
+        append(')')
+    }
+    LinDoDiagnosticLogger.configurePersistence(logsDir, platformInfo = desktopPlatformSummary)
+    restrictFilePermissionsToOwner(logsDir, isDirectory = true)
+    LinDoDiagnosticLogger.installUncaughtExceptionHandler()
+    LinDoDiagnosticLogger.exportSaveHandler = { suggestedFileName, content, onResult ->
+        SwingUtilities.invokeLater {
+            try {
+                val ownerFrame = currentMainWindow as? Frame
+                val dialog = FileDialog(
+                    ownerFrame,
+                    LinDoMessagesCopy.EXPORT_DIAG_DIALOG_TITLE.text,
+                    FileDialog.SAVE
+                ).apply {
+                    file = suggestedFileName
+                    isVisible = true
+                }
+                val dir = dialog.directory
+                val fileName = dialog.file
+                if (dir != null && fileName != null) {
+                    val outFile = File(dir, fileName)
+                    outFile.writeText(content, Charsets.UTF_8)
+                    LinDoDiagnosticLogger.info(
+                        DiagnosticCategory.SYSTEM,
+                        "LogExport",
+                        "Exported diagnostic report to ${outFile.name} (${content.length} chars)"
+                    )
+                    onResult(true, LinDoMessagesCopy.EXPORT_SUCCESS_PATH.format(outFile.absolutePath))
+                } else {
+                    onResult(false, LinDoMessagesCopy.EXPORT_CANCELLED.text)
+                }
+            } catch (err: Throwable) {
+                onResult(false, LinDoMessagesCopy.EXPORT_FAILED_REASON.format(err.message ?: err::class.simpleName))
+            }
+        }
+    }
+
     Runtime.getRuntime().addShutdownHook(
         Thread({ DesktopSingleInstanceBridge.close() }, "lindo-single-instance-cleanup")
     )
 
-    if (IS_MAC_OS) {
-        System.setProperty("apple.awt.application.name", "Lindo")
-    }
-    if (IS_WINDOWS) {
-        Thread(::ensureWindowsProtocolHandlersRegistered, "lindo-win-protocol-reg").apply {
-            isDaemon = true
-            start()
+    when (DesktopOsKind.current) {
+        DesktopOsKind.MACOS -> {
+            System.setProperty("apple.awt.application.name", LinDoCommonCopy.APP_NAME.text)
         }
+        DesktopOsKind.WINDOWS -> {
+            Thread(::ensureWindowsProtocolHandlersRegistered, "lindo-win-protocol-reg").apply {
+                isDaemon = true
+                start()
+            }
+        }
+        DesktopOsKind.LINUX -> Unit
     }
 
     DesktopStateStore.initAndWire()
@@ -1702,8 +1817,12 @@ fun main(args: Array<String> = emptyArray()) {
         var trayInstalled by remember { mutableStateOf(false) }
         var pendingTrayCommand by remember { mutableStateOf<DesktopTrayCommand?>(null) }
         var activeWindowRef by remember { mutableStateOf<AwtWindow?>(null) }
-        var latestUnreadCount by remember { mutableIntStateOf(0) }
-        var latestUsername by remember { mutableStateOf<String?>(null) }
+        var latestUnreadCount by remember { mutableIntStateOf(UserApiKeyAuthManager.cachedUnreadNotificationCount) }
+        var latestUsername by remember {
+            mutableStateOf(
+                UserApiKeyAuthManager.currentUser?.username?.takeIf { it.isNotBlank() && it != "linuxdo_user" }
+            )
+        }
 
         fun restoreAndFocusWindow() {
             isWindowVisible = true
@@ -1751,27 +1870,35 @@ fun main(args: Array<String> = emptyArray()) {
                 },
                 onQuitApp = { quitCleanly() }
             )
+            if (latestUnreadCount > 0 || !latestUsername.isNullOrBlank()) {
+                DesktopTrayController.updateUnreadState(latestUnreadCount, latestUsername, activeWindowRef)
+            }
             onDispose {
                 DesktopTrayController.uninstall()
             }
         }
 
-        // 窗口退入后台期间，每 90 秒静默轮询一次未读通知数，实时刷新菜单栏托盘角标与 Dock 角标
+        // 窗口退入后台期间，每 60 秒静默轮询一次未读通知数，实时刷新菜单栏托盘角标与 Dock 角标
         LaunchedEffect(isWindowVisible) {
             if (isWindowVisible) return@LaunchedEffect
             while (!isWindowVisible) {
-                delay(90_000L)
+                delay(60_000L)
                 if (isWindowVisible) break
                 if (!UserApiKeyAuthManager.isAuthorized() || LinuxDoRepository.isChallengeCooldownActive()) {
                     continue
                 }
-                val profile = runCatching {
-                    LinuxDoRepository.fetchCurrentUserProfile(background = true)
+                val unread = runCatching {
+                    LinuxDoRepository.refreshUnreadNotifications(background = true)
+                }.getOrNull() ?: runCatching {
+                    LinuxDoRepository.fetchCurrentUserProfile(background = true)?.unreadNotifications
                 }.getOrNull()
-                if (profile != null) {
-                    latestUnreadCount = profile.unreadNotifications
-                    latestUsername = profile.username.takeIf { it.isNotBlank() }
+                if (unread != null) {
+                    latestUnreadCount = unread
+                    latestUsername = UserApiKeyAuthManager.currentUser?.username
+                        ?.takeIf { it.isNotBlank() && it != "linuxdo_user" }
+                        ?: latestUsername
                     DesktopTrayController.updateUnreadState(latestUnreadCount, latestUsername, activeWindowRef)
+                    UserApiKeyAuthManager.persistSessionQuietly()
                 }
             }
         }
@@ -1793,7 +1920,7 @@ fun main(args: Array<String> = emptyArray()) {
                 }
             },
             state = windowState,
-            title = "Lindo",
+            title = LinDoCommonCopy.APP_NAME.text,
             onKeyEvent = { event ->
                 if (isDesktopBackShortcut(event)) {
                     BackNavigationBridge.dispatchBack()
@@ -1857,6 +1984,7 @@ fun main(args: Array<String> = emptyArray()) {
             }
 
             val topTitleInset = if (IS_MAC_OS && !isMacFullScreen) 28.dp else 0.dp
+            DesktopSmoothWheelEngine.VSyncDriver()
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1879,6 +2007,11 @@ fun main(args: Array<String> = emptyArray()) {
                         latestUnreadCount = unreadCount
                         latestUsername = username
                         DesktopTrayController.updateUnreadState(unreadCount, username, window)
+                        DesktopStateStore.update {
+                            if (UserApiKeyAuthManager.isAuthorized()) {
+                                setProperty("unread_notifications", unreadCount.coerceAtLeast(0).toString())
+                            }
+                        }
                     },
                     externalDesktopCommand = pendingTrayCommand,
                     onConsumeDesktopCommand = { pendingTrayCommand = null }

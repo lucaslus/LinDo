@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import android.widget.Toast
+import do_.linux.lindo.core.copy.LinDoMessagesCopy
 import do_.linux.lindo.ui.LinDoAppIcon
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -72,7 +73,7 @@ internal class AndroidAppIconManager(private val activity: Activity) {
             runCatching { selectOnly(restart.current) }
                 .onFailure { Log.w("LinDoIcon", "Could not restore launcher icon", it) }
             Log.w("LinDoIcon", "Could not switch launcher icon", error)
-            Toast.makeText(activity, "切换图标失败，请重试", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, LinDoMessagesCopy.SWITCH_ICON_FAILED_RETRY.text, Toast.LENGTH_SHORT).show()
             restore()
         } finally {
             if (pendingRestart === restart) pendingRestart = null

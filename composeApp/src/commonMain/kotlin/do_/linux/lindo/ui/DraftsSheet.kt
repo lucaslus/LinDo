@@ -11,28 +11,25 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import do_.linux.lindo.core.compose.LocalComposerDrafts
 import do_.linux.lindo.core.compose.toCloudItem
+import do_.linux.lindo.core.copy.CloudDraftKind
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoComposerCopy
+import do_.linux.lindo.core.copy.isSiteVerificationError
 import do_.linux.lindo.core.network.*
 import do_.linux.lindo.ui.components.LinDoIcons
 import do_.linux.lindo.ui.components.LocalLinDoNetworkRestoreVersion
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-internal fun resolveDraftKindLabel(draft: CloudDraftItem): String = when {
-    draft.action == "privateMessage" ||
-        draft.draftKey.startsWith("private_message") ||
-        draft.draftKey.startsWith("new_private_message") -> "私信"
-    draft.action.startsWith("edit") ||
-        draft.draftKey.startsWith("edit_post_") -> "编辑"
-    draft.draftKey == "new_topic" ||
-        draft.action == "createTopic" -> "新话题"
-    else -> "回复"
-}
+internal fun resolveDraftKindLabel(draft: CloudDraftItem): String =
+    CloudDraftKind.resolve(draft.action, draft.draftKey).badgeCopy.text
 
 internal fun mergeCloudAndLocalDraftLists(
     owner: String,
@@ -77,7 +74,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
     LaunchedEffect(netRestoreVer) {
         if (netRestoreVer == baselineNetRestoreVer) return@LaunchedEffect
         baselineNetRestoreVer = netRestoreVer
-        if (error != null && error?.contains("站点验证") != true) {
+        if (error != null && !error.isSiteVerificationError()) {
             reload++
         }
     }
@@ -89,7 +86,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
         if (error != null) {
             reload++
         }
-        if (deleteError?.contains("站点验证") == true) {
+        if (deleteError.isSiteVerificationError()) {
             deleteError = null
         }
     }
@@ -103,12 +100,12 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
             drafts = mergeCloudAndLocalDraftLists(owner = owner, cloud = cloud, local = local)
         }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (failure: Exception) { error = failure.message ?: "云端草稿同步失败" }
+        catch (failure: Exception) { error = failure.message ?: LinDoComposerCopy.CLOUD_DRAFTS_SYNC_FAILED.text }
         finally { loading = false }
     }
     LinDoFullScreenPage(onBack = onDismiss, containerColor = palette.cardSurface) {
         LinDoPageTopBar(
-            title = "草稿箱",
+            title = LinDoComposerCopy.DRAFTS_BOX_TITLE.text,
             onBack = onDismiss,
             trailingContent = {
                 if (drafts.isNotEmpty() && !busy) {
@@ -117,7 +114,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                         showClearAllConfirm = true
                     }) {
                         Text(
-                            text = "清空全部",
+                            text = LinDoComposerCopy.CLEAR_ALL_DRAFTS.text,
                             color = MaterialTheme.colorScheme.error,
                             fontSize = 13.5.sp,
                             fontWeight = FontWeight.Medium
@@ -128,12 +125,20 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
         )
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             error?.let { LinDoLoadFailure(it, { reload++ }) }
-            if (loading && drafts.isEmpty()) Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { LinDoLoadingIndicator(label = "读取草稿") }
+            if (loading && drafts.isEmpty()) Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { LinDoLoadingIndicator(label = LinDoComposerCopy.LOADING_DRAFTS.text) }
             else LazyColumn(Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) {
-                if (drafts.isEmpty() && error == null) item { LinDoEmptyState("暂无草稿") }
+                if (drafts.isEmpty() && error == null) item { LinDoEmptyState(LinDoComposerCopy.EMPTY_DRAFTS.text) }
                 items(drafts, key = { it.draftKey }) { draft ->
                     val kindLabel = resolveDraftKindLabel(draft)
-                    Row(Modifier.fillMaxWidth().clickable { onOpen(draft) }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
+                            .clickable { onOpen(draft) }
+                            .padding(horizontal = 6.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -165,7 +170,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                             }
                             if (draft.recipients.isNotBlank()) {
                                 Text(
-                                    text = "收件人：${draft.recipients}",
+                                    text = LinDoComposerCopy.RECIPIENT_PREFIX.format(draft.recipients),
                                     color = palette.inkSecondary,
                                     fontSize = 12.sp,
                                     maxLines = 1,
@@ -175,7 +180,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                             if (draft.excerpt.isNotBlank()) Text(draft.excerpt, color = palette.inkSecondary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(draft.createdAtText, color = palette.inkTertiary, fontSize = 12.sp)
                         }
-                        IconButton(onClick = { deleting = draft; deleteError = null }) { Icon(LinDoIcons.Trash, "删除草稿", tint = palette.inkSecondary, modifier = Modifier.size(20.dp)) }
+                        IconButton(onClick = { deleting = draft; deleteError = null }) { Icon(LinDoIcons.Trash, LinDoComposerCopy.DELETE_DRAFT_DESC.text, tint = palette.inkSecondary, modifier = Modifier.size(20.dp)) }
                     }
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
@@ -184,8 +189,8 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
     }
     deleting?.let { draft ->
         LinDoConfirmDialog(
-            title = "要删除这份草稿吗？",
-            confirmLabel = "删除",
+            title = LinDoComposerCopy.CONFIRM_DELETE_DRAFT.text,
+            confirmLabel = LinDoCommonCopy.DELETE.text,
             busy = busy,
             error = deleteError,
             destructive = true,
@@ -210,7 +215,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                                 true
                             }
                             if (!cloudDeleted) {
-                                deleteError = "草稿已在其他设备更新，请重新核对"
+                                deleteError = LinDoComposerCopy.DRAFT_UPDATED_OTHER_DEVICE.text
                                 return@launch
                             }
                             LocalComposerDrafts.remove(owner, draft.draftKey)
@@ -223,12 +228,12 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                                 LocalComposerDrafts.forgetSequence(owner, draft.draftKey)
                                 drafts = drafts.filterNot { it.draftKey == draft.draftKey }
                                 deleting = null
-                            } else deleteError = "草稿已在其他设备更新，请重新核对"
+                            } else deleteError = LinDoComposerCopy.DRAFT_UPDATED_OTHER_DEVICE.text
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failure: Exception) {
-                        deleteError = failure.message ?: "删除失败，草稿已保留"
+                        deleteError = failure.message ?: LinDoComposerCopy.DELETE_DRAFT_FAILED_KEPT.text
                     } finally {
                         busy = false
                     }
@@ -238,9 +243,9 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
     }
     if (showClearAllConfirm) {
         LinDoConfirmDialog(
-            title = "要清空全部 ${drafts.size} 份草稿吗？",
-            detail = "清空后云端与本地未发布草稿均不可恢复。",
-            confirmLabel = "清空全部",
+            title = LinDoComposerCopy.CONFIRM_CLEAR_ALL_DRAFTS.format(drafts.size),
+            detail = LinDoComposerCopy.CLEAR_ALL_DRAFTS_DETAIL.text,
+            confirmLabel = LinDoComposerCopy.CLEAR_ALL_DRAFTS.text,
             busy = busy,
             error = deleteError,
             destructive = true,
@@ -284,12 +289,12 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                         if (remaining.isEmpty()) {
                             showClearAllConfirm = false
                         } else {
-                            deleteError = "部分草稿已在其他设备更新，请刷新后重试"
+                            deleteError = LinDoComposerCopy.PARTIAL_DRAFTS_UPDATED_REFRESH.text
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failure: Exception) {
-                        deleteError = failure.message ?: "清空草稿失败，请稍后重试"
+                        deleteError = failure.message ?: LinDoComposerCopy.CLEAR_DRAFTS_FAILED_RETRY.text
                     } finally {
                         busy = false
                     }

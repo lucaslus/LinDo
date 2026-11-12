@@ -21,33 +21,50 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.*
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import do_.linux.lindo.core.copy.CalloutBlockKind
+import do_.linux.lindo.core.copy.GuestGateScenario
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoReaderCopy
+import do_.linux.lindo.core.copy.MediaBlockKind
+import do_.linux.lindo.core.copy.UnsupportedBlockKind
+import do_.linux.lindo.core.copy.isSiteVerificationError
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import coil3.compose.AsyncImage
@@ -62,11 +79,15 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
     if (plain != null && plain.href == null && plain.imageUrl == null && !plain.bold &&
         !plain.italic && !plain.code && !plain.strike && !plain.underline
     ) {
-        SelectablePostText(plain.text, onSelectionChange) {
+        var plainLayoutResult by remember(plain.text) { mutableStateOf<TextLayoutResult?>(null) }
+        SelectablePostText(plain.text, onSelectionChange, plainLayoutResult) {
             Text(
-                plain.text, color = palette.inkPrimary,
-                fontSize = if (heading) 17.sp else 15.sp, lineHeight = 24.sp,
-                fontWeight = if (heading) FontWeight.SemiBold else null
+                plain.text,
+                color = palette.inkPrimary,
+                fontSize = if (heading) 17.sp else 15.sp,
+                lineHeight = 24.sp,
+                fontWeight = if (heading) FontWeight.SemiBold else null,
+                onTextLayout = { plainLayoutResult = it }
             )
         }
         return
@@ -115,8 +136,9 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
                 } else {
                     AsyncImage(
                         model = url,
-                        contentDescription = "表情：${run.text}",
+                        contentDescription = LinDoReaderCopy.EMOJI_ALT.format(run.text),
                         contentScale = ContentScale.Fit,
+                        filterQuality = FilterQuality.High,
                         modifier = Modifier.fillMaxSize().padding(0.5.dp),
                         onError = { failedEmoji[url] = true }
                     )
@@ -124,17 +146,28 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
             }
         } }.toMap()
     }
-    SelectablePostText(annotated.text, onSelectionChange) {
-        Text(annotated, inlineContent = inlineImages, color = palette.inkPrimary, fontSize = if (heading) 17.sp else 15.sp, lineHeight = 24.sp)
+    var richLayoutResult by remember(annotated.text) { mutableStateOf<TextLayoutResult?>(null) }
+    SelectablePostText(annotated.text, onSelectionChange, richLayoutResult) {
+        Text(
+            annotated,
+            inlineContent = inlineImages,
+            color = palette.inkPrimary,
+            fontSize = if (heading) 17.sp else 15.sp,
+            lineHeight = 24.sp,
+            onTextLayout = { richLayoutResult = it }
+        )
     }
     unavailableMailLink?.let { mail ->
         TextButton(onClick = { clipboard.setText(AnnotatedString(mail.removePrefix("mailto:"))) }) {
-            Text("无法打开邮件应用，点击复制地址", color = palette.activeChipText)
+            Text(LinDoReaderCopy.CANNOT_OPEN_MAIL_APP.text, color = palette.activeChipText)
         }
     }
 }
 
 private val LocalActiveSelectionOwner = compositionLocalOf<MutableState<Any?>?> { null }
+internal val LocalOnQuoteSelectedText = compositionLocalOf<((String) -> Unit)?> { null }
+private val isAndroidSelectionRuntime: Boolean =
+    System.getProperty("java.vm.name")?.contains("Dalvik", ignoreCase = true) == true
 
 // Compose exposes selection offsets through its controlled container on the pinned runtime.
 @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
@@ -142,18 +175,25 @@ private val LocalActiveSelectionOwner = compositionLocalOf<MutableState<Any?>?> 
 private fun SelectablePostText(
     text: String,
     onSelectionChange: ((String?) -> Unit)?,
+    textLayoutResult: TextLayoutResult? = null,
     content: @Composable () -> Unit
 ) {
-    if (onSelectionChange == null) {
+    val onQuoteAction = LocalOnQuoteSelectedText.current
+    if (onSelectionChange == null && onQuoteAction == null) {
         SelectionContainer(content = content)
         return
     }
+    val palette = LocalPalette.current
+    val clipboard = LocalClipboardManager.current
+    val density = LocalDensity.current
     val ownerToken = remember { Any() }
     val activeOwner = LocalActiveSelectionOwner.current
     var selection by remember(text) {
         mutableStateOf<androidx.compose.foundation.text.selection.Selection?>(null)
     }
+    var isPointerPressed by remember(ownerToken) { mutableStateOf(false) }
     val latestCallback by rememberUpdatedState(onSelectionChange)
+    val latestQuoteAction by rememberUpdatedState(onQuoteAction)
     LaunchedEffect(activeOwner?.value) {
         if (activeOwner != null && activeOwner.value != ownerToken && selection != null) {
             selection = null
@@ -162,38 +202,175 @@ private fun SelectablePostText(
     DisposableEffect(text, ownerToken) {
         onDispose {
             if (activeOwner == null) {
-                if (selection != null) latestCallback(null)
+                if (selection != null) latestCallback?.invoke(null)
             } else if (activeOwner.value == ownerToken) {
                 activeOwner.value = null
-                latestCallback(null)
+                latestCallback?.invoke(null)
             }
         }
     }
-    SelectionContainer(
-        selection = selection,
-        onSelectionChange = { next ->
-            val hadSelection = selection != null
-            selection = next
-            if (next != null) {
-                val start = minOf(next.start.offset, next.end.offset).coerceIn(0, text.length)
-                val end = maxOf(next.start.offset, next.end.offset).coerceIn(start, text.length)
-                val selectedText = text.substring(start, end).takeIf { it.isNotBlank() }
-                if (selectedText != null) {
-                    activeOwner?.value = ownerToken
-                    latestCallback(selectedText)
-                } else if (activeOwner == null || activeOwner.value == ownerToken) {
-                    if (activeOwner?.value == ownerToken) activeOwner.value = null
-                    latestCallback(null)
+
+    val activeSelectedText = remember(selection, text) {
+        val sel = selection ?: return@remember null
+        val start = minOf(sel.start.offset, sel.end.offset).coerceIn(0, text.length)
+        val end = maxOf(sel.start.offset, sel.end.offset).coerceIn(start, text.length)
+        text.substring(start, end).takeIf { it.isNotBlank() }
+    }
+
+    val pillAnchorOffset = remember(selection, textLayoutResult, density, text) {
+        val sel = selection
+        val layout = textLayoutResult
+        val pillHalfWidthPx = with(density) { 84.dp.toPx() }
+        val pillHeightPx = with(density) { 40.dp.toPx() }
+        val verticalGapPx = with(density) { 6.dp.toPx() }
+        if (sel != null && layout != null && text.isNotEmpty()) {
+            val maxIdx = (text.length - 1).coerceAtLeast(0)
+            val minOff = minOf(sel.start.offset, sel.end.offset).coerceIn(0, maxIdx)
+            val maxOff = (maxOf(sel.start.offset, sel.end.offset) - 1).coerceIn(minOff, maxIdx)
+            val startBox = runCatching { layout.getBoundingBox(minOff) }.getOrNull()
+            val endBox = runCatching { layout.getBoundingBox(maxOff) }.getOrNull()
+            if (startBox != null && endBox != null) {
+                val topPx = minOf(startBox.top, endBox.top)
+                val bottomPx = maxOf(startBox.bottom, endBox.bottom)
+                val centerX = ((startBox.left + endBox.right) * 0.5f).coerceAtLeast(0f)
+                val yPx = if (isAndroidSelectionRuntime || topPx < pillHeightPx + 2f) {
+                    (bottomPx + verticalGapPx).roundToInt()
+                } else {
+                    (topPx - pillHeightPx - verticalGapPx).roundToInt()
                 }
-            } else if (hadSelection) {
-                if (activeOwner == null || activeOwner.value == ownerToken) {
-                    if (activeOwner?.value == ownerToken) activeOwner.value = null
-                    latestCallback(null)
+                IntOffset((centerX - pillHalfWidthPx).coerceAtLeast(0f).roundToInt(), yPx)
+            } else {
+                IntOffset(0, (-pillHeightPx - verticalGapPx).roundToInt())
+            }
+        } else {
+            IntOffset(0, (-pillHeightPx - verticalGapPx).roundToInt())
+        }
+    }
+
+    Box(
+        modifier = Modifier.pointerInput(ownerToken) {
+            awaitPointerEventScope {
+                while (true) {
+                    val ev = awaitPointerEvent(PointerEventPass.Initial)
+                    isPointerPressed = ev.changes.any { it.pressed }
                 }
             }
-        },
-        children = content
-    )
+        }
+    ) {
+        SelectionContainer(
+            selection = selection,
+            onSelectionChange = { next ->
+                val hadSelection = selection != null
+                selection = next
+                if (next != null) {
+                    val start = minOf(next.start.offset, next.end.offset).coerceIn(0, text.length)
+                    val end = maxOf(next.start.offset, next.end.offset).coerceIn(start, text.length)
+                    val selectedText = text.substring(start, end).takeIf { it.isNotBlank() }
+                    if (selectedText != null) {
+                        activeOwner?.value = ownerToken
+                        latestCallback?.invoke(selectedText)
+                    } else if (activeOwner == null || activeOwner.value == ownerToken) {
+                        if (activeOwner?.value == ownerToken) activeOwner.value = null
+                        latestCallback?.invoke(null)
+                    }
+                } else if (hadSelection) {
+                    if (activeOwner == null || activeOwner.value == ownerToken) {
+                        if (activeOwner?.value == ownerToken) activeOwner.value = null
+                        latestCallback?.invoke(null)
+                    }
+                }
+            },
+            children = content
+        )
+
+        if (activeSelectedText != null && !isPointerPressed && latestQuoteAction != null) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = pillAnchorOffset,
+                properties = PopupProperties(focusable = false)
+            ) {
+                val pillShape = RoundedCornerShape(20.dp)
+                val pillBg = if (palette.isDark) Color(0xFF1E222B) else Color(0xFF1F2329)
+                Row(
+                    modifier = Modifier
+                        .testTag("quote_and_reply_pill")
+                        .shadow(elevation = 8.dp, shape = pillShape)
+                        .clip(pillShape)
+                        .background(pillBg)
+                        .border(0.6.dp, Color.White.copy(alpha = 0.14f), pillShape)
+                        .padding(horizontal = 4.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .pointerHoverIcon(PointerIcon.Hand)
+                            .clickable {
+                                val captured = activeSelectedText
+                                selection = null
+                                if (activeOwner?.value == ownerToken) activeOwner.value = null
+                                latestCallback?.invoke(null)
+                                latestQuoteAction?.invoke(captured)
+                            }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.Quote,
+                            contentDescription = null,
+                            modifier = Modifier.size(13.dp),
+                            tint = palette.brandGold
+                        )
+                        Text(
+                            text = LinDoReaderCopy.QUOTE_AND_REPLY_PILL.text,
+                            fontSize = 12.5.sp,
+                            lineHeight = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .width(0.6.dp)
+                            .height(14.dp)
+                            .background(Color.White.copy(alpha = 0.18f))
+                    )
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .pointerHoverIcon(PointerIcon.Hand)
+                            .clickable {
+                                clipboard.setText(AnnotatedString(activeSelectedText))
+                                selection = null
+                                if (activeOwner?.value == ownerToken) activeOwner.value = null
+                                latestCallback?.invoke(null)
+                            }
+                            .padding(horizontal = 9.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.FaClone,
+                            contentDescription = null,
+                            modifier = Modifier.size(11.5.dp),
+                            tint = Color.White.copy(alpha = 0.85f)
+                        )
+                        Text(
+                            text = LinDoCommonCopy.COPY.text,
+                            fontSize = 12.2.sp,
+                            lineHeight = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White.copy(alpha = 0.92f),
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -204,12 +381,17 @@ internal fun PostRichContent(
     originalUrl: String? = null,
     postId: Int? = null,
     onSelectionChange: ((String?) -> Unit)? = null,
-    onRequestLogin: (() -> Unit)? = null
+    onRequestLogin: (() -> Unit)? = null,
+    onQuoteSelection: ((String) -> Unit)? = null
 ) {
     val existingSelectionOwner = LocalActiveSelectionOwner.current
+    val effectiveQuoteAction = onQuoteSelection ?: LocalOnQuoteSelectedText.current
     if (existingSelectionOwner == null) {
         val rootSelectionOwner = remember { mutableStateOf<Any?>(null) }
-        CompositionLocalProvider(LocalActiveSelectionOwner provides rootSelectionOwner) {
+        CompositionLocalProvider(
+            LocalActiveSelectionOwner provides rootSelectionOwner,
+            LocalOnQuoteSelectedText provides effectiveQuoteAction
+        ) {
             PostRichContentBody(
                 nodes = nodes,
                 palette = palette,
@@ -221,15 +403,17 @@ internal fun PostRichContent(
             )
         }
     } else {
-        PostRichContentBody(
-            nodes = nodes,
-            palette = palette,
-            onOpenLink = onOpenLink,
-            originalUrl = originalUrl,
-            postId = postId,
-            onSelectionChange = onSelectionChange,
-            onRequestLogin = onRequestLogin
-        )
+        CompositionLocalProvider(LocalOnQuoteSelectedText provides effectiveQuoteAction) {
+            PostRichContentBody(
+                nodes = nodes,
+                palette = palette,
+                onOpenLink = onOpenLink,
+                originalUrl = originalUrl,
+                postId = postId,
+                onSelectionChange = onSelectionChange,
+                onRequestLogin = onRequestLogin
+            )
+        }
     }
 }
 
@@ -251,14 +435,19 @@ private fun PostRichContentBody(
             is PostBlockNode.Spoiler -> {
                 var revealed by remember(node) { mutableStateOf(false) }
                 Column {
-                    TextButton(onClick = { revealed = !revealed }) { Text(if (revealed) "收起隐藏内容" else "显示隐藏内容", color = palette.inkSecondary) }
+                    TextButton(onClick = { revealed = !revealed }) {
+                        Text(
+                            if (revealed) LinDoReaderCopy.COLLAPSE_SPOILER.text else LinDoReaderCopy.REVEAL_SPOILER.text,
+                            color = palette.inkSecondary
+                        )
+                    }
                     if (revealed) PostRichContent(node.children, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
                 }
             }
             is PostBlockNode.Poll -> NativePostPoll(node, palette, postId, originalUrl, onOpenLink, onRequestLogin)
 
             is PostBlockNode.QuoteBlock -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp)).padding(12.dp)) {
-                node.username?.let { Text("@$it", color = palette.inkSecondary, fontSize = 12.sp) }
+                node.username?.let { Text(LinDoCommonCopy.AT_USERNAME.format(it), color = palette.inkSecondary, fontSize = 12.sp) }
                 PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.quotedText)) }, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
             }
             is PostBlockNode.CodeBlock -> {
@@ -279,12 +468,20 @@ private fun PostRichContentBody(
                             },
                             modifier = Modifier.heightIn(min = 48.dp)
                         ) {
-                            Text(if (copied) "已复制" else "复制代码", color = palette.activeChipText)
+                            Text(if (copied) LinDoCommonCopy.COPIED.text else LinDoReaderCopy.COPY_CODE.text, color = palette.activeChipText)
                         }
                     }
-                    SelectablePostText(node.code, onSelectionChange) {
-                        Text(node.code, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 20.sp,
-                            color = palette.inkPrimary, modifier = Modifier.horizontalScroll(rememberScrollState()).padding(12.dp))
+                    var codeLayoutResult by remember(node.code) { mutableStateOf<TextLayoutResult?>(null) }
+                    SelectablePostText(node.code, onSelectionChange, codeLayoutResult) {
+                        Text(
+                            node.code,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 13.sp,
+                            lineHeight = 20.sp,
+                            color = palette.inkPrimary,
+                            onTextLayout = { codeLayoutResult = it },
+                            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(12.dp)
+                        )
                     }
                 }
             }
@@ -329,11 +526,11 @@ private fun PostRichContentBody(
                         !rawLink.equals(fullUrl, ignoreCase = true) &&
                         !rawLink.equals(url, ignoreCase = true) &&
                         !isPostImageAssetUrl(rawLink)
-                    val alt = node.captions.getOrNull(index).orEmpty().ifBlank { "帖子配图" }
+                    val alt = node.captions.getOrNull(index).orEmpty().ifBlank { LinDoReaderCopy.POST_IMAGE_ALT.text }
                     if (failed) {
                         TextButton(onClick = {
                             if (isExternalArticleLink) onOpenLink(linkTarget) else lightboxIndex = index
-                        }) { Text("$alt · 打开图片", color = palette.activeChipText) }
+                        }) { Text(LinDoReaderCopy.OPEN_IMAGE_LABEL.format(alt), color = palette.activeChipText) }
                     } else {
                         val context = coil3.compose.LocalPlatformContext.current
                         val imageRequest = remember(context, url) {
@@ -381,13 +578,16 @@ private fun PostRichContentBody(
                     } }
                 } }
             }
-            is PostBlockNode.Media -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(10.dp)).border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp)).padding(12.dp)) {
-                Text(node.label, color = palette.inkPrimary, fontWeight = FontWeight.Medium)
-                TextButton(onClick = { (node.url ?: originalUrl)?.let(onOpenLink) }, enabled = node.url != null || originalUrl != null) {
-                    Text(
-                        "播放${if (node.kind == "audio") "音频" else "媒体内容"}",
-                        color = if (node.url != null || originalUrl != null) palette.activeChipText else palette.inkTertiary
-                    )
+            is PostBlockNode.Media -> {
+                val mediaKind = MediaBlockKind.fromKey(node.kind)
+                Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(10.dp)).border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp)).padding(12.dp)) {
+                    Text(node.label, color = palette.inkPrimary, fontWeight = FontWeight.Medium)
+                    TextButton(onClick = { (node.url ?: originalUrl)?.let(onOpenLink) }, enabled = node.url != null || originalUrl != null) {
+                        Text(
+                            if (mediaKind.isAudio) LinDoReaderCopy.PLAY_AUDIO.text else LinDoReaderCopy.PLAY_MEDIA.text,
+                            color = if (node.url != null || originalUrl != null) palette.activeChipText else palette.inkTertiary
+                        )
+                    }
                 }
             }
             is PostBlockNode.OneboxCard -> Column(
@@ -428,11 +628,11 @@ private fun PostRichContentBody(
                 }
             }
             is PostBlockNode.CalloutBlock -> {
-                val accentColor = when (node.kind) {
-                    "lottery" -> palette.brandGold
-                    "warning" -> androidx.compose.ui.graphics.Color(0xFFD97706)
-                    "tip" -> androidx.compose.ui.graphics.Color(0xFF10B981)
-                    else -> palette.inkSecondary
+                val accentColor = when (CalloutBlockKind.fromKey(node.kind)) {
+                    CalloutBlockKind.LOTTERY -> palette.brandGold
+                    CalloutBlockKind.WARNING -> androidx.compose.ui.graphics.Color(0xFFD97706)
+                    CalloutBlockKind.TIP -> androidx.compose.ui.graphics.Color(0xFF10B981)
+                    CalloutBlockKind.NOTE -> palette.inkSecondary
                 }
                 Column(
                     modifier = Modifier
@@ -453,11 +653,11 @@ private fun PostRichContentBody(
                 }
             }
             is PostBlockNode.Unsupported -> {
-                when (node.kind) {
-                    "merged_table" -> {
+                when (UnsupportedBlockKind.fromKey(node.kind)) {
+                    UnsupportedBlockKind.MERGED_TABLE -> {
                         // 表格单元格内容已在上方 Table 块完整渲染，无需再显示冗余占位框
                     }
-                    "math" -> {
+                    UnsupportedBlockKind.MATH -> {
                         if (node.text.isNotBlank()) {
                             Box(
                                 modifier = Modifier
@@ -478,21 +678,20 @@ private fun PostRichContentBody(
                             }
                         }
                     }
-                    "poll" -> Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    UnsupportedBlockKind.POLL -> Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(node.label, color = palette.inkPrimary, fontWeight = FontWeight.SemiBold)
                         node.options.forEach { Text("• $it", color = palette.inkSecondary, fontSize = 14.sp) }
                         if (originalUrl != null) TextButton(onClick = { onOpenLink(originalUrl + if (originalUrl.contains('?')) "&web=1" else "?web=1") }) {
-                            Text("前往原帖投票", color = palette.brandGold)
-                        } else Text("投票在发布后可用", color = palette.inkSecondary, fontSize = 12.sp)
+                            Text(LinDoReaderCopy.GO_ORIGINAL_POST_TO_VOTE.text, color = palette.brandGold)
+                        } else Text(LinDoReaderCopy.POLL_AVAILABLE_AFTER_PUBLISH.text, color = palette.inkSecondary, fontSize = 12.sp)
                     }
-                    "svg" -> Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    UnsupportedBlockKind.SVG -> Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                         Text(node.text, color = palette.inkSecondary, fontSize = 13.sp)
                         if (originalUrl != null) TextButton(onClick = { onOpenLink(originalUrl + if (originalUrl.contains('?')) "&web=1" else "?web=1") }) {
-                            Text("在原帖查看图形", color = palette.brandGold)
+                            Text(LinDoReaderCopy.VIEW_GRAPHIC_IN_ORIGINAL_POST.text, color = palette.brandGold)
                         }
                     }
-
-                    else -> {
+                    UnsupportedBlockKind.GENERIC -> {
                         if (node.text.isNotBlank()) {
                             Column(
                                 modifier = Modifier
@@ -502,7 +701,7 @@ private fun PostRichContentBody(
                                     .padding(12.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                if (node.label.isNotBlank() && node.label != "互动内容") {
+                                if (node.label.isNotBlank() && node.label != LinDoReaderCopy.INTERACTIVE_CONTENT_SENTINEL.text) {
                                     Text(node.label, color = palette.inkPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp)
                                 }
                                 SelectionContainer {
@@ -548,15 +747,18 @@ private fun NativePostPoll(
     androidx.compose.runtime.LaunchedEffect(siteVerifyVer) {
         if (siteVerifyVer == baselineSiteVerifyVer) return@LaunchedEffect
         baselineSiteVerifyVer = siteVerifyVer
-        if (error?.contains("站点验证") == true) {
+        if (error.isSiteVerificationError()) {
             error = null
         }
     }
     val busy = submitting || retracting
     val isAuthorized = UserApiKeyAuthManager.isAuthorized()
     val requestGuestLogin = do_.linux.lindo.ui.components.LocalRequestGuestLogin.current
+    val pollGuestGate = GuestGateScenario.POLL
     val triggerPollLogin: (() -> Unit)? = when {
-        requestGuestLogin != null -> ({ requestGuestLogin("登录后参与投票", "登录 LINUX DO 账号后即可参与社区话题投票") })
+        requestGuestLogin != null -> ({
+            requestGuestLogin(pollGuestGate.titleCopy.text, pollGuestGate.subtitleCopy.text)
+        })
         onRequestLogin != null -> onRequestLogin
         else -> null
     }
@@ -564,7 +766,7 @@ private fun NativePostPoll(
     fun submitOrUpdateVote() {
         if (postId == null || busy) return
         if (!UserApiKeyAuthManager.isAuthorized()) {
-            if (triggerPollLogin != null) triggerPollLogin() else error = "请先登录后投票"
+            if (triggerPollLogin != null) triggerPollLogin() else error = LinDoReaderCopy.PLEASE_LOGIN_BEFORE_VOTE.text
             return
         }
         if (selected.size !in poll.min..poll.max) return
@@ -581,12 +783,12 @@ private fun NativePostPoll(
                     voters = latest.voters
                     isClosed = poll.closed || latest.closed
                 } else {
-                    error = if (submitted) "投票未更新，请重试" else "投票未提交，请重试"
+                    error = if (submitted) LinDoReaderCopy.POLL_UPDATE_FAILED_RETRY.text else LinDoReaderCopy.POLL_SUBMIT_FAILED_RETRY.text
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message ?: if (submitted) "投票未更新，请重试" else "投票未提交，请重试"
+                error = failure.message ?: if (submitted) LinDoReaderCopy.POLL_UPDATE_FAILED_RETRY.text else LinDoReaderCopy.POLL_SUBMIT_FAILED_RETRY.text
             } finally {
                 submitting = false
             }
@@ -596,7 +798,7 @@ private fun NativePostPoll(
     fun retractVote() {
         if (postId == null || busy) return
         if (!UserApiKeyAuthManager.isAuthorized()) {
-            if (triggerPollLogin != null) triggerPollLogin() else error = "请先登录后操作"
+            if (triggerPollLogin != null) triggerPollLogin() else error = LinDoReaderCopy.PLEASE_LOGIN_BEFORE_ACTION.text
             return
         }
         retracting = true
@@ -612,12 +814,12 @@ private fun NativePostPoll(
                     voters = removed.voters
                     isClosed = poll.closed || removed.closed
                 } else {
-                    error = "撤回投票失败，请重试"
+                    error = LinDoReaderCopy.POLL_WITHDRAW_FAILED_RETRY.text
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message ?: "撤回投票失败，请重试"
+                error = failure.message ?: LinDoReaderCopy.POLL_WITHDRAW_FAILED_RETRY.text
             } finally {
                 retracting = false
             }
@@ -628,16 +830,31 @@ private fun NativePostPoll(
         Text(poll.title, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
         poll.options.forEach { option ->
             val isOptionSelected = option.id in selected
-            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                .clickable(enabled = postId != null && !isClosed && !busy) {
-                    selected = when {
-                        isOptionSelected -> selected - option.id
-                        !poll.multiple -> setOf(option.id)
-                        selected.size < poll.max -> selected + option.id
-                        else -> selected
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .let { mod ->
+                        if (postId != null && !isClosed && !busy) {
+                            mod.pointerHoverIcon(PointerIcon.Hand)
+                        } else {
+                            mod
+                        }
                     }
-                    error = null
-                }.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    .clickable(enabled = postId != null && !isClosed && !busy) {
+                        selected = when {
+                            isOptionSelected -> selected - option.id
+                            !poll.multiple -> setOf(option.id)
+                            selected.size < poll.max -> selected + option.id
+                            else -> selected
+                        }
+                        error = null
+                    }
+                    .padding(horizontal = 6.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 val indicatorShape = if (poll.multiple) RoundedCornerShape(4.dp) else androidx.compose.foundation.shape.CircleShape
                 Box(
                     modifier = Modifier
@@ -673,15 +890,19 @@ private fun NativePostPoll(
                 }
                 Text(option.text, modifier = Modifier.weight(1f), color = palette.inkPrimary, fontSize = 14.sp)
                 optionVotes[option.id]?.let { count ->
-                    Text("$count 票", color = palette.inkSecondary, fontSize = 12.sp)
+                    Text(LinDoReaderCopy.POLL_VOTES_COUNT.format(count), color = palette.inkSecondary, fontSize = 12.sp)
                 }
             }
         }
         when {
-            isClosed -> Text(voters?.let { "投票已关闭 · 共 $it 人参与" } ?: "投票已关闭", color = palette.inkSecondary, fontSize = 12.sp)
-            postId == null -> Text("投票在发布后可用", color = palette.inkSecondary, fontSize = 12.sp)
+            isClosed -> Text(
+                voters?.let { LinDoReaderCopy.POLL_CLOSED_WITH_VOTERS.format(it) } ?: LinDoReaderCopy.POLL_CLOSED.text,
+                color = palette.inkSecondary,
+                fontSize = 12.sp
+            )
+            postId == null -> Text(LinDoReaderCopy.POLL_AVAILABLE_AFTER_PUBLISH.text, color = palette.inkSecondary, fontSize = 12.sp)
             !isAuthorized && triggerPollLogin != null -> TextButton(enabled = !busy, onClick = triggerPollLogin) {
-                Text("登录后投票", color = palette.brandGold, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                Text(LinDoReaderCopy.LOGIN_TO_VOTE.text, color = palette.brandGold, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
             }
             submitted -> {
                 Row(
@@ -690,7 +911,7 @@ private fun NativePostPoll(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = voters?.let { "投票已提交 · 共 $it 人参与" } ?: "投票已提交",
+                        text = voters?.let { LinDoReaderCopy.POLL_SUBMITTED_WITH_VOTERS.format(it) } ?: LinDoReaderCopy.POLL_SUBMITTED.text,
                         modifier = Modifier.weight(1f),
                         color = palette.inkSecondary,
                         fontSize = 13.sp
@@ -704,8 +925,8 @@ private fun NativePostPoll(
                         ) {
                             LinDoBusyButtonLabel(
                                 busy = submitting,
-                                busyLabel = "更新中",
-                                label = "更新投票",
+                                busyLabel = LinDoCommonCopy.UPDATING.text,
+                                label = LinDoReaderCopy.UPDATE_VOTE.text,
                                 color = if (canUpdate || submitting) palette.brandGold else palette.inkTertiary
                             )
                         }
@@ -717,8 +938,8 @@ private fun NativePostPoll(
                     ) {
                         LinDoBusyButtonLabel(
                             busy = retracting,
-                            busyLabel = "撤回中",
-                            label = "撤回投票",
+                            busyLabel = LinDoCommonCopy.WITHDRAWING.text,
+                            label = LinDoReaderCopy.WITHDRAW_VOTE.text,
                             color = palette.inkSecondary
                         )
                     }
@@ -729,8 +950,8 @@ private fun NativePostPoll(
                 TextButton(enabled = canVote, onClick = ::submitOrUpdateVote) {
                     LinDoBusyButtonLabel(
                         busy = submitting,
-                        busyLabel = "提交中",
-                        label = "提交投票",
+                        busyLabel = LinDoCommonCopy.SUBMITTING.text,
+                        label = LinDoReaderCopy.SUBMIT_VOTE.text,
                         color = if (canVote || submitting) palette.brandGold else palette.inkTertiary
                     )
                 }
@@ -895,7 +1116,7 @@ private fun PostImageLightboxDialog(
             ) {
                 AsyncImage(
                     model = displayUrl,
-                    contentDescription = rawCaption.ifBlank { "图片预览" },
+                    contentDescription = rawCaption.ifBlank { LinDoReaderCopy.IMAGE_PREVIEW_DESC.text },
                     contentScale = ContentScale.Fit,
                     filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
                     onError = {
@@ -963,7 +1184,7 @@ private fun PostImageLightboxDialog(
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = "${(scale * 100f).roundToInt()}% · 重置 100%",
+                            text = LinDoReaderCopy.RESET_ZOOM_100.format((scale * 100f).roundToInt()),
                             color = Color.White,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
@@ -980,7 +1201,7 @@ private fun PostImageLightboxDialog(
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭图片预览",
+                        contentDescription = LinDoReaderCopy.CLOSE_IMAGE_PREVIEW_DESC.text,
                         tint = Color.White,
                         modifier = Modifier.size(18.dp)
                     )
@@ -1002,7 +1223,7 @@ private fun PostImageLightboxDialog(
                     ) {
                         Icon(
                             imageVector = LinDoIcons.ArrowLeft,
-                            contentDescription = "上一张",
+                            contentDescription = LinDoReaderCopy.PREV_IMAGE_DESC.text,
                             tint = Color.White,
                             modifier = Modifier.size(20.dp)
                         )
@@ -1021,7 +1242,7 @@ private fun PostImageLightboxDialog(
                     ) {
                         Icon(
                             imageVector = LinDoIcons.ArrowRight,
-                            contentDescription = "下一张",
+                            contentDescription = LinDoReaderCopy.NEXT_IMAGE_DESC.text,
                             tint = Color.White,
                             modifier = Modifier.size(20.dp)
                         )
@@ -1056,7 +1277,7 @@ private fun PostImageLightboxDialog(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = if (copiedLink) "已复制图片链接" else "复制图片链接",
+                        text = if (copiedLink) LinDoReaderCopy.IMAGE_LINK_COPIED.text else LinDoReaderCopy.COPY_IMAGE_LINK.text,
                         color = Color.White,
                         fontSize = 12.8.sp,
                         fontWeight = FontWeight.Medium
@@ -1080,7 +1301,7 @@ private fun PostImageLightboxDialog(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = "浏览器打开原图",
+                        text = LinDoReaderCopy.OPEN_ORIGINAL_IN_BROWSER.text,
                         color = Color.White,
                         fontSize = 12.8.sp,
                         fontWeight = FontWeight.Medium

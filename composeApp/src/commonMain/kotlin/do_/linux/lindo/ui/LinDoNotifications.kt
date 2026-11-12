@@ -40,6 +40,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.copy.DiscourseNotificationKind
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoMessagesCopy
+import do_.linux.lindo.core.copy.LinDoNetworkCopy
 import do_.linux.lindo.core.model.TopicUser
 import do_.linux.lindo.core.model.UserNotificationItem
 import do_.linux.lindo.core.network.LinuxDoRepository
@@ -60,12 +64,12 @@ internal fun LinDoNotificationActions(
             onClick = onMarkAll, enabled = enabled,
             colors = ButtonDefaults.textButtonColors(contentColor = palette.inkSecondary)
         ) {
-            Text("全部标为已读", fontSize = 12.sp, maxLines = 1)
+            Text(LinDoMessagesCopy.MARK_ALL_AS_READ.text, fontSize = 12.sp, maxLines = 1)
         }
     }
     IconButton(onClick = onRefresh, enabled = enabled) {
         Icon(
-            LinDoIcons.Refresh, "刷新通知", Modifier.size(18.dp),
+            LinDoIcons.Refresh, LinDoMessagesCopy.REFRESH_NOTIFICATIONS_DESC.text, Modifier.size(18.dp),
             tint = if (enabled) palette.inkSecondary else palette.inkTertiary
         )
     }
@@ -80,8 +84,9 @@ internal fun LinDoNotificationRow(
     val palette = LocalPalette.current
     val networkRestoreVersion = LocalLinDoNetworkRestoreVersion.current
     val siteVerificationRestoreVersion = do_.linux.lindo.ui.components.LocalSiteVerificationRestoreVersion.current
+    val notificationKind = DiscourseNotificationKind.fromCode(item.notificationType)
     val canResolvePostAuthor = item.actorUsername == null &&
-        item.notificationType in setOf(17, 36, 801, 802) &&
+        notificationKind.needsPostAuthorLookup &&
         (item.originalPostId > 0 || item.topicId > 0)
     var resolvedActorUser by remember(item.id, item.actingUsername) {
         mutableStateOf<TopicUser?>(null)
@@ -155,8 +160,16 @@ internal fun LinDoNotificationRow(
 
     Row(
         modifier = Modifier.fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .semantics { stateDescription = if (effectiveItem.read) "已读" else "未读" }
+            .then(
+                if (onClick != null) {
+                    Modifier
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .clickable(onClick = onClick)
+                } else {
+                    Modifier
+                }
+            )
+            .semantics { stateDescription = if (effectiveItem.read) LinDoCommonCopy.READ.text else LinDoCommonCopy.UNREAD.text }
             .padding(start = 12.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.Top
@@ -169,7 +182,7 @@ internal fun LinDoNotificationRow(
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
-                            onClickLabel = "查看 $actor 的资料",
+                            onClickLabel = LinDoMessagesCopy.INSPECT_USER_PROFILE_LABEL.format(actor),
                             role = Role.Button,
                             onClick = { onInspectUser(actor) }
                         )
@@ -244,15 +257,78 @@ internal fun LinDoNotificationRow(
     HorizontalDivider(Modifier.padding(start = 68.dp, end = 16.dp), thickness = 0.5.dp, color = palette.hairline)
 }
 
-internal fun resolveNotificationIcon(item: UserNotificationItem): ImageVector = when {
-    item.notificationType in setOf(36, 800) -> LinDoIcons.User
-    item.notificationType in setOf(17, 37, 801) -> LinDoIcons.FileText
-    item.notificationType in setOf(38, 802) -> LinDoIcons.Reply
-    item.notificationType in setOf(40, 803) ||
-        item.typeLabel.contains("助力") ||
-        item.typeLabel.contains("boost", ignoreCase = true) -> LinDoIcons.BoostRocket
-    item.isGroupedReply || item.notificationType in setOf(1, 2, 3, 6, 9, 29, 30, 33) -> LinDoIcons.MessageCircle
-    item.badgeId > 0 || item.notificationType == 12 -> LinDoIcons.AwardBadge
-    item.notificationType in setOf(5, 19, 25) -> LinDoIcons.Heart
-    else -> LinDoIcons.Bell
+internal fun resolveNotificationIcon(item: UserNotificationItem): ImageVector {
+    val boostKeyword = LinDoNetworkCopy.NOTIF_BOOSTED_POST.text.take(2)
+    val isBoostLabel = item.typeLabel.contains(boostKeyword) ||
+        item.typeLabel.contains("boost", ignoreCase = true)
+    return when (DiscourseNotificationKind.fromCode(item.notificationType)) {
+        DiscourseNotificationKind.WATCHING_CATEGORY_OR_TAG,
+        DiscourseNotificationKind.PLUGIN_FOLLOWED -> LinDoIcons.User
+
+        DiscourseNotificationKind.WATCHING_FIRST_POST,
+        DiscourseNotificationKind.FOLLOWING_CREATED_TOPIC,
+        DiscourseNotificationKind.PLUGIN_FOLLOW_TOPIC -> LinDoIcons.FileText
+
+        DiscourseNotificationKind.FOLLOWING_REPLIED,
+        DiscourseNotificationKind.PLUGIN_FOLLOW_POST -> LinDoIcons.Reply
+
+        DiscourseNotificationKind.BOOST_LEGACY,
+        DiscourseNotificationKind.BOOST,
+        DiscourseNotificationKind.PLUGIN_BOOST -> LinDoIcons.BoostRocket
+
+        DiscourseNotificationKind.MENTIONED,
+        DiscourseNotificationKind.REPLIED,
+        DiscourseNotificationKind.QUOTED,
+        DiscourseNotificationKind.PRIVATE_MESSAGE,
+        DiscourseNotificationKind.POSTED,
+        DiscourseNotificationKind.CHAT_MENTION,
+        DiscourseNotificationKind.CHAT_MESSAGE,
+        DiscourseNotificationKind.CHAT_QUOTED ->
+            if (isBoostLabel) LinDoIcons.BoostRocket else LinDoIcons.MessageCircle
+
+        DiscourseNotificationKind.GRANTED_BADGE -> when {
+            isBoostLabel -> LinDoIcons.BoostRocket
+            item.isGroupedReply -> LinDoIcons.MessageCircle
+            else -> LinDoIcons.AwardBadge
+        }
+
+        DiscourseNotificationKind.LIKED,
+        DiscourseNotificationKind.LIKED_CONSOLIDATED,
+        DiscourseNotificationKind.REACTION -> when {
+            isBoostLabel -> LinDoIcons.BoostRocket
+            item.isGroupedReply -> LinDoIcons.MessageCircle
+            item.badgeId > 0 -> LinDoIcons.AwardBadge
+            else -> LinDoIcons.Heart
+        }
+
+        DiscourseNotificationKind.EDITED,
+        DiscourseNotificationKind.INVITED_TO_PRIVATE_MESSAGE,
+        DiscourseNotificationKind.INVITEE_ACCEPTED,
+        DiscourseNotificationKind.MOVED_POST,
+        DiscourseNotificationKind.LINKED,
+        DiscourseNotificationKind.INVITED_TO_TOPIC,
+        DiscourseNotificationKind.CUSTOM,
+        DiscourseNotificationKind.GROUP_MENTIONED,
+        DiscourseNotificationKind.GROUP_MESSAGE_SUMMARY,
+        DiscourseNotificationKind.TOPIC_REMINDER,
+        DiscourseNotificationKind.POST_APPROVED,
+        DiscourseNotificationKind.CODE_REVIEW_COMMIT_APPROVED,
+        DiscourseNotificationKind.MEMBERSHIP_REQUEST_ACCEPTED,
+        DiscourseNotificationKind.MEMBERSHIP_REQUEST_CONSOLIDATED,
+        DiscourseNotificationKind.BOOKMARK_REMINDER,
+        DiscourseNotificationKind.VOTES_RELEASED,
+        DiscourseNotificationKind.EVENT_REMINDER,
+        DiscourseNotificationKind.EVENT_INVITATION,
+        DiscourseNotificationKind.CHAT_INVITATION,
+        DiscourseNotificationKind.CHAT_GROUP_MENTION,
+        DiscourseNotificationKind.ASSIGNED,
+        DiscourseNotificationKind.CIRCLE_REACTION,
+        DiscourseNotificationKind.PLUGIN_REACTION_EXT,
+        DiscourseNotificationKind.UNKNOWN -> when {
+            isBoostLabel -> LinDoIcons.BoostRocket
+            item.isGroupedReply -> LinDoIcons.MessageCircle
+            item.badgeId > 0 -> LinDoIcons.AwardBadge
+            else -> LinDoIcons.Bell
+        }
+    }
 }

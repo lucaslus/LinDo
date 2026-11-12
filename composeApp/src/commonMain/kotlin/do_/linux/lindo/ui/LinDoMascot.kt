@@ -33,6 +33,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.copy.LinDoAuthCopy
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoMessagesCopy
+import do_.linux.lindo.core.copy.UiErrorKind
+import do_.linux.lindo.core.copy.isAuthOrPermissionError
+import do_.linux.lindo.core.copy.isSiteVerificationError
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.ui.components.LinDoIcons
 import do_.linux.lindo.ui.components.LocalOpenInAppWebUrl
@@ -46,13 +52,20 @@ import org.jetbrains.compose.resources.painterResource
 val LocalLinDoAnimations = staticCompositionLocalOf { true }
 val LocalLinDoDarkTheme = staticCompositionLocalOf { false }
 
-enum class LinDoMascotState(val asset: String, val title: String, val detail: String) {
-    Loading("loading", "加载中", "加载中"),
-    Refreshing("refreshing", "刷新中", "刷新中"),
-    NetworkError("error", "网络异常", "网络连接异常"),
-    Empty("empty", "暂无内容", "暂无内容"),
-    Success("success", "已完成", "已完成"),
-    End("end", "没有更多了", "没有更多了")
+enum class LinDoMascotState(
+    val asset: String,
+    val titleCopy: LinDoCommonCopy,
+    val detailCopy: LinDoCommonCopy
+) {
+    Loading("loading", LinDoCommonCopy.LOADING, LinDoCommonCopy.LOADING),
+    Refreshing("refreshing", LinDoCommonCopy.REFRESHING, LinDoCommonCopy.REFRESHING),
+    NetworkError("error", LinDoCommonCopy.NETWORK_ERROR, LinDoCommonCopy.NETWORK_CONNECTION_ERROR),
+    Empty("empty", LinDoCommonCopy.EMPTY_CONTENT, LinDoCommonCopy.EMPTY_CONTENT),
+    Success("success", LinDoCommonCopy.COMPLETED, LinDoCommonCopy.COMPLETED),
+    End("end", LinDoCommonCopy.NO_MORE, LinDoCommonCopy.NO_MORE);
+
+    val title: String get() = titleCopy.text
+    val detail: String get() = detailCopy.text
 }
 
 /**
@@ -192,20 +205,20 @@ fun LinDoLoadingIndicator(
     color: Color = LocalPalette.current.inkSecondary,
     trackColor: Color = Color.Transparent,
     progress: (() -> Float)? = null,
-    label: String = "加载中",
+    label: String = LinDoCommonCopy.LOADING.text,
     state: LinDoMascotState = LinDoMascotState.Loading,
     compactInline: Boolean = false,
     useIconArtwork: Boolean = false
 ) {
     val cleanLabel = remember(label) {
         val stripped = label
-            .replace("零度娘正在", "")
-            .replace("正在", "")
+            .replace(LinDoCommonCopy.MASCOT_PREFIX_FULL.text, "")
+            .replace(LinDoCommonCopy.MASCOT_PREFIX_SHORT.text, "")
             .removeSuffix("...")
             .removeSuffix("…")
             .trim()
         when {
-            stripped.isEmpty() -> "加载中"
+            stripped.isEmpty() -> LinDoCommonCopy.LOADING.text
             stripped.length > 16 -> stripped.take(16) + "…"
             else -> stripped
         }
@@ -355,7 +368,7 @@ fun LinDoStatePanel(
     title: String = state.title,
     detail: String? = state.detail,
     onRetry: (() -> Unit)? = null,
-    actionLabel: String = if (state == LinDoMascotState.NetworkError) "重试" else "刷新",
+    actionLabel: String = if (state == LinDoMascotState.NetworkError) LinDoCommonCopy.RETRY.text else LinDoCommonCopy.REFRESH.text,
     modifier: Modifier = Modifier,
     useIconArtwork: Boolean = false,
     iconOverride: ImageVector? = null,
@@ -378,17 +391,16 @@ fun LinDoStatePanel(
     }
     val openWeb = LocalOpenInAppWebUrl.current
     val requestGuestLogin = LocalRequestGuestLogin.current
+    val isAuthorized = UserApiKeyAuthManager.isAuthorized()
+    val errorKind = UiErrorKind.classify(displayMessage, isAuthorized)
     val isSiteVerify = state == LinDoMascotState.NetworkError &&
-        displayMessage.contains("站点验证") &&
+        (errorKind == UiErrorKind.SITE_VERIFICATION || displayMessage.isSiteVerificationError()) &&
         openWeb != null
-    val isPermissionOrAuth = displayMessage.contains("权限") ||
-        displayMessage.contains("无权") ||
-        displayMessage.contains("登录") ||
-        displayMessage.contains("等级") ||
-        displayMessage.contains("受限") ||
-        displayMessage.contains("私密")
+    val isPermissionOrAuth = errorKind == UiErrorKind.GUEST_LOGIN_REQUIRED ||
+        errorKind == UiErrorKind.AUTH_OR_PERMISSION ||
+        displayMessage.isAuthOrPermissionError()
     val isGuestLoginNeeded = !isSiteVerify &&
-        !UserApiKeyAuthManager.isAuthorized() &&
+        !isAuthorized &&
         isPermissionOrAuth &&
         requestGuestLogin != null
     val resolvedIcon = iconOverride ?: when {
@@ -400,13 +412,13 @@ fun LinDoStatePanel(
     val resolvedIconSize = if (resolvedIcon == LinDoIcons.FaLock) 19.dp else 21.dp
     val resolvedAction: (() -> Unit)? = when {
         isSiteVerify -> ({ openWeb?.invoke("https://linux.do/") })
-        isGuestLoginNeeded -> ({ requestGuestLogin?.invoke("登录后查看该内容", displayMessage) })
+        isGuestLoginNeeded -> ({ requestGuestLogin?.invoke(LinDoAuthCopy.GUEST_VIEW_CONTENT_TITLE.text, displayMessage) })
         else -> onRetry
     }
     val resolvedActionLabel = when {
         resolvedAction == null -> null
-        isSiteVerify && actionLabel == "重试" -> "打开网页验证"
-        isGuestLoginNeeded && actionLabel == "重试" -> "去登录"
+        isSiteVerify && actionLabel == LinDoCommonCopy.RETRY.text -> LinDoCommonCopy.OPEN_WEB_VERIFY.text
+        isGuestLoginNeeded && actionLabel == LinDoCommonCopy.RETRY.text -> LinDoCommonCopy.GO_LOGIN.text
         else -> actionLabel
     }
     LinDoStatusNotice(
@@ -429,7 +441,7 @@ fun LinDoEmptyState(
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null
 ) {
-    val isRestricted = message.contains("权限") || message.contains("登录") || message.contains("受限")
+    val isRestricted = message.isAuthOrPermissionError()
     val resolvedIcon = if (isRestricted && icon == LinDoIcons.Inbox) LinDoIcons.FaLock else icon
     LinDoStatusNotice(
         message = message,
@@ -448,7 +460,7 @@ fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifie
     val secondaryText = palette.inkSecondary
     val openWeb = LocalOpenInAppWebUrl.current
     val showSiteVerifyAction = state == LinDoMascotState.NetworkError &&
-        message.contains("站点验证") &&
+        message.isSiteVerificationError() &&
         openWeb != null
     Row(
         modifier = modifier
@@ -476,7 +488,7 @@ fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifie
                 modifier = Modifier.heightIn(min = 28.dp)
             ) {
                 Text(
-                    text = "去验证",
+                    text = LinDoCommonCopy.GO_VERIFY.text,
                     fontSize = 11.8.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = palette.activeChipText
@@ -522,11 +534,13 @@ fun LinDoMascotGallery(onClose: () -> Unit, onThemeChanged: (Boolean) -> Unit = 
                     .windowInsetsPadding(WindowInsets.safeDrawing).verticalScroll(rememberScrollState()).padding(20.dp)) {
                     LinDoBrandWordmark(isDark = dark)
                     Spacer(Modifier.height(12.dp))
-                    Text("零度娘 · SVG 状态提示", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text(LinDoMessagesCopy.MASCOT_GALLERY_TITLE.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("播放动效", Modifier.weight(1f))
+                        Text(LinDoMessagesCopy.MASCOT_PLAY_ANIMATION.text, Modifier.weight(1f))
                         Switch(checked = animate, onCheckedChange = { animate = it })
-                        TextButton(onClick = { dark = !dark }) { Text(if (dark) "浅色" else "深色") }
+                        TextButton(onClick = { dark = !dark }) {
+                            Text(if (dark) LinDoMessagesCopy.MASCOT_THEME_LIGHT.text else LinDoMessagesCopy.MASCOT_THEME_DARK.text)
+                        }
                     }
                     LinDoMascotState.entries.chunked(2).forEach { pair ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -540,9 +554,13 @@ fun LinDoMascotGallery(onClose: () -> Unit, onThemeChanged: (Boolean) -> Unit = 
                             }
                         }
                     }
-                    LinDoLoadingIndicator(label = "行内加载与分页预览")
-                    Button(onClick = { transition = true }, modifier = Modifier.fillMaxWidth()) { Text("查看登录过渡") }
-                    TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("返回登录首屏") }
+                    LinDoLoadingIndicator(label = LinDoMessagesCopy.MASCOT_INLINE_PREVIEW_LABEL.text)
+                    Button(onClick = { transition = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(LinDoMessagesCopy.MASCOT_VIEW_LOGIN_TRANSITION.text)
+                    }
+                    TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                        Text(LinDoMessagesCopy.MASCOT_BACK_TO_WELCOME.text)
+                    }
                 }
             }
         }
@@ -556,11 +574,13 @@ fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
     val secondaryText = palette.inkSecondary
     val openWeb = LocalOpenInAppWebUrl.current
     val requestGuestLogin = LocalRequestGuestLogin.current
-    val isSiteVerify = message.contains("站点验证") && openWeb != null
+    val isAuthorized = UserApiKeyAuthManager.isAuthorized()
+    val errorKind = UiErrorKind.classify(message, isAuthorized)
+    val isSiteVerify = (errorKind == UiErrorKind.SITE_VERIFICATION || message.isSiteVerificationError()) && openWeb != null
     val isGuestLogin = !isSiteVerify &&
-        !UserApiKeyAuthManager.isAuthorized() &&
+        !isAuthorized &&
         requestGuestLogin != null &&
-        (message.contains("登录") || message.contains("权限") || message.contains("无权") || message.contains("受限") || message.contains("私密"))
+        (errorKind == UiErrorKind.GUEST_LOGIN_REQUIRED || message.isAuthOrPermissionError())
     val highlightAction = isSiteVerify || isGuestLogin
     val actionColor = if (highlightAction) palette.activeChipText else secondaryText
     Row(
@@ -589,7 +609,7 @@ fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
             onClick = {
                 when {
                     isSiteVerify -> openWeb?.invoke("https://linux.do/")
-                    isGuestLogin -> requestGuestLogin?.invoke("登录后查看该内容", message)
+                    isGuestLogin -> requestGuestLogin?.invoke(LinDoAuthCopy.GUEST_VIEW_CONTENT_TITLE.text, message)
                     else -> onRetry()
                 }
             },
@@ -606,9 +626,9 @@ fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
             }
             Text(
                 text = when {
-                    isSiteVerify -> "去验证"
-                    isGuestLogin -> "去登录"
-                    else -> "重试"
+                    isSiteVerify -> LinDoCommonCopy.GO_VERIFY.text
+                    isGuestLogin -> LinDoCommonCopy.GO_LOGIN.text
+                    else -> LinDoCommonCopy.RETRY.text
                 },
                 fontSize = 11.8.sp,
                 fontWeight = if (highlightAction) FontWeight.SemiBold else FontWeight.Normal,

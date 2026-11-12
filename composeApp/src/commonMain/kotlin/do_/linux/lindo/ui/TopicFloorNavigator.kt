@@ -55,6 +55,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.copy.FloorNavigatorMode
+import do_.linux.lindo.core.copy.LinDoReaderCopy
 import do_.linux.lindo.ui.components.LinDoIcons
 import kotlin.math.roundToInt
 
@@ -69,7 +71,7 @@ internal fun TopicFloorNavigator(
     val palette = LocalPalette.current
     val safeLastFloor = lastFloor.coerceAtLeast(1)
     var targetFloor by remember { mutableIntStateOf(currentFloor.coerceIn(1, safeLastFloor)) }
-    var enteringFloor by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf(FloorNavigatorMode.SLIDER) }
     val target = targetFloor.coerceIn(1, safeLastFloor)
 
     if (do_.linux.lindo.ui.components.LocalIsWebModalActive.current) return
@@ -96,20 +98,31 @@ internal fun TopicFloorNavigator(
                         Row(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
-                                .clickable { enteringFloor = !enteringFloor }
+                                .clickable {
+                                    mode = when (mode) {
+                                        FloorNavigatorMode.SLIDER -> FloorNavigatorMode.EXACT_INPUT
+                                        FloorNavigatorMode.EXACT_INPUT -> FloorNavigatorMode.SLIDER
+                                    }
+                                }
                                 .padding(vertical = 4.dp, horizontal = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
                             Text(
-                                text = "$target / $safeLastFloor 楼",
+                                text = LinDoReaderCopy.FLOOR_COUNTER.format(target, safeLastFloor),
                                 color = palette.inkPrimary,
                                 fontSize = 15.5.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Icon(
-                                imageVector = if (enteringFloor) LinDoIcons.Sliders else LinDoIcons.Edit,
-                                contentDescription = if (enteringFloor) "返回滑块" else "输入楼号",
+                                imageVector = when (mode) {
+                                    FloorNavigatorMode.SLIDER -> LinDoIcons.Edit
+                                    FloorNavigatorMode.EXACT_INPUT -> LinDoIcons.Sliders
+                                },
+                                contentDescription = when (mode) {
+                                    FloorNavigatorMode.SLIDER -> LinDoReaderCopy.FLOOR_ENTER_NUMBER_DESC.text
+                                    FloorNavigatorMode.EXACT_INPUT -> LinDoReaderCopy.FLOOR_BACK_TO_SLIDER_DESC.text
+                                },
                                 modifier = Modifier.size(13.5.dp),
                                 tint = palette.inkSecondary
                             )
@@ -119,20 +132,20 @@ internal fun TopicFloorNavigator(
                             onClick = { onJump(1, false) },
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Text("首楼", color = palette.inkSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            Text(LinDoReaderCopy.FIRST_FLOOR.text, color = palette.inkSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                         }
                         TextButton(
                             onClick = { onJump(safeLastFloor, false) },
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Text("末楼", color = palette.inkSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            Text(LinDoReaderCopy.LAST_FLOOR.text, color = palette.inkSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                         }
-                        if (!enteringFloor) {
+                        if (mode == FloorNavigatorMode.SLIDER) {
                             TextButton(
                                 onClick = { onJump(target, false) },
                                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                             ) {
-                                Text("跳转", color = palette.activeChipText, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
+                                Text(LinDoReaderCopy.JUMP_ACTION.text, color = palette.activeChipText, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                         Box(
@@ -142,38 +155,41 @@ internal fun TopicFloorNavigator(
                                 .clickable(onClick = onDismiss),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(LinDoIcons.Close, "关闭楼层导航", Modifier.size(15.dp), tint = palette.inkSecondary)
+                            Icon(LinDoIcons.Close, LinDoReaderCopy.CLOSE_FLOOR_NAV_DESC.text, Modifier.size(15.dp), tint = palette.inkSecondary)
                         }
                     }
 
-                    if (enteringFloor) {
-                        ExactFloorInput(target, safeLastFloor, onJump = { onJump(it, true) })
-                    } else {
-                        val sliderColors = SliderDefaults.colors(
-                            thumbColor = palette.brandGold,
-                            activeTrackColor = palette.brandGold,
-                            inactiveTrackColor = palette.inkTertiary.copy(alpha = 0.35f)
-                        )
-                        Slider(
-                            value = target.toFloat(),
-                            onValueChange = { targetFloor = it.roundToInt() },
-                            valueRange = 1f..safeLastFloor.toFloat(),
-                            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "目标楼层" },
-                            colors = sliderColors,
-                            track = {
-                                SliderDefaults.Track(
-                                    sliderState = it, modifier = Modifier.height(4.dp),
-                                    colors = sliderColors, drawStopIndicator = null
-                                )
-                            }
-                        )
+                    when (mode) {
+                        FloorNavigatorMode.EXACT_INPUT -> {
+                            ExactFloorInput(target, safeLastFloor, onJump = { onJump(it, true) })
+                        }
+                        FloorNavigatorMode.SLIDER -> {
+                            val sliderColors = SliderDefaults.colors(
+                                thumbColor = palette.brandGold,
+                                activeTrackColor = palette.brandGold,
+                                inactiveTrackColor = palette.inkTertiary.copy(alpha = 0.35f)
+                            )
+                            Slider(
+                                value = target.toFloat(),
+                                onValueChange = { targetFloor = it.roundToInt() },
+                                valueRange = 1f..safeLastFloor.toFloat(),
+                                modifier = Modifier.fillMaxWidth().semantics { contentDescription = LinDoReaderCopy.TARGET_FLOOR_SEMANTICS.text },
+                                colors = sliderColors,
+                                track = {
+                                    SliderDefaults.Track(
+                                        sliderState = it, modifier = Modifier.height(4.dp),
+                                        colors = sliderColors, drawStopIndicator = null
+                                    )
+                                }
+                            )
+                        }
                     }
                 } else {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("1 / 1 楼", Modifier.weight(1f), color = palette.inkSecondary, fontSize = 13.5.sp)
+                        Text(LinDoReaderCopy.SINGLE_FLOOR_TEXT.text, Modifier.weight(1f), color = palette.inkSecondary, fontSize = 13.5.sp)
                         Box(
                             modifier = Modifier
                                 .size(28.dp)
@@ -181,7 +197,7 @@ internal fun TopicFloorNavigator(
                                 .clickable(onClick = onDismiss),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(LinDoIcons.Close, "关闭楼层导航", Modifier.size(15.dp), tint = palette.inkSecondary)
+                            Icon(LinDoIcons.Close, LinDoReaderCopy.CLOSE_FLOOR_NAV_DESC.text, Modifier.size(15.dp), tint = palette.inkSecondary)
                         }
                     }
                 }
@@ -224,7 +240,7 @@ private fun ExactFloorInput(initialFloor: Int, lastFloor: Int, onJump: (Int) -> 
                 .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
                 .padding(horizontal = 12.dp)
                 .focusRequester(focusRequester)
-                .semantics { contentDescription = "楼号" },
+                .semantics { contentDescription = LinDoReaderCopy.FLOOR_NUMBER_SEMANTICS.text },
             singleLine = true,
             textStyle = style,
             cursorBrush = SolidColor(palette.brandGold),
@@ -233,7 +249,7 @@ private fun ExactFloorInput(initialFloor: Int, lastFloor: Int, onJump: (Int) -> 
             decorationBox = { inner ->
                 LinDoInputDecoration(
                     empty = input.text.isEmpty(),
-                    placeholder = "输入楼层 (1–$safeLastFloor)",
+                    placeholder = LinDoReaderCopy.FLOOR_INPUT_PLACEHOLDER.format(safeLastFloor),
                     textStyle = style,
                     placeholderColor = palette.inkSecondary,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -243,7 +259,7 @@ private fun ExactFloorInput(initialFloor: Int, lastFloor: Int, onJump: (Int) -> 
         )
         TextButton(enabled = selected != null, onClick = { selected?.let(onJump) }) {
             Text(
-                "前往",
+                LinDoReaderCopy.GO_TO_FLOOR_ACTION.text,
                 color = if (selected != null) palette.activeChipText else palette.inkTertiary,
                 fontWeight = FontWeight.SemiBold
             )

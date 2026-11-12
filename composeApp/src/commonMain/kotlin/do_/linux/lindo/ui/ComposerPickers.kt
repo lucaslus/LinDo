@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
@@ -34,6 +35,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoComposerCopy
+import do_.linux.lindo.core.copy.LinDoFeedCopy
 import do_.linux.lindo.core.network.ComposerTagChoices
 import do_.linux.lindo.core.network.ComposerTagOption
 import do_.linux.lindo.core.network.LinuxDoCategoryMeta
@@ -113,7 +117,7 @@ internal fun ComposerCategoryPickerContent(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "选择发布版块",
+                    text = LinDoComposerCopy.PICKER_SELECT_CATEGORY_TITLE.text,
                     color = palette.inkPrimary,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
@@ -128,7 +132,7 @@ internal fun ComposerCategoryPickerContent(
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭版块抽屉",
+                        contentDescription = LinDoComposerCopy.CLOSE_CATEGORY_DRAWER_DESC.text,
                         modifier = Modifier.size(16.dp),
                         tint = palette.inkSecondary
                     )
@@ -148,7 +152,7 @@ internal fun ComposerCategoryPickerContent(
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Text(
-                        text = "${focusedParent.name}：",
+                        text = LinDoComposerCopy.PARENT_CATEGORY_COLON.format(focusedParent.name),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         color = palette.inkSecondary,
@@ -158,8 +162,10 @@ internal fun ComposerCategoryPickerContent(
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                             .clickable(enabled = enabled) { onSelect(focusedParent) }
-                            .padding(vertical = 2.dp)
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -174,7 +180,7 @@ internal fun ComposerCategoryPickerContent(
                                 )
                             }
                             Text(
-                                text = "主版块",
+                                text = LinDoComposerCopy.MAIN_CATEGORY_CHIP.text,
                                 fontSize = 12.5.sp,
                                 fontWeight = if (parentSelected) FontWeight.Bold else FontWeight.Medium,
                                 color = if (parentSelected) palette.activeChipText else palette.inkPrimary
@@ -196,8 +202,10 @@ internal fun ComposerCategoryPickerContent(
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                                 .clickable(enabled = enabled) { onSelect(subCat) }
-                                .padding(vertical = 2.dp)
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -263,7 +271,9 @@ internal fun ComposerCategoryPickerContent(
                                     modifier = Modifier
                                         .weight(1f)
                                         .heightIn(min = 46.dp)
+                                        .clip(RoundedCornerShape(8.dp))
                                         .background(palette.cardSurface)
+                                        .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                                         .selectable(selected, enabled = enabled, role = Role.RadioButton) {
                                             if (subCats.isNotEmpty() && focusedParentId != category.id) {
                                                 focusedParentId = category.id
@@ -315,7 +325,7 @@ internal fun ComposerCategoryPickerContent(
                                                 tint = palette.activeChipText
                                             )
                                             Text(
-                                                text = activeSubOfThisParent.subLabel ?: "Lv",
+                                                text = activeSubOfThisParent.subLabel ?: LinDoComposerCopy.SUBCATEGORY_LV_FALLBACK.text,
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = palette.activeChipText
@@ -323,7 +333,11 @@ internal fun ComposerCategoryPickerContent(
                                         }
                                     } else if (subCats.isNotEmpty()) {
                                         val lvs = subCats.mapNotNull { it.trustLevel }.sorted()
-                                        val hint = if (lvs.size >= 2) "Lv${lvs.first()}-${lvs.last()}" else "Lv"
+                                        val hint = if (lvs.size >= 2) {
+                                            LinDoFeedCopy.SUBCATEGORY_LV_RANGE.format(lvs.first(), lvs.last())
+                                        } else {
+                                            LinDoComposerCopy.SUBCATEGORY_LV_FALLBACK.text
+                                        }
                                         Text(
                                             text = hint,
                                             fontSize = 10.5.sp,
@@ -333,7 +347,7 @@ internal fun ComposerCategoryPickerContent(
                                     } else if (selectedId == category.id) {
                                         Icon(
                                             imageVector = LinDoIcons.Check,
-                                            contentDescription = "已选中",
+                                            contentDescription = LinDoCommonCopy.SELECTED.text,
                                             modifier = Modifier.size(15.dp),
                                             tint = palette.activeChipText
                                         )
@@ -412,13 +426,13 @@ internal fun ComposerTagPicker(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "选择话题标签",
+                        text = LinDoComposerCopy.PICKER_SELECT_TAGS_TITLE.text,
                         color = palette.inkPrimary,
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "已选 ${selected.size}/$limit",
+                        text = LinDoComposerCopy.PICKER_SELECTED_TAGS_COUNT.format(selected.size, limit),
                         color = palette.inkSecondary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
@@ -433,7 +447,7 @@ internal fun ComposerTagPicker(
                 ) {
                     Icon(
                         imageVector = LinDoIcons.Close,
-                        contentDescription = "关闭标签抽屉",
+                        contentDescription = LinDoComposerCopy.CLOSE_TAG_DRAWER_DESC.text,
                         modifier = Modifier.size(16.dp),
                         tint = palette.inkSecondary
                     )
@@ -477,7 +491,7 @@ internal fun ComposerTagPicker(
                     decorationBox = { inner ->
                         LinDoInputDecoration(
                             empty = query.isEmpty(),
-                            placeholder = "搜索标签",
+                            placeholder = LinDoComposerCopy.SEARCH_TAGS_PLACEHOLDER.text,
                             textStyle = searchStyle,
                             placeholderColor = palette.inkSecondary,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
@@ -495,7 +509,7 @@ internal fun ComposerTagPicker(
                     ) {
                         Icon(
                             imageVector = LinDoIcons.Close,
-                            contentDescription = "清空",
+                            contentDescription = LinDoCommonCopy.CLEAR.text,
                             modifier = Modifier.size(12.dp),
                             tint = palette.inkTertiary
                         )
@@ -512,7 +526,7 @@ internal fun ComposerTagPicker(
                         modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        LinDoLoadingIndicator(label = "加载可用标签", compactInline = true)
+                        LinDoLoadingIndicator(label = LinDoComposerCopy.LOADING_AVAILABLE_TAGS.text, compactInline = true)
                     }
                 }
                 error != null -> {
@@ -537,7 +551,7 @@ internal fun ComposerTagPicker(
                     }
 
                     val message = choices.forbiddenMessage
-                        ?: choices.requiredGroup?.let { "请先选择「$it」中的标签" }
+                        ?: choices.requiredGroup?.let { LinDoComposerCopy.SELECT_REQUIRED_GROUP_FIRST.format(it) }
                     val hasExactMatch = baseOptions.any { it.name.equals(cleanQuery, ignoreCase = true) }
                     val canCreateNewTag = canCreateTag &&
                         cleanQuery.isNotEmpty() &&
@@ -574,7 +588,9 @@ internal fun ComposerTagPicker(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .heightIn(min = 46.dp)
+                                        .clip(RoundedCornerShape(8.dp))
                                         .background(palette.brandGold.copy(alpha = 0.08f))
+                                        .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                                         .clickable(enabled = enabled) {
                                             onToggle(ComposerTagOption(normalizedNewTag))
                                             onQueryChange("")
@@ -585,12 +601,12 @@ internal fun ComposerTagPicker(
                                 ) {
                                     Icon(
                                         imageVector = LinDoIcons.Plus,
-                                        contentDescription = "创建标签",
+                                        contentDescription = LinDoComposerCopy.CREATE_TAG_DESC.text,
                                         modifier = Modifier.size(15.dp),
                                         tint = palette.brandGold
                                     )
                                     Text(
-                                        text = "创建标签 #$normalizedNewTag",
+                                        text = LinDoComposerCopy.CREATE_TAG_LABEL.format(normalizedNewTag),
                                         color = palette.brandGold,
                                         fontWeight = FontWeight.SemiBold,
                                         fontSize = 13.5.sp,
@@ -609,14 +625,18 @@ internal fun ComposerTagPicker(
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
-                                        text = if (cleanQuery.isEmpty()) "当前版块暂无可用标签" else "未找到「#$cleanQuery」相关标签",
+                                        text = if (cleanQuery.isEmpty()) {
+                                            LinDoComposerCopy.NO_AVAILABLE_TAGS_IN_CATEGORY.text
+                                        } else {
+                                            LinDoComposerCopy.NO_MATCHING_TAGS.format(cleanQuery)
+                                        },
                                         color = palette.inkSecondary,
                                         fontSize = 13.5.sp,
                                         fontWeight = FontWeight.Medium
                                     )
                                     if (cleanQuery.isNotEmpty() && !canCreateTag) {
                                         Text(
-                                            text = "当前账号权限仅支持选用社区已有标签",
+                                            text = LinDoComposerCopy.ONLY_EXISTING_TAGS_ALLOWED.text,
                                             color = palette.inkTertiary,
                                             fontSize = 11.8.sp
                                         )
@@ -636,10 +656,14 @@ internal fun ComposerTagPicker(
                                                 modifier = Modifier
                                                     .weight(1f)
                                                     .heightIn(min = 46.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
                                                     .background(
                                                         if (checked) palette.brandGold.copy(alpha = 0.10f)
                                                         else palette.cardSurface
                                                     )
+                                                    .let { mod ->
+                                                        if (canClick) mod.pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand) else mod
+                                                    }
                                                     .selectable(
                                                         selected = checked,
                                                         enabled = canClick,
@@ -684,7 +708,7 @@ internal fun ComposerTagPicker(
                                                 if (checked) {
                                                     Icon(
                                                         imageVector = LinDoIcons.Check,
-                                                        contentDescription = "已选中",
+                                                        contentDescription = LinDoCommonCopy.SELECTED.text,
                                                         modifier = Modifier.size(15.dp),
                                                         tint = palette.brandGold
                                                     )

@@ -25,6 +25,10 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.copy.LinDoAuthCopy
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoFeedCopy
+import do_.linux.lindo.core.copy.LinDoMessagesCopy
 import do_.linux.lindo.ui.components.LinDoIcons
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_mascot_welcome
@@ -76,10 +80,10 @@ fun LindoColorWordmarkText(
     }
     val styled = buildAnnotatedString {
         withStyle(SpanStyle(color = resolvedLinColor)) {
-            append("Lin")
+            append(LinDoCommonCopy.BRAND_WORD_LIN.text)
         }
         withStyle(SpanStyle(color = resolvedDoColor)) {
-            append("do")
+            append(LinDoCommonCopy.BRAND_WORD_DO.text)
         }
     }
     Text(
@@ -124,7 +128,7 @@ fun LinDoBrandWordmark(
             )
             if (showMotto) {
                 Text(
-                    text = "真诚 · 友善 · 团结 · 专业",
+                    text = LinDoCommonCopy.SLOGAN_DOT.text,
                     fontSize = 10.8.sp,
                     fontWeight = FontWeight.Medium,
                     letterSpacing = 0.2.sp,
@@ -147,7 +151,7 @@ internal fun LinDoWelcomeScreen(
     onToggleDark: () -> Unit,
     onOpenAppIcon: (() -> Unit)? = null,
     onGuestBrowse: (() -> Unit)? = null,
-    secondaryActionLabel: String = "系统浏览器授权",
+    secondaryActionLabel: String = LinDoAuthCopy.SYSTEM_BROWSER_AUTH.text,
     secondaryActionIcon: ImageVector = LinDoIcons.Globe
 ) {
     BoxWithConstraints(Modifier.fillMaxSize().background(brandCanvas(isDark))
@@ -165,13 +169,17 @@ internal fun LinDoWelcomeScreen(
                 LinDoBrandWordmark(isDark = isDark, modifier = Modifier.weight(1f))
                 if (onOpenAppIcon != null) {
                     IconButton(onClick = onOpenAppIcon, modifier = Modifier.size(48.dp)) {
-                        Icon(LinDoIcons.AppsGrid, contentDescription = "应用图标",
+                        Icon(LinDoIcons.AppsGrid, contentDescription = LinDoMessagesCopy.ROW_APP_ICON.text,
                             tint = brandSecondary(isDark), modifier = Modifier.size(20.dp))
                     }
                 }
                 IconButton(onClick = onToggleDark, modifier = Modifier.size(48.dp)) {
                     Icon(if (isDark) LinDoIcons.Sun else LinDoIcons.Moon,
-                        contentDescription = if (isDark) "切换至浅色模式" else "切换至深色模式",
+                        contentDescription = if (isDark) {
+                            LinDoFeedCopy.SWITCH_TO_LIGHT_MODE_DESC.text
+                        } else {
+                            LinDoFeedCopy.SWITCH_TO_DARK_MODE_DESC.text
+                        },
                         tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
                 }
             }
@@ -181,14 +189,14 @@ internal fun LinDoWelcomeScreen(
                     if (artwork != null) {
                         LinDoIconArtworkImage(artwork, Modifier.size(heroSize))
                     } else {
-                        Image(painterResource(Res.drawable.lindo_mascot_welcome), "零度娘向你挥手",
+                        Image(painterResource(Res.drawable.lindo_mascot_welcome), LinDoAuthCopy.WELCOME_WAVE_DESC.text,
                             Modifier.size(heroSize), contentScale = ContentScale.Fit)
                     }
                     Spacer(Modifier.height(18.dp))
-                    Text("你好，佬友。", fontSize = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp,
+                    Text(LinDoAuthCopy.WELCOME_GREETING.text, fontSize = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp,
                         color = brandText(isDark), textAlign = TextAlign.Center, lineHeight = 36.sp)
                     Spacer(Modifier.height(8.dp))
-                    Text("欢迎来到 Lindo · 连接 LINUX DO，发现有趣的讨论。", fontSize = 14.sp, lineHeight = 22.sp,
+                    Text(LinDoAuthCopy.WELCOME_SUBTITLE.text, fontSize = 14.sp, lineHeight = 22.sp,
                         color = brandSecondary(isDark), textAlign = TextAlign.Center)
                 }
             }
@@ -203,7 +211,7 @@ internal fun LinDoWelcomeScreen(
                     shape = actionShape,
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)
                 ) {
-                    Text("使用 LINUX DO 登录", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Text(LinDoAuthCopy.LOGIN_WITH_LINUX_DO.text, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(10.dp))
                     Icon(LinDoIcons.ArrowRight, contentDescription = null, modifier = Modifier.size(18.dp))
                 }
@@ -246,12 +254,12 @@ internal fun LinDoWelcomeScreen(
                             modifier = Modifier.size(17.dp)
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("以游客模式浏览", fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                        Text(LinDoAuthCopy.BROWSE_AS_GUEST.text, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
                     }
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Text("LINUX DO 第三方客户端", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
+            Text(LinDoCommonCopy.THIRD_PARTY_CLIENT.text, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                 fontSize = 10.sp, letterSpacing = 0.7.sp, color = brandSecondary(isDark))
         }
     }
@@ -261,7 +269,7 @@ internal fun LinDoWelcomeScreen(
 fun LinDoMascotLoginTransitionView(
     isDark: Boolean,
     progress: Float,
-    statusTitle: String = "加载中",
+    statusTitle: String = LinDoCommonCopy.LOADING.text,
     statusSubtitle: String = "",
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
@@ -275,7 +283,7 @@ fun LinDoMascotLoginTransitionView(
                 LinDoBrandWordmark(isDark = isDark)
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onCancel, modifier = Modifier.size(48.dp)) {
-                    Icon(LinDoIcons.Close, "关闭网页", tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
+                    Icon(LinDoIcons.Close, LinDoAuthCopy.CLOSE_WEB_PAGE.text, tint = brandSecondary(isDark), modifier = Modifier.size(21.dp))
                 }
             }
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -318,7 +326,7 @@ fun LinDoMascotLoginTransitionView(
                 }
             }
             if (onRetry == null) {
-                Text("连接过程中可随时返回", color = brandSecondary(isDark), modifier = Modifier.fillMaxWidth(),
+                Text(LinDoAuthCopy.RETURN_ANYTIME_WHILE_CONNECTING.text, color = brandSecondary(isDark), modifier = Modifier.fillMaxWidth(),
                     fontSize = 11.sp, textAlign = TextAlign.Center)
             }
         }

@@ -1,6 +1,11 @@
 package do_.linux.lindo.core.model
 
 import androidx.compose.runtime.Immutable
+import do_.linux.lindo.core.copy.DiscourseNotificationKind
+import do_.linux.lindo.core.copy.DiscourseTrustLevel
+import do_.linux.lindo.core.copy.DiscourseUserActionKind
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoNetworkCopy
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -18,9 +23,9 @@ import kotlinx.serialization.json.jsonPrimitive
  * Discourse 徽章等级：1=金徽章, 2=银徽章, 3=铜徽章
  */
 enum class BadgeType(val id: Int, val labelZh: String) {
-    GOLD(1, "金徽章"),
-    SILVER(2, "银徽章"),
-    BRONZE(3, "铜徽章");
+    GOLD(1, LinDoNetworkCopy.BADGE_GOLD.text),
+    SILVER(2, LinDoNetworkCopy.BADGE_SILVER.text),
+    BRONZE(3, LinDoNetworkCopy.BADGE_BRONZE.text);
 
     companion object {
         fun fromId(id: Int): BadgeType = entries.firstOrNull { it.id == id } ?: BRONZE
@@ -196,7 +201,7 @@ data class TopicSummary(
     val views: Int = 0,
     @SerialName("like_count") val likeCount: Int = 0,
     @SerialName("category_id") val categoryId: Int = 1,
-    val categoryName: String = "常规话题",
+    val categoryName: String = LinDoNetworkCopy.DEFAULT_REGULAR_TOPIC_CATEGORY.text,
     val categoryColorHex: String = "0088CC",
     val tags: List<String> = emptyList(),
     val excerpt: String? = null,
@@ -206,7 +211,7 @@ data class TopicSummary(
     val unseen: Boolean = false,
     val unreadPosts: Int = 0,
     val hasAcceptedAnswer: Boolean = false,
-    val lastPostedAt: String = "1m",
+    val lastPostedAt: String = LinDoCommonCopy.ONE_MINUTE.text,
     val createdAtIso: String = "",
     val lastPostedAtIso: String = "",
     val originalPoster: TopicUser,
@@ -454,14 +459,7 @@ data class UserFullProfileSummary(
     val flair: FlairInfo = FlairInfo()
 ) {
     val trustLevelName: String
-        get() = when (trustLevel) {
-            0 -> "Lv.0 新用户"
-            1 -> "Lv.1 基本用户"
-            2 -> "Lv.2 成员"
-            3 -> "Lv.3 活跃会员"
-            4 -> "Lv.4 社区领袖"
-            else -> "Lv.$trustLevel 成员"
-        }
+        get() = DiscourseTrustLevel.displayLabel(trustLevel)
 }
 
 /**
@@ -489,68 +487,26 @@ data class UserNotificationItem(
     val badgeName: String = "",
     val chatChannelId: Int = 0
 ) {
-    val isGroupedReply: Boolean get() = (notificationType == 2 || notificationType == 9) && count > 1
+    val kind: DiscourseNotificationKind
+        get() = DiscourseNotificationKind.fromCode(notificationType)
+
+    val isGroupedReply: Boolean get() = kind.supportsConsolidatedCount && count > 1
 
     val actorUsername: String?
         get() = actingUsername.substringBefore("、").trim()
-            .takeIf { it.isNotEmpty() && it != "系统" && !CONSOLIDATED_NOTIFICATION_ACTOR_REGEX.matches(it) }
+            .takeIf {
+                it.isNotEmpty() &&
+                    it != LinDoCommonCopy.SYSTEM_ACTOR.text &&
+                    !CONSOLIDATED_NOTIFICATION_ACTOR_REGEX.matches(it)
+            }
 
     val typeLabel: String
-        get() = when (notificationType) {
-            1 -> "提及了你"
-            2 -> when {
-                isGroupedReply && actorUsername != null -> "等发来 $count 条回复"
-                isGroupedReply -> "收到 $count 条回复"
-                else -> "回复了你"
-            }
-            3 -> "引用了你的发言"
-            4 -> "编辑了帖子"
-            5 -> if (postNumber > 1) "赞了你的回复" else "赞了你的主帖"
-            6 -> "发来私信"
-            7 -> "邀请你参与私信"
-            8 -> "接受了你的邀请"
-            9 -> when {
-                isGroupedReply && actorUsername != null -> "等发表了 $count 条话题回复"
-                isGroupedReply -> "话题有 $count 条新回复"
-                else -> "回复了话题"
-            }
-            10 -> "移动了帖子"
-            11 -> "链接了你的帖子"
-            12 -> "获得徽章"
-            13 -> "邀请你参与话题"
-            14 -> "系统通知"
-            15 -> "提及了你所在的群组"
-            16 -> "群组消息汇总"
-            17 -> "发布了关注的新话题"
-            18 -> "话题定时提醒"
-            19 -> if (count > 1) "累计赞了你的 $count 条发言" else "赞了你的多条发言"
-            20 -> "帖子已通过审核"
-            21 -> "代码审查已通过"
-            22 -> "群组申请已通过"
-            23 -> "群组加入申请"
-            24 -> "书签定时提醒"
-            25 -> "给你的发言加了表情"
-            26 -> "投票额度已归还"
-            27 -> "活动即将开始"
-            28 -> "邀请你参加活动"
-            29 -> "在聊天中 @提及了你"
-            30 -> "发来聊天消息"
-            31 -> "邀请你加入聊天"
-            32 -> "在聊天中提及群组"
-            33 -> "在聊天中引用了你"
-            34 -> "指派了话题给你"
-            36 -> if (topicId > 0) "发布了关注分类的新帖" else "关注了你"
-            37, 801 -> "发布了新话题"
-            38 -> "发表了新回复"
-            43, 803 -> "助力了你的帖子"
-            800 -> "关注了你"
-            802 -> when {
-                count > 1 && actorUsername != null -> "等发表了 $count 条新回复"
-                count > 1 -> "发表了 $count 条新回复"
-                else -> "发表了新回复"
-            }
-            else -> if (topicId > 0) "参与了话题互动" else "社区动态"
-        }
+        get() = kind.formatTypeLabel(
+            count = count,
+            hasActorUsername = actorUsername != null,
+            postNumber = postNumber,
+            topicId = topicId
+        )
 
     companion object {
         internal val CONSOLIDATED_NOTIFICATION_ACTOR_REGEX = Regex(
@@ -571,18 +527,11 @@ data class UserActivityItem(
     val title: String,
     val excerpt: String = "",
     val createdAtText: String = "",
-    val categoryName: String = "技术讨论",
-    val actionType: Int = 5
+    val categoryName: String = LinDoNetworkCopy.DEFAULT_TECH_CATEGORY.text,
+    val actionType: Int = DiscourseUserActionKind.REPLY.code
 ) {
     val actionLabel: String
-        get() = when (actionType) {
-            1 -> "送出赞"
-            2 -> "收到赞"
-            4 -> "发布话题"
-            5 -> "发表回复"
-            88 -> "收藏书签"
-            else -> "社区动态"
-        }
+        get() = DiscourseUserActionKind.fromCode(actionType).copy.text
 }
 
 /**
@@ -597,7 +546,7 @@ data class CommunitySearchResult(
     val username: String = "",
     val avatarTemplate: String = "",
     val createdAtText: String = "",
-    val categoryName: String = "技术讨论",
+    val categoryName: String = LinDoNetworkCopy.DEFAULT_TECH_CATEGORY.text,
     val categoryColorHex: String = "0E76BD",
     val likeCount: Int = 0,
     val postsCount: Int = 1
@@ -714,7 +663,7 @@ object BadgeInjector {
         val known = knownBadgesById[resolvedId]
         val rawName = rawNameCandidate
             ?: known?.name
-            ?: "徽章 #$resolvedId"
+            ?: LinDoCommonCopy.BADGE_NUMBER_FALLBACK.format(resolvedId)
         val rawSlug = rawSlugCandidate
             ?: known?.slug
             ?: ""

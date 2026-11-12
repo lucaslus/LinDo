@@ -1,5 +1,7 @@
 package do_.linux.lindo.core.compose
 
+import do_.linux.lindo.core.copy.CloudDraftKind
+import do_.linux.lindo.core.copy.LinDoNetworkCopy
 import do_.linux.lindo.core.network.ApiFailureKind
 import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.CloudDraftItem
@@ -42,6 +44,16 @@ data class ComposerDraft(
     val hasContent: Boolean
         get() = raw.isNotBlank() ||
             (action == ComposerAction.NEW_TOPIC && (title.isNotBlank() || recipients.isNotBlank()))
+
+    val cloudKind: CloudDraftKind
+        get() {
+            val actionHint = when (action) {
+                ComposerAction.NEW_TOPIC -> CloudDraftKind.NEW_TOPIC.wireAction
+                ComposerAction.EDIT -> CloudDraftKind.EDIT_POST.wireAction
+                ComposerAction.REPLY -> CloudDraftKind.TOPIC_REPLY.wireAction
+            }
+            return CloudDraftKind.resolve(action = actionHint, draftKey = key)
+        }
 
     fun sameContent(other: ComposerDraft) = copy(sequence = null, updatedAt = 0) == other.copy(sequence = null, updatedAt = 0)
 }
@@ -156,13 +168,24 @@ class ComposerDraftSession(
         private set
     var existsOnServer: Boolean = initialExistsOnServer
         internal set
+    var userModifiedInSession: Boolean = false
+        private set
     private var synced: ComposerDraft? = null
     private var completed = false
 
-    private fun applyRemoteItem(remote: CloudDraftItem): ComposerDraft {
-        val cleanRemoteTitle = remote.title.takeUnless {
-            it.startsWith("未命名") || it.startsWith("回复话题 #") || it.startsWith("私信 @")
+    private fun stripGeneratedDraftTitle(rawTitle: String): String {
+        val untitledPrefix = LinDoNetworkCopy.DRAFT_UNTITLED_TOPIC.text.take(3)
+        val replyPrefix = LinDoNetworkCopy.DRAFT_REPLY_TOPIC_ID.format("")
+        val pmPrefix = LinDoNetworkCopy.DRAFT_PM_RECIPIENT.format("")
+        return rawTitle.takeUnless {
+            it.startsWith(untitledPrefix) ||
+                it.startsWith(replyPrefix) ||
+                it.startsWith(pmPrefix)
         }.orEmpty()
+    }
+
+    private fun applyRemoteItem(remote: CloudDraftItem): ComposerDraft {
+        val cleanRemoteTitle = stripGeneratedDraftTitle(remote.title)
         val hydrated = current.copy(
             raw = remote.raw,
             title = if (current.action == ComposerAction.NEW_TOPIC) cleanRemoteTitle else current.title,
@@ -224,7 +247,7 @@ class ComposerDraftSession(
             return null
         }
 
-        val hasLocalEdits = if (untouchedBaselineRaw != null) {
+        val hasLocalEdits = userModifiedInSession || if (untouchedBaselineRaw != null) {
             current.raw != untouchedBaselineRaw
         } else {
             current.hasContent
@@ -234,10 +257,8 @@ class ComposerDraftSession(
             return null
         }
 
-        val cleanRemoteTitle = remoteDraft.title.takeUnless {
-            it.startsWith("未命名") || it.startsWith("回复话题 #") || it.startsWith("私信 @")
-        }.orEmpty()
-        val isPrivateMessageDraft = current.key.startsWith("private_message") || current.key.startsWith("new_private_message")
+        val cleanRemoteTitle = stripGeneratedDraftTitle(remoteDraft.title)
+        val isPrivateMessageDraft = current.cloudKind == CloudDraftKind.PRIVATE_MESSAGE
         val contentDiffers = remoteDraft.raw.trim() != current.raw.trim() ||
             (current.action == ComposerAction.NEW_TOPIC && cleanRemoteTitle.trim() != current.title.trim()) ||
             (isPrivateMessageDraft && remoteDraft.recipients.trim() != current.recipients.trim())
@@ -259,8 +280,11 @@ class ComposerDraftSession(
     suspend fun hydrateFromServer(untouchedBaselineRaw: String? = null): RemoteDraftHydration =
         RemoteDraftHydration(conflict = prepareWithRemote(untouchedBaselineRaw))
 
-    fun update(value: ComposerDraft) {
+    fun update(value: ComposerDraft, fromUserEdit: Boolean = true) {
         if (completed) return
+        if (fromUserEdit) {
+            userModifiedInSession = true
+        }
         current = value.copy(sequence = savedSequence)
         LocalComposerDrafts.save(current)
     }
@@ -279,13 +303,7 @@ class ComposerDraftSession(
         val snapshot = current
         val sequence = LocalComposerDrafts.sequence(snapshot.owner, snapshot.key) ?: savedSequence
             ?: LinuxDoRepository.fetchDraftSequence(snapshot.key).also { savedSequence = it }
-        val wireAction = when {
-            snapshot.key.startsWith("private_message") || snapshot.key.startsWith("new_private_message") -> "privateMessage"
-            snapshot.action == ComposerAction.NEW_TOPIC -> "createTopic"
-            snapshot.action == ComposerAction.REPLY -> "reply"
-            snapshot.action == ComposerAction.EDIT -> "edit"
-            else -> "reply"
-        }
+        val wireAction = snapshot.cloudKind.wireAction
         val next = LinuxDoRepository.saveCloudDraft(
             draftKey = snapshot.key,
             sequence = sequence,
@@ -384,33 +402,32 @@ class ComposerDraftSession(
 }
 
 fun ComposerDraft.toCloudItem(): CloudDraftItem {
-    val isPm = key.startsWith("private_message") || key.startsWith("new_private_message")
-    val resolvedAction = when {
-        isPm -> "privateMessage"
-        action == ComposerAction.NEW_TOPIC -> "createTopic"
-        action == ComposerAction.REPLY -> "reply"
-        action == ComposerAction.EDIT -> "edit"
-        else -> "reply"
-    }
+    val kind = cloudKind
     return CloudDraftItem(
         draftKey = key,
         sequence = sequence ?: 0,
         title = title.ifBlank {
-            when {
-                isPm -> if (recipients.isNotBlank()) "私信 @$recipients" else "未命名私信草稿"
-                action == ComposerAction.NEW_TOPIC -> "未命名话题草稿"
-                action == ComposerAction.REPLY -> "话题回复草稿"
-                else -> postNumber?.takeIf { it > 1 }?.let { "${it} 楼 · 编辑草稿" } ?: "帖子编辑草稿"
+            when (kind) {
+                CloudDraftKind.PRIVATE_MESSAGE -> if (recipients.isNotBlank()) {
+                    LinDoNetworkCopy.DRAFT_PM_RECIPIENT.format(recipients)
+                } else {
+                    LinDoNetworkCopy.DRAFT_UNTITLED_PM.text
+                }
+                CloudDraftKind.NEW_TOPIC -> LinDoNetworkCopy.DRAFT_UNTITLED_TOPIC.text
+                CloudDraftKind.TOPIC_REPLY -> LinDoNetworkCopy.DRAFT_TOPIC_REPLY.text
+                CloudDraftKind.EDIT_POST -> postNumber?.takeIf { it > 1 }
+                    ?.let { LinDoNetworkCopy.DRAFT_FLOOR_EDIT.format(it) }
+                    ?: LinDoNetworkCopy.DRAFT_POST_EDIT.text
             }
         },
         excerpt = raw,
         topicId = topicId ?: 0,
-        createdAtText = "本机草稿",
+        createdAtText = LinDoNetworkCopy.DRAFT_LOCAL_TAG.text,
         raw = raw,
         categoryId = categoryId,
         tags = tags,
         replyToPostNumber = replyToPostNumber,
-        action = resolvedAction,
+        action = kind.wireAction,
         postId = postId,
         sequenceKnown = sequence != null,
         recipients = recipients

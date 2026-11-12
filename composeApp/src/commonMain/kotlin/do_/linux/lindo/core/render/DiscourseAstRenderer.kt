@@ -1,5 +1,10 @@
 package do_.linux.lindo.core.render
 
+import do_.linux.lindo.core.copy.CalloutBlockKind
+import do_.linux.lindo.core.copy.LinDoNetworkCopy
+import do_.linux.lindo.core.copy.LinDoReaderCopy
+import do_.linux.lindo.core.copy.MediaBlockKind
+import do_.linux.lindo.core.copy.UnsupportedBlockKind
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
@@ -32,7 +37,9 @@ sealed interface PostBlockNode {
         val linkUrls: List<String?> = emptyList()
     ) : PostBlockNode
     data class Table(val rows: List<List<List<PostBlockNode>>>, val headerRows: Set<Int>) : PostBlockNode
-    data class Media(val label: String, val url: String?, val kind: String) : PostBlockNode
+    data class Media(val label: String, val url: String?, val kind: String) : PostBlockNode {
+        val kindEnum: MediaBlockKind get() = MediaBlockKind.fromKey(kind)
+    }
     data class OneboxCard(
         val title: String,
         val description: String,
@@ -44,13 +51,17 @@ sealed interface PostBlockNode {
         val kind: String,
         val title: String,
         val children: List<PostBlockNode> = emptyList()
-    ) : PostBlockNode
+    ) : PostBlockNode {
+        val kindEnum: CalloutBlockKind get() = CalloutBlockKind.fromKey(kind)
+    }
     data class Unsupported(
         val label: String,
         val text: String,
         val options: List<String> = emptyList(),
-        val kind: String = "generic"
-    ) : PostBlockNode
+        val kind: String = UnsupportedBlockKind.GENERIC.wireKey
+    ) : PostBlockNode {
+        val kindEnum: UnsupportedBlockKind get() = UnsupportedBlockKind.fromKey(kind)
+    }
     data object Divider : PostBlockNode
 }
 
@@ -58,6 +69,7 @@ sealed interface PostBlockNode {
 object DiscourseAstParser {
     private const val MAX_CACHE_ENTRIES = 256
     private const val MAX_CACHE_HTML_CHARS = 1_000_000
+    private val mediaTagNames = MediaBlockKind.entries.map { it.wireKey }.toSet()
     private data class CacheKey(val postId: Int, val html: String)
     private val astCache = LinkedHashMap<CacheKey, List<PostBlockNode>>(256, .75f, true)
     private var cachedHtmlChars = 0
@@ -130,7 +142,14 @@ object DiscourseAstParser {
     fun stripHtmlTags(html: String): String = Jsoup.parseBodyFragment(html).body().wholeText()
 
     private fun blocks(nodes: List<Node>, depth: Int): List<PostBlockNode> {
-        if (depth > 48) return listOf(PostBlockNode.Unsupported("深层嵌套内容", nodes.joinToString(" ") { if (it is Element) it.text() else it.toString() }))
+        if (depth > 48) {
+            return listOf(
+                PostBlockNode.Unsupported(
+                    LinDoReaderCopy.AST_DEEP_NESTED.text,
+                    nodes.joinToString(" ") { if (it is Element) it.text() else it.toString() }
+                )
+            )
+        }
         val result = mutableListOf<PostBlockNode>()
         val pending = mutableListOf<InlineRun>()
         fun flush() {
@@ -145,7 +164,11 @@ object DiscourseAstParser {
             pending.clear()
         }
         fun visit(node: Node, style: InlineRun = InlineRun(""), nesting: Int = depth) {
-            if (nesting > 48) { flush(); result += PostBlockNode.Unsupported("深层嵌套内容", (node as? Element)?.text().orEmpty()); return }
+            if (nesting > 48) {
+                flush()
+                result += PostBlockNode.Unsupported(LinDoReaderCopy.AST_DEEP_NESTED.text, (node as? Element)?.text().orEmpty())
+                return
+            }
             if (node is TextNode) {
                 pending += style.copy(text = if (style.code) node.wholeText else node.wholeText.replace(Regex("[\\t\\n\\r ]+"), " "))
                 return
@@ -162,7 +185,7 @@ object DiscourseAstParser {
                     flush()
                     val title = node.attr("data-poll-title")
                         .ifBlank { node.selectFirst(".poll-title, p, h3, h4")?.text().orEmpty() }
-                        .ifBlank { "社区投票" }
+                        .ifBlank { LinDoReaderCopy.AST_COMMUNITY_POLL.text }
                     val liOptions = node.select("li").map { it.text().trim() }.filter { it.isNotBlank() }
                     val options = node.select("[data-poll-option-id]").map { PostBlockNode.PollOption(it.attr("data-poll-option-id"), it.text().trim()) }.filter { it.id.isNotBlank() }
                     if (options.isNotEmpty() && node.attr("data-poll-name").isNotBlank()) {
@@ -182,15 +205,15 @@ object DiscourseAstParser {
                         label = title,
                         text = node.wholeText().trim(),
                         options = liOptions,
-                        kind = "poll"
+                        kind = UnsupportedBlockKind.POLL.wireKey
                     )
                 }
                 node.hasClass("math") || node.hasClass("math-container") || node.hasClass("katex") -> {
                     flush()
                     result += PostBlockNode.Unsupported(
-                        label = "数学公式",
+                        label = LinDoReaderCopy.AST_MATH_FORMULA.text,
                         text = node.attr("data-math").ifBlank { node.text() },
-                        kind = "math"
+                        kind = UnsupportedBlockKind.MATH.wireKey
                     )
                 }
                 tag == "aside" && node.hasClass("onebox") -> {
@@ -199,7 +222,7 @@ object DiscourseAstParser {
                         .ifBlank { node.selectFirst("header a[href], h3 a[href], h4 a[href], a[href]")?.attr("href").orEmpty() }
                     val safeLink = safeUrl(rawUrl, allowMailto = false).orEmpty()
                     val title = node.selectFirst("h3, h4, .onebox-body h3, .onebox-body h4, header a")?.text().orEmpty()
-                        .ifBlank { safeLink.ifBlank { "引用链接" } }
+                        .ifBlank { safeLink.ifBlank { LinDoReaderCopy.AST_QUOTE_LINK.text } }
                     val desc = node.selectFirst(".onebox-body p, p")?.text().orEmpty()
                         .ifBlank { node.text().removePrefix(title).trim().take(180) }
                     val domain = node.selectFirst("header .source, header a")?.text().orEmpty()
@@ -225,24 +248,17 @@ object DiscourseAstParser {
                     node.hasClass("linuxdo-lottery") -> {
                     flush()
                     val isLottery = node.attr("data-wrap").equals("lottery", ignoreCase = true) || node.hasClass("linuxdo-lottery")
-                    val kind = when {
-                        isLottery -> "lottery"
-                        node.classNames().any { it.contains("warning") || it.contains("caution") } -> "warning"
-                        node.classNames().any { it.contains("tip") || it.contains("important") } -> "tip"
-                        else -> "note"
+                    val calloutKind = when {
+                        isLottery -> CalloutBlockKind.LOTTERY
+                        node.classNames().any { it.contains("warning") || it.contains("caution") } -> CalloutBlockKind.WARNING
+                        node.classNames().any { it.contains("tip") || it.contains("important") } -> CalloutBlockKind.TIP
+                        else -> CalloutBlockKind.NOTE
                     }
                     val titleEl = node.selectFirst(".markdown-alert-title, .admonition-title, .lottery-title")
-                    val title = titleEl?.text()?.trim().orEmpty().ifBlank {
-                        when (kind) {
-                            "lottery" -> "社区抽奖活动"
-                            "warning" -> "注意"
-                            "tip" -> "提示"
-                            else -> "说明"
-                        }
-                    }
+                    val title = titleEl?.text()?.trim().orEmpty().ifBlank { calloutKind.defaultTitle.text }
                     val childrenNodes = blocks(node.childNodes().filter { it !== titleEl }, nesting + 1)
                     result += PostBlockNode.CalloutBlock(
-                        kind = kind,
+                        kind = calloutKind.wireKey,
                         title = title,
                         children = childrenNodes.ifEmpty { listOf(PostBlockNode.Paragraph(node.text().trim())) }
                     )
@@ -268,7 +284,11 @@ object DiscourseAstParser {
                             else -> ""
                         }
                     }.trim()
-                    result += PostBlockNode.DetailsSpoilerBlock(summary?.text().orEmpty().ifBlank { "展开内容" }, bodyText, children)
+                    result += PostBlockNode.DetailsSpoilerBlock(
+                        summary?.text().orEmpty().ifBlank { LinDoReaderCopy.AST_EXPAND_DETAILS.text },
+                        bodyText,
+                        children
+                    )
                 }
                 tag == "ul" || tag == "ol" -> {
                     flush(); val items = node.children().filter { it.normalName() == "li" }
@@ -281,15 +301,22 @@ object DiscourseAstParser {
                         rows.mapIndexedNotNull { i, row -> if (row.children().any { it.normalName() == "th" }) i else null }.toSet())
                     if (node.select("[rowspan], [colspan]").isNotEmpty()) {
                         result += PostBlockNode.Unsupported(
-                            label = "合并单元格表格",
-                            text = "单元格内容已按顺序展示，可在原网页查看合并布局。",
-                            kind = "merged_table"
+                            label = LinDoReaderCopy.AST_MERGED_TABLE_TITLE.text,
+                            text = LinDoReaderCopy.AST_MERGED_TABLE_HINT.text,
+                            kind = UnsupportedBlockKind.MERGED_TABLE.wireKey
                         )
                     }
                 }
-                tag in setOf("video", "audio", "iframe", "object", "embed") -> {
-                    flush(); val raw = node.attr("src").ifBlank { node.attr("data") }.ifBlank { node.selectFirst("source")?.attr("src").orEmpty() }
-                    result += PostBlockNode.Media(node.attr("title").ifBlank { if (tag == "audio") "音频" else "视频或嵌入内容" }, safeUrl(raw, allowMailto = false), tag)
+                tag in mediaTagNames -> {
+                    flush()
+                    val mediaKind = MediaBlockKind.fromKey(tag)
+                    val raw = node.attr("src").ifBlank { node.attr("data") }.ifBlank { node.selectFirst("source")?.attr("src").orEmpty() }
+                    val defaultLabel = if (mediaKind.isAudio) LinDoReaderCopy.AST_AUDIO.text else LinDoReaderCopy.AST_VIDEO_OR_EMBED.text
+                    result += PostBlockNode.Media(
+                        node.attr("title").ifBlank { defaultLabel },
+                        safeUrl(raw, allowMailto = false),
+                        mediaKind.wireKey
+                    )
                 }
                 tag == "input" && node.attr("type").equals("checkbox", ignoreCase = true) -> {
                     val isChecked = node.hasAttr("checked") || node.attr("checked").equals("true", ignoreCase = true)
@@ -325,7 +352,11 @@ object DiscourseAstParser {
                             node.parents().any { it.hasClass("anchor") || it.hasClass("chckbx-box") }
                         if (!isDecorativeIcon) {
                             flush()
-                            result += PostBlockNode.Unsupported("图形内容", svgText.ifBlank { "此图形可在原帖中查看" }, kind = "svg")
+                            result += PostBlockNode.Unsupported(
+                                LinDoReaderCopy.AST_SVG_TITLE.text,
+                                svgText.ifBlank { LinDoReaderCopy.AST_SVG_HINT.text },
+                                kind = UnsupportedBlockKind.SVG.wireKey
+                            )
                         }
                     }
                 }
@@ -341,7 +372,8 @@ object DiscourseAstParser {
                 }
                 tag == "img" && (node.hasClass("emoji") || node.attr("src").contains("/emoji/") || node.attr("src").contains("twemoji") || node.attr("data-src").contains("/emoji/")) -> {
                     val rawEmojiSrc = node.attr("src").ifBlank { node.attr("data-src") }
-                    val emojiLabel = node.attr("title").ifBlank { node.attr("alt") }.ifBlank { "[表情]" }
+                    val emojiLabel = node.attr("title").ifBlank { node.attr("alt") }
+                        .ifBlank { LinDoNetworkCopy.EMOJI_BRACKET_PLACEHOLDER.text }
                     pending.add(
                         style.copy(
                             text = emojiLabel,
@@ -374,7 +406,7 @@ object DiscourseAstParser {
                             )
                         }
                     } ?: run {
-                        result += PostBlockNode.Unsupported("图片暂不可用", node.attr("alt"))
+                        result += PostBlockNode.Unsupported(LinDoReaderCopy.AST_IMAGE_UNAVAILABLE.text, node.attr("alt"))
                     }
                 }
                 tag == "hr" -> { flush(); result += PostBlockNode.Divider }

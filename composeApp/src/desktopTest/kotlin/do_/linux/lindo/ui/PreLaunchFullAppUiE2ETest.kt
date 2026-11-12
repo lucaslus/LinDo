@@ -509,12 +509,14 @@ class PreLaunchFullAppUiE2ETest {
             openedExternalUrls.any { it.startsWith("https://connect.linux.do") }
         }
 
-        // Scroll Profile LazyColumn down to Settings / Cache Clear / Version v0.2.31
+        // Scroll Profile LazyColumn down to Settings / Cache Clear / Version v0.2.32
         onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(3)
-        waitForText("Lindo v0.2.31")
-        onAllNodesWithText("Lindo v0.2.31").onFirst().edtAssertDisplayed()
+        waitForText("Lindo v0.2.32")
+        onAllNodesWithText("Lindo v0.2.32").onFirst().edtAssertDisplayed()
 
         onNodeWithText("清理本地缓存").edtScrollClick()
+        waitForText("仅清理图片与数据缓存")
+        onNodeWithText("仅清理图片与数据缓存").edtClick()
         waitForText("已清理图片与解析缓存")
 
         savePreviewSnapshotIfConfigured("e2e_4_profile_v0_2_31.png")

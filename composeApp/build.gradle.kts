@@ -88,8 +88,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 33
-        versionName = "0.2.31"
+        versionCode = 34
+        versionName = "0.2.32"
     }
 
     packaging {
@@ -121,8 +121,13 @@ compose.desktop {
     application {
         mainClass = "do_.linux.lindo.MainKt"
         jvmArgs += buildList {
+            add("-XX:+IgnoreUnrecognizedVMOptions")
             add("-XX:+UseZGC")
+            add("-XX:+ZGenerational")
             add("-Dskiko.vsync.enabled=true")
+            add("-Dskiko.rendering.macos.waitForPreviousFrameVsyncOnRedrawImmediately=false")
+            add("-Dskiko.rendering.windows.waitForVsyncOnRedrawImmediately=false")
+            add("-Dskiko.gpu.resourceCacheLimit=268435456")
             add("-Dfile.encoding=UTF-8")
             if (org.gradle.internal.os.OperatingSystem.current().isMacOsX) {
                 add("-Dsun.java2d.metal=true")
@@ -133,7 +138,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.0.31"
+            packageVersion = "1.0.32"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
             vendor = "Lindo Community"
 
@@ -154,7 +159,11 @@ compose.desktop {
                                 </array>
                             </dict>
                         </array>
+                        <key>CADisableMinimumFrameDuration</key>
+                        <true/>
                         <key>CADisableMinimumFrameDurationOnPhone</key>
+                        <true/>
+                        <key>NSHighResolutionCapable</key>
                         <true/>
                     """.trimIndent()
                 }

@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoNetworkCopy
 import do_.linux.lindo.core.runUiSafeStateWrite
 import kotlin.math.roundToInt
 
@@ -38,7 +40,7 @@ object UserPresenceService {
     var todayVisitConfirmed by mutableStateOf(false)
         private set
 
-    var lastVisitSyncTimeText by mutableStateOf("尚未确认")
+    var lastVisitSyncTimeText by mutableStateOf(LinDoNetworkCopy.SYNC_UNCONFIRMED.text)
         private set
 
     fun setAppForeground(foreground: Boolean, countAsActivity: Boolean = true) {
@@ -65,7 +67,7 @@ object UserPresenceService {
     fun recordSuccessfulForegroundRequest() {
         runUiSafeStateWrite {
             todayVisitConfirmed = true
-            lastVisitSyncTimeText = "刚刚"
+            lastVisitSyncTimeText = LinDoCommonCopy.JUST_NOW.text
         }
     }
 
@@ -126,6 +128,47 @@ data class ConsolidatedTimingBatch(
  *    `topic_id={id}&topic_time={ms}&timings[{postNumber}]={ms}`；
  * 4. 临时网络失败会合并回内存队列并指数退避重传；进程被杀时尚未持久化的队列仍可能丢失。
  */
+internal enum class TimingBatchOutcome {
+    CONFIRMED,
+    SITE_VERIFICATION_BLOCKED,
+    PERMANENT_DROP,
+    RETRYABLE_FAILURE;
+
+    companion object {
+        private val retryableStatusCodes = setOf(403, 405, 429, 500, 501, 502, 503, 504)
+        private val permanentDropStatusCodes = setOf(400, 401, 404, 410, 422)
+
+        fun classify(statusCode: Int?): TimingBatchOutcome = when {
+            statusCode != null && statusCode in 200..299 -> CONFIRMED
+            statusCode == ScreenTrackEngine.STATUS_SITE_VERIFICATION_REQUIRED -> SITE_VERIFICATION_BLOCKED
+            statusCode != null && statusCode in permanentDropStatusCodes -> PERMANENT_DROP
+            statusCode == null || statusCode == 0 || statusCode in retryableStatusCodes -> RETRYABLE_FAILURE
+            else -> PERMANENT_DROP
+        }
+    }
+}
+
+internal enum class ConnectQualificationStatus {
+    QUALIFIED,
+    UNQUALIFIED,
+    UNSPECIFIED;
+
+    companion object {
+        private val negativeMarkers = listOf("不符合", "未达标", "未达到", "不满足")
+
+        fun classify(badgeClasses: String, badgeText: String, htmlContent: String): ConnectQualificationStatus {
+            if (negativeMarkers.any { badgeText.contains(it) }) {
+                return UNQUALIFIED
+            }
+            val explicitlyQualified = badgeClasses.contains("badge-success") ||
+                badgeText.contains(LinDoNetworkCopy.CONNECT_QUALIFIED.text) ||
+                badgeText.contains("符合") ||
+                htmlContent.contains("符合信任等级 3")
+            return if (explicitlyQualified) QUALIFIED else UNSPECIFIED
+        }
+    }
+}
+
 object ScreenTrackEngine {
     const val STATUS_SITE_VERIFICATION_REQUIRED = -403
     private const val PAUSE_UNLESS_SCROLLED_MS = 3 * 60 * 1000L
@@ -134,8 +177,6 @@ object ScreenTrackEngine {
     private const val MAX_TOPIC_RETRIES = 3
     private const val MAX_TRACKED_READ_POSTS = 2_000
     private val BACKOFF_DELAYS_MS = longArrayOf(5_000L, 10_000L, 20_000L, 40_000L)
-    private val RETRYABLE_STATUS_CODES = setOf(403, 405, 429, 500, 501, 502, 503, 504)
-    private val PERMANENT_DROP_STATUS_CODES = setOf(400, 401, 404, 410, 422)
     private val lock = Any()
     private val flushSignal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
 
@@ -443,53 +484,55 @@ object ScreenTrackEngine {
     }
 
     fun onBatchSendResult(batch: ConsolidatedTimingBatch, statusCode: Int?, nowMs: Long = System.currentTimeMillis()) = synchronized(lock) {
-        if (statusCode != null && statusCode in 200..299) {
-            consecutiveFailures = 0
-            blockSendingUntilEpochMs = 0L
-            retryCounts.remove(batch.topicId)
-            var added = false
-            for (postNum in batch.timingsMs.keys) {
-                if (addBoundedReadPostLocked(serverConfirmedReadPosts, batch.topicId to postNum)) {
-                    added = true
-                }
-            }
-            if (added) {
-                runUiSafeStateWrite {
-                    serverConfirmedReadVersion += 1L
-                }
-            }
-        } else if (statusCode == STATUS_SITE_VERIFICATION_REQUIRED) {
-            // 遭遇 Cloudflare 站点验证挑战：挂起后台 timings 发送 90s（或直至用户完成验证手动恢复），
-            // 严禁清空 readPostsSet（否则每秒 tick 触发 hasUnreadRush 进入 1s 无限风暴）！
-            blockSendingUntilEpochMs = maxOf(blockSendingUntilEpochMs, nowMs + 90_000L)
-            consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
-        } else if (statusCode != null && statusCode in PERMANENT_DROP_STATUS_CODES) {
-            retryCounts.remove(batch.topicId)
-            releaseUnconfirmedFloorTrackingLocked(batch)
-        } else if (statusCode == null || statusCode == 0 || statusCode in RETRYABLE_STATUS_CODES) {
-            if (!UserPresenceService.isForeground) {
-                blockSendingUntilEpochMs = nowMs + 15_000L
-                consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
-            } else {
-                val retries = (retryCounts[batch.topicId] ?: 0) + 1
-                if (retries >= MAX_TOPIC_RETRIES) {
-                    retryCounts.remove(batch.topicId)
-                    if (currentTopicId == batch.topicId) {
-                        blockSendingUntilEpochMs = maxOf(blockSendingUntilEpochMs, nowMs + 30_000L)
+        when (TimingBatchOutcome.classify(statusCode)) {
+            TimingBatchOutcome.CONFIRMED -> {
+                consecutiveFailures = 0
+                blockSendingUntilEpochMs = 0L
+                retryCounts.remove(batch.topicId)
+                var added = false
+                for (postNum in batch.timingsMs.keys) {
+                    if (addBoundedReadPostLocked(serverConfirmedReadPosts, batch.topicId to postNum)) {
+                        added = true
                     }
-                    releaseUnconfirmedFloorTrackingLocked(batch)
-                } else {
-                    retryCounts[batch.topicId] = retries
-                    val delayIdx = consecutiveFailures.coerceIn(0, BACKOFF_DELAYS_MS.lastIndex)
-                    consecutiveFailures += 1
-                    blockSendingUntilEpochMs = nowMs + BACKOFF_DELAYS_MS[delayIdx]
-                    // 失败不丢数据：重新合并回队列尾部等待退避后重发（FIFO 不阻塞其他话题）
-                    consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
+                }
+                if (added) {
+                    runUiSafeStateWrite {
+                        serverConfirmedReadVersion += 1L
+                    }
                 }
             }
-        } else {
-            retryCounts.remove(batch.topicId)
-            releaseUnconfirmedFloorTrackingLocked(batch)
+            TimingBatchOutcome.SITE_VERIFICATION_BLOCKED -> {
+                // 遭遇 Cloudflare 站点验证挑战：挂起后台 timings 发送 90s（或直至用户完成验证手动恢复），
+                // 严禁清空 readPostsSet（否则每秒 tick 触发 hasUnreadRush 进入 1s 无限风暴）！
+                blockSendingUntilEpochMs = maxOf(blockSendingUntilEpochMs, nowMs + 90_000L)
+                consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
+            }
+            TimingBatchOutcome.PERMANENT_DROP -> {
+                retryCounts.remove(batch.topicId)
+                releaseUnconfirmedFloorTrackingLocked(batch)
+            }
+            TimingBatchOutcome.RETRYABLE_FAILURE -> {
+                if (!UserPresenceService.isForeground) {
+                    blockSendingUntilEpochMs = nowMs + 15_000L
+                    consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
+                } else {
+                    val retries = (retryCounts[batch.topicId] ?: 0) + 1
+                    if (retries >= MAX_TOPIC_RETRIES) {
+                        retryCounts.remove(batch.topicId)
+                        if (currentTopicId == batch.topicId) {
+                            blockSendingUntilEpochMs = maxOf(blockSendingUntilEpochMs, nowMs + 30_000L)
+                        }
+                        releaseUnconfirmedFloorTrackingLocked(batch)
+                    } else {
+                        retryCounts[batch.topicId] = retries
+                        val delayIdx = consecutiveFailures.coerceIn(0, BACKOFF_DELAYS_MS.lastIndex)
+                        consecutiveFailures += 1
+                        blockSendingUntilEpochMs = nowMs + BACKOFF_DELAYS_MS[delayIdx]
+                        // 失败不丢数据：重新合并回队列尾部等待退避后重发（FIFO 不阻塞其他话题）
+                        consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
+                    }
+                }
+            }
         }
     }
 
@@ -616,23 +659,23 @@ object ConnectStatsParser {
             .find(htmlContent)?.groupValues?.getOrNull(1)?.let { cleanText(it) }
             ?: Regex("""<h[123][^>]*>(.*?信任等级.*?)</h[123]>""", RegexOption.DOT_MATCHES_ALL)
                 .find(htmlContent)?.groupValues?.getOrNull(1)?.let { cleanText(it) }
-            ?.ifBlank { "信任等级 3 要求" }
-            ?: "信任等级 3 要求"
+            ?.ifBlank { LinDoNetworkCopy.CONNECT_TL3_REQUIREMENT.text }
+            ?: LinDoNetworkCopy.CONNECT_TL3_REQUIREMENT.text
 
         val subtitle = Regex("""<[^>]*class=["'][^"']*card-subtitle[^"']*["'][^>]*>(.*?)</[^>]+>""", RegexOption.DOT_MATCHES_ALL)
             .find(htmlContent)?.groupValues?.getOrNull(1)?.let { cleanText(it) }
-            ?: "过去 100 天内社区活跃度统计 (connect.linux.do)"
+            ?: LinDoNetworkCopy.CONNECT_100_DAYS_SUBTITLE.text
 
         val badgeMatch = Regex("""<span[^>]*class=["']([^"']*badge[^"']*)["'][^>]*>(.*?)</span>""", RegexOption.DOT_MATCHES_ALL)
             .find(htmlContent)
         val badgeClasses = badgeMatch?.groupValues?.getOrNull(1).orEmpty()
         val badgeText = badgeMatch?.groupValues?.getOrNull(2)?.let { cleanText(it) }
-            ?: if (htmlContent.contains("符合信任等级") || htmlContent.contains("已达标")) "已达标" else "实时数据"
-        val hasNegativeBadge = listOf("不符合", "未达标", "未达到", "不满足").any { badgeText.contains(it) }
-        val isQualified = !hasNegativeBadge && (badgeClasses.contains("badge-success") ||
-            badgeText.contains("已达标") ||
-            badgeText.contains("符合") ||
-            htmlContent.contains("符合信任等级 3"))
+            ?: if (htmlContent.contains("符合信任等级") || htmlContent.contains(LinDoNetworkCopy.CONNECT_QUALIFIED.text)) {
+                LinDoNetworkCopy.CONNECT_QUALIFIED.text
+            } else {
+                LinDoNetworkCopy.CONNECT_LIVE_DATA.text
+            }
+        val qualificationStatus = ConnectQualificationStatus.classify(badgeClasses, badgeText, htmlContent)
 
         val periodDays = Regex("""(\d+)\s*(?:天|days)""", RegexOption.IGNORE_CASE)
             .find(subtitle)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 100
@@ -756,7 +799,11 @@ object ConnectStatsParser {
             title = title,
             subtitle = subtitle,
             statusBadgeText = badgeText,
-            isQualified = !hasNegativeBadge && (isQualified || metrics.all { it.isMet }),
+            isQualified = when (qualificationStatus) {
+                ConnectQualificationStatus.QUALIFIED -> true
+                ConnectQualificationStatus.UNQUALIFIED -> false
+                ConnectQualificationStatus.UNSPECIFIED -> metrics.all { it.isMet }
+            },
             timePeriodDays = periodDays,
             daysVisited = matchMetric(mapByLabel, listOf("访问天数", "days visited")),
             topicsEntered = matchMetric(mapByLabel, listOf("浏览话题", "浏览的话题", "浏览主题", "topics viewed")),
@@ -788,21 +835,25 @@ object ConnectStatsParser {
         timeReadSeconds: Int
     ): ConnectTrustLevelReport {
         fun metric(label: String, value: Int, suffix: String = "") = ConnectMetricItem(
-            label, value, 0, "$value$suffix", "未提供", false
+            label, value, 0, "$value$suffix", LinDoCommonCopy.NOT_PROVIDED.text, false
         )
         return ConnectTrustLevelReport(
-            title = "Lv.$trustLevel 账户累计统计 (@$username)",
-            subtitle = "Connect 周期数据暂未取得；以下为账户累计统计",
-            statusBadgeText = "累计统计，非 Connect 周期数据",
+            title = LinDoNetworkCopy.CONNECT_CUMULATIVE_HEADER.format(trustLevel, username),
+            subtitle = LinDoNetworkCopy.CONNECT_CUMULATIVE_SUBTITLE.text,
+            statusBadgeText = LinDoNetworkCopy.CONNECT_CUMULATIVE_BADGE.text,
             isQualified = false, timePeriodDays = 0,
             daysVisited = daysVisited, topicsEntered = topicsEntered, postsRead = postsReadCount,
             topicsRepliedTo = postCount, likesGiven = likesGiven, likesReceived = likesReceived,
             likesReceivedDays = 0, likesReceivedUsers = 0,
             metrics = listOf(
-                metric("累计访问天数", daysVisited, " 天"), metric("累计浏览话题", topicsEntered),
-                metric("累计已读帖子", postsReadCount), metric("发布话题", topicCount),
-                metric("发布回复", postCount), metric("送出点赞", likesGiven), metric("获得点赞", likesReceived),
-                metric("累计阅读时长", timeReadSeconds / 60, " 分钟")
+                metric(LinDoNetworkCopy.CONNECT_METRIC_DAYS_VISITED.text, daysVisited, LinDoNetworkCopy.CONNECT_UNIT_DAYS.text),
+                metric(LinDoNetworkCopy.CONNECT_METRIC_TOPICS_ENTERED.text, topicsEntered),
+                metric(LinDoNetworkCopy.CONNECT_METRIC_POSTS_READ.text, postsReadCount),
+                metric(LinDoNetworkCopy.CONNECT_METRIC_TOPICS_CREATED.text, topicCount),
+                metric(LinDoNetworkCopy.CONNECT_METRIC_POSTS_CREATED.text, postCount),
+                metric(LinDoNetworkCopy.CONNECT_METRIC_LIKES_GIVEN.text, likesGiven),
+                metric(LinDoNetworkCopy.CONNECT_METRIC_LIKES_RECEIVED.text, likesReceived),
+                metric(LinDoNetworkCopy.CONNECT_METRIC_READ_TIME.text, timeReadSeconds / 60, LinDoNetworkCopy.CONNECT_UNIT_MINUTES.text)
             ),
             isLiveConnectData = false
         )
@@ -810,7 +861,9 @@ object ConnectStatsParser {
 
     fun buildSessionBaselineReport(sessionTopicsEntered: Int, sessionPostsRead: Int): ConnectTrustLevelReport {
         return ConnectTrustLevelReport(
-            title = "Connect", subtitle = "尚未取得 Connect 数据", statusBadgeText = "尚未同步",
+            title = "Connect",
+            subtitle = LinDoNetworkCopy.CONNECT_EMPTY_TITLE.text,
+            statusBadgeText = LinDoNetworkCopy.SYNC_NOT_YET.text,
             isQualified = false, timePeriodDays = 0, daysVisited = 0, topicsEntered = 0, postsRead = 0,
             topicsRepliedTo = 0, likesGiven = 0, likesReceived = 0, likesReceivedDays = 0, likesReceivedUsers = 0,
             metrics = emptyList(), isLiveConnectData = false

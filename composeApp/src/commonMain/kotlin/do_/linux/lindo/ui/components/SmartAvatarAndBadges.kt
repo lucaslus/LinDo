@@ -41,16 +41,25 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.lerp
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.LinearGradientShader
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.ShaderBrush
-import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -67,6 +76,8 @@ import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import coil3.request.ImageRequest
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
+import do_.linux.lindo.core.copy.LinDoCommonCopy
+import do_.linux.lindo.core.copy.LinDoComposerCopy
 import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
 import do_.linux.lindo.core.network.LinuxDoRepository
@@ -80,8 +91,21 @@ import org.jetbrains.compose.resources.painterResource
 val LocalLinDoNetworkRestoreVersion = compositionLocalOf { 0 }
 val LocalSiteVerificationRestoreVersion = compositionLocalOf { 0 }
 val LocalIsWebModalActive = compositionLocalOf { false }
+val LocalLinDoListScrolling = compositionLocalOf { false }
 val LocalOpenInAppWebUrl = compositionLocalOf<((String) -> Unit)?> { null }
 val LocalRequestGuestLogin = compositionLocalOf<((String, String) -> Unit)?> { null }
+
+private enum class AvatarGlowPreset(val color: Color, val pulseDurationMs: Int) {
+    OFFICIAL_ICE_BLUE(Color(0xFF00AEFF), 1500),
+    MERCHANT_GOLD(Color(0xFFF5BF03), 2500);
+
+    companion object {
+        fun fromColor(color: Color?): AvatarGlowPreset? {
+            if (color == null) return null
+            return entries.firstOrNull { it.color == color } ?: MERCHANT_GOLD
+        }
+    }
+}
 
 /**
  * LinDo 双栈智能动态头像组件 (`SmartAvatar`)
@@ -104,7 +128,11 @@ fun SmartAvatar(
     // 统一收敛至 Discourse 官方预生成尺寸档位（常规 <=60dp 统一使用 144px，超大图使用 288px），
     // 确保首页、帖子正文、个人主页、用户名片、小火箭与通知中心 100% 共享同一 CDN URL 与内存/磁盘缓存，零 302 重定向！
     val thumbnailSize = if (size <= 60.dp) 144 else 288
-    val motionEnabled = enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused
+    val isListScrolling = LocalLinDoListScrolling.current
+    val motionEnabled = enableAnimations &&
+        LocalLinDoAnimations.current &&
+        LocalWindowInfo.current.isWindowFocused &&
+        !isListScrolling
     val networkRestoreVersion = LocalLinDoNetworkRestoreVersion.current
     val siteVerificationRestoreVersion = LocalSiteVerificationRestoreVersion.current
 
@@ -145,19 +173,18 @@ fun SmartAvatar(
     val isSquare = remember(username, staticUrl) {
         LinuxDoSiteRules.isSquareAvatar(username, staticUrl)
     }
-    val shape: Shape = if (isSquare) RoundedCornerShape(percent = 10) else CircleShape
     val glowColor = remember(username, effectivePrimaryGroup, staticUrl) {
         LinuxDoSiteRules.matchAvatarGlowColor(username, effectivePrimaryGroup, staticUrl)
     }
-    val isBlueGlow = glowColor == Color(0xFF00AEFF)
+    val glowPreset = remember(glowColor) { AvatarGlowPreset.fromColor(glowColor) }
     // 对齐官方 common_theme_138 `@keyframes pulse`：冰蓝 3s 往返 (单程 1500ms)、鎏金 5s 往返 (单程 2500ms)，列表滚动禁用动效时保留静态光晕
-    val pulseProgress = if (glowColor != null && motionEnabled) {
+    val pulseProgress = if (glowPreset != null && motionEnabled) {
         val pulse = rememberInfiniteTransition(label = "official_avatar_glow")
         pulse.animateFloat(
             initialValue = 0f,
             targetValue = 1f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = if (isBlueGlow) 1500 else 2500, easing = officialTitleEasing),
+                animation = tween(durationMillis = glowPreset.pulseDurationMs, easing = officialTitleEasing),
                 repeatMode = RepeatMode.Reverse
             ),
             label = "glow_pulse"
@@ -219,13 +246,8 @@ fun SmartAvatar(
             }
         }
 
-        val glowOpacity = if (glowColor != null) 0.5f + 0.5f * pulseProgress.value else 0f
-        val borderStrokeColor = if (glowColor != null) {
-            glowColor.copy(alpha = (0.58f * glowOpacity).coerceIn(0.25f, 0.72f))
-        } else {
-            palette.hairline
-        }
-        val borderStrokeWidth = if (glowColor != null && size >= 24.dp) 1.dp else 0.5.dp
+        val baseBorderColor = palette.hairline
+        val borderStrokeWidth = if (glowColor != null && size >= 24.dp) 1.dp else 0.65.dp
 
         Box(
             modifier = modifier.size(size).then(
@@ -263,15 +285,76 @@ fun SmartAvatar(
             ),
             contentAlignment = Alignment.Center
         ) {
+            // 采用 Offscreen 离屏混合 + EvenOdd 抗锯齿透明遮罩 + 顶层内缩抗锯齿描边：
+            // 彻底根治桌面端 Skia/Metal/Direct3D 模板裁剪 (sampleCount=1) 与底层 border 被图片像素覆盖导致的边缘毛刺问题
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(shape)
-                    .border(
-                        width = borderStrokeWidth,
-                        color = borderStrokeColor,
-                        shape = shape
-                    ),
+                    .graphicsLayer {
+                        compositingStrategy = CompositingStrategy.Offscreen
+                    }
+                    .drawWithCache {
+                        val minDim = this.size.minDimension
+                        val cornerPx = minDim * 0.10f
+                        val cutoutPath = Path().apply {
+                            fillType = PathFillType.EvenOdd
+                            addRect(Rect(-2f, -2f, this@drawWithCache.size.width + 2f, this@drawWithCache.size.height + 2f))
+                            if (isSquare) {
+                                addRoundRect(
+                                    RoundRect(
+                                        rect = Rect(0f, 0f, this@drawWithCache.size.width, this@drawWithCache.size.height),
+                                        cornerRadius = CornerRadius(cornerPx, cornerPx)
+                                    )
+                                )
+                            } else {
+                                val radius = minDim * 0.5f
+                                addOval(
+                                    Rect(
+                                        left = (this@drawWithCache.size.width - radius * 2f) * 0.5f,
+                                        top = (this@drawWithCache.size.height - radius * 2f) * 0.5f,
+                                        right = (this@drawWithCache.size.width + radius * 2f) * 0.5f,
+                                        bottom = (this@drawWithCache.size.height + radius * 2f) * 0.5f
+                                    )
+                                )
+                            }
+                        }
+                        val strokePx = borderStrokeWidth.toPx()
+                        val halfStroke = strokePx * 0.5f
+                        onDrawWithContent {
+                            drawContent()
+                            drawPath(
+                                path = cutoutPath,
+                                color = Color.Black,
+                                blendMode = BlendMode.Clear
+                            )
+                            val strokeColor = if (glowColor != null) {
+                                val opacity = 0.5f + 0.5f * pulseProgress.value
+                                glowColor.copy(alpha = (0.58f * opacity).coerceIn(0.25f, 0.72f))
+                            } else {
+                                baseBorderColor
+                            }
+                            if (isSquare) {
+                                val insetCorner = (cornerPx - halfStroke).coerceAtLeast(0f)
+                                drawRoundRect(
+                                    color = strokeColor,
+                                    topLeft = Offset(halfStroke, halfStroke),
+                                    size = Size(
+                                        width = (this.size.width - strokePx).coerceAtLeast(0f),
+                                        height = (this.size.height - strokePx).coerceAtLeast(0f)
+                                    ),
+                                    cornerRadius = CornerRadius(insetCorner, insetCorner),
+                                    style = Stroke(width = strokePx)
+                                )
+                            } else {
+                                drawCircle(
+                                    color = strokeColor,
+                                    radius = (minDim * 0.5f - halfStroke).coerceAtLeast(0f),
+                                    center = center,
+                                    style = Stroke(width = strokePx)
+                                )
+                            }
+                        }
+                    },
                 contentAlignment = Alignment.Center
             ) {
                 if (staticUrl.isEmpty() || (!staticLoaded && !animatedReady)) {
@@ -288,7 +371,7 @@ fun SmartAvatar(
                         model = requestModel,
                         contentDescription = username,
                         contentScale = ContentScale.Crop,
-                        filterQuality = FilterQuality.Medium,
+                        filterQuality = FilterQuality.High,
                         onLoading = {
                             if (!isLoadedAvatarUrl(staticUrl)) {
                                 staticLoaded = false
@@ -313,9 +396,9 @@ fun SmartAvatar(
                 if (hasAnimated && (staticLoaded || staticUrl.isEmpty())) {
                     AsyncImage(
                         model = animatedUrl,
-                        contentDescription = "$username animated avatar",
+                        contentDescription = LinDoComposerCopy.ANIMATED_AVATAR_DESC.format(username),
                         contentScale = ContentScale.Crop,
-                        filterQuality = FilterQuality.Medium,
+                        filterQuality = FilterQuality.High,
                         onLoading = { animatedReady = false },
                         onSuccess = { animatedReady = true },
                         onError = { animatedReady = false },
@@ -398,7 +481,11 @@ fun UserTitleTag(
     val isHolographic = remember(title) { LinuxDoSiteRules.isHolographicTitle(title) }
     val neutral = palette.inkSecondary
     if (isHolographic && animatePostTitle != null) {
-        val animate = animatePostTitle && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused
+        val isListScrolling = LocalLinDoListScrolling.current
+        val animate = animatePostTitle &&
+            LocalLinDoAnimations.current &&
+            LocalWindowInfo.current.isWindowFocused &&
+            !isListScrolling
         val phase = if (animate) {
             val transition = rememberInfiniteTransition(label = "official_title")
             val progress by transition.animateFloat(
@@ -442,7 +529,7 @@ fun UserTitleTag(
             text = title,
             fontSize = 12.sp,
             lineHeight = 14.sp,
-            color = if (merchantGroupTitle) Color(0xFFF5BF03) else neutral,
+            color = if (merchantGroupTitle) AvatarGlowPreset.MERCHANT_GOLD.color else neutral,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = modifier
@@ -469,7 +556,14 @@ fun PostGrantedBadgeIcon(
         description = description,
         colorFilter = tint,
         modifier = modifier.size(size).then(
-            if (onClick == null) Modifier else Modifier.clickable { onClick(badge) }
+            if (onClick == null) {
+                Modifier
+            } else {
+                Modifier
+                    .clip(CircleShape)
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .clickable { onClick(badge) }
+            }
         )
     )
 }
@@ -494,7 +588,14 @@ internal fun OfficialBadgeArtwork(
             contentScale = ContentScale.Fit, colorFilter = colorFilter
         )
     } else {
-        AsyncImage(url, description, modifier, contentScale = ContentScale.Fit, colorFilter = colorFilter)
+        AsyncImage(
+            model = url,
+            contentDescription = description,
+            modifier = modifier,
+            contentScale = ContentScale.Fit,
+            filterQuality = FilterQuality.High,
+            colorFilter = colorFilter
+        )
     }
 }
 
@@ -514,7 +615,11 @@ fun UniversalBadgeChip(
         modifier = modifier
             .clip(shape)
             .let { mod ->
-                if (onClick != null) mod.clickable { onClick(badge) } else mod
+                if (onClick != null) {
+                    mod.pointerHoverIcon(PointerIcon.Hand).clickable { onClick(badge) }
+                } else {
+                    mod
+                }
             }
             .background(
                 color = palette.cardSurface,
@@ -543,7 +648,7 @@ fun UniversalBadgeChip(
         if (badge.count > 1) {
             Spacer(modifier = Modifier.width(3.dp))
             Text(
-                text = "×${badge.count}",
+                text = LinDoCommonCopy.COUNT_MULTIPLIER.format(badge.count),
                 color = tierColor,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -566,7 +671,7 @@ private fun AvatarSkeletonPlaceholder(
         return
     }
     val transition = rememberInfiniteTransition(label = "avatarSkeleton")
-    val pulsePhase by transition.animateFloat(
+    val pulsePhase = transition.animateFloat(
         initialValue = 0.25f,
         targetValue = 0.85f,
         animationSpec = infiniteRepeatable(
@@ -576,19 +681,11 @@ private fun AvatarSkeletonPlaceholder(
         label = "avatarSkeletonPhase"
     )
     val peakAlpha = if (isDark) 0.17f else 0.13f
-    val lowColor = baseTint.copy(alpha = baseAlpha)
-    val highColor = baseTint.copy(alpha = baseAlpha + (peakAlpha - baseAlpha) * pulsePhase)
 
     Box(
-        modifier = modifier.drawWithCache {
-            val brush = Brush.linearGradient(
-                colors = listOf(lowColor, highColor, lowColor),
-                start = Offset.Zero,
-                end = Offset(size.width, size.height)
-            )
-            onDrawBehind {
-                drawRect(brush = brush)
-            }
+        modifier = modifier.drawBehind {
+            val dynamicAlpha = baseAlpha + (peakAlpha - baseAlpha) * pulsePhase.value
+            drawRect(color = baseTint.copy(alpha = dynamicAlpha))
         }
     )
 }
