@@ -83,8 +83,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 29
-        versionName = "0.2.27"
+        versionCode = 30
+        versionName = "0.2.28"
     }
 
     packaging {
@@ -125,7 +125,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.0.27"
+            packageVersion = "1.0.28"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
 
             macOS {
@@ -164,7 +164,7 @@ tasks.matching { it.name == "packageDmg" }.configureEach {
         ).firstOrNull { File(it).canExecute() } ?: "uv"
         val scriptFile = rootProject.file("scripts/build_macos_dmg.py")
         val appDir = layout.buildDirectory.dir("compose/binaries/main/app/Lindo.app").get().asFile
-        val dmgOut = layout.buildDirectory.file("compose/binaries/main/dmg/Lindo-1.0.27.dmg").get().asFile
+        val dmgOut = layout.buildDirectory.file("compose/binaries/main/dmg/Lindo-1.0.28.dmg").get().asFile
         val iconFile = project.file("src/desktopMain/resources/icon.icns")
         val markFile = rootProject.file("design/brand-v3/sources/mark-transparent.png")
         if (scriptFile.isFile && appDir.isDirectory) {

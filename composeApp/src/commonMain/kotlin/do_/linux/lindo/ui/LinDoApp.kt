@@ -7889,6 +7889,7 @@ internal fun CommunityPostFloor(
     post: PostItemModel,
     repliedPost: PostItemModel? = null,
     childReplies: List<PostItemModel> = emptyList(),
+    initiallyExpandInlineReplies: Boolean = false,
     isUnread: Boolean = false,
     isJumpTarget: Boolean = false,
     loadingReplyTarget: Boolean = false,
@@ -7963,7 +7964,7 @@ internal fun CommunityPostFloor(
     var showReactionPopover by remember(post.id) { mutableStateOf(false) }
     var showBoostComposer by remember(post.id) { mutableStateOf(false) }
     var showFloorMoreMenu by remember(post.id) { mutableStateOf(false) }
-    var showInlineReplies by remember(post.id) { mutableStateOf(false) }
+    var showInlineReplies by remember(post.id) { mutableStateOf(initiallyExpandInlineReplies) }
     var copiedFloorLink by remember(post.id) { mutableStateOf(false) }
 
     BackNavigationBridge.Handler(
@@ -8964,29 +8965,33 @@ internal fun CommunityPostFloor(
                 }
 
                 if (childReplies.isNotEmpty()) {
+                    if (localReactions.isNotEmpty()) {
+                        Text(
+                            text = "·",
+                            fontSize = 13.sp,
+                            color = palette.inkTertiary.copy(alpha = 0.65f)
+                        )
+                    }
                     Row(
                         modifier = Modifier
                             .height(30.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                if (showInlineReplies) palette.subtleSurface else Color.Transparent
-                            )
+                            .clip(RoundedCornerShape(15.dp))
                             .clickable { showInlineReplies = !showInlineReplies }
-                            .padding(horizontal = 6.dp),
+                            .padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        horizontalArrangement = Arrangement.spacedBy(3.5.dp)
                     ) {
                         Text(
                             text = if (showInlineReplies) "收起回复" else "${childReplies.size} 条回复",
-                            fontSize = 13.5.sp,
+                            fontSize = 12.8.sp,
                             fontWeight = FontWeight.Medium,
-                            color = if (showInlineReplies) palette.inkPrimary else palette.inkSecondary
+                            color = palette.inkSecondary
                         )
                         Icon(
                             imageVector = if (showInlineReplies) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
                             contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                            tint = if (showInlineReplies) palette.inkPrimary else palette.inkSecondary
+                            modifier = Modifier.size(13.5.dp),
+                            tint = palette.inkTertiary
                         )
                     }
                 }
@@ -9253,66 +9258,141 @@ internal fun CommunityPostFloor(
             }
         }
 
-        // 4. 点击左下角 `N ⌄` 展开的本楼嵌套子回复列表（还原官方 Discourse 展开下属回复体验）
+        // 4. 点击左下角展开的本楼下属回复线程（去除沉重灰盒，改用左侧竖向导引线 + 头像正文双列对齐，融入通透阅读流）
         AnimatedVisibility(visible = showInlineReplies && childReplies.isNotEmpty()) {
+            val threadLineColor = if (palette.isDark) {
+                palette.hairline.copy(alpha = 0.95f)
+            } else {
+                palette.inkTertiary.copy(alpha = 0.24f)
+            }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 10.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.55f else 0.7f))
-                    .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(top = 2.dp, bottom = 6.dp)
+                    .drawBehind {
+                        val strokeW = 1.5.dp.toPx()
+                        val x = 8.dp.toPx()
+                        val topY = 2.dp.toPx()
+                        val bottomY = (size.height - 2.dp.toPx()).coerceAtLeast(topY + strokeW)
+                        drawRoundRect(
+                            color = threadLineColor,
+                            topLeft = Offset(x, topY),
+                            size = androidx.compose.ui.geometry.Size(strokeW, bottomY - topY),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(strokeW / 2f, strokeW / 2f)
+                        )
+                    }
+                    .padding(start = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 childReplies.forEachIndexed { cIdx, child ->
                     if (cIdx > 0) {
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 35.dp),
+                            thickness = 0.5.dp,
+                            color = palette.hairline.copy(alpha = 0.6f)
+                        )
                     }
                     val childCleanText = remember(child.cookedHtml) { postPreviewText(child.cookedHtml) }
-                    Column(
+                    val childIsOp = child.isTopicOwner || child.username.equals(opUsername, ignoreCase = true)
+                    val childFloorMeta = remember(child.postNumber, child.createdAtText) {
+                        listOfNotNull(
+                            child.postNumber.takeIf { it > 0 }?.let { "$it 楼" },
+                            child.createdAtText.takeIf { it.isNotBlank() }
+                        ).joinToString(" · ")
+                    }
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onJumpToFloorNumber(child.postNumber) }
-                            .padding(vertical = 2.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(
+                                onClickLabel = "跳转到 ${child.postNumber} 楼",
+                                onClick = { onJumpToFloorNumber(child.postNumber) }
+                            )
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.Top
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 1.5.dp)
+                                .clickable { onInspectUser(child.username) }
                         ) {
                             SmartAvatar(
                                 username = child.username,
                                 avatarTemplate = child.avatarTemplate,
                                 animatedAvatar = child.animatedAvatar,
-                                size = 22.dp,
+                                primaryGroupName = child.primaryGroupName,
+                                flair = child.flair,
+                                size = 26.dp,
                                 enableAnimations = enableAnimations
                             )
-                            Text(
-                                text = child.displayName?.takeIf { it.isNotBlank() } ?: child.username,
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.inkPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Text(
-                                text = "${child.createdAtText} · ${child.postNumber} 楼",
-                                fontSize = 11.2.sp,
-                                color = palette.inkTertiary
-                            )
                         }
-                        if (childCleanText.isNotBlank()) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = childCleanText,
-                                fontSize = 13.sp,
-                                lineHeight = 18.8.sp,
-                                color = palette.inkSecondary,
-                                maxLines = 4,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                        Spacer(modifier = Modifier.width(9.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.5.dp)
+                                ) {
+                                    Text(
+                                        text = child.displayName?.takeIf { it.isNotBlank() } ?: child.username,
+                                        fontSize = 13.2.sp,
+                                        lineHeight = 16.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = palette.inkPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (childIsOp) {
+                                        Text(
+                                            text = "楼主",
+                                            fontSize = 10.5.sp,
+                                            lineHeight = 13.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.brandGold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    if (childFloorMeta.isNotEmpty()) {
+                                        Text(
+                                            text = childFloorMeta,
+                                            fontSize = 11.2.sp,
+                                            lineHeight = 14.sp,
+                                            color = palette.inkTertiary,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = LinDoIcons.ChevronRight,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.5.dp),
+                                        tint = palette.inkTertiary
+                                    )
+                                }
+                            }
+                            if (childCleanText.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = childCleanText,
+                                    fontSize = 13.8.sp,
+                                    lineHeight = 20.5.sp,
+                                    color = palette.inkPrimary.copy(alpha = 0.88f),
+                                    maxLines = 4,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
                 }
