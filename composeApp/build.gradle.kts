@@ -82,8 +82,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 31
-        versionName = "0.2.29"
+        versionCode = 32
+        versionName = "0.2.30"
     }
 
     packaging {
@@ -124,7 +124,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.0.29"
+            packageVersion = "1.0.30"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
 
             macOS {

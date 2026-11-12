@@ -1,10 +1,39 @@
 package do_.linux.lindo
 
+import java.awt.Dimension
+import java.awt.Frame
+import java.awt.GraphicsEnvironment
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class DesktopShellPolishTest {
+    @Test
+    fun desktopWindowMinimumSizeConstantsAndHelperAreEnforced() {
+        assertEquals(420, DESKTOP_MIN_WINDOW_WIDTH_DP)
+        assertEquals(580, DESKTOP_MIN_WINDOW_HEIGHT_DP)
+        assertTrue(DESKTOP_DEFAULT_WINDOW_WIDTH_DP >= DESKTOP_MIN_WINDOW_WIDTH_DP)
+        assertTrue(DESKTOP_DEFAULT_WINDOW_HEIGHT_DP >= DESKTOP_MIN_WINDOW_HEIGHT_DP)
+
+        applyDesktopMinimumWindowSize(null) // safe no-op on null
+
+        if (!GraphicsEnvironment.isHeadless()) {
+            val frame = Frame()
+            try {
+                frame.setSize(120, 300)
+                applyDesktopMinimumWindowSize(frame)
+                assertEquals(
+                    Dimension(DESKTOP_MIN_WINDOW_WIDTH_DP, DESKTOP_MIN_WINDOW_HEIGHT_DP),
+                    frame.minimumSize
+                )
+                assertTrue(frame.width >= DESKTOP_MIN_WINDOW_WIDTH_DP)
+                assertTrue(frame.height >= DESKTOP_MIN_WINDOW_HEIGHT_DP)
+            } finally {
+                frame.dispose()
+            }
+        }
+    }
+
     @Test
     fun trayCanvasRendersRetinaAndUnreadBadgesCleanly() {
         val base1x = DesktopTrayController.renderTrayCanvas(sizePx = 22, scale = 1f, unreadCount = 0)

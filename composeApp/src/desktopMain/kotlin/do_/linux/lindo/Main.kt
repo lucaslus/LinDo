@@ -28,6 +28,7 @@ import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.Component
 import java.awt.Desktop
+import java.awt.Dimension
 import java.awt.EventQueue
 import java.awt.Font
 import java.awt.Frame
@@ -76,6 +77,34 @@ import kotlin.math.sign
 
 private val IS_MAC_OS: Boolean =
     System.getProperty("os.name").orEmpty().contains("Mac", ignoreCase = true)
+
+internal const val DESKTOP_MIN_WINDOW_WIDTH_DP = 420
+internal const val DESKTOP_MIN_WINDOW_HEIGHT_DP = 580
+internal const val DESKTOP_DEFAULT_WINDOW_WIDTH_DP = 1240
+internal const val DESKTOP_DEFAULT_WINDOW_HEIGHT_DP = 820
+
+/**
+ * 约束桌面窗口最小宽高（420×580dp）：
+ * - 既允许用户将窗口缩窄至手机侧栏形态（420~639dp 单栏模式）贴靠屏幕边缘阅读，
+ * - 又由原生窗口管理器（macOS NSWindow.minSize / Windows WM_GETMINMAXINFO）硬性拦截过窄拖拽，防止文字挤压成单字竖排。
+ */
+internal fun applyDesktopMinimumWindowSize(window: AwtWindow?) {
+    if (window == null) return
+    val minDim = Dimension(DESKTOP_MIN_WINDOW_WIDTH_DP, DESKTOP_MIN_WINDOW_HEIGHT_DP)
+    runCatching {
+        if (window.minimumSize != minDim) {
+            window.minimumSize = minDim
+        }
+        if (window.width in 1 until DESKTOP_MIN_WINDOW_WIDTH_DP ||
+            window.height in 1 until DESKTOP_MIN_WINDOW_HEIGHT_DP
+        ) {
+            window.setSize(
+                max(window.width, DESKTOP_MIN_WINDOW_WIDTH_DP),
+                max(window.height, DESKTOP_MIN_WINDOW_HEIGHT_DP)
+            )
+        }
+    }
+}
 
 private object DesktopStateStore {
     private val lock = Any()
@@ -942,7 +971,7 @@ fun main() {
 
     application {
         val windowState = rememberWindowState(
-            size = DpSize(1240.dp, 820.dp),
+            size = DpSize(DESKTOP_DEFAULT_WINDOW_WIDTH_DP.dp, DESKTOP_DEFAULT_WINDOW_HEIGHT_DP.dp),
             position = WindowPosition.Aligned(Alignment.Center)
         )
         var isWindowVisible by remember { mutableStateOf(true) }
@@ -1044,12 +1073,14 @@ fun main() {
         ) {
             DisposableEffect(window) {
                 activeWindowRef = window
+                applyDesktopMinimumWindowSize(window)
                 applyMacSeamlessWindowChrome(window, isDark = UserApiKeyAuthManager.uiDarkTheme)
                 DesktopSmoothWheelEngine.attachToWindow(window)
                 val removeDrag = installMacTitleBarDragSupport(window)
 
                 val compListener = object : ComponentAdapter() {
                     override fun componentResized(e: ComponentEvent?) {
+                        applyDesktopMinimumWindowSize(window)
                         isMacFullScreen = isMacWindowNativeFullScreen(window)
                     }
 
@@ -1075,6 +1106,13 @@ fun main() {
                     if (activeWindowRef === window) {
                         activeWindowRef = null
                     }
+                }
+            }
+
+            LaunchedEffect(window, isWindowVisible) {
+                if (isWindowVisible) {
+                    applyDesktopMinimumWindowSize(window)
+                    applyMacSeamlessWindowChrome(window, isDark = UserApiKeyAuthManager.uiDarkTheme)
                 }
             }
 

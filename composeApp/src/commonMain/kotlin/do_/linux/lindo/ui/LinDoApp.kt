@@ -7290,7 +7290,9 @@ internal fun CommunityTopicReaderPane(
                                 "${formatCompactNumber(detail.views)} 次浏览 · ${formatCompactNumber((postCount - 1).coerceAtLeast(0))} 条回复",
                                 modifier = Modifier.weight(1f).padding(end = 8.dp),
                                 fontSize = 12.sp,
-                                color = palette.inkSecondary
+                                color = palette.inkSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             TextButton(
                                 contentPadding = PaddingValues(horizontal = 8.dp),
