@@ -903,6 +903,13 @@ object BackNavigationBridge {
     }
 }
 
+internal enum class DesktopTrayCommand {
+    OPEN_MESSAGES,
+    OPEN_PUBLISH
+}
+
+internal val LocalMacTitleBarInset = androidx.compose.runtime.compositionLocalOf { 0.dp }
+
 @Composable
 internal fun LinDoFullScreenPage(
     onBack: () -> Unit,
@@ -911,6 +918,7 @@ internal fun LinDoFullScreenPage(
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit
 ) {
     val latestOnBack by androidx.compose.runtime.rememberUpdatedState(onBack)
+    val macTopInset = LocalMacTitleBarInset.current
     DisposableEffect(Unit) {
         val remove = BackNavigationBridge.pushInterceptor { latestOnBack() }
         onDispose { remove() }
@@ -922,6 +930,7 @@ internal fun LinDoFullScreenPage(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .padding(top = macTopInset)
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .then(if (imePadding) Modifier.windowInsetsPadding(WindowInsets.ime) else Modifier)
                 .windowInsetsPadding(WindowInsets.navigationBars),
@@ -1520,6 +1529,10 @@ internal fun LinDoApp(
     appIcon: LinDoAppIcon? = null,
     onApplyAppIcon: ((LinDoAppIcon) -> Boolean)? = null,
     imageCacheDir: java.io.File? = null,
+    macTitleBarInset: Dp = 0.dp,
+    onUnreadStateChanged: (Int, String?) -> Unit = { _, _ -> },
+    externalDesktopCommand: DesktopTrayCommand? = null,
+    onConsumeDesktopCommand: () -> Unit = {},
     addPlatformImageDecoders: coil3.ComponentRegistry.Builder.() -> Unit = {}
 ) {
     remember {
@@ -2739,6 +2752,40 @@ internal fun LinDoApp(
     }
     val materialScheme = remember(palette) { buildMaterialSchemeFromPalette(palette) }
 
+    val effectiveUnreadCount = if (isAuthorized) {
+        fullUserProfile?.unreadNotifications ?: UserApiKeyAuthManager.fullProfileCache?.unreadNotifications ?: 0
+    } else {
+        0
+    }
+    LaunchedEffect(effectiveUnreadCount, currentUser?.username, isAuthorized) {
+        onUnreadStateChanged(effectiveUnreadCount, currentUser?.username?.takeIf { isAuthorized && it.isNotBlank() })
+    }
+    LaunchedEffect(externalDesktopCommand) {
+        val cmd = externalDesktopCommand ?: return@LaunchedEffect
+        onConsumeDesktopCommand()
+        when (cmd) {
+            DesktopTrayCommand.OPEN_MESSAGES -> {
+                if (!isAuthorized && !isGuestMode) {
+                    isGuestMode = true
+                }
+                mobileShowingDetail = false
+                currentTab = MainTab.MESSAGES
+            }
+            DesktopTrayCommand.OPEN_PUBLISH -> {
+                if (isAuthorized) {
+                    pendingNewTopicDraft = null
+                    showCreateTopicSheet = true
+                } else {
+                    if (!isGuestMode) isGuestMode = true
+                    requestGuestLogin(
+                        title = "登录后发布话题",
+                        subtitle = "登录 LINUX DO 账号，与佬友分享你的发现与见解"
+                    )
+                }
+            }
+        }
+    }
+
     CompositionLocalProvider(
         LocalPalette provides palette,
         LocalLinDoAnimations provides (enableAnimations && systemAnimationsEnabled),
@@ -2751,6 +2798,7 @@ internal fun LinDoApp(
         LocalIsWebModalActive provides (activeWebLoginUrl != null),
         LocalOpenInAppWebUrl provides ::openWebPage,
         LocalRequestGuestLogin provides ::requestGuestLogin,
+        LocalMacTitleBarInset provides macTitleBarInset,
         LocalDensity provides scaledDensity
     ) {
         MaterialTheme(
@@ -2782,31 +2830,37 @@ internal fun LinDoApp(
                     }
 
                     if (!isAuthorized && !isGuestMode) {
-                        GoogleWelcomeLoginScreen(
-                            onOpenAppIcon = openAppIconPage,
-                            onPrimaryWebLogin = {
-                                openWebPage("https://linux.do/login")
-                            },
-                            onBrowserOneClickAuth = {
-                                val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
-                                if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
-                                    openWebPage(url)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(top = macTitleBarInset)
+                        ) {
+                            GoogleWelcomeLoginScreen(
+                                onOpenAppIcon = openAppIconPage,
+                                onPrimaryWebLogin = {
+                                    openWebPage("https://linux.do/login")
+                                },
+                                onBrowserOneClickAuth = {
+                                    val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
+                                    if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
+                                        openWebPage(url)
+                                    }
+                                },
+                                onToggleDark = { updateThemePref(!isDarkTheme) },
+                                onGuestBrowse = {
+                                    isGuestMode = true
+                                    if (currentSort !in setOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)) {
+                                        currentSort = FeedSortFilter.LATEST
+                                    }
+                                    if (topics.isEmpty() && !isLoadingTopics) {
+                                        loadTopics(FeedSortFilter.LATEST, null)
+                                    }
+                                    scope.launch {
+                                        runCatching { LinuxDoRepository.syncSiteCategories() }
+                                    }
                                 }
-                            },
-                            onToggleDark = { updateThemePref(!isDarkTheme) },
-                            onGuestBrowse = {
-                                isGuestMode = true
-                                if (currentSort !in setOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)) {
-                                    currentSort = FeedSortFilter.LATEST
-                                }
-                                if (topics.isEmpty() && !isLoadingTopics) {
-                                    loadTopics(FeedSortFilter.LATEST, null)
-                                }
-                                scope.launch {
-                                    runCatching { LinuxDoRepository.syncSiteCategories() }
-                                }
-                            }
-                        )
+                            )
+                        }
                     } else if (isDesktop) {
                         Row(modifier = Modifier.fillMaxSize()) {
                             DesktopSideRail(
@@ -2814,6 +2868,7 @@ internal fun LinDoApp(
                                 isDarkTheme = isDarkTheme,
                                 unreadCount = fullUserProfile?.unreadNotifications ?: 0,
                                 compactWidth = isCompactWideRail,
+                                topWindowInset = macTitleBarInset,
                                 onSelectTab = { currentTab = it },
                                 onPublishClick = {
                                     if (isAuthorized) {
@@ -2833,6 +2888,8 @@ internal fun LinDoApp(
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxHeight()
+                                    .background(palette.cardSurface)
+                                    .padding(top = if (macTitleBarInset > 0.dp) 6.dp else 0.dp)
                                     .windowInsetsPadding(
                                         WindowInsets.systemBars
                                             .union(WindowInsets.displayCutout)
@@ -3127,6 +3184,8 @@ internal fun LinDoApp(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
+                                .background(palette.cardSurface)
+                                .padding(top = macTitleBarInset)
                                 .windowInsetsPadding(
                                     WindowInsets.systemBars
                                         .union(WindowInsets.displayCutout)
@@ -4003,6 +4062,7 @@ private fun DesktopSideRail(
     isDarkTheme: Boolean,
     unreadCount: Int = 0,
     compactWidth: Boolean = false,
+    topWindowInset: Dp = 0.dp,
     onSelectTab: (MainTab) -> Unit,
     onPublishClick: () -> Unit = {},
     onToggleTheme: () -> Unit
@@ -4010,6 +4070,12 @@ private fun DesktopSideRail(
     val palette = LocalPalette.current
     val leftTabs = listOf(MainTab.HOME, MainTab.DISCOVER)
     val rightTabs = listOf(MainTab.MESSAGES, MainTab.PROFILE)
+    // macOS 一体化无边框窗口下（topWindowInset > 0），左侧红黄绿交通灯占 ~66dp 宽，侧栏保持 76dp 以确保舒适留白不压分割线
+    val railWidth = when {
+        topWindowInset > 0.dp -> 76.dp
+        compactWidth -> 64.dp
+        else -> 72.dp
+    }
 
     Row(
         modifier = Modifier
@@ -4023,7 +4089,7 @@ private fun DesktopSideRail(
     ) {
         BoxWithConstraints(
             modifier = Modifier
-                .width(if (compactWidth) 64.dp else 72.dp)
+                .width(railWidth)
                 .fillMaxHeight()
         ) {
             val isCompactHeight = maxHeight < 500.dp
@@ -4119,7 +4185,10 @@ private fun DesktopSideRail(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(vertical = if (isCompactHeight) 8.dp else 16.dp),
+                    .padding(
+                        top = (if (isCompactHeight) 8.dp else 12.dp) + topWindowInset,
+                        bottom = if (isCompactHeight) 8.dp else 16.dp
+                    ),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = if (isCompactHeight) Arrangement.SpaceBetween else Arrangement.Top
             ) {
@@ -6077,17 +6146,30 @@ private fun CommunityTopicItem(
             Column(
                 modifier = Modifier.weight(1f)
             ) {
-                Text(
-                    text = titleAnnotated,
-                    inlineContent = titleInlineContent,
-                    fontSize = 15.8.sp,
-                    lineHeight = 21.5.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.inkPrimary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (showUnreadDotSlot) {
+                    Text(
+                        text = titleAnnotated,
+                        inlineContent = titleInlineContent,
+                        fontSize = 15.8.sp,
+                        lineHeight = 21.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkPrimary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    Text(
+                        text = topic.title,
+                        fontSize = 15.8.sp,
+                        lineHeight = 21.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkPrimary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
@@ -6183,17 +6265,30 @@ private fun CommunityTopicItem(
             Column(
                 modifier = Modifier.weight(1f)
             ) {
-                Text(
-                    text = titleAnnotated,
-                    inlineContent = titleInlineContent,
-                    fontSize = LinDoTokens.Headline,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 22.sp,
-                    color = palette.inkPrimary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (showUnreadDotSlot) {
+                    Text(
+                        text = titleAnnotated,
+                        inlineContent = titleInlineContent,
+                        fontSize = LinDoTokens.Headline,
+                        fontWeight = FontWeight.SemiBold,
+                        lineHeight = 22.sp,
+                        color = palette.inkPrimary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    Text(
+                        text = topic.title,
+                        fontSize = LinDoTokens.Headline,
+                        fontWeight = FontWeight.SemiBold,
+                        lineHeight = 22.sp,
+                        color = palette.inkPrimary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
@@ -7482,39 +7577,50 @@ internal fun CommunityTopicReaderPane(
             ) {
                 val readerAuthorized = UserApiKeyAuthManager.isAuthorized()
                 if (readerAuthorized) {
-                    Row(
-                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
-                            .background(palette.subtleSurface.copy(alpha = 0.65f))
-                            .clickable {
-                                replyTargetPostNumber = null
-                                replyTargetUsername = null
-                                replyInitialQuote = ""
-                                replyCloudDraft = null
-                                showReplySheet = true
-                            }
-                            .padding(horizontal = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterStart
                     ) {
-                        Icon(LinDoIcons.Edit, null, Modifier.size(16.dp), tint = palette.inkSecondary)
-                        Text(
-                            "回复话题",
-                            fontSize = 13.sp, color = palette.inkPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
+                        Row(
+                            modifier = Modifier
+                                .widthIn(max = 380.dp)
+                                .fillMaxWidth()
+                                .heightIn(min = 40.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(palette.subtleSurface.copy(alpha = 0.65f))
+                                .border(0.5.dp, palette.hairline, RoundedCornerShape(20.dp))
+                                .clickable {
+                                    replyTargetPostNumber = null
+                                    replyTargetUsername = null
+                                    replyInitialQuote = ""
+                                    replyCloudDraft = null
+                                    showReplySheet = true
+                                }
+                                .padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(LinDoIcons.Edit, null, Modifier.size(15.dp), tint = palette.inkSecondary)
+                            Text(
+                                "回复话题",
+                                fontSize = 13.sp, color = palette.inkPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 } else {
                     Row(
                         modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 44.dp)
-                            .clip(RoundedCornerShape(8.dp))
+                            .heightIn(min = 38.dp)
+                            .clip(RoundedCornerShape(19.dp))
+                            .background(palette.subtleSurface.copy(alpha = 0.72f))
+                            .border(0.5.dp, palette.hairline, RoundedCornerShape(19.dp))
                             .clickable {
                                 requestGuestLogin?.invoke("登录后参与回复", "登录 LINUX DO 账号，参与话题讨论与互动")
                                     ?: onRequestLogin()
                             }
-                            .padding(horizontal = 4.dp),
+                            .padding(horizontal = 14.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(LinDoIcons.FaLock, null, Modifier.size(13.dp), tint = palette.inkTertiary)
                         Text(
@@ -7522,8 +7628,7 @@ internal fun CommunityTopicReaderPane(
                             fontSize = 13.sp,
                             color = palette.inkSecondary,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             "登录",
@@ -7532,6 +7637,7 @@ internal fun CommunityTopicReaderPane(
                             color = palette.activeChipText
                         )
                     }
+                    Spacer(modifier = Modifier.weight(1f))
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))

@@ -83,8 +83,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 28
-        versionName = "0.2.26"
+        versionCode = 29
+        versionName = "0.2.27"
     }
 
     packaging {
@@ -115,11 +115,17 @@ dependencies {
 compose.desktop {
     application {
         mainClass = "do_.linux.lindo.MainKt"
+        jvmArgs(
+            "-XX:+UseZGC",
+            "-Dskiko.vsync.enabled=true",
+            "-Dsun.java2d.metal=true",
+            "-Dapple.awt.application.name=Lindo"
+        )
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.0.26"
+            packageVersion = "1.0.27"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
 
             macOS {
@@ -139,8 +145,40 @@ compose.desktop {
                                 </array>
                             </dict>
                         </array>
+                        <key>CADisableMinimumFrameDurationOnPhone</key>
+                        <true/>
                     """.trimIndent()
                 }
+            }
+        }
+    }
+}
+
+tasks.matching { it.name == "packageDmg" }.configureEach {
+    dependsOn("createDistributable")
+    doLast {
+        val uvBin = listOf(
+            File(System.getProperty("user.home"), ".local/bin/uv").absolutePath,
+            "/opt/homebrew/bin/uv",
+            "/usr/local/bin/uv"
+        ).firstOrNull { File(it).canExecute() } ?: "uv"
+        val scriptFile = rootProject.file("scripts/build_macos_dmg.py")
+        val appDir = layout.buildDirectory.dir("compose/binaries/main/app/Lindo.app").get().asFile
+        val dmgOut = layout.buildDirectory.file("compose/binaries/main/dmg/Lindo-1.0.27.dmg").get().asFile
+        val iconFile = project.file("src/desktopMain/resources/icon.icns")
+        val markFile = rootProject.file("design/brand-v3/sources/mark-transparent.png")
+        if (scriptFile.isFile && appDir.isDirectory) {
+            val proc = ProcessBuilder(
+                uvBin, "run", "--with", "dmgbuild,pillow",
+                "python3", scriptFile.absolutePath,
+                "--app", appDir.absolutePath,
+                "--icon", iconFile.absolutePath,
+                "--mark", markFile.absolutePath,
+                "--out", dmgOut.absolutePath
+            ).inheritIO().start()
+            val code = proc.waitFor()
+            if (code != 0) {
+                throw GradleException("Best-practice macOS DMG packaging failed with exit code $code")
             }
         }
     }
