@@ -75,11 +75,15 @@ object UserPresenceService {
     fun buildPresenceHeaders(
         isBackgroundTimingRequest: Boolean = false,
         isLoggedIn: Boolean = false,
-        nowMs: Long = System.currentTimeMillis()
+        nowMs: Long = System.currentTimeMillis(),
+        silenceLogger: Boolean = isBackgroundTimingRequest,
+        includeOrigin: Boolean = true
     ): Map<String, String> {
         val headers = LinkedHashMap<String, String>()
         headers["X-Requested-With"] = "XMLHttpRequest"
-        headers["Origin"] = "https://linux.do"
+        if (includeOrigin) {
+            headers["Origin"] = "https://linux.do"
+        }
         headers["Referer"] = "https://linux.do/"
         headers["Sec-Fetch-Dest"] = "empty"
         headers["Sec-Fetch-Mode"] = "cors"
@@ -90,8 +94,10 @@ object UserPresenceService {
         }
 
         if (isBackgroundTimingRequest) {
-            // /topics/timings 属于高频阅读心跳，带静默日志头
-            headers["X-SILENCE-LOGGER"] = "true"
+            // /topics/timings 属于高频阅读心跳，带静默日志头；普通后台只读请求不附加 X-SILENCE-LOGGER
+            if (silenceLogger) {
+                headers["X-SILENCE-LOGGER"] = "true"
+            }
             headers["Discourse-Background"] = "true"
         } else if (isPresent(nowMs)) {
             // 用户前台交互请求携带 Discourse-Present: true，触发后端写入 user_visits 记录连登天数
@@ -121,6 +127,7 @@ data class ConsolidatedTimingBatch(
  * 4. 临时网络失败会合并回内存队列并指数退避重传；进程被杀时尚未持久化的队列仍可能丢失。
  */
 object ScreenTrackEngine {
+    const val STATUS_SITE_VERIFICATION_REQUIRED = -403
     private const val PAUSE_UNLESS_SCROLLED_MS = 3 * 60 * 1000L
     private const val MAX_TRACKING_TIME_PER_POST_MS = 6 * 60 * 1000
     private const val FLUSH_INTERVAL_MS = 15_000L
@@ -418,6 +425,11 @@ object ScreenTrackEngine {
         }
     }
 
+    fun clearSendBlock() = synchronized(lock) {
+        blockSendingUntilEpochMs = 0L
+        consecutiveFailures = 0
+    }
+
     fun onBatchSendResult(batch: ConsolidatedTimingBatch, statusCode: Int?, nowMs: Long = System.currentTimeMillis()) = synchronized(lock) {
         if (statusCode != null && statusCode in 200..299) {
             consecutiveFailures = 0
@@ -434,6 +446,11 @@ object ScreenTrackEngine {
                     serverConfirmedReadVersion += 1L
                 }
             }
+        } else if (statusCode == STATUS_SITE_VERIFICATION_REQUIRED) {
+            // 遭遇 Cloudflare 站点验证挑战：挂起后台 timings 发送 90s（或直至用户完成验证手动恢复），
+            // 严禁清空 readPostsSet（否则每秒 tick 触发 hasUnreadRush 进入 1s 无限风暴）！
+            blockSendingUntilEpochMs = maxOf(blockSendingUntilEpochMs, nowMs + 90_000L)
+            consolidateBatchLocked(batch.topicId, batch.topicTimeMs, batch.timingsMs, moveToTail = true)
         } else if (statusCode != null && statusCode in PERMANENT_DROP_STATUS_CODES) {
             retryCounts.remove(batch.topicId)
             releaseUnconfirmedFloorTrackingLocked(batch)
@@ -445,6 +462,9 @@ object ScreenTrackEngine {
                 val retries = (retryCounts[batch.topicId] ?: 0) + 1
                 if (retries >= MAX_TOPIC_RETRIES) {
                     retryCounts.remove(batch.topicId)
+                    if (currentTopicId == batch.topicId) {
+                        blockSendingUntilEpochMs = maxOf(blockSendingUntilEpochMs, nowMs + 30_000L)
+                    }
                     releaseUnconfirmedFloorTrackingLocked(batch)
                 } else {
                     retryCounts[batch.topicId] = retries

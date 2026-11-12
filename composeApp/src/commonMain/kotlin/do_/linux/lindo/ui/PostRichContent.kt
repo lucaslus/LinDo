@@ -481,13 +481,28 @@ private fun NativePostPoll(
     var voters by remember(postId, poll, snapshot) { mutableStateOf(snapshot?.voters) }
     var isClosed by remember(postId, poll, snapshot) { mutableStateOf(poll.closed || snapshot?.closed == true) }
     var error by remember(postId, poll) { mutableStateOf<String?>(null) }
+    val siteVerifyVer = do_.linux.lindo.ui.components.LocalSiteVerificationRestoreVersion.current
+    var baselineSiteVerifyVer by remember(postId, poll) { androidx.compose.runtime.mutableIntStateOf(siteVerifyVer) }
+    androidx.compose.runtime.LaunchedEffect(siteVerifyVer) {
+        if (siteVerifyVer == baselineSiteVerifyVer) return@LaunchedEffect
+        baselineSiteVerifyVer = siteVerifyVer
+        if (error?.contains("站点验证") == true) {
+            error = null
+        }
+    }
     val busy = submitting || retracting
     val isAuthorized = UserApiKeyAuthManager.isAuthorized()
+    val requestGuestLogin = do_.linux.lindo.ui.components.LocalRequestGuestLogin.current
+    val triggerPollLogin: (() -> Unit)? = when {
+        requestGuestLogin != null -> ({ requestGuestLogin("登录后参与投票", "登录 LINUX DO 账号后即可参与社区话题投票") })
+        onRequestLogin != null -> onRequestLogin
+        else -> null
+    }
 
     fun submitOrUpdateVote() {
         if (postId == null || busy) return
         if (!UserApiKeyAuthManager.isAuthorized()) {
-            if (onRequestLogin != null) onRequestLogin() else error = "请先登录后投票"
+            if (triggerPollLogin != null) triggerPollLogin() else error = "请先登录后投票"
             return
         }
         if (selected.size !in poll.min..poll.max) return
@@ -519,7 +534,7 @@ private fun NativePostPoll(
     fun retractVote() {
         if (postId == null || busy) return
         if (!UserApiKeyAuthManager.isAuthorized()) {
-            if (onRequestLogin != null) onRequestLogin() else error = "请先登录后操作"
+            if (triggerPollLogin != null) triggerPollLogin() else error = "请先登录后操作"
             return
         }
         retracting = true
@@ -603,7 +618,7 @@ private fun NativePostPoll(
         when {
             isClosed -> Text(voters?.let { "投票已关闭 · 共 $it 人参与" } ?: "投票已关闭", color = palette.inkSecondary, fontSize = 12.sp)
             postId == null -> Text("投票在发布后可用", color = palette.inkSecondary, fontSize = 12.sp)
-            !isAuthorized && onRequestLogin != null -> TextButton(enabled = !busy, onClick = onRequestLogin) {
+            !isAuthorized && triggerPollLogin != null -> TextButton(enabled = !busy, onClick = triggerPollLogin) {
                 Text("登录后投票", color = palette.brandGold, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
             }
             submitted -> {

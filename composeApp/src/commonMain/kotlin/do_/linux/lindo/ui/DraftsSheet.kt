@@ -19,6 +19,7 @@ import do_.linux.lindo.core.compose.LocalComposerDrafts
 import do_.linux.lindo.core.compose.toCloudItem
 import do_.linux.lindo.core.network.*
 import do_.linux.lindo.ui.components.LinDoIcons
+import do_.linux.lindo.ui.components.LocalLinDoNetworkRestoreVersion
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -70,6 +71,27 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
     var deleting by remember { mutableStateOf<CloudDraftItem?>(null) }
     var busy by remember { mutableStateOf(false) }
     var deleteError by remember { mutableStateOf<String?>(null) }
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var baselineNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer == baselineNetRestoreVer) return@LaunchedEffect
+        baselineNetRestoreVer = netRestoreVer
+        if (error != null && error?.contains("站点验证") != true) {
+            reload++
+        }
+    }
+    val siteVerifyVer = do_.linux.lindo.ui.components.LocalSiteVerificationRestoreVersion.current
+    var baselineSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
+    LaunchedEffect(siteVerifyVer) {
+        if (siteVerifyVer == baselineSiteVerifyVer) return@LaunchedEffect
+        baselineSiteVerifyVer = siteVerifyVer
+        if (error != null) {
+            reload++
+        }
+        if (deleteError?.contains("站点验证") == true) {
+            deleteError = null
+        }
+    }
     LaunchedEffect(owner, reload) {
         loading = true
         error = null
@@ -155,10 +177,19 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                 scope.launch {
                     try {
                         if (!draft.sequenceKnown) {
-                            val cloudDeleted = runCatching {
+                            val cloudDeleted = try {
                                 val sequence = LinuxDoRepository.fetchDraftSequence(draft.draftKey)
                                 LinuxDoRepository.deleteCloudDraft(draft.draftKey, sequence)
-                            }.getOrDefault(true)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (apiErr: ApiReadException) {
+                                if (apiErr.kind == ApiFailureKind.Verification || apiErr.kind == ApiFailureKind.Authentication) {
+                                    throw apiErr
+                                }
+                                true
+                            } catch (_: Exception) {
+                                true
+                            }
                             if (!cloudDeleted) {
                                 deleteError = "草稿已在其他设备更新，请重新核对"
                                 return@launch

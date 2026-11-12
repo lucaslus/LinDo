@@ -78,6 +78,10 @@ import lindo.composeapp.generated.resources.allDrawableResources
 import org.jetbrains.compose.resources.painterResource
 
 val LocalLinDoNetworkRestoreVersion = compositionLocalOf { 0 }
+val LocalSiteVerificationRestoreVersion = compositionLocalOf { 0 }
+val LocalIsWebModalActive = compositionLocalOf { false }
+val LocalOpenInAppWebUrl = compositionLocalOf<((String) -> Unit)?> { null }
+val LocalRequestGuestLogin = compositionLocalOf<((String, String) -> Unit)?> { null }
 
 /**
  * LinDo 双栈智能动态头像组件 (`SmartAvatar`)
@@ -102,6 +106,7 @@ fun SmartAvatar(
     val thumbnailSize = if (size <= 60.dp) 144 else 288
     val motionEnabled = enableAnimations && LocalLinDoAnimations.current && LocalWindowInfo.current.isWindowFocused
     val networkRestoreVersion = LocalLinDoNetworkRestoreVersion.current
+    val siteVerificationRestoreVersion = LocalSiteVerificationRestoreVersion.current
 
     var cachedVisual by remember(username) {
         mutableStateOf(LinuxDoRepository.getCachedUserVisualMeta(username))
@@ -113,7 +118,7 @@ fun SmartAvatar(
                 ?: LinuxDoRepository.getCachedUserAvatar(username).orEmpty()
         )
     }
-    LaunchedEffect(username, effectiveTemplate, networkRestoreVersion) {
+    LaunchedEffect(username, effectiveTemplate, networkRestoreVersion, siteVerificationRestoreVersion) {
         if (effectiveTemplate.isBlank()) {
             val clean = username.trim().removePrefix("@")
             if (clean.isNotEmpty() && clean != "L" && !clean.startsWith("user_")) {

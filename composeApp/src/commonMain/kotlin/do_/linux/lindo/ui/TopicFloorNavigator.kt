@@ -72,6 +72,8 @@ internal fun TopicFloorNavigator(
     var enteringFloor by remember { mutableStateOf(false) }
     val target = targetFloor.coerceIn(1, safeLastFloor)
 
+    if (do_.linux.lindo.ui.components.LocalIsWebModalActive.current) return
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),

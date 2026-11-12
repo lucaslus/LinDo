@@ -1,5 +1,7 @@
 package do_.linux.lindo
 
+import coil3.disk.directory
+
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -131,7 +133,8 @@ private fun hasCookieNamed(rawCookieHeader: String?, targetName: String): Boolea
 
 private fun csrfOwnerTag(rawCookieHeader: String?): String {
     val t = getCookieValue(rawCookieHeader, "_t")?.takeUnless { it == "demo_session_token" }.orEmpty()
-    return if (t.isEmpty()) "" else "${t.hashCode()}_${t.length}"
+    val fs = getCookieValue(rawCookieHeader, "_forum_session").orEmpty()
+    return if (t.isEmpty() && fs.isEmpty()) "" else "${t.hashCode()}_${t.length}_${fs.hashCode()}_${fs.length}"
 }
 
 private fun releaseNativeWebView(view: WebView, rendererGone: Boolean = false) {
@@ -150,6 +153,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val REBUILD_ABORTED_STATUS = -2
         private const val REBUILD_ABORTED_BODY = "__REBUILD_ABORTED__"
+        private const val BRIDGE_BOOTSTRAP_URL = "https://linux.do/"
 
         @Volatile
         private var activeInstance: MainActivity? = null
@@ -190,6 +194,8 @@ class MainActivity : ComponentActivity() {
     private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile
     private var activeValidatedNetworkHandle: Long = 0L
+    @Volatile
+    private var activeTransportSignature: String = ""
     @Volatile
     private var hadNetworkInterruption: Boolean = false
     @Volatile
@@ -349,6 +355,8 @@ class MainActivity : ComponentActivity() {
             if (clean.isNotEmpty()) {
                 LinuxDoRepository.updateCsrfToken(clean)
                 runCatching { CookieManager.getInstance().flush() }
+            } else {
+                LinuxDoRepository.updateCsrfToken(null)
             }
         }
 
@@ -390,6 +398,28 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         activeInstance = this
+        UserApiKeyAuthManager.requireBrowserTransportOnly = true
+        coil3.SingletonImageLoader.setSafe { context ->
+            coil3.ImageLoader.Builder(context)
+                .memoryCache {
+                    coil3.memory.MemoryCache.Builder()
+                        .maxSizePercent(context, 0.22)
+                        .build()
+                }
+                .diskCache {
+                    coil3.disk.DiskCache.Builder()
+                        .directory(java.io.File(cacheDir, "lindo_image_cache"))
+                        .maxSizeBytes(128L * 1024L * 1024L)
+                        .build()
+                }
+                .components {
+                    add(coil3.network.ktor3.KtorNetworkFetcherFactory(httpClient = { LinuxDoRepository.imageHttpClient }))
+                    add(coil3.svg.SvgDecoder.Factory())
+                    if (android.os.Build.VERSION.SDK_INT >= 28) add(coil3.gif.AnimatedImageDecoder.Factory())
+                    else add(coil3.gif.GifDecoder.Factory())
+                }
+                .build()
+        }
         val initialDark = runCatching { prefs.getBoolean("ui_dark_theme", false) }.getOrDefault(false)
         val initialBarStyle = if (initialDark) {
             SystemBarStyle.dark(Color.TRANSPARENT)
@@ -843,13 +873,14 @@ class MainActivity : ComponentActivity() {
         val observedGen = apiWebViewGeneration
         val current = apiWebView
         if (current == null || pendingTransportRecycleOnNextUse || consecutiveBridgeFailures.get() >= 1) {
+            val forceRecycle = pendingTransportRecycleOnNextUse
             rebuildApiWebView(
                 reason = when {
                     current == null -> "missing_webview"
-                    pendingTransportRecycleOnNextUse -> "network_changed_recycle"
+                    forceRecycle -> "network_changed_recycle"
                     else -> "prior_bridge_failure"
                 },
-                force = false
+                force = forceRecycle
             )
             return
         }
@@ -909,8 +940,35 @@ class MainActivity : ComponentActivity() {
             cm.setAcceptCookie(true)
             cm.setAcceptThirdPartyCookies(wv, true)
 
+            val bootstrapIntercepted = java.util.concurrent.atomic.AtomicBoolean(false)
             wv.addJavascriptInterface(LinDoJsBridge(), "LinDoJsBridge")
             wv.webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): android.webkit.WebResourceResponse? {
+                    val reqUrl = request?.url
+                    val encodedPath = reqUrl?.encodedPath
+                    if (request != null &&
+                        request.isForMainFrame &&
+                        reqUrl?.scheme.equals("https", ignoreCase = true) &&
+                        reqUrl?.host.equals("linux.do", ignoreCase = true) &&
+                        (encodedPath.isNullOrEmpty() || encodedPath == "/") &&
+                        bootstrapIntercepted.compareAndSet(false, true)
+                    ) {
+                        return android.webkit.WebResourceResponse(
+                            "text/html",
+                            "UTF-8",
+                            200,
+                            "OK",
+                            mapOf("Cache-Control" to "no-store"),
+                            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>"
+                                .byteInputStream(Charsets.UTF_8)
+                        )
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+
                 override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                     if (apiWebView !== view) {
                         runCatching { releaseNativeWebView(view, rendererGone = true) }
@@ -963,11 +1021,16 @@ class MainActivity : ComponentActivity() {
                                     window.__lindoCsrf = seeded;
                                 }
                                 if (!window.__lindoCsrf && !window.__lindoCsrfPromise) {
-                                    window.__lindoCsrfPromise = fetch('https://linux.do/session/csrf.json', {
+                                    var csrfInit = {
                                         headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
                                         credentials: 'include',
-                                        cache: 'no-store'
-                                    }).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
+                                        cache: 'no-cache',
+                                        referrerPolicy: 'strict-origin-when-cross-origin'
+                                    };
+                                    if (window.location.origin === 'https://linux.do') {
+                                        csrfInit.referrer = 'https://linux.do/';
+                                    }
+                                    window.__lindoCsrfPromise = fetch('https://linux.do/session/csrf.json', csrfInit).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
                                         if (d && d.csrf) {
                                             window.__lindoCsrf = d.csrf;
                                             if (window.LinDoJsBridge && window.LinDoJsBridge.onCsrfTokenUpdated) {
@@ -999,14 +1062,10 @@ class MainActivity : ComponentActivity() {
                 wv.onResume()
                 wv.resumeTimers()
             }
-            // 使用轻量级同源空文档初始化 https://linux.do 上下文（historyUrl 传 https://linux.do/ 确保 SiteForCookies 与 SameSite=Lax Cookie 100% 生效）
-            wv.loadDataWithBaseURL(
-                "https://linux.do/",
-                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
-                "text/html",
-                "UTF-8",
-                "https://linux.do/"
-            )
+            // 通过单次本地拦截的真实 HTTPS 同源根路径初始化 https://linux.do/ 上下文（零启动网络请求）：
+            // 相比 loadDataWithBaseURL（内部保留 data: 文档 URL 导致 Chromium 剥离 fetch Referer 标头、在 5G/VPN 下 POST /drafts.json 与 /posts.json 易触发 Cloudflare WAF），
+            // 真实提交 https://linux.do/ 使 window.location、Origin、Referer 与 Sec-Fetch-Site 100% 对齐官方 Ember SPA！
+            wv.loadUrl(BRIDGE_BOOTSTRAP_URL)
         }.onFailure {
             apiWebView = null
             if (!apiWebViewReady.isCompleted) {
@@ -1024,7 +1083,7 @@ class MainActivity : ComponentActivity() {
     ): Pair<Int, String>? {
         val isRead = method.equals("GET", true) || method.equals("HEAD", true)
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
-            rebuildApiWebView(reason = "pending_network_recycle", force = false)
+            rebuildApiWebView(reason = "pending_network_recycle", force = true)
         }
         if (apiWebView == null && !isFinishing && !isDestroyed) {
             withContext(Dispatchers.Main) {
@@ -1048,30 +1107,36 @@ class MainActivity : ComponentActivity() {
 
         val formBodyEncoded = if (!formParams.isNullOrEmpty()) {
             do_.linux.lindo.core.network.formEntries(formParams).joinToString("&") { (k, v) ->
-                "${Uri.encode(k)}=${Uri.encode(v)}"
+                "${java.net.URLEncoder.encode(k, "UTF-8")}=${java.net.URLEncoder.encode(v, "UTF-8")}"
             }
         } else {
             ""
         }
 
-        // 过滤浏览器禁止脚本篡改的受保护头（Origin / Referer / Sec-Fetch-* / Cookie / User-Agent），
-        // 且不在同源 WebView fetch 中强制注入 Discourse-Logged-In（避免 Cookie 尚未同步或失效时触发 Discourse 403 InvalidAccess）
+        val preExecCookies = runCatching {
+            val cm = CookieManager.getInstance()
+            ensureAuthCookiesInWebKit(cm, cm.getCookie("https://linux.do").orEmpty())
+        }.getOrNull().orEmpty()
+        val hasBrowserSessionCookie = hasCookieNamed(preExecCookies, "_t")
+        val preferredReferer = headers.entries.firstOrNull {
+            it.key.equals("Referer", ignoreCase = true)
+        }?.value?.takeIf { it.startsWith("https://linux.do/") } ?: "https://linux.do/"
+
+        // 过滤浏览器禁止脚本篡改的受保护头（Origin / Referer / Sec-Fetch-* / Cookie / User-Agent）；
+        // 仅在浏览器确实持有有效 `_t` 会话 Cookie 时保留 Discourse-Logged-In: true（对齐官方 Ember SPA 标头组合）
         val forbiddenJsHeaders = setOf(
             "origin", "referer", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site",
-            "cookie", "user-agent", "discourse-logged-in"
+            "cookie", "user-agent"
         )
         val headersJson = JSONObject().apply {
             headers.forEach { (k, v) ->
-                if (k.lowercase() !in forbiddenJsHeaders) {
+                val lower = k.lowercase()
+                if (lower !in forbiddenJsHeaders && (lower != "discourse-logged-in" || hasBrowserSessionCookie)) {
                     put(k, v)
                 }
             }
         }.toString()
         val initialCachedCsrf = LinuxDoRepository.getCachedCsrfToken().orEmpty()
-        val preExecCookies = runCatching {
-            val cm = CookieManager.getInstance()
-            ensureAuthCookiesInWebKit(cm, cm.getCookie("https://linux.do").orEmpty())
-        }.getOrNull().orEmpty()
         val currentCsrfOwner = csrfOwnerTag(preExecCookies)
         val isBackground = headers.entries.any {
             it.key.equals("Discourse-Background", ignoreCase = true) && it.value.equals("true", ignoreCase = true)
@@ -1143,9 +1208,9 @@ class MainActivity : ComponentActivity() {
                         window.__lindoCsrfCookieOwner = currentOwner;
                     }
                     const kotlinCsrf = ${JSONObject.quote(initialCachedCsrf)};
-                    if (!kotlinCsrf && !currentOwner) {
+                    if (!kotlinCsrf) {
                         window.__lindoCsrf = null;
-                    } else if (kotlinCsrf && !window.__lindoCsrf && !ownerChanged) {
+                    } else if (!ownerChanged) {
                         window.__lindoCsrf = kotlinCsrf;
                     }
                     let csrfLastStatus = 0;
@@ -1165,18 +1230,23 @@ class MainActivity : ComponentActivity() {
                             for (let attempt = 0; attempt < 2; attempt++) {
                                 if (cancelledByKotlin) break;
                                 try {
-                                    const csrfOut = await fetchTextWithTimeout('https://linux.do/session/csrf.json', {
+                                    const csrfOpts = {
                                         headers: {
                                             'Accept': 'application/json, text/javascript, */*; q=0.01',
                                             'X-Requested-With': 'XMLHttpRequest'
                                         },
                                         credentials: 'include',
-                                        cache: 'no-store'
-                                    }, 7500);
+                                        cache: 'no-cache',
+                                        referrerPolicy: 'strict-origin-when-cross-origin'
+                                    };
+                                    if (window.location.origin === 'https://linux.do') {
+                                        csrfOpts.referrer = 'https://linux.do/';
+                                    }
+                                    const csrfOut = await fetchTextWithTimeout('https://linux.do/session/csrf.json', csrfOpts, 7500);
                                     const csrfResp = csrfOut.resp;
                                     csrfLastStatus = csrfResp.status || 0;
                                     csrfLastMitigated = csrfResp.headers.get('cf-mitigated') || '';
-                                    if (csrfResp.ok) {
+                                    if (csrfResp.ok && !csrfLastMitigated) {
                                         const csrfData = JSON.parse(csrfOut.text || '{}');
                                         if (csrfData && csrfData.csrf) {
                                             window.__lindoCsrf = csrfData.csrf;
@@ -1187,7 +1257,7 @@ class MainActivity : ComponentActivity() {
                                         }
                                     } else {
                                         csrfLastBody = csrfOut.text || '';
-                                        if (csrfResp.status === 429 || csrfResp.status === 401 || csrfResp.status === 403) {
+                                        if (csrfLastMitigated || csrfResp.status === 429 || csrfResp.status === 401 || csrfResp.status === 403 || csrfResp.status === 503) {
                                             break;
                                         }
                                     }
@@ -1216,18 +1286,24 @@ class MainActivity : ComponentActivity() {
                         hdrs['X-CSRF-Token'] = token;
                     }
                     const bodyStr = ${JSONObject.quote(formBodyEncoded)};
-                    if (!isRead) {
+                    const hasBody = !isRead && (bodyStr.length > 0 || method === 'POST');
+                    if (hasBody) {
                         hdrs['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
                     }
-                    const mustNoStore = !isRead || /\/session\/(csrf|current)\.json|\/notifications|\/drafts/i.test(targetUrl);
+                    const mustNoStore = isRead && /\/session\/(csrf|current)\.json|\/notifications|\/drafts/i.test(targetUrl);
+                    const targetReferer = ${JSONObject.quote(preferredReferer)};
                     function buildBaseOpts() {
                         const o = {
                             method: method,
                             headers: Object.assign({}, hdrs),
                             credentials: 'include',
-                            cache: mustNoStore ? 'no-store' : 'default'
+                            cache: mustNoStore ? 'no-store' : 'default',
+                            referrerPolicy: 'strict-origin-when-cross-origin'
                         };
-                        if (!isRead) {
+                        if (window.location.origin === 'https://linux.do') {
+                            o.referrer = targetReferer;
+                        }
+                        if (hasBody) {
                             o.body = bodyStr;
                         }
                         return o;
@@ -1239,17 +1315,24 @@ class MainActivity : ComponentActivity() {
                     const out = await fetchTextWithTimeout(targetUrl, buildBaseOpts(), perAttemptTimeoutMs);
                     let resp = out.resp;
                     let text = out.text;
-                    if (!isRead && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token|bad csrf/i.test(text)) {
+                    let cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
+                    if (!isRead && !cfMitigated && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token|bad csrf/i.test(text)) {
                         window.__lindoCsrf = null;
+                        if (window.LinDoJsBridge && window.LinDoJsBridge.onCsrfTokenUpdated) {
+                            window.LinDoJsBridge.onCsrfTokenUpdated('');
+                        }
                         const freshToken = await refreshCsrfToken(true);
                         if (freshToken) {
                             hdrs['X-CSRF-Token'] = freshToken;
                             const retryOut = await fetchTextWithTimeout(targetUrl, buildBaseOpts(), perAttemptTimeoutMs);
                             resp = retryOut.resp;
                             text = retryOut.text;
+                            cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
+                        } else if (csrfLastMitigated || csrfLastStatus === 403 || csrfLastStatus === 503 || csrfLastStatus === 429) {
+                            reportHttp(csrfLastStatus || resp.status, csrfLastBody || text, csrfLastMitigated);
+                            return;
                         }
                     }
-                    const cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
                     reportHttp(resp.status, text, cfMitigated);
                 } catch (err) {
                     reportHttp(0, '', '');
@@ -1413,15 +1496,18 @@ class MainActivity : ComponentActivity() {
                             try { attemptCtrl.abort(); } catch (_) {}
                         }, 5500);
                         try {
-                            const credMode = isSameOrigin
-                                ? (attempt === 0 ? 'same-origin' : 'omit')
-                                : 'omit';
-                            resp = await fetch(targetUrl, {
+                            const credMode = isSameOrigin ? 'same-origin' : 'omit';
+                            const binOpts = {
                                 method: 'GET',
                                 credentials: credMode,
                                 cache: cacheMode,
+                                referrerPolicy: 'strict-origin-when-cross-origin',
                                 signal: attemptCtrl.signal
-                            });
+                            };
+                            if (isSameOrigin && window.location.origin === 'https://linux.do') {
+                                binOpts.referrer = 'https://linux.do/';
+                            }
+                            resp = await fetch(targetUrl, binOpts);
                             if (resp && (resp.ok || (resp.status !== 502 && resp.status !== 503 && resp.status !== 504))) {
                                 break;
                             }
@@ -1475,6 +1561,9 @@ class MainActivity : ComponentActivity() {
     private suspend fun fetchBinaryViaWebViewBridge(
         url: String
     ): UserApiKeyAuthManager.BinaryHttpPayload? {
+        if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
+            rebuildApiWebView(reason = "pending_network_recycle", force = true)
+        }
         if (apiWebView == null && !isFinishing && !isDestroyed) {
             withContext(Dispatchers.Main) {
                 if (apiWebView == null && !isFinishing && !isDestroyed) {
@@ -1586,7 +1675,7 @@ class MainActivity : ComponentActivity() {
         rawBytes: ByteArray
     ): Pair<Int, String>? {
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
-            rebuildApiWebView(reason = "pending_network_recycle", force = false)
+            rebuildApiWebView(reason = "pending_network_recycle", force = true)
         }
         if (apiWebView == null && !isFinishing && !isDestroyed) {
             withContext(Dispatchers.Main) {
@@ -1648,6 +1737,7 @@ class MainActivity : ComponentActivity() {
                 }
                 val initialCachedCsrf = LinuxDoRepository.getCachedCsrfToken().orEmpty()
                 val currentCsrfOwner = csrfOwnerTag(cookieStr)
+                val hasBrowserSessionCookie = hasCookieNamed(cookieStr, "_t")
 
                 val jsCode = """
                     (async function() {
@@ -1687,15 +1777,20 @@ class MainActivity : ComponentActivity() {
                                 if (cached) return cached;
                             }
                             try {
-                                const csrfResp = await fetch('https://linux.do/session/csrf.json', {
-                                    headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                                const csrfOpts = {
+                                    headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
                                     credentials: 'include',
-                                    cache: 'no-store',
+                                    cache: 'no-cache',
+                                    referrerPolicy: 'strict-origin-when-cross-origin',
                                     signal: controller.signal
-                                });
+                                };
+                                if (window.location.origin === 'https://linux.do') {
+                                    csrfOpts.referrer = 'https://linux.do/';
+                                }
+                                const csrfResp = await fetch('https://linux.do/session/csrf.json', csrfOpts);
                                 csrfLastStatus = csrfResp.status || 0;
                                 csrfLastMitigated = csrfResp.headers.get('cf-mitigated') || '';
-                                if (csrfResp.ok) {
+                                if (csrfResp.ok && !csrfLastMitigated) {
                                     const csrfData = await csrfResp.json();
                                     if (csrfData && csrfData.csrf) {
                                         window.__lindoCsrf = csrfData.csrf;
@@ -1713,8 +1808,12 @@ class MainActivity : ComponentActivity() {
                         try {
                             const hdrs = {
                                 'Accept': 'application/json, text/javascript, */*; q=0.01',
-                                'X-Requested-With': 'XMLHttpRequest'
+                                'X-Requested-With': 'XMLHttpRequest',
+                                'Discourse-Present': 'true'
                             };
+                            if ($hasBrowserSessionCookie) {
+                                hdrs['Discourse-Logged-In'] = 'true';
+                            }
                             const currentOwner = ${JSONObject.quote(currentCsrfOwner)};
                             let ownerChanged = false;
                             if (window.__lindoCsrfCookieOwner !== currentOwner) {
@@ -1724,9 +1823,9 @@ class MainActivity : ComponentActivity() {
                                 window.__lindoCsrfCookieOwner = currentOwner;
                             }
                             const kotlinCsrf = ${JSONObject.quote(initialCachedCsrf)};
-                            if (!kotlinCsrf && !currentOwner) {
+                            if (!kotlinCsrf) {
                                 window.__lindoCsrf = null;
-                            } else if (kotlinCsrf && !window.__lindoCsrf && !ownerChanged) {
+                            } else if (!ownerChanged) {
                                 window.__lindoCsrf = kotlinCsrf;
                             }
                             const csrf = await refreshCsrfToken(false);
@@ -1767,30 +1866,39 @@ class MainActivity : ComponentActivity() {
                                 fd.append('files[]', blob, ${JSONObject.quote(fileName)});
                                 return fd;
                             }
-                            let resp = await fetch('https://linux.do/uploads.json', {
-                                method: 'POST',
-                                headers: hdrs,
-                                body: buildFormData(),
-                                credentials: 'include',
-                                signal: controller.signal
-                            });
+                            function buildUploadOpts() {
+                                const uo = {
+                                    method: 'POST',
+                                    headers: hdrs,
+                                    body: buildFormData(),
+                                    credentials: 'include',
+                                    referrerPolicy: 'strict-origin-when-cross-origin',
+                                    signal: controller.signal
+                                };
+                                if (window.location.origin === 'https://linux.do') {
+                                    uo.referrer = 'https://linux.do/';
+                                }
+                                return uo;
+                            }
+                            let resp = await fetch('https://linux.do/uploads.json', buildUploadOpts());
                             let text = await resp.text();
-                            if ((resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token|bad csrf/i.test(text)) {
+                            let cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
+                            if (!cfMitigated && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token|bad csrf/i.test(text)) {
                                 window.__lindoCsrf = null;
+                                if (window.LinDoJsBridge && window.LinDoJsBridge.onCsrfTokenUpdated) {
+                                    window.LinDoJsBridge.onCsrfTokenUpdated('');
+                                }
                                 const freshCsrf = await refreshCsrfToken(true);
                                 if (freshCsrf) {
                                     hdrs['X-CSRF-Token'] = freshCsrf;
-                                    resp = await fetch('https://linux.do/uploads.json', {
-                                        method: 'POST',
-                                        headers: hdrs,
-                                        body: buildFormData(),
-                                        credentials: 'include',
-                                        signal: controller.signal
-                                    });
+                                    resp = await fetch('https://linux.do/uploads.json', buildUploadOpts());
                                     text = await resp.text();
+                                    cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
+                                } else if (csrfLastMitigated || csrfLastStatus === 403 || csrfLastStatus === 503 || csrfLastStatus === 429) {
+                                    reportUpload(csrfLastStatus || resp.status, csrfLastBody || text, csrfLastMitigated);
+                                    return;
                                 }
                             }
-                            const cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
                             reportUpload(resp.status, text, cfMitigated);
                         } catch (err) {
                             reportUpload(0, '', '');
@@ -2053,6 +2161,53 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun computeTransportSignature(
+        cm: ConnectivityManager,
+        network: Network?,
+        caps: NetworkCapabilities?
+    ): String {
+        if (network == null || caps == null) return ""
+        val transports = buildList {
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("wifi")
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("cell")
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) add("vpn")
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) add("eth")
+        }.joinToString(",")
+        val lp = runCatching { cm.getLinkProperties(network) }.getOrNull()
+        val iface = lp?.interfaceName.orEmpty()
+        val dns = lp?.dnsServers?.joinToString(",") { it.hostAddress.orEmpty() }.orEmpty()
+        return "$transports|$iface|$dns"
+    }
+
+    private fun dispatchNetworkRestoreRecycle() {
+        pendingTransportRecycleOnNextUse = true
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastNetworkRestoreNotifyAtMs
+        if (elapsed >= 1_200L) {
+            trailingNetworkRestoreJob?.cancel()
+            trailingNetworkRestoreJob = null
+            lastNetworkRestoreNotifyAtMs = now
+            activityScope.launch {
+                ensureHealthyApiWebView(forceCheck = true)
+                withContext(Dispatchers.Main) {
+                    UserApiKeyAuthManager.notifyNetworkRestored()
+                }
+            }
+        } else {
+            val waitMs = (1_200L - elapsed).coerceAtLeast(350L)
+            trailingNetworkRestoreJob?.cancel()
+            trailingNetworkRestoreJob = activityScope.launch {
+                delay(waitMs)
+                lastNetworkRestoreNotifyAtMs = System.currentTimeMillis()
+                pendingTransportRecycleOnNextUse = true
+                ensureHealthyApiWebView(forceCheck = true)
+                withContext(Dispatchers.Main) {
+                    UserApiKeyAuthManager.notifyNetworkRestored()
+                }
+            }
+        }
+    }
+
     private fun registerNetworkRecoveryMonitor() {
         if (connectivityCallback != null) return
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
@@ -2060,6 +2215,7 @@ class MainActivity : ComponentActivity() {
             override fun onLost(network: Network) {
                 if (network.networkHandle == activeValidatedNetworkHandle) {
                     activeValidatedNetworkHandle = 0L
+                    activeTransportSignature = ""
                     hadNetworkInterruption = true
                 }
             }
@@ -2075,39 +2231,31 @@ class MainActivity : ComponentActivity() {
                     return
                 }
                 val handle = network.networkHandle
+                val sig = computeTransportSignature(cm, network, networkCapabilities)
                 if (activeValidatedNetworkHandle == 0L && !hadNetworkInterruption) {
                     activeValidatedNetworkHandle = handle
+                    activeTransportSignature = sig
                     return
                 }
-                if (handle != activeValidatedNetworkHandle || hadNetworkInterruption) {
+                if (handle != activeValidatedNetworkHandle || sig != activeTransportSignature || hadNetworkInterruption) {
                     activeValidatedNetworkHandle = handle
+                    activeTransportSignature = sig
                     hadNetworkInterruption = false
-                    pendingTransportRecycleOnNextUse = true
-                    val now = System.currentTimeMillis()
-                    val elapsed = now - lastNetworkRestoreNotifyAtMs
-                    if (elapsed >= 1_200L) {
-                        trailingNetworkRestoreJob?.cancel()
-                        trailingNetworkRestoreJob = null
-                        lastNetworkRestoreNotifyAtMs = now
-                        activityScope.launch {
-                            ensureHealthyApiWebView(forceCheck = true)
-                            withContext(Dispatchers.Main) {
-                                UserApiKeyAuthManager.notifyNetworkRestored()
-                            }
-                        }
-                    } else {
-                        val waitMs = (1_200L - elapsed).coerceAtLeast(350L)
-                        trailingNetworkRestoreJob?.cancel()
-                        trailingNetworkRestoreJob = activityScope.launch {
-                            delay(waitMs)
-                            lastNetworkRestoreNotifyAtMs = System.currentTimeMillis()
-                            pendingTransportRecycleOnNextUse = true
-                            ensureHealthyApiWebView(forceCheck = true)
-                            withContext(Dispatchers.Main) {
-                                UserApiKeyAuthManager.notifyNetworkRestored()
-                            }
-                        }
-                    }
+                    dispatchNetworkRestoreRecycle()
+                }
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: android.net.LinkProperties) {
+                if (network.networkHandle != activeValidatedNetworkHandle || activeValidatedNetworkHandle == 0L) return
+                val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull() ?: return
+                val hasValidatedInternet =
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                if (!hasValidatedInternet) return
+                val sig = computeTransportSignature(cm, network, caps)
+                if (activeTransportSignature.isNotEmpty() && sig != activeTransportSignature) {
+                    activeTransportSignature = sig
+                    dispatchNetworkRestoreRecycle()
                 }
             }
         }
@@ -2118,9 +2266,11 @@ class MainActivity : ComponentActivity() {
             initialCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         if (initiallyValidated && initialNet != null) {
             activeValidatedNetworkHandle = initialNet.networkHandle
+            activeTransportSignature = computeTransportSignature(cm, initialNet, initialCaps)
             hadNetworkInterruption = false
         } else {
             activeValidatedNetworkHandle = 0L
+            activeTransportSignature = ""
             hadNetworkInterruption = true
         }
         runCatching {
@@ -2259,6 +2409,7 @@ private fun AndroidWebLoginModal(
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember { mutableStateOf(false) }
+    var csrfSyncedInModal by remember(initialUrl) { mutableStateOf(false) }
     var postLoginProbeMisses by remember(initialUrl) { mutableStateOf(0) }
     var pageLoadError by remember { mutableStateOf<String?>(null) }
     var rendererGone by remember { mutableStateOf(false) }
@@ -2330,7 +2481,7 @@ private fun AndroidWebLoginModal(
         onLoginSuccess()
     }
 
-    fun tryExtractSessionAndComplete(webView: WebView?) {
+    fun tryExtractSessionAndComplete(webView: WebView?, isPageFinished: Boolean = false) {
         if (completed || webView == null) return
         val cookieManager = CookieManager.getInstance()
         val rawCookies = cookieManager.getCookie("https://linux.do").orEmpty()
@@ -2340,11 +2491,36 @@ private fun AndroidWebLoginModal(
             webView.evaluateJavascript(AUTO_SUBMIT_OTP_FORM_JS, null)
         }
 
+        // 无论是否为登录流，只要页面加载完成，立即同步刷盘最新 Cookie（如通过 Cloudflare 验证后的 cf_clearance）
+        if (isPageFinished) {
+            runCatching { cookieManager.flush() }
+            val latestSynced = cookieManager.getCookie("https://linux.do").orEmpty().ifBlank { rawCookies }
+            if (latestSynced.isNotBlank()) {
+                CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestSynced)
+            }
+        }
+
         // 非登录流（如应用广场、官网验证、Connect/Credit 等内置容器模式）：
         // 同步最新 Cookie（如 cf_clearance），不自动关闭窗口
         if (!isLoginFlow) {
-            if (rawCookies.isNotBlank()) {
-                CookieSentinel.syncFromAuthoritativeBrowserCookieString(rawCookies)
+            val latestCookies = cookieManager.getCookie("https://linux.do").orEmpty().ifBlank { rawCookies }
+            if (latestCookies.isNotBlank()) {
+                CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies)
+            }
+            // 若用户已完成安全验证并进入真实主站 HTML（含 Discourse meta csrf-token），同步最新 CSRF Token 至仓库
+            if (isPageFinished &&
+                webView.url?.startsWith("https://linux.do") == true &&
+                hasCookieNamed(latestCookies, "_t")
+            ) {
+                webView.evaluateJavascript(
+                    "(function(){var m=document.querySelector('meta[name=\"csrf-token\"]');return (m&&m.content)?m.content:'';})();"
+                ) { raw ->
+                    val csrf = decodeJsStringResult(raw)?.trim().orEmpty()
+                    if (csrf.isNotEmpty()) {
+                        csrfSyncedInModal = true
+                        LinuxDoRepository.updateCsrfToken(csrf)
+                    }
+                }
             }
             return
         }
@@ -2453,6 +2629,7 @@ private fun AndroidWebLoginModal(
                     val obj = JSONObject(decoded)
                     val csrf = obj.optString("__csrf").trim()
                     if (csrf.isNotEmpty()) {
+                        csrfSyncedInModal = true
                         LinuxDoRepository.updateCsrfToken(csrf)
                     }
                     completeWithUserObject(obj)
@@ -2461,6 +2638,7 @@ private fun AndroidWebLoginModal(
                 if (decoded != null && decoded.startsWith("__CSRF_ONLY__:")) {
                     val csrf = decoded.removePrefix("__CSRF_ONLY__:").trim()
                     if (csrf.isNotEmpty()) {
+                        csrfSyncedInModal = true
                         LinuxDoRepository.updateCsrfToken(csrf)
                     }
                 }
@@ -2479,7 +2657,7 @@ private fun AndroidWebLoginModal(
                         window.__lindoCurrentUserProbeInFlight = true;
                         var owner = ${JSONObject.quote(expectedOwnerTag)};
                         fetch('/session/current.json', {
-                            headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                            headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
                             credentials: 'include',
                             cache: 'no-store'
                         }).then(function(r) { return r.ok ? r.json() : null; })
@@ -2530,14 +2708,15 @@ private fun AndroidWebLoginModal(
 
     DisposableEffect(Unit) {
         onDispose {
-            if (!isLoginFlow) {
-                runCatching {
-                    val cm = CookieManager.getInstance()
-                    cm.flush()
-                    val latest = cm.getCookie("https://linux.do").orEmpty()
-                    if (latest.isNotBlank()) {
-                        CookieSentinel.syncFromAuthoritativeBrowserCookieString(latest)
-                    }
+            runCatching {
+                val cm = CookieManager.getInstance()
+                cm.flush()
+                val latest = cm.getCookie("https://linux.do").orEmpty()
+                if (latest.isNotBlank()) {
+                    CookieSentinel.syncFromAuthoritativeBrowserCookieString(latest)
+                }
+                if (initialUrl.contains("linux.do", ignoreCase = true) && !csrfSyncedInModal && !completed) {
+                    LinuxDoRepository.updateCsrfToken(null)
                 }
             }
             webViewRef = null
@@ -2549,9 +2728,12 @@ private fun AndroidWebLoginModal(
     val barSubFg = if (isDark) androidx.compose.ui.graphics.Color(0xFFA1A8B5) else androidx.compose.ui.graphics.Color(0xFF525866)
     val barBorder = if (isDark) androidx.compose.ui.graphics.Color(0xFF232833) else androidx.compose.ui.graphics.Color(0xFFEDEFF3)
     val currentPageTitle = remember(initialUrl, isLoginFlow) {
-        val host = runCatching { Uri.parse(initialUrl).host }.getOrNull().orEmpty()
+        val parsed = runCatching { Uri.parse(initialUrl) }.getOrNull()
+        val host = parsed?.host.orEmpty()
+        val path = parsed?.path.orEmpty()
         when {
             isLoginFlow -> "LINUX DO 登录与安全验证"
+            host.equals("linux.do", ignoreCase = true) && (path.isEmpty() || path == "/") -> "LINUX DO 安全验证 · 完成后点左上角返回"
             host.equals("connect.linux.do", ignoreCase = true) -> "LINUX DO Connect"
             host.equals("credit.linux.do", ignoreCase = true) -> "LINUX DO 社区积分"
             else -> host.ifBlank { "LINUX DO" }
@@ -2723,7 +2905,7 @@ private fun AndroidWebLoginModal(
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     super.onPageFinished(view, url)
-                                    tryExtractSessionAndComplete(view)
+                                    tryExtractSessionAndComplete(view, isPageFinished = true)
                                 }
                             }
 

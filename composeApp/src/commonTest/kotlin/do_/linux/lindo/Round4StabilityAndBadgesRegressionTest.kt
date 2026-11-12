@@ -1,17 +1,27 @@
 package do_.linux.lindo
 
+import do_.linux.lindo.core.compose.ComposerAction
+import do_.linux.lindo.core.compose.ComposerDraft
+import do_.linux.lindo.core.compose.ComposerDraftSession
+import do_.linux.lindo.core.compose.LocalComposerDrafts
 import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.UserNotificationItem
 import do_.linux.lindo.core.network.ApiFailureKind
 import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
+import do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX
 import do_.linux.lindo.core.network.CookieSentinel
+import do_.linux.lindo.core.network.LinuxDoCategoryMeta
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.PlatformMediaPicker
+import do_.linux.lindo.core.network.PostSubmission
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.network.onAuthenticationInvalidated
 import do_.linux.lindo.core.network.readApiObject
+import do_.linux.lindo.ui.isGuestLoginRequiredError
+import do_.linux.lindo.ui.resolveGuestLoginPromptForUrl
+import do_.linux.lindo.ui.shouldGateCategoryForGuest
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -37,6 +47,7 @@ class Round4StabilityAndBadgesRegressionTest {
     private var savedLogoutClear = UserApiKeyAuthManager.onLogoutPlatformClear
     private var savedAuthInvalidated = onAuthenticationInvalidated
     private var savedPrepareRecovery = UserApiKeyAuthManager.onPrepareManualRecovery
+    private var savedRequireBrowserOnly = UserApiKeyAuthManager.requireBrowserTransportOnly
 
     @BeforeTest
     fun setUp() {
@@ -48,7 +59,10 @@ class Round4StabilityAndBadgesRegressionTest {
         savedLogoutClear = UserApiKeyAuthManager.onLogoutPlatformClear
         savedAuthInvalidated = onAuthenticationInvalidated
         savedPrepareRecovery = UserApiKeyAuthManager.onPrepareManualRecovery
+        savedRequireBrowserOnly = UserApiKeyAuthManager.requireBrowserTransportOnly
 
+        UserApiKeyAuthManager.requireBrowserTransportOnly = false
+        UserApiKeyAuthManager.webViewHttpExecutor = null
         UserApiKeyAuthManager.onAuthStateChanged = null
         UserApiKeyAuthManager.onPersistSession = null
         UserApiKeyAuthManager.onLogoutPlatformClear = null
@@ -60,12 +74,14 @@ class Round4StabilityAndBadgesRegressionTest {
         CookieSentinel.clearAll()
         LinuxDoRepository.clearUserSessionCaches()
         LinuxDoRepository.clearTransientRateLimit()
+        LinuxDoRepository.clearChallengeCooldown()
         ScreenTrackEngine.resetForTest()
         UserPresenceService.setAppForeground(true)
     }
 
     @AfterTest
     fun tearDown() {
+        UserApiKeyAuthManager.requireBrowserTransportOnly = savedRequireBrowserOnly
         UserApiKeyAuthManager.webViewHttpExecutor = savedHttpExecutor
         PlatformMediaPicker.webViewUploadExecutor = savedUploadExecutor
         PlatformMediaPicker.webViewBinaryUploadExecutor = savedBinaryUploadExecutor
@@ -78,6 +94,7 @@ class Round4StabilityAndBadgesRegressionTest {
         CookieSentinel.clearAll()
         LinuxDoRepository.clearUserSessionCaches()
         LinuxDoRepository.clearTransientRateLimit()
+        LinuxDoRepository.clearChallengeCooldown()
         ScreenTrackEngine.resetForTest()
         UserPresenceService.setAppForeground(true)
         UserApiKeyAuthManager.onAuthStateChanged = savedAuthCallback
@@ -669,5 +686,339 @@ class Round4StabilityAndBadgesRegressionTest {
             assertEquals(1, feed.size)
             assertNull(feed.single().excerpt)
         }
+    }
+
+    @Test
+    fun composerDraftSyncAndPostPublishSurfaceSiteVerificationAndRecoverWithoutDataLoss() = runTest {
+        CookieSentinel.ingestRawCookieString("_t=reply_tok", domain = "linux.do")
+        LinuxDoRepository.updateCsrfToken("csrf_reply")
+        LocalComposerDrafts.remove("lucas", "topic_9901")
+        LocalComposerDrafts.forgetSequence("lucas", "topic_9901")
+
+        var challengeActive = true
+        withMockHttp(
+            handler = { url, method, _, _ ->
+                when {
+                    url.contains("/drafts/topic_9901.json") && method == "GET" -> 200 to """{"draft":null,"draft_sequence":4}"""
+                    url.contains("/drafts.json") && method == "POST" -> {
+                        if (challengeActive) {
+                            403 to (CF_MITIGATED_CHALLENGE_PREFIX + "<!DOCTYPE html><html><title>Just a moment...</title></html>")
+                        } else {
+                            200 to """{"draft_sequence":5}"""
+                        }
+                    }
+                    url.contains("/posts.json") && method == "POST" -> {
+                        if (challengeActive) {
+                            403 to (CF_MITIGATED_CHALLENGE_PREFIX + "<!DOCTYPE html><html><title>Just a moment...</title></html>")
+                        } else {
+                            200 to """{"id":50123,"topic_id":9901,"post_number":10,"username":"lucas","cooked":"<p>浏览量是最简单的了佬友。</p>"}"""
+                        }
+                    }
+                    url.contains("/drafts/topic_9901.json") && method == "DELETE" -> 200 to """{"success":"OK"}"""
+                    else -> 404 to "{}"
+                }
+            }
+        ) {
+            val draft = ComposerDraft(
+                owner = "lucas",
+                key = "topic_9901",
+                action = ComposerAction.REPLY,
+                raw = "浏览量是最简单的了佬友。",
+                topicId = 9901,
+                replyToPostNumber = 9,
+                replyToUsername = "Cory",
+                sequence = 4
+            )
+            val session = ComposerDraftSession(draft, initialExistsOnServer = false)
+            session.update(draft)
+
+            // 1) 云端草稿保存遭遇 Cloudflare Managed Challenge 时必须原样抛出 Verification，且文案不再误导用户跳外部浏览器，本机草稿完整保留
+            val draftVerifyEx = assertFailsWith<ApiReadException> {
+                session.sync()
+            }
+            assertEquals(ApiFailureKind.Verification, draftVerifyEx.kind)
+            assertEquals("需要完成站点验证", draftVerifyEx.message)
+            assertFalse(draftVerifyEx.message.orEmpty().contains("官网"))
+            assertEquals("浏览量是最简单的了佬友。", LocalComposerDrafts.get("lucas", "topic_9901")?.raw)
+
+            // 2) 发送回复遭遇 Cloudflare Managed Challenge 时同样抛出 Verification，本机草稿绝不丢失
+            val postVerifyEx = assertFailsWith<ApiReadException> {
+                session.publish {
+                    LinuxDoRepository.createPost(
+                        topicId = 9901,
+                        raw = draft.raw,
+                        replyToPostNumber = 9,
+                        draftKey = "topic_9901"
+                    )
+                }
+            }
+            assertEquals(ApiFailureKind.Verification, postVerifyEx.kind)
+            assertEquals("需要完成站点验证", postVerifyEx.message)
+            assertEquals("浏览量是最简单的了佬友。", LocalComposerDrafts.get("lucas", "topic_9901")?.raw)
+
+            // 3) 用户在应用内置安全 WebView 完成站点验证后，恢复云端草稿同步与一键发送，成功后清理本机草稿
+            challengeActive = false
+            assertTrue(session.sync())
+            val published = session.publish {
+                LinuxDoRepository.createPost(
+                    topicId = 9901,
+                    raw = draft.raw,
+                    replyToPostNumber = 9,
+                    draftKey = "topic_9901"
+                )
+            }
+            assertTrue(published is PostSubmission.Published)
+            assertEquals(10, published.value.postNumber)
+            assertNull(LocalComposerDrafts.get("lucas", "topic_9901"))
+        }
+    }
+
+    @Test
+    fun screenTrackAndTimingsPauseCleanlyOnSiteVerificationWithoutOneSecondRushStorm() = runTest {
+        CookieSentinel.ingestRawCookieString("_t=valid_cookie", domain = "linux.do")
+        LinuxDoRepository.updateCsrfToken("csrf_timings")
+        var challengeActive = true
+        var lastTimingsHeaders: Map<String, String> = emptyMap()
+        withMockHttp(
+            handler = { _, method, _, headers ->
+                lastTimingsHeaders = headers
+                if (method == "POST" && challengeActive) {
+                    403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<!DOCTYPE html><title>Just a moment...</title>"
+                } else {
+                    200 to "{}"
+                }
+            }
+        ) {
+            val t0 = 1_000_000L
+            ScreenTrackEngine.onTopicEntered(topicId = 8801, initialVisiblePosts = setOf(1, 2), nowMs = t0)
+            // 首次 1 秒阅读触发 hasUnreadRush 入队
+            assertTrue(ScreenTrackEngine.tickAndEnqueue(nowMs = t0 + 1_200L))
+            val firstBatch = ScreenTrackEngine.popNextSendableBatch(nowMs = t0 + 1_200L)
+            assertNotNull(firstBatch)
+
+            val status = LinuxDoRepository.sendTopicTimings(firstBatch)
+            assertEquals(ScreenTrackEngine.STATUS_SITE_VERIFICATION_REQUIRED, status)
+            assertTrue(LinuxDoRepository.isChallengeCooldownActive())
+            assertEquals("https://linux.do/t/8801", lastTimingsHeaders["Referer"])
+            assertEquals("true", lastTimingsHeaders["X-SILENCE-LOGGER"])
+
+            ScreenTrackEngine.onBatchSendResult(firstBatch, status, nowMs = t0 + 1_200L)
+            // 1) 在 90s 挂起窗口内，popNextSendableBatch 必须返回 null，绝不继续打 POST /topics/timings
+            assertNull(ScreenTrackEngine.popNextSendableBatch(nowMs = t0 + 5_000L))
+            // 2) 更关键：下一秒 tick 绝不能因为清空了 totalTimingsMs/readPostsSet 而陷入 1s hasUnreadRush 死循环！
+            assertFalse(ScreenTrackEngine.tickAndEnqueue(nowMs = t0 + 2_300L))
+
+            // 3) 用户完成内置网页安全验证并触发 prepareForManualRecovery 后，冷却解除并恢复正常上报
+            challengeActive = false
+            LinuxDoRepository.prepareForManualRecovery()
+            assertFalse(LinuxDoRepository.isChallengeCooldownActive())
+            val resumedBatch = ScreenTrackEngine.popNextSendableBatch(nowMs = t0 + 6_000L)
+            assertNotNull(resumedBatch)
+            val okStatus = LinuxDoRepository.sendTopicTimings(resumedBatch)
+            assertEquals(200, okStatus)
+            ScreenTrackEngine.onBatchSendResult(resumedBatch, okStatus, nowMs = t0 + 6_000L)
+            assertFalse(ScreenTrackEngine.hasPendingWork())
+        }
+    }
+
+    @Test
+    fun postSubmission503ChallengeContextualRefererAndDiscardDraftProtection() = runTest {
+        CookieSentinel.ingestRawCookieString("_t=valid_cookie", domain = "linux.do")
+        LinuxDoRepository.updateCsrfToken("csrf_post")
+        LocalComposerDrafts.remove("lucas", "topic_4321")
+        LocalComposerDrafts.forgetSequence("lucas", "topic_4321")
+
+        val observedHeadersByUrl = mutableMapOf<String, Map<String, String>>()
+        withMockHttp(
+            handler = { url, method, _, headers ->
+                observedHeadersByUrl["$method $url"] = headers
+                when {
+                    method == "GET" && url.contains("latest.json") ->
+                        200 to """{"topic_list":{"topics":[]}}"""
+                    // Cloudflare Turnstile / JS Challenge 经常返回 HTTP 503 + HTML（甚至无 cf-mitigated 前缀）
+                    method == "POST" && url.endsWith("/posts.json") ->
+                        503 to "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><script src=\"/cdn-cgi/challenge-platform/scripts/jsd/main.js\"></script></body></html>"
+                    method == "DELETE" && url.contains("/drafts/") ->
+                        403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<!DOCTYPE html><title>Just a moment...</title>"
+                    else -> 200 to "{}"
+                }
+            }
+        ) {
+            // 后台普通 GET 不得携带非法的 X-SILENCE-LOGGER 或 Origin 请求头
+            LinuxDoRepository.fetchTopics(path = "/latest.json", background = true)
+            val getHeaders = observedHeadersByUrl.entries.first { it.key.startsWith("GET ") }.value
+            assertNull(getHeaders["X-SILENCE-LOGGER"])
+            assertNull(getHeaders["Origin"])
+            assertEquals("application/json, text/javascript, */*; q=0.01", getHeaders["Accept"])
+
+            // POST /posts.json 遭遇 503 Cloudflare Challenge 时必须抛出 ApiFailureKind.Verification，绝不能伪装成 PostSubmissionUnconfirmed
+            val postEx = assertFailsWith<ApiReadException> {
+                LinuxDoRepository.createPost(topicId = 4321, raw = "测试回复内容长度足够")
+            }
+            assertEquals(ApiFailureKind.Verification, postEx.kind)
+            assertEquals("需要完成站点验证", postEx.message)
+            val postHeaders = observedHeadersByUrl["POST https://linux.do/posts.json"]
+            assertNotNull(postHeaders)
+            assertEquals("https://linux.do/t/4321", postHeaders["Referer"])
+            assertEquals("https://linux.do", postHeaders["Origin"])
+            assertNull(postHeaders["X-SILENCE-LOGGER"])
+
+            // 放弃草稿遭遇站点验证时必须抛出异常保留本机草稿，避免云端草稿未删却把本机草稿误删
+            val draft = ComposerDraft(
+                owner = "lucas",
+                key = "topic_4321",
+                action = ComposerAction.REPLY,
+                topicId = 4321,
+                raw = "未发送草稿",
+                sequence = 2
+            )
+            val session = ComposerDraftSession(draft, initialExistsOnServer = true)
+            session.update(draft)
+            val discardEx = assertFailsWith<ApiReadException> {
+                session.discard()
+            }
+            assertEquals(ApiFailureKind.Verification, discardEx.kind)
+            assertNotNull(LocalComposerDrafts.get("lucas", "topic_4321"))
+        }
+    }
+
+    @Test
+    fun browserTransportOnlyGuardAndExpiredCfClearanceEvictionAndBooleanMutationReason() = runTest {
+        // 1) CookieSentinel：当完整浏览器快照包含有效 _t 但不再包含过期 cf_clearance 时，必须剔除陈旧 cf_clearance
+        CookieSentinel.ingestRawCookieString("_t=old_session; cf_clearance=stale_cf_token", domain = "linux.do")
+        assertTrue(CookieSentinel.buildCookieHeader().contains("cf_clearance=stale_cf_token"))
+        CookieSentinel.syncFromAuthoritativeBrowserCookieString("_t=fresh_session; _forum_session=sess_2")
+        val cleaned = CookieSentinel.buildCookieHeader()
+        assertTrue(cleaned.contains("_t=fresh_session"))
+        assertFalse(cleaned.contains("cf_clearance"))
+
+        // 2) Android 强制浏览器桥接锁开启后，严禁向非浏览器栈泄漏 cf_clearance，且桥接暂不可用时绝不回退 Java TLS OkHttp
+        CookieSentinel.ingestRawCookieString("_t=fresh_session; cf_clearance=new_cf_token", domain = "linux.do")
+        UserApiKeyAuthManager.requireBrowserTransportOnly = true
+        assertFalse(CookieSentinel.buildCookieHeader().contains("cf_clearance"))
+        UserApiKeyAuthManager.webViewHttpExecutor = null
+        val fallbackBlockedEx = assertFailsWith<ApiReadException> {
+            LinuxDoRepository.fetchTopics("latest.json")
+        }
+        assertEquals(ApiFailureKind.Connection, fallbackBlockedEx.kind)
+
+        // 3) Boolean 写操作（如删帖/全部标为已读）遭遇 Cloudflare 验证时必须精确记录「需要完成站点验证」
+        LinuxDoRepository.updateCsrfToken("csrf_bool")
+        withMockHttp(
+            handler = { _, _, _, _ ->
+                403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<!DOCTYPE html><title>Just a moment...</title>"
+            }
+        ) {
+            assertFalse(LinuxDoRepository.deletePost(998877))
+            assertEquals("需要完成站点验证", LinuxDoRepository.lastMutationErrorOr("删除失败"))
+            assertFalse(LinuxDoRepository.markNotificationsRead())
+            assertEquals("需要完成站点验证", LinuxDoRepository.lastMutationErrorOr("标记失败"))
+        }
+    }
+
+    @Test
+    fun guestModeUrlRoutingAndCategoryGuardPreventAbruptWebLoginJumps() {
+        // 1) 所有未登录会 302 跳往 /login 的生态站与专属路径均返回结构化原生引导提示（含 ?web=1 参数场景）
+        val connectPrompt = resolveGuestLoginPromptForUrl("https://connect.linux.do/?web=1")
+        assertNotNull(connectPrompt)
+        assertTrue(connectPrompt.title.contains("Connect"))
+
+        assertNotNull(resolveGuestLoginPromptForUrl("https://credit.linux.do/"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://cdk.linux.do/receive/abc"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://hub.linux.do/"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://lottery.linux.do/"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://linux.do/login"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://linux.do/new-topic?category=develop"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://linux.do/chat/c/general/1"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://linux.do/u/alice/follow"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://linux.do/my/preferences/profile"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://linux.do/my/messages"))
+        assertNotNull(resolveGuestLoginPromptForUrl("https://linux.do/bookmarks"))
+
+        // 2) 公开生态站、公开原生页面与公开话题链接在游客模式下保持畅通直达，绝不误拦截
+        assertNull(resolveGuestLoginPromptForUrl("https://wiki.linux.do/"))
+        assertNull(resolveGuestLoginPromptForUrl("https://idcflare.com/"))
+        assertNull(resolveGuestLoginPromptForUrl("https://linux.do/t/topic/12345"))
+        assertNull(resolveGuestLoginPromptForUrl("https://linux.do/badges"))
+        assertNull(resolveGuestLoginPromptForUrl("https://linux.do/about"))
+        assertNull(resolveGuestLoginPromptForUrl("https://linux.do/leaderboard"))
+        assertNull(resolveGuestLoginPromptForUrl("https://github.com/linux-do"))
+
+        // 3) 受限版块（如跳蚤市场、Lv1~Lv3 子版块）在游客模式下前置拦截引导登录，公开版块与已登录态正常放行
+        val restrictedCat = LinuxDoCategoryMeta(
+            id = 10,
+            name = "跳蚤市场",
+            slug = "trade",
+            colorHex = "ED207B",
+            description = "闲置流转",
+            readRestricted = true
+        )
+        val publicCat = LinuxDoCategoryMeta(
+            id = 4,
+            name = "开发调优",
+            slug = "develop",
+            colorHex = "0088CC",
+            description = "技术交流",
+            readRestricted = false
+        )
+        assertTrue(shouldGateCategoryForGuest(isAuthorized = false, category = restrictedCat))
+        assertFalse(shouldGateCategoryForGuest(isAuthorized = false, category = publicCat))
+        assertFalse(shouldGateCategoryForGuest(isAuthorized = true, category = restrictedCat))
+
+        // 4) 游客受限错误判定覆盖「登录 / 权限 / 无权 / 受限 / 私密」，但严禁把「站点验证」误判为登录引导
+        assertTrue(isGuestLoginRequiredError(isAuthorized = false, errorMessage = "该内容需要登录后查看"))
+        assertTrue(isGuestLoginRequiredError(isAuthorized = false, errorMessage = "您无权查看所请求的资源。"))
+        assertTrue(isGuestLoginRequiredError(isAuthorized = false, errorMessage = "该版块需登录后访问"))
+        assertFalse(isGuestLoginRequiredError(isAuthorized = false, errorMessage = "需要完成站点验证"))
+        assertFalse(isGuestLoginRequiredError(isAuthorized = true, errorMessage = "该内容需要登录后查看"))
+    }
+
+    @Test
+    fun guestMode401And403ResponsesSurfaceGuestLoginPromptInsteadOfFakeNetworkFailure() = runTest {
+        // 确保处于纯游客模式（无 Cookie、无 API Key）
+        UserApiKeyAuthManager.logout()
+        CookieSentinel.clearAll()
+        assertFalse(UserApiKeyAuthManager.isAuthorized())
+
+        // 1) Discourse 中文站对未登录游客返回 403 invalid_access 时，readApiObject 归一化为友好的「该内容需要登录后查看」
+        val guestForbiddenEx = assertFailsWith<ApiReadException> {
+            readApiObject(
+                403 to """{"errors":["您无权查看所请求的资源。"],"error_type":"invalid_access"}"""
+            )
+        }
+        assertEquals(ApiFailureKind.PermissionDenied, guestForbiddenEx.kind)
+        assertEquals("该内容需要登录后查看", guestForbiddenEx.message)
+
+        // 2) 游客点开隐藏公开档案的用户名片（HTTP 403）或受限话题（HTTP 403）时，精确返回权限/登录提示而非伪造的「网络连接失败」
+        withMockHttp(
+            handler = { url, _, _, _ ->
+                when {
+                    url.contains("/u/hidden_member.json") ->
+                        403 to """{"errors":["您无权查看所请求的资源。"],"error_type":"invalid_access"}"""
+                    url.contains("/t/77777.json") ->
+                        403 to """{"errors":["您无权查看所请求的资源。"],"error_type":"invalid_access"}"""
+                    else -> 404 to "{}"
+                }
+            }
+        ) {
+            val cardEx = assertFailsWith<ApiReadException> {
+                LinuxDoRepository.fetchPublicUserCard("hidden_member")
+            }
+            assertEquals(ApiFailureKind.PermissionDenied, cardEx.kind)
+            assertEquals("该内容需要登录后查看", cardEx.message)
+
+            val restrictedTopic = LinuxDoRepository.fetchTopicDetail(77777)
+            assertEquals("该话题需要登录后查看", restrictedTopic.loadError)
+            assertTrue(isGuestLoginRequiredError(isAuthorized = false, errorMessage = restrictedTopic.loadError))
+        }
+
+        // 3) 对照验证：已登录态遭遇 403 仍保持「当前账号暂无访问权限」语义，不混淆等级不足与未登录
+        CookieSentinel.ingestRawCookieString("_t=logged_in_member", domain = "linux.do")
+        assertTrue(UserApiKeyAuthManager.isAuthorized())
+        val memberForbiddenEx = assertFailsWith<ApiReadException> {
+            readApiObject(403 to "{}")
+        }
+        assertEquals(ApiFailureKind.PermissionDenied, memberForbiddenEx.kind)
+        assertEquals("当前账号暂无访问权限", memberForbiddenEx.message)
     }
 }

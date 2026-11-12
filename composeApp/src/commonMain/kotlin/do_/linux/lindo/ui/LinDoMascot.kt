@@ -33,7 +33,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.ui.components.LinDoIcons
+import do_.linux.lindo.ui.components.LocalOpenInAppWebUrl
+import do_.linux.lindo.ui.components.LocalRequestGuestLogin
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_brand_mark
 import lindo.composeapp.generated.resources.lindo_mascot_welcome
@@ -373,11 +376,21 @@ fun LinDoStatePanel(
         !detail.isNullOrBlank() && detail != title && detail != state.detail -> detail
         else -> title
     }
+    val openWeb = LocalOpenInAppWebUrl.current
+    val requestGuestLogin = LocalRequestGuestLogin.current
+    val isSiteVerify = state == LinDoMascotState.NetworkError &&
+        displayMessage.contains("站点验证") &&
+        openWeb != null
     val isPermissionOrAuth = displayMessage.contains("权限") ||
+        displayMessage.contains("无权") ||
         displayMessage.contains("登录") ||
         displayMessage.contains("等级") ||
         displayMessage.contains("受限") ||
         displayMessage.contains("私密")
+    val isGuestLoginNeeded = !isSiteVerify &&
+        !UserApiKeyAuthManager.isAuthorized() &&
+        isPermissionOrAuth &&
+        requestGuestLogin != null
     val resolvedIcon = iconOverride ?: when {
         isPermissionOrAuth -> LinDoIcons.FaLock
         state == LinDoMascotState.NetworkError -> LinDoIcons.InfoCircle
@@ -385,14 +398,25 @@ fun LinDoStatePanel(
         else -> LinDoIcons.Inbox
     }
     val resolvedIconSize = if (resolvedIcon == LinDoIcons.FaLock) 19.dp else 21.dp
+    val resolvedAction: (() -> Unit)? = when {
+        isSiteVerify -> ({ openWeb?.invoke("https://linux.do/") })
+        isGuestLoginNeeded -> ({ requestGuestLogin?.invoke("登录后查看该内容", displayMessage) })
+        else -> onRetry
+    }
+    val resolvedActionLabel = when {
+        resolvedAction == null -> null
+        isSiteVerify && actionLabel == "重试" -> "打开网页验证"
+        isGuestLoginNeeded && actionLabel == "重试" -> "去登录"
+        else -> actionLabel
+    }
     LinDoStatusNotice(
         message = displayMessage,
         icon = resolvedIcon,
         iconSize = resolvedIconSize,
-        actionLabel = if (onRetry != null) actionLabel else null,
-        actionIcon = if (onRetry != null && showActionIcon && !isPermissionOrAuth) LinDoIcons.Refresh else null,
-        emphasizeAction = emphasizeAction || isPermissionOrAuth,
-        onAction = onRetry,
+        actionLabel = resolvedActionLabel,
+        actionIcon = if (resolvedAction != null && showActionIcon && !isPermissionOrAuth && !isSiteVerify) LinDoIcons.Refresh else null,
+        emphasizeAction = emphasizeAction || isPermissionOrAuth || isSiteVerify,
+        onAction = resolvedAction,
         modifier = modifier
     )
 }
@@ -420,9 +444,15 @@ fun LinDoEmptyState(
 
 @Composable
 fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifier = Modifier) {
-    val secondaryText = LocalPalette.current.inkSecondary
+    val palette = LocalPalette.current
+    val secondaryText = palette.inkSecondary
+    val openWeb = LocalOpenInAppWebUrl.current
+    val showSiteVerifyAction = state == LinDoMascotState.NetworkError &&
+        message.contains("站点验证") &&
+        openWeb != null
     Row(
         modifier = modifier
+            .then(if (showSiteVerifyAction) Modifier.fillMaxWidth() else Modifier)
             .heightIn(min = 22.dp)
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         verticalAlignment = Alignment.CenterVertically
@@ -431,14 +461,28 @@ fun LinDoFeedbackRow(message: String, state: LinDoMascotState, modifier: Modifie
         Spacer(Modifier.width(5.dp))
         Text(
             text = message,
-            modifier = Modifier.weight(1f, fill = false),
-            fontSize = 11.sp,
+            modifier = Modifier.weight(1f, fill = showSiteVerifyAction),
+            fontSize = 11.5.sp,
             lineHeight = 15.sp,
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
             color = secondaryText
         )
+        if (showSiteVerifyAction) {
+            TextButton(
+                onClick = { openWeb?.invoke("https://linux.do/") },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                modifier = Modifier.heightIn(min = 28.dp)
+            ) {
+                Text(
+                    text = "去验证",
+                    fontSize = 11.8.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.activeChipText
+                )
+            }
+        }
     }
 }
 
@@ -508,12 +552,31 @@ fun LinDoMascotGallery(onClose: () -> Unit, onThemeChanged: (Boolean) -> Unit = 
 /** Inline failure is never represented by the successful-empty illustration. */
 @Composable
 fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
-    val secondaryText = LocalPalette.current.inkSecondary
+    val palette = LocalPalette.current
+    val secondaryText = palette.inkSecondary
+    val openWeb = LocalOpenInAppWebUrl.current
+    val requestGuestLogin = LocalRequestGuestLogin.current
+    val isSiteVerify = message.contains("站点验证") && openWeb != null
+    val isGuestLogin = !isSiteVerify &&
+        !UserApiKeyAuthManager.isAuthorized() &&
+        requestGuestLogin != null &&
+        (message.contains("登录") || message.contains("权限") || message.contains("无权") || message.contains("受限") || message.contains("私密"))
+    val highlightAction = isSiteVerify || isGuestLogin
+    val actionColor = if (highlightAction) palette.activeChipText else secondaryText
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        LinDoMascot(LinDoMascotState.NetworkError, size = 20.dp, compact = true, animate = false)
+        if (isGuestLogin) {
+            Icon(
+                imageVector = LinDoIcons.FaLock,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+                tint = secondaryText
+            )
+        } else {
+            LinDoMascot(LinDoMascotState.NetworkError, size = 20.dp, compact = true, animate = false)
+        }
         Spacer(Modifier.width(6.dp))
         Text(
             text = message,
@@ -523,17 +586,34 @@ fun LinDoLoadFailure(message: String, onRetry: () -> Unit) {
             color = secondaryText
         )
         TextButton(
-            onClick = onRetry,
+            onClick = {
+                when {
+                    isSiteVerify -> openWeb?.invoke("https://linux.do/")
+                    isGuestLogin -> requestGuestLogin?.invoke("登录后查看该内容", message)
+                    else -> onRetry()
+                }
+            },
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
         ) {
-            Icon(
-                imageVector = LinDoIcons.Refresh,
-                contentDescription = null,
-                modifier = Modifier.size(13.dp),
-                tint = secondaryText
+            if (!highlightAction) {
+                Icon(
+                    imageVector = LinDoIcons.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(13.dp),
+                    tint = actionColor
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            Text(
+                text = when {
+                    isSiteVerify -> "去验证"
+                    isGuestLogin -> "去登录"
+                    else -> "重试"
+                },
+                fontSize = 11.8.sp,
+                fontWeight = if (highlightAction) FontWeight.SemiBold else FontWeight.Normal,
+                color = actionColor
             )
-            Spacer(Modifier.width(4.dp))
-            Text("重试", fontSize = 11.8.sp, color = secondaryText)
         }
     }
 }

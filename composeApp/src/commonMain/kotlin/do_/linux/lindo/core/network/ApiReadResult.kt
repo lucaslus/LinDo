@@ -72,15 +72,34 @@ class ApiReadException(
 ) : IOException(
     customMessage?.takeIf { it.isNotBlank() } ?: when (kind) {
         ApiFailureKind.Connection -> "网络连接失败"
-        ApiFailureKind.Authentication -> "登录状态已失效，请重新登录后重试"
-        ApiFailureKind.PermissionDenied -> "当前账号暂无访问权限"
-        ApiFailureKind.Verification -> "需要完成站点验证，请打开官网检查"
+        ApiFailureKind.Authentication -> if (UserApiKeyAuthManager.isAuthorized()) {
+            "登录状态已失效，请重新登录后重试"
+        } else {
+            "该内容需要登录后查看"
+        }
+        ApiFailureKind.PermissionDenied -> if (UserApiKeyAuthManager.isAuthorized()) {
+            "当前账号暂无访问权限"
+        } else {
+            "该内容需要登录后查看"
+        }
+        ApiFailureKind.Verification -> "需要完成站点验证"
         ApiFailureKind.RateLimited -> "请求过于频繁，请稍后重试"
         ApiFailureKind.Server -> "服务暂时不可用，请稍后重试"
         ApiFailureKind.InvalidPayload -> "返回的数据不完整，请重试"
     },
     cause
 )
+
+private fun normalizeGuestAuthMessage(serverMsg: String?): String? {
+    if (UserApiKeyAuthManager.isAuthorized()) return serverMsg
+    val trimmed = serverMsg?.trim().orEmpty()
+    if (trimmed.isEmpty()) return "该内容需要登录后查看"
+    val isGenericDiscourseDenial = trimmed.contains("您无权查看") ||
+        trimmed.contains("您需要登录") ||
+        trimmed.equals("not_logged_in", ignoreCase = true) ||
+        trimmed.equals("invalid_access", ignoreCase = true)
+    return if (isGenericDiscourseDenial) "该内容需要登录后查看" else trimmed
+}
 
 internal fun readApiObject(response: Pair<Int, String>?): JsonObject {
     if (response == null || response.first == 0) throw ApiReadException(ApiFailureKind.Connection)
@@ -109,11 +128,11 @@ internal fun readApiObject(response: Pair<Int, String>?): JsonObject {
         }
 
         throw when (status) {
-            401 -> ApiReadException(ApiFailureKind.Authentication, customMessage = serverMsg)
+            401 -> ApiReadException(ApiFailureKind.Authentication, customMessage = normalizeGuestAuthMessage(serverMsg))
             403 -> if (errorType == "not_logged_in") {
-                ApiReadException(ApiFailureKind.Authentication, customMessage = serverMsg)
+                ApiReadException(ApiFailureKind.Authentication, customMessage = normalizeGuestAuthMessage(serverMsg))
             } else {
-                ApiReadException(ApiFailureKind.PermissionDenied, customMessage = serverMsg)
+                ApiReadException(ApiFailureKind.PermissionDenied, customMessage = normalizeGuestAuthMessage(serverMsg))
             }
             429 -> ApiReadException(ApiFailureKind.RateLimited, customMessage = serverMsg)
             else -> ApiReadException(ApiFailureKind.Server, customMessage = serverMsg)

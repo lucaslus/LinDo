@@ -83,8 +83,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 27
-        versionName = "0.2.25"
+        versionCode = 28
+        versionName = "0.2.26"
     }
 
     packaging {
@@ -119,8 +119,29 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.0.0"
+            packageVersion = "1.0.26"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
+
+            macOS {
+                bundleID = "do.linux.lindo"
+                iconFile.set(project.file("src/desktopMain/resources/icon.icns"))
+                infoPlist {
+                    extraKeysRawXml = """
+                        <key>CFBundleURLTypes</key>
+                        <array>
+                            <dict>
+                                <key>CFBundleURLName</key>
+                                <string>Lindo Auth Redirect</string>
+                                <key>CFBundleURLSchemes</key>
+                                <array>
+                                    <string>discourse</string>
+                                    <string>lindo</string>
+                                </array>
+                            </dict>
+                        </array>
+                    """.trimIndent()
+                }
+            }
         }
     }
 }

@@ -31,6 +31,8 @@ import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.network.*
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
+import do_.linux.lindo.ui.components.LocalLinDoNetworkRestoreVersion
+import do_.linux.lindo.ui.components.LocalOpenInAppWebUrl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -68,15 +70,37 @@ internal fun LinDoConfirmDialog(
     onConfirm: () -> Unit
 ) {
     val palette = LocalPalette.current
+    if (do_.linux.lindo.ui.components.LocalIsWebModalActive.current) return
+    val openWebUrl = LocalOpenInAppWebUrl.current
     val errorColor = MaterialTheme.colorScheme.error
     val visibleError = error?.takeIf { !busy && it.isNotBlank() }
+    val needsVerify = visibleError?.contains("站点验证") == true && openWebUrl != null
     val body: (@Composable () -> Unit)? = if (detail == null && visibleError == null) null else {
         {
             LinDoScaledPopupContent {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     detail?.let { Text(it, color = palette.inkSecondary, fontSize = 14.sp, lineHeight = 20.sp) }
                     visibleError?.let {
-                        Text(it, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = errorColor, fontSize = 13.sp, lineHeight = 18.sp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                it,
+                                Modifier.weight(1f, fill = false).semantics { liveRegion = LiveRegionMode.Polite },
+                                color = errorColor,
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp
+                            )
+                            if (needsVerify) {
+                                TextButton(
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    onClick = { openWebUrl?.invoke("https://linux.do/") }
+                                ) {
+                                    Text("去验证", color = palette.activeChipText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -169,6 +193,8 @@ internal fun ComposerSheet(
     var submitting by remember(stateKey) { mutableStateOf(false) }
     var uploading by remember(stateKey) { mutableStateOf(false) }
     var draftSyncFailed by remember(stateKey) { mutableStateOf(false) }
+    var draftSyncErrorMsg by remember(stateKey) { mutableStateOf<String?>(null) }
+    var draftSyncBlockedByVerification by remember(stateKey) { mutableStateOf(false) }
     var submitError by remember(stateKey) { mutableStateOf<String?>(null) }
     var pendingReview by remember(stateKey) { mutableStateOf(false) }
     var unconfirmedDraft by remember(stateKey) { mutableStateOf<ComposerDraft?>(null) }
@@ -219,11 +245,58 @@ internal fun ComposerSheet(
             draft.hasContent
         }
 
+    val openWebUrl = LocalOpenInAppWebUrl.current
+    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
+    var baselineNetRestoreVer by remember(stateKey) { mutableIntStateOf(netRestoreVer) }
+    LaunchedEffect(netRestoreVer) {
+        if (netRestoreVer == baselineNetRestoreVer) return@LaunchedEffect
+        baselineNetRestoreVer = netRestoreVer
+        if (prepareError != null && prepareError?.contains("站点验证") != true) {
+            prepareRetry++
+        }
+        if (draftSyncFailed && !draftSyncBlockedByVerification) {
+            draftSyncErrorMsg = null
+            draftSyncFailed = false
+            syncRetry++
+        }
+        if (tagsError != null && tagsError?.contains("站点验证") != true) {
+            tagRetry++
+        }
+    }
+
+    val siteVerifyVer = do_.linux.lindo.ui.components.LocalSiteVerificationRestoreVersion.current
+    var baselineSiteVerifyVer by remember(stateKey) { mutableIntStateOf(siteVerifyVer) }
+    LaunchedEffect(siteVerifyVer) {
+        if (siteVerifyVer == baselineSiteVerifyVer) return@LaunchedEffect
+        baselineSiteVerifyVer = siteVerifyVer
+        if (prepareError != null) {
+            prepareRetry++
+        }
+        if (submitError?.contains("站点验证") == true) {
+            submitError = null
+        }
+        if (discardError?.contains("站点验证") == true) {
+            discardError = null
+        }
+        if (draftSyncFailed || draftSyncBlockedByVerification) {
+            draftSyncBlockedByVerification = false
+            draftSyncErrorMsg = null
+            draftSyncFailed = false
+            syncRetry++
+        }
+        if (tagsError != null) {
+            tagRetry++
+        }
+    }
+
     fun update(next: ComposerDraft) {
         if (submitting || !prepared) return
         draft = next.copy(updatedAt = System.currentTimeMillis())
         session?.update(draft)
-        draftSyncFailed = false
+        if (!draftSyncBlockedByVerification) {
+            draftSyncFailed = false
+            draftSyncErrorMsg = null
+        }
         submitError = null
     }
     fun requestClose() {
@@ -375,14 +448,29 @@ internal fun ComposerSheet(
         }
     }
 
-    LaunchedEffect(draft, prepared, syncRetry, conflictRemoteDraft) {
-        if (!prepared || !hasChanges || isUntouchedTemplate || conflictRemoteDraft != null) return@LaunchedEffect
+    LaunchedEffect(draft, prepared, syncRetry, conflictRemoteDraft, draftSyncBlockedByVerification) {
+        if (!prepared || !hasChanges || isUntouchedTemplate || conflictRemoteDraft != null || draftSyncBlockedByVerification) return@LaunchedEffect
         delay(1200)
-        if (!hasChanges || isUntouchedTemplate || conflictRemoteDraft != null) return@LaunchedEffect
+        if (!hasChanges || isUntouchedTemplate || conflictRemoteDraft != null || draftSyncBlockedByVerification) return@LaunchedEffect
         try {
-            draftSyncFailed = session?.sync() != true
+            val ok = session?.sync() == true
+            draftSyncFailed = !ok
+            if (ok) {
+                draftSyncBlockedByVerification = false
+                draftSyncErrorMsg = null
+            }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { draftSyncFailed = true }
+        catch (error: Exception) {
+            draftSyncFailed = true
+            val needsSiteVerify = (error is ApiReadException && error.kind == ApiFailureKind.Verification) ||
+                error.message?.contains("站点验证") == true
+            draftSyncBlockedByVerification = needsSiteVerify
+            draftSyncErrorMsg = if (needsSiteVerify) {
+                "草稿已存本机 · 需完成站点验证"
+            } else {
+                null
+            }
+        }
     }
 
     LaunchedEffect(draft.categoryId, draft.tags, tagQuery, tagRetry, prepared, hasTopicMetaControls) {
@@ -635,8 +723,18 @@ internal fun ComposerSheet(
 
             when {
                 prepareError != null -> {
+                    val prepNeedsVerify = prepareError?.contains("站点验证") == true && openWebUrl != null
                     Box(Modifier.weight(1f).fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
-                        LinDoLoadFailure(prepareError!!, { prepareRetry++ })
+                        LinDoLoadFailure(
+                            message = prepareError!!,
+                            onRetry = {
+                                if (prepNeedsVerify) {
+                                    openWebUrl?.invoke("https://linux.do/")
+                                } else {
+                                    prepareRetry++
+                                }
+                            }
+                        )
                     }
                 }
                 !prepared -> {
@@ -1000,7 +1098,16 @@ internal fun ComposerSheet(
                     }
 
                     if (draftSyncFailed && submitError == null && !busy) {
-                        LinDoLoadFailure("草稿已存本机 · 云端同步失败") { syncRetry++ }
+                        val syncMsg = draftSyncErrorMsg ?: "草稿已存本机 · 云端同步失败"
+                        val syncNeedsVerify = syncMsg.contains("站点验证") && openWebUrl != null
+                        LinDoLoadFailure(syncMsg) {
+                            if (syncNeedsVerify) {
+                                openWebUrl?.invoke("https://linux.do/")
+                            } else {
+                                draftSyncBlockedByVerification = false
+                                syncRetry++
+                            }
+                        }
                     }
                     if (submitError != null) {
                         Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
@@ -1031,7 +1138,7 @@ internal fun ComposerSheet(
         }
     }
 
-    if (pendingReview) {
+    if (pendingReview && !do_.linux.lindo.ui.components.LocalIsWebModalActive.current) {
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { LinDoScaledPopupContent { LinDoDialogTitle("已提交审核") } },

@@ -335,8 +335,8 @@ class ComposerDraftSession(
     suspend fun discard(): Boolean = serialWrite {
         val targetOwner = current.owner
         val targetKey = current.key
-        LocalComposerDrafts.remove(targetOwner, targetKey)
         if (!existsOnServer && synced == null) {
+            LocalComposerDrafts.remove(targetOwner, targetKey)
             completed = true
             LocalComposerDrafts.forgetSequence(targetOwner, targetKey)
             return@serialWrite true
@@ -347,6 +347,8 @@ class ComposerDraftSession(
             LinuxDoRepository.deleteCloudDraft(targetKey, sequence)
         } catch (error: ApiReadException) {
             when (error.kind) {
+                ApiFailureKind.Verification,
+                ApiFailureKind.Authentication -> throw error
                 ApiFailureKind.Connection,
                 ApiFailureKind.RateLimited,
                 ApiFailureKind.Server -> {
@@ -362,6 +364,7 @@ class ComposerDraftSession(
             }
         }
         if (!cloudRemoved) return@serialWrite false
+        LocalComposerDrafts.remove(targetOwner, targetKey)
         existsOnServer = false
         completed = true
         LocalComposerDrafts.forgetSequence(targetOwner, targetKey)

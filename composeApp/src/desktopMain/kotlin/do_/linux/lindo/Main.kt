@@ -193,6 +193,16 @@ private object DesktopStateStore {
 
 fun main() {
     DesktopStateStore.initAndWire()
+    runCatching {
+        if (Desktop.isDesktopSupported()) {
+            val desktop = Desktop.getDesktop()
+            if (desktop.isSupported(Desktop.Action.APP_OPEN_URI)) {
+                desktop.setOpenURIHandler { event ->
+                    event.uri?.toString()?.let { UserApiKeyAuthManager.handleAuthRedirectUri(it) }
+                }
+            }
+        }
+    }
     application {
         val windowState = rememberWindowState(
             size = DpSize(1240.dp, 820.dp),
@@ -204,7 +214,7 @@ fun main() {
                 exitApplication()
             },
             state = windowState,
-            title = "Lindo — Linux.do High-Performance Client (macOS / Windows / Android)"
+            title = "Lindo"
         ) {
             LinDoApp(onApplyAppIcon = null)
         }

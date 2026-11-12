@@ -76,6 +76,7 @@ internal fun LinDoNotificationRow(
 ) {
     val palette = LocalPalette.current
     val networkRestoreVersion = LocalLinDoNetworkRestoreVersion.current
+    val siteVerificationRestoreVersion = do_.linux.lindo.ui.components.LocalSiteVerificationRestoreVersion.current
     val canResolvePostAuthor = item.actorUsername == null &&
         item.notificationType in setOf(17, 36, 801, 802) &&
         (item.originalPostId > 0 || item.topicId > 0)
@@ -86,7 +87,7 @@ internal fun LinDoNotificationRow(
         mutableStateOf(!canResolvePostAuthor)
     }
     if (canResolvePostAuthor && !postAuthorResolveDone) {
-        LaunchedEffect(item.id, item.actorUsername, item.originalPostId, item.topicId, networkRestoreVersion) {
+        LaunchedEffect(item.id, item.actorUsername, item.originalPostId, item.topicId, networkRestoreVersion, siteVerificationRestoreVersion) {
             val resolved = LinuxDoRepository.resolveNotificationActor(item)
             if (resolved != null) {
                 resolvedActorUser = resolved
@@ -122,7 +123,7 @@ internal fun LinDoNotificationRow(
         mutableStateOf(effectiveActorUsername == null || !initialAvatarTemplate.isNullOrBlank())
     }
     if (effectiveActorUsername != null && effectiveAvatarTemplate.isNullOrBlank() && !avatarResolveDone) {
-        LaunchedEffect(effectiveActorUsername, effectiveAvatarTemplate, networkRestoreVersion) {
+        LaunchedEffect(effectiveActorUsername, effectiveAvatarTemplate, networkRestoreVersion, siteVerificationRestoreVersion) {
             val resolved = LinuxDoRepository.resolveUserAvatarTemplate(effectiveActorUsername)
             if (!resolved.isNullOrBlank()) {
                 effectiveAvatarTemplate = resolved

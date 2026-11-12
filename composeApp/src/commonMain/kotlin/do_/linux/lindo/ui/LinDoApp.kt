@@ -206,7 +206,11 @@ import do_.linux.lindo.core.render.PostBlockNode
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
 import do_.linux.lindo.ui.components.LinDoIcons
+import do_.linux.lindo.ui.components.LocalIsWebModalActive
 import do_.linux.lindo.ui.components.LocalLinDoNetworkRestoreVersion
+import do_.linux.lindo.ui.components.LocalOpenInAppWebUrl
+import do_.linux.lindo.ui.components.LocalRequestGuestLogin
+import do_.linux.lindo.ui.components.LocalSiteVerificationRestoreVersion
 import do_.linux.lindo.ui.components.OfficialBadgeArtwork
 import do_.linux.lindo.ui.components.PostGrantedBadgeIcon
 import lindo.composeapp.generated.resources.*
@@ -581,6 +585,62 @@ internal fun parseSmartTopicUrlTarget(url: String): Pair<Int, Int?>? {
     return tid to pnum
 }
 
+internal data class GuestLoginPrompt(
+    val title: String,
+    val subtitle: String
+)
+
+internal fun shouldGateCategoryForGuest(
+    isAuthorized: Boolean,
+    category: LinuxDoCategoryMeta?
+): Boolean = !isAuthorized && category != null && category.readRestricted
+
+internal fun isGuestLoginRequiredError(
+    isAuthorized: Boolean,
+    errorMessage: String?
+): Boolean {
+    if (isAuthorized || errorMessage.isNullOrBlank()) return false
+    if (errorMessage.contains("站点验证")) return false
+    return errorMessage.contains("登录") ||
+        errorMessage.contains("权限") ||
+        errorMessage.contains("无权") ||
+        errorMessage.contains("受限") ||
+        errorMessage.contains("私密")
+}
+
+internal fun resolveGuestLoginPromptForUrl(rawUrl: String): GuestLoginPrompt? {
+    val (_, cleaned) = stripWebOneQueryParam(rawUrl.trim())
+    val target = cleaned.trim()
+    if (target.isEmpty()) return null
+    return when {
+        Regex("""^https?://connect\.linux\.do(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后访问 Connect 中心", "查看信任等级进度、保级指标与专属社区权益")
+        Regex("""^https?://credit\.linux\.do(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后访问 Credit 积分", "积分流转与服务认证需通过 LINUX DO 账号授权")
+        Regex("""^https?://cdk\.linux\.do(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后访问 CDK 分发", "领取或发布社区福利需登录 LINUX DO 账号")
+        Regex("""^https?://hub\.linux\.do(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后访问 LD Hub", "访问生态 AI 与聚合中心需登录 LINUX DO 账号")
+        Regex("""^https?://lottery\.linux\.do(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后访问 Lottery 抽奖", "使用官方楼层开奖与抽奖工具需登录 LINUX DO 账号")
+        Regex("""^https?://(?:www\.)?linux\.do/(?:login|session|auth|oauth2)(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("欢迎登录 LINUX DO", "登录后解锁全站版块、发布话题、互动回复与 Connect 中心")
+        Regex("""^https?://(?:www\.)?linux\.do/(?:new-topic|new-message)(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后发布内容", "登录 LINUX DO 账号后可发布新话题或发送私信")
+        Regex("""^https?://(?:www\.)?linux\.do/chat(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后使用社区聊天", "登录 LINUX DO 账号后可参与实时频道聊天")
+        Regex("""^https?://(?:www\.)?linux\.do/u/[^/?#]+/follow(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后查看关注与粉丝", "关注感兴趣的佬友，订阅他们的最新动态")
+        Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences/profile(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后编辑个人资料", "登录 LINUX DO 账号后可编辑个人简介与主页信息")
+        Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后管理账号设置", "自定义个人主页、头衔徽章与隐私偏好")
+        Regex("""^https?://(?:www\.)?linux\.do/(?:my(?:/.*)?|bookmarks(?:[/?#].*)?|notifications(?:[/?#].*)?|u/[^/?#]+/(?:messages|notifications|bookmarks|activity/(?:bookmarks|drafts))(?:[/?#].*)?)$""", RegexOption.IGNORE_CASE).matches(target) ->
+            GuestLoginPrompt("登录后查看个人中心", "登录 LINUX DO 账号后可同步收藏、通知、草稿与私信")
+        else -> null
+    }
+}
+
 internal fun toggleMarkdownLinePrefix(text: String, cursorPos: Int, prefix: String): Pair<String, Int> {
     val pos = cursorPos.coerceIn(0, text.length)
     val lineStart = if (pos == 0) 0 else text.lastIndexOf('\n', pos - 1) + 1
@@ -688,6 +748,8 @@ private fun LinearPulseLoadingFooter(
     onLoadMore: () -> Unit
 ) {
     val palette = LocalPalette.current
+    val openWebUrl = LocalOpenInAppWebUrl.current
+    val needsVerify = isError && errorText.contains("站点验证") && openWebUrl != null
     val currentOnLoadMore by androidx.compose.runtime.rememberUpdatedState(onLoadMore)
     LaunchedEffect(autoLoadWhenVisible, hasMore, isLoadingMore, isError, loadedCount) {
         if (autoLoadWhenVisible && hasMore && !isLoadingMore && !isError && loadedCount > 0) {
@@ -707,8 +769,14 @@ private fun LinearPulseLoadingFooter(
             .heightIn(min = 52.dp)
             .clickable(
                 enabled = !isLoadingMore && (hasMore || isError),
-                onClickLabel = if (isError) "重试" else null,
-                onClick = onLoadMore
+                onClickLabel = when {
+                    needsVerify -> "去验证"
+                    isError -> "重试"
+                    else -> null
+                },
+                onClick = {
+                    if (needsVerify) openWebUrl?.invoke("https://linux.do/") else onLoadMore()
+                }
             )
             .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.Center,
@@ -743,22 +811,31 @@ private fun LinearPulseLoadingFooter(
         }
         if (isError) {
             Spacer(Modifier.width(8.dp))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp)
-            ) {
-                Icon(
-                    imageVector = LinDoIcons.Refresh,
-                    contentDescription = null,
-                    modifier = Modifier.size(13.dp),
-                    tint = palette.inkSecondary
-                )
+            if (needsVerify) {
                 Text(
-                    text = "重试",
-                    color = palette.inkSecondary,
+                    text = "去验证",
+                    color = palette.activeChipText,
                     fontSize = 11.8.sp,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.SemiBold
                 )
+            } else {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(13.dp),
+                        tint = palette.inkSecondary
+                    )
+                    Text(
+                        text = "重试",
+                        color = palette.inkSecondary,
+                        fontSize = 11.8.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
         }
         if (!hasMore && !isLoadingMore && !isError) {
@@ -1599,6 +1676,7 @@ internal fun LinDoApp(
     // 认证状态与真实个人资料状态
     var authVersion by remember { mutableStateOf(0) }
     var networkRestoreVersion by remember { mutableIntStateOf(0) }
+    var siteVerificationRestoreVersion by remember { mutableIntStateOf(0) }
     var wasAuthorized by remember { mutableStateOf(UserApiKeyAuthManager.isAuthorized()) }
     var lastAuthenticatedUsername by remember {
         mutableStateOf(
@@ -1606,6 +1684,7 @@ internal fun LinDoApp(
         )
     }
     var isGuestMode by remember { mutableStateOf(false) }
+    var guestLoginPrompt by remember { mutableStateOf<GuestLoginPrompt?>(null) }
     var activeWebLoginUrl by remember { mutableStateOf<String?>(null) }
     var fullUserProfile by remember { mutableStateOf<UserFullProfileSummary?>(UserApiKeyAuthManager.fullProfileCache) }
 
@@ -1614,6 +1693,7 @@ internal fun LinDoApp(
 
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val rootKeyboardController = LocalSoftwareKeyboardController.current
     val serverConfirmedTopicFloors = remember {
         androidx.compose.runtime.mutableStateMapOf<Int, Int>().apply {
             putAll(LinuxDoRepository.getReadTopicSnapshot())
@@ -1621,10 +1701,29 @@ internal fun LinDoApp(
     }
 
     fun openWebPage(url: String) {
+        rootKeyboardController?.hide()
+        guestLoginPrompt = null
         if (PlatformWebLoginHost.webLoginRenderer != null) {
             activeWebLoginUrl = url
         } else {
             UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
+        }
+    }
+
+    fun requestGuestLogin(
+        title: String = "欢迎登录 LINUX DO",
+        subtitle: String = "登录后解锁全站版块、发布话题、互动回复与 Connect 中心"
+    ) {
+        rootKeyboardController?.hide()
+        guestLoginPrompt = GuestLoginPrompt(title = title, subtitle = subtitle)
+    }
+
+    fun triggerBrowserOneClickLogin() {
+        guestLoginPrompt = null
+        showAuthSheet = false
+        val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
+        if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
+            openWebPage(url)
         }
     }
 
@@ -1733,6 +1832,7 @@ internal fun LinDoApp(
         badgesCenterUsername = null
         showConnectSheet = false
         showAuthSheet = false
+        guestLoginPrompt = null
         showCreateTopicSheet = false
         pendingNewTopicDraft = null
         pendingReplyDraft = null
@@ -1946,6 +2046,16 @@ internal fun LinDoApp(
 
     fun openTopic(topic: TopicSummary, targetPostNumber: Int? = null, isManualRetry: Boolean = false) {
         if (topic.id <= 0) return
+        if (!isAuthorized && topic.categoryId > 0) {
+            val catMeta = LinuxDoRepository.findCategoryById(topic.categoryId)
+            if (shouldGateCategoryForGuest(isAuthorized = false, category = catMeta)) {
+                requestGuestLogin(
+                    title = "登录后查看「${catMeta!!.displayName}」话题",
+                    subtitle = "该话题属于受限版块，登录 LINUX DO 账号后即可阅读全文"
+                )
+                return
+            }
+        }
         val hadDetailError = activeTopicSummary?.id == topic.id && activeTopicDetail?.loadError != null
         detailLoadJob?.cancel()
         // Dismiss any full-screen overlay sheets so the Topic Reader is never hidden underneath (C5)
@@ -2087,6 +2197,7 @@ internal fun LinDoApp(
             wasAuthorized = true
             lastAuthenticatedUsername = nowUsername
             isGuestMode = false
+            guestLoginPrompt = null
             activeWebLoginUrl = null
             showAuthSheet = false
             loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
@@ -2152,28 +2263,36 @@ internal fun LinDoApp(
         if (isAuthorized) {
             showEditProfileSheet = true
         } else {
-            openWebPage("https://linux.do/login")
+            requestGuestLogin(
+                title = "登录后编辑个人资料",
+                subtitle = "登录 LINUX DO 账号后可自定义头像、个人简介与主页信息"
+            )
         }
     }
 
     fun closeWebPage() {
         val closedUrl = activeWebLoginUrl
         val wasEditingProfile = closedUrl?.endsWith("/preferences/profile") == true
-        val wasSiteHomeCheck = closedUrl != null && (
-            closedUrl == "https://linux.do/" || closedUrl == "https://linux.do"
+        val wasLinuxDoPage = closedUrl != null && (
+            closedUrl.startsWith("https://linux.do") || closedUrl.contains(".linux.do")
         )
         activeWebLoginUrl = null
         if (wasEditingProfile) syncUserProfile()
-        if (wasSiteHomeCheck) {
-            if (feedError != null || topics.isEmpty()) {
-                loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
-            }
-            if (loadMoreError) {
-                loadMoreError = false
-                loadNextPageTopics()
-            }
-            if (activeTopicDetail?.loadError != null && activeTopicSummary != null) {
-                openTopic(activeTopicSummary!!, activeTargetPostNumber, isManualRetry = true)
+        if (wasLinuxDoPage) {
+            scope.launch {
+                LinuxDoRepository.prepareForManualRecovery()
+                siteVerificationRestoreVersion++
+                networkRestoreVersion++
+                if (feedError != null || topics.isEmpty()) {
+                    loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+                }
+                if (loadMoreError) {
+                    loadMoreError = false
+                    loadNextPageTopics()
+                }
+                if (activeTopicDetail?.loadError != null && activeTopicSummary != null) {
+                    openTopic(activeTopicSummary!!, activeTargetPostNumber, isManualRetry = true)
+                }
             }
         }
     }
@@ -2221,14 +2340,33 @@ internal fun LinDoApp(
         openTopic(existing, targetPostNumber)
     }
 
+    fun selectCategoryWithGuestGuard(cid: Int?, navigateToHome: Boolean = false) {
+        if (cid != null) {
+            val catMeta = LinuxDoRepository.findCategoryById(cid)
+            if (shouldGateCategoryForGuest(isAuthorized = isAuthorized, category = catMeta)) {
+                requestGuestLogin(
+                    title = "登录后查看「${catMeta!!.displayName}」",
+                    subtitle = "该版块仅对登录会员开放，登录后即可浏览对应等级内容"
+                )
+                return
+            }
+        }
+        if (navigateToHome) {
+            dismissCoveringSheets()
+            selectedCategoryId = cid
+            selectedTag = null
+            searchQuery = ""
+            mobileShowingDetail = false
+            currentTab = MainTab.HOME
+            loadTopics(currentSort, cid, null, currentTopPeriod)
+        } else {
+            selectedCategoryId = cid
+            loadTopics(currentSort, cid, selectedTag, currentTopPeriod)
+        }
+    }
+
     fun selectCategoryExternally(cid: Int?) {
-        dismissCoveringSheets()
-        selectedCategoryId = cid
-        selectedTag = null
-        searchQuery = ""
-        mobileShowingDetail = false
-        currentTab = MainTab.HOME
-        loadTopics(currentSort, cid, null, currentTopPeriod)
+        selectCategoryWithGuestGuard(cid, navigateToHome = true)
     }
 
     fun selectTagExternally(tag: String?) {
@@ -2245,6 +2383,12 @@ internal fun LinDoApp(
     fun openSmartUrl(rawUrl: String) {
         val trimmed = rawUrl.trim()
         if (trimmed.isEmpty()) return
+        if (!isAuthorized) {
+            resolveGuestLoginPromptForUrl(trimmed)?.let { prompt ->
+                requestGuestLogin(title = prompt.title, subtitle = prompt.subtitle)
+                return
+            }
+        }
         val (forceWeb, cleanedWebUrl) = stripWebOneQueryParam(trimmed)
         if (forceWeb) {
             openWebPage(cleanedWebUrl)
@@ -2333,15 +2477,15 @@ internal fun LinDoApp(
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/u/[^/?#]+/follow(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            if (isAuthorized) showFollowSheet = true else openWebPage("https://linux.do/login")
+            if (isAuthorized) showFollowSheet = true else requestGuestLogin("登录后查看关注与粉丝", "关注感兴趣的佬友，订阅他们的最新动态")
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences/profile(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            if (isAuthorized) showEditProfileSheet = true else openWebPage("https://linux.do/login")
+            if (isAuthorized) showEditProfileSheet = true else requestGuestLogin("登录后编辑个人资料", "登录 LINUX DO 账号后可编辑个人简介与主页信息")
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences(?:/.*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            if (isAuthorized) showAccountPreferencesSheet = true else openWebPage("https://linux.do/login")
+            if (isAuthorized) showAccountPreferencesSheet = true else requestGuestLogin("登录后管理账号设置", "自定义个人主页、头衔徽章与隐私偏好")
             return
         }
         val parsedHost = runCatching { java.net.URI(trimmed).host?.lowercase().orEmpty() }.getOrDefault("")
@@ -2404,6 +2548,7 @@ internal fun LinDoApp(
         while (currentTab == MainTab.HOME && (!mobileShowingDetail || isWideLayout)) {
             delay(45_000L)
             if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) continue
+            if (activeWebLoginUrl != null || feedError?.contains("站点验证") == true || LinuxDoRepository.isChallengeCooldownActive()) continue
             if (!isLoadingTopics && !isLoadingMoreTopics && topics.isNotEmpty() && searchQuery.isBlank()) {
                 val genBefore = feedGeneration
                 val fresh = try {
@@ -2602,6 +2747,10 @@ internal fun LinDoApp(
         LocalFontScale provides fontScale,
         LocalTargetFontScale provides targetFontScale,
         LocalLinDoNetworkRestoreVersion provides networkRestoreVersion,
+        LocalSiteVerificationRestoreVersion provides siteVerificationRestoreVersion,
+        LocalIsWebModalActive provides (activeWebLoginUrl != null),
+        LocalOpenInAppWebUrl provides ::openWebPage,
+        LocalRequestGuestLogin provides ::requestGuestLogin,
         LocalDensity provides scaledDensity
     ) {
         MaterialTheme(
@@ -2671,7 +2820,10 @@ internal fun LinDoApp(
                                         pendingNewTopicDraft = null
                                         showCreateTopicSheet = true
                                     } else {
-                                        openWebPage("https://linux.do/login")
+                                        requestGuestLogin(
+                                            title = "登录后发布话题",
+                                            subtitle = "登录 LINUX DO 账号，与佬友分享你的发现与见解"
+                                        )
                                     }
                                 },
                                 onToggleTheme = { updateThemePref(!isDarkTheme) }
@@ -2733,7 +2885,7 @@ internal fun LinDoApp(
                                                     currentUser = currentUser,
                                                     unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
                                                     onRequestLogin = {
-                                                        openWebPage("https://linux.do/login")
+                                                        requestGuestLogin()
                                                     },
                                                     onSearchChange = { searchQuery = it },
                                                     onOpenGlobalSearch = { showGlobalSearchSheet = true },
@@ -2741,7 +2893,12 @@ internal fun LinDoApp(
                                                         if (isAuthorized) {
                                                             pendingNewTopicDraft = null
                                                             showCreateTopicSheet = true
-                                                        } else openWebPage("https://linux.do/login")
+                                                        } else {
+                                                            requestGuestLogin(
+                                                                title = "登录后发布话题",
+                                                                subtitle = "登录 LINUX DO 账号，与佬友分享你的发现与见解"
+                                                            )
+                                                        }
                                                     },
                                                     onOpenNotifications = {
                                                         currentTab = MainTab.MESSAGES
@@ -2750,8 +2907,7 @@ internal fun LinDoApp(
                                                         updateCompactFeedMode(!isCompactFeed)
                                                     },
                                                     onSelectCategory = { catId ->
-                                                        selectedCategoryId = catId
-                                                        loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
+                                                        selectCategoryWithGuestGuard(catId)
                                                     },
                                                     onSelectTag = { tag ->
                                                         selectedTag = tag
@@ -2809,7 +2965,12 @@ internal fun LinDoApp(
                                                     onInspectUser = { inspectedUsername = it },
                                                     onSelectTag = { tag -> selectTagExternally(tag) },
                                                     onOpenWebUrl = { openSmartUrl(it) },
-                                                    onRequestLogin = { openWebPage("https://linux.do/login") }
+                                                    onRequestLogin = {
+                                                        requestGuestLogin(
+                                                            title = "登录后参与互动",
+                                                            subtitle = "登录 LINUX DO 账号后即可回复话题、点赞表态、收藏与投票"
+                                                        )
+                                                    }
                                                 )
                                             }
                                         }
@@ -2847,6 +3008,7 @@ internal fun LinDoApp(
                                     CommunityDiscoverScreen(
                                         hotTopics = discoverHotTopics.ifEmpty { topics.filterNot { it.pinned }.take(5) },
                                         isLoadingHot = isLoadingDiscoverHot,
+                                        isAuthorized = isAuthorized,
                                         onRefreshHot = ::refreshDiscoverHotTopics,
                                         onSelectCategory = { catId -> selectCategoryExternally(catId) },
                                         onSelectTag = { tag -> selectTagExternally(tag) },
@@ -2864,7 +3026,12 @@ internal fun LinDoApp(
                                         isAuthorized = isAuthorized,
                                         username = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
                                         globalUnreadCount = fullUserProfile?.unreadNotifications ?: 0,
-                                        onRequestLogin = { openWebPage("https://linux.do/login") },
+                                        onRequestLogin = {
+                                            requestGuestLogin(
+                                                title = "登录后查看消息与私信",
+                                                subtitle = "实时接收回复、提及、点赞通知与佬友私信"
+                                            )
+                                        },
                                         onSelectTopicId = { tid, title, postNum ->
                                             currentTab = MainTab.HOME
                                             openTopicById(tid, title, postNum)
@@ -2931,12 +3098,22 @@ internal fun LinDoApp(
                                             badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
                                             showBadgesCenterSheet = true
                                         },
-                                        onOpenConnectSheet = { openWebPage("https://connect.linux.do/") },
+                                        onOpenConnectSheet = {
+                                            if (isAuthorized) {
+                                                openWebPage("https://connect.linux.do/")
+                                            } else {
+                                                requestGuestLogin(
+                                                    title = "登录后访问 Connect 中心",
+                                                    subtitle = "查看信任等级进度、保级指标与专属社区权益"
+                                                )
+                                            }
+                                        },
                                         onOpenAuthSheet = { showAuthSheet = true },
                                         onOpenWebUrl = { openSmartUrl(it) },
                                         onPrimaryWebLogin = {
-                                            openWebPage("https://linux.do/login")
+                                            requestGuestLogin()
                                         },
+                                        onRequestGuestLogin = ::requestGuestLogin,
                                         onLogout = {
                                             showLogoutConfirm = true
                                         }
@@ -2976,7 +3153,12 @@ internal fun LinDoApp(
                                 onInspectUser = { inspectedUsername = it },
                                 onSelectTag = { tag -> selectTagExternally(tag) },
                                 onOpenWebUrl = { openSmartUrl(it) },
-                                onRequestLogin = { openWebPage("https://linux.do/login") }
+                                onRequestLogin = {
+                                    requestGuestLogin(
+                                        title = "登录后参与互动",
+                                        subtitle = "登录 LINUX DO 账号后即可回复话题、点赞表态、收藏与投票"
+                                    )
+                                }
                             )
                         } else {
                             Box(modifier = Modifier.fillMaxSize()) {
@@ -3009,7 +3191,7 @@ internal fun LinDoApp(
                                                 currentUser = currentUser,
                                                 unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
                                                 onRequestLogin = {
-                                                    openWebPage("https://linux.do/login")
+                                                    requestGuestLogin()
                                                 },
                                                 onSearchChange = { searchQuery = it },
                                                 onOpenGlobalSearch = { showGlobalSearchSheet = true },
@@ -3017,7 +3199,12 @@ internal fun LinDoApp(
                                                     if (isAuthorized) {
                                                         pendingNewTopicDraft = null
                                                         showCreateTopicSheet = true
-                                                    } else openWebPage("https://linux.do/login")
+                                                    } else {
+                                                        requestGuestLogin(
+                                                            title = "登录后发布话题",
+                                                            subtitle = "登录 LINUX DO 账号，与佬友分享你的发现与见解"
+                                                        )
+                                                    }
                                                 },
                                                 onOpenNotifications = {
                                                     currentTab = MainTab.MESSAGES
@@ -3026,8 +3213,7 @@ internal fun LinDoApp(
                                                     updateCompactFeedMode(!isCompactFeed)
                                                 },
                                                 onSelectCategory = { catId ->
-                                                    selectedCategoryId = catId
-                                                    loadTopics(currentSort, catId, selectedTag, currentTopPeriod)
+                                                    selectCategoryWithGuestGuard(catId)
                                                 },
                                                 onSelectTag = { tag ->
                                                     selectedTag = tag
@@ -3055,6 +3241,7 @@ internal fun LinDoApp(
                                             CommunityDiscoverScreen(
                                                 hotTopics = discoverHotTopics.ifEmpty { topics.filterNot { it.pinned }.take(5) },
                                                 isLoadingHot = isLoadingDiscoverHot,
+                                                isAuthorized = isAuthorized,
                                                 onRefreshHot = ::refreshDiscoverHotTopics,
                                                 onSelectCategory = { catId -> selectCategoryExternally(catId) },
                                                 onSelectTag = { tag -> selectTagExternally(tag) },
@@ -3071,7 +3258,12 @@ internal fun LinDoApp(
                                                 isAuthorized = isAuthorized,
                                                 username = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
                                                 globalUnreadCount = fullUserProfile?.unreadNotifications ?: 0,
-                                                onRequestLogin = { openWebPage("https://linux.do/login") },
+                                                onRequestLogin = {
+                                                    requestGuestLogin(
+                                                        title = "登录后查看消息与私信",
+                                                        subtitle = "实时接收回复、提及、点赞通知与佬友私信"
+                                                    )
+                                                },
                                                 onSelectTopicId = { tid, title, postNum -> openTopicById(tid, title, postNum) },
                                                 onSelectMessageTopic = { topic -> openTopic(topic) },
                                                 onInspectUser = { uname -> inspectedUsername = uname },
@@ -3132,12 +3324,22 @@ internal fun LinDoApp(
                                                     badgesCenterUsername = fullUserProfile?.username ?: currentUser?.username
                                                     showBadgesCenterSheet = true
                                                 },
-                                                onOpenConnectSheet = { openWebPage("https://connect.linux.do/") },
+                                                onOpenConnectSheet = {
+                                                    if (isAuthorized) {
+                                                        openWebPage("https://connect.linux.do/")
+                                                    } else {
+                                                        requestGuestLogin(
+                                                            title = "登录后访问 Connect 中心",
+                                                            subtitle = "查看信任等级进度、保级指标与专属社区权益"
+                                                        )
+                                                    }
+                                                },
                                                 onOpenAuthSheet = { showAuthSheet = true },
                                                 onOpenWebUrl = { openSmartUrl(it) },
                                                 onPrimaryWebLogin = {
-                                                    openWebPage("https://linux.do/login")
+                                                    requestGuestLogin()
                                                 },
+                                                onRequestGuestLogin = ::requestGuestLogin,
                                                 onLogout = {
                                                     showLogoutConfirm = true
                                                 }
@@ -3158,7 +3360,10 @@ internal fun LinDoApp(
                                             pendingNewTopicDraft = null
                                             showCreateTopicSheet = true
                                         } else {
-                                            openWebPage("https://linux.do/login")
+                                            requestGuestLogin(
+                                                title = "登录后发布话题",
+                                                subtitle = "登录 LINUX DO 账号，与佬友分享你的发现与见解"
+                                            )
                                         }
                                     },
                                     modifier = Modifier.align(Alignment.BottomCenter)
@@ -3285,7 +3490,14 @@ internal fun LinDoApp(
                 if (showConnectSheet) {
                     LaunchedEffect(Unit) {
                         showConnectSheet = false
-                        openWebPage("https://connect.linux.do/")
+                        if (isAuthorized) {
+                            openWebPage("https://connect.linux.do/")
+                        } else {
+                            requestGuestLogin(
+                                title = "登录后访问 Connect 中心",
+                                subtitle = "查看信任等级进度、保级指标与专属社区权益"
+                            )
+                        }
                     }
                 }
 
@@ -3519,13 +3731,16 @@ internal fun LinDoApp(
                         currentUsername = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
                         onDismiss = { inspectedUsername = null },
                         onSendPrivateMessage = { targetUser ->
-                            inspectedUsername = null
                             if (isAuthorized) {
+                                inspectedUsername = null
                                 pmInitialDraft = null
                                 pmInitialRecipient = targetUser
                                 showPrivateMessagesSheet = true
                             } else {
-                                openWebPage("https://linux.do/login")
+                                requestGuestLogin(
+                                    title = "登录后发送私信",
+                                    subtitle = "登录 LINUX DO 账号后可向 @$targetUser 发送私信"
+                                )
                             }
                         },
                         onSelectTopicId = { tid, title, postNum ->
@@ -3551,6 +3766,18 @@ internal fun LinDoApp(
                         isAuthorized = isAuthorized,
                         onDismiss = { inspectedBadge = null },
                         onTitleUpdated = { syncUserProfile(force = true) }
+                    )
+                }
+
+                guestLoginPrompt?.let { prompt ->
+                    GuestLoginGuideSheet(
+                        prompt = prompt,
+                        onPrimaryWebLogin = {
+                            guestLoginPrompt = null
+                            openWebPage("https://linux.do/login")
+                        },
+                        onBrowserOneClickAuth = ::triggerBrowserOneClickLogin,
+                        onDismiss = { guestLoginPrompt = null }
                     )
                 }
 
@@ -3591,9 +3818,17 @@ internal fun LinDoApp(
                                 val wasAlreadyAuth = wasAuthorized
                                 activeWebLoginUrl = null
                                 authVersion++
-                                if (wasAlreadyAuth) {
-                                    loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
-                                    syncUserProfile(force = true)
+                                scope.launch {
+                                    LinuxDoRepository.prepareForManualRecovery()
+                                    siteVerificationRestoreVersion++
+                                    networkRestoreVersion++
+                                    if (wasAlreadyAuth) {
+                                        loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+                                        syncUserProfile(force = true)
+                                    }
+                                    if (activeTopicDetail?.loadError != null && activeTopicSummary != null) {
+                                        openTopic(activeTopicSummary!!, activeTargetPostNumber, isManualRetry = true)
+                                    }
                                 }
                             }
                         )
@@ -5045,9 +5280,7 @@ internal fun CommunityHomeFeedPane(
                     ) {
                         if (errorMessage != null) {
                             val needsSiteVerify = errorMessage.contains("站点验证")
-                            val needsLogin = !needsSiteVerify && !isAuthorized && (
-                                errorMessage.contains("登录") || errorMessage.contains("权限")
-                            )
+                            val needsLogin = isGuestLoginRequiredError(isAuthorized, errorMessage)
                             val lacksTrustLevel = !needsSiteVerify && isAuthorized && (
                                 errorMessage.contains("权限") || errorMessage.contains("等级")
                             )
@@ -6192,6 +6425,8 @@ internal fun CommunityTopicReaderPane(
                 if (LinuxDoRepository.setTopicBookmark(summary.id, value)) {
                     isBookmarked = value
                     showRemoveBookmark = false
+                } else {
+                    bookmarkError = LinuxDoRepository.lastMutationErrorOr("收藏操作失败")
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (error: Exception) { bookmarkError = error.message ?: "收藏操作失败" }
@@ -6206,6 +6441,8 @@ internal fun CommunityTopicReaderPane(
     }
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
     var isLoadingGapPosts by remember(summary.id) { mutableStateOf(false) }
     var loadMorePostsError by remember(summary.id) { mutableStateOf(false) }
@@ -6515,6 +6752,7 @@ internal fun CommunityTopicReaderPane(
     }
 
     var showTopMoreMenu by remember(summary.id) { mutableStateOf(false) }
+    val requestGuestLogin = LocalRequestGuestLogin.current
     var expandTopBarTitle by remember(summary.id) { mutableStateOf(false) }
     var showAiSummaryPanel by remember(summary.id) { mutableStateOf(false) }
     var isLoadingAiSummary by remember(summary.id) { mutableStateOf(false) }
@@ -6616,18 +6854,25 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
+            if (activeVerify) {
+                if (bookmarkError?.contains("站点验证") == true) bookmarkError = null
+                if (deletePostError?.contains("站点验证") == true) deletePostError = null
+            }
             val currentFloorErr = floorLoadError ?: "楼层加载失败".takeIf { loadMorePostsError }
-            if (currentFloorErr != null && isTransientRecoverableLoadError(currentFloorErr)) {
+            if (currentFloorErr != null && (activeVerify || isTransientRecoverableLoadError(currentFloorErr))) {
                 floorLoadError = null
                 loadMorePostsError = false
                 if (afterTailPostIds.isNotEmpty() && !isLoadingMorePosts && !isLoadingGapPosts && !changingReaderFilter) {
                     loadMoreFloorBatch(20, isManualRetry = true)
                 }
             }
-            if (navigationError != null && isTransientRecoverableLoadError(navigationError)) {
+            if (navigationError != null && (activeVerify || isTransientRecoverableLoadError(navigationError))) {
                 val target = pendingJumpFloor
                 if (target != null && !fetchingJumpWindow && !changingReaderFilter) {
                     jumpToFloor(target, pendingReturnFloor, pendingJumpRequiresExact, isManualRetry = true)
@@ -6635,7 +6880,7 @@ internal fun CommunityTopicReaderPane(
                     navigationError = null
                 }
             }
-            if (filterError != null && isTransientRecoverableLoadError(filterError)) {
+            if (filterError != null && (activeVerify || isTransientRecoverableLoadError(filterError))) {
                 if (!changingReaderFilter && !fetchingJumpWindow && !isLoadingMorePosts) {
                     toggleOnlyOpMode()
                 } else {
@@ -6711,7 +6956,8 @@ internal fun CommunityTopicReaderPane(
                 tint = if (isBookmarked) palette.brandGold else palette.inkSecondary,
                 onClick = {
                     if (!UserApiKeyAuthManager.isAuthorized()) {
-                        onRequestLogin()
+                        requestGuestLogin?.invoke("登录后收藏话题", "登录 LINUX DO 账号后可随时收藏话题并跨端同步")
+                            ?: onRequestLogin()
                         return@TonalCircleIconButton
                     }
                     if (!bookmarkBusy) {
@@ -6768,7 +7014,8 @@ internal fun CommunityTopicReaderPane(
                     modifier = Modifier.clickable {
                         if (!UserApiKeyAuthManager.isAuthorized()) {
                             showTopMoreMenu = false
-                            onRequestLogin()
+                            requestGuestLogin?.invoke("登录后订阅话题", "登录 LINUX DO 账号后可关注话题更新动态")
+                                ?: onRequestLogin()
                             return@clickable
                         }
                         val prevLevel = notificationLevel
@@ -6782,6 +7029,7 @@ internal fun CommunityTopicReaderPane(
                             val ok = LinuxDoRepository.setTopicNotificationLevel(summary.id, nextLevel)
                             if (!ok) {
                                 notificationLevel = prevLevel
+                                bookmarkError = LinuxDoRepository.lastMutationErrorOr("订阅状态更新失败")
                             }
                         }
                     },
@@ -7046,15 +7294,16 @@ internal fun CommunityTopicReaderPane(
                         contentAlignment = Alignment.Center
                     ) {
                         val needsSiteVerify = detail.loadError.contains("站点验证")
-                        val needsLogin = !needsSiteVerify && !UserApiKeyAuthManager.isAuthorized() && (
-                            detail.loadError.contains("登录") || detail.loadError.contains("权限") || detail.loadError.contains("私密")
-                        )
+                        val needsLogin = isGuestLoginRequiredError(UserApiKeyAuthManager.isAuthorized(), detail.loadError)
                         LinDoStatePanel(
                             LinDoMascotState.NetworkError,
                             detail = detail.loadError,
                             onRetry = when {
                                 needsSiteVerify -> ({ onOpenWebUrl("https://linux.do/") })
-                                needsLogin -> onRequestLogin
+                                needsLogin -> ({
+                                    requestGuestLogin?.invoke("该话题需要登录后查看", "登录 LINUX DO 账号后即可访问专属或受限话题")
+                                        ?: onRequestLogin()
+                                })
                                 detail.unavailable -> onUnavailable
                                 else -> onRefresh
                             },
@@ -7136,7 +7385,8 @@ internal fun CommunityTopicReaderPane(
                     onDeletePost = { targetPost -> pendingDeletePost = targetPost; deletePostError = null },
                     onReplyFloor = { targetPost ->
                         if (!UserApiKeyAuthManager.isAuthorized()) {
-                            onRequestLogin()
+                            requestGuestLogin?.invoke("登录后参与回复", "登录 LINUX DO 账号，参与话题讨论与互动")
+                                ?: onRequestLogin()
                         } else {
                             replyTargetPostNumber = targetPost.postNumber
                             replyTargetUsername = targetPost.username
@@ -7147,7 +7397,8 @@ internal fun CommunityTopicReaderPane(
                     },
                     onQuoteFloor = { targetPost, selection ->
                         if (!UserApiKeyAuthManager.isAuthorized()) {
-                            onRequestLogin()
+                            requestGuestLogin?.invoke("登录后参与回复", "登录 LINUX DO 账号，参与话题讨论与互动")
+                                ?: onRequestLogin()
                         } else {
                             val quote = selection ?: postPreviewText(targetPost.cookedHtml).take(160)
                             replyTargetPostNumber = targetPost.postNumber
@@ -7257,7 +7508,10 @@ internal fun CommunityTopicReaderPane(
                             .weight(1f)
                             .heightIn(min = 44.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable(onClick = onRequestLogin)
+                            .clickable {
+                                requestGuestLogin?.invoke("登录后参与回复", "登录 LINUX DO 账号，参与话题讨论与互动")
+                                    ?: onRequestLogin()
+                            }
                             .padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -7330,7 +7584,7 @@ internal fun CommunityTopicReaderPane(
                                     streamIds = current.streamIds.filterNot { it == target.id },
                                     postsCount = (current.postsCount - 1).coerceAtLeast(1))) }
                                 pendingDeletePost = null
-                            } else deletePostError = "删除失败"
+                            } else deletePostError = LinuxDoRepository.lastMutationErrorOr("删除失败")
                         } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
                         catch (error: Exception) { deletePostError = error.message ?: "删除失败" }
                         finally { deletingPost = false }
@@ -7549,6 +7803,7 @@ internal fun CommunityPostFloor(
     val palette = LocalPalette.current
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
+    val requestGuestLogin = LocalRequestGuestLogin.current
 
     val isOp = post.isTopicOwner || post.username.equals(opUsername, ignoreCase = true)
     val account = UserApiKeyAuthManager.currentUser
@@ -7615,8 +7870,19 @@ internal fun CommunityPostFloor(
         }
     }
 
+    val floorVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastFloorVerifyVer by remember(post.id) { mutableIntStateOf(floorVerifyVer) }
+    LaunchedEffect(floorVerifyVer) {
+        if (floorVerifyVer > 0 && floorVerifyVer != lastFloorVerifyVer) {
+            lastFloorVerifyVer = floorVerifyVer
+            if (floorActionError?.contains("站点验证") == true) {
+                floorActionError = null
+            }
+        }
+    }
+
     LaunchedEffect(floorActionError) {
-        if (floorActionError != null) {
+        if (floorActionError != null && !floorActionError!!.contains("站点验证")) {
             delay(4200L)
             floorActionError = null
         }
@@ -7630,7 +7896,8 @@ internal fun CommunityPostFloor(
 
     fun toggleReaction(reactionId: String, emojiChar: String) {
         if (!UserApiKeyAuthManager.isAuthorized()) {
-            onRequestLogin()
+            requestGuestLogin?.invoke("登录后点赞与表态", "登录 LINUX DO 账号后即可点赞或用表情回应帖子")
+                ?: onRequestLogin()
             return
         }
         if (isOwnPost) {
@@ -7695,7 +7962,8 @@ internal fun CommunityPostFloor(
 
     fun submitBoost(rawText: String = boostInputText) {
         if (!UserApiKeyAuthManager.isAuthorized()) {
-            onRequestLogin()
+            requestGuestLogin?.invoke("登录后使用小火箭助力", "登录 LINUX DO 账号后可发送小火箭短评助力好帖")
+                ?: onRequestLogin()
             return
         }
         if (!canComposeBoost || isSubmittingBoost) return
@@ -8222,6 +8490,7 @@ internal fun CommunityPostFloor(
         // 2.5 点赞/表态/小火箭操作反馈提示条（避免静默失败回退）
         AnimatedVisibility(visible = floorActionError != null) {
             val errMsg = floorActionError.orEmpty()
+            val needsVerify = errMsg.contains("站点验证")
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -8229,7 +8498,9 @@ internal fun CommunityPostFloor(
                     .clip(RoundedCornerShape(10.dp))
                     .background(Color(0xFFEF4444).copy(alpha = if (palette.isDark) 0.18f else 0.10f))
                     .border(0.6.dp, Color(0xFFEF4444).copy(alpha = 0.35f), RoundedCornerShape(10.dp))
-                    .clickable { floorActionError = null }
+                    .clickable {
+                        if (needsVerify) onOpenWebUrl("https://linux.do/") else floorActionError = null
+                    }
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -8241,10 +8512,22 @@ internal fun CommunityPostFloor(
                     color = if (palette.isDark) Color(0xFFFCA5A5) else Color(0xFFDC2626),
                     modifier = Modifier.weight(1f)
                 )
+                if (needsVerify) {
+                    Text(
+                        text = "去验证",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.activeChipText,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
                 Icon(
                     imageVector = LinDoIcons.Close,
                     contentDescription = "关闭提示",
-                    modifier = Modifier.padding(start = 8.dp).size(13.dp),
+                    modifier = Modifier
+                        .padding(start = 8.dp)
+                        .size(13.dp)
+                        .clickable { floorActionError = null },
                     tint = palette.inkTertiary
                 )
             }
@@ -8624,8 +8907,13 @@ internal fun CommunityPostFloor(
                                 }
                             },
                             onLongClick = {
-                                showReactionPopover = !showReactionPopover
-                                if (showReactionPopover) showBoostComposer = false
+                                if (!UserApiKeyAuthManager.isAuthorized()) {
+                                    requestGuestLogin?.invoke("登录后点赞与表态", "登录 LINUX DO 账号后即可点赞或用表情回应帖子")
+                                        ?: onRequestLogin()
+                                } else {
+                                    showReactionPopover = !showReactionPopover
+                                    if (showReactionPopover) showBoostComposer = false
+                                }
                             }
                         ),
                     contentAlignment = Alignment.Center
@@ -8655,7 +8943,8 @@ internal fun CommunityPostFloor(
                 if (!isOwnPost && (canComposeBoost || myBoost != null)) {
                     IconButton(onClick = {
                         if (!UserApiKeyAuthManager.isAuthorized()) {
-                            onRequestLogin()
+                            requestGuestLogin?.invoke("登录后使用小火箭助力", "登录 LINUX DO 账号后可发送小火箭短评助力好帖")
+                                ?: onRequestLogin()
                         } else if (myBoost != null) {
                             expandedBoostId = if (expandedBoostId == myBoost.id) null else myBoost.id
                         } else {
@@ -8716,8 +9005,13 @@ internal fun CommunityPostFloor(
                                 },
                                 onClick = {
                                     showFloorMoreMenu = false
-                                    showReactionPopover = true
-                                    showBoostComposer = false
+                                    if (!UserApiKeyAuthManager.isAuthorized()) {
+                                        requestGuestLogin?.invoke("登录后点赞与表态", "登录 LINUX DO 账号后即可点赞或用表情回应帖子")
+                                            ?: onRequestLogin()
+                                    } else {
+                                        showReactionPopover = true
+                                        showBoostComposer = false
+                                    }
                                 }
                             )
                         }
@@ -9168,6 +9462,7 @@ private fun BoostInlineContent(
 @Composable
 internal fun CommunityDiscoverScreen(
     hotTopics: List<TopicSummary>,
+    isAuthorized: Boolean = true,
     isLoadingHot: Boolean = false,
     onRefreshHot: () -> Unit = {},
     onSelectCategory: (Int) -> Unit,
@@ -9192,16 +9487,16 @@ internal fun CommunityDiscoverScreen(
 
     val ecoPortalRows = remember {
         listOf(
-            DiscoverBoardEntry("Connect 中心", "保级 / 邮箱 / DeepLX", LinDoIcons.ShieldCheck, Color(0xFF3B82F6), "https://connect.linux.do/"),
+            DiscoverBoardEntry("Connect 中心", "保级 / 邮箱 / DeepLX", LinDoIcons.ShieldCheck, Color(0xFF3B82F6), "https://connect.linux.do/", requiresAuth = true),
             DiscoverBoardEntry("积分与活跃榜", "全站获赞与活跃排行", LinDoIcons.Trophy, Color(0xFFF59E0B), "https://linux.do/leaderboard"),
             DiscoverBoardEntry("全站徽章墙", "荣誉徽章与头衔规则", LinDoIcons.AwardBadge, Color(0xFFEAB308), "https://linux.do/badges"),
             DiscoverBoardEntry("关于与准则", "管理团队 / 统计 / 准则", LinDoIcons.InfoCircle, Color(0xFF6366F1), "https://linux.do/about"),
-            DiscoverBoardEntry("Credit 积分", "积分流转与服务认证", LinDoIcons.Coins, Color(0xFFF59E0B), "https://credit.linux.do/"),
-            DiscoverBoardEntry("CDK 分发", "社区福利领取与发布", LinDoIcons.Gift, Color(0xFFEC4899), "https://cdk.linux.do/"),
-            DiscoverBoardEntry("LD Hub", "生态 AI 与聚合中心", LinDoIcons.Sparkles, Color(0xFF8B5CF6), "https://hub.linux.do/"),
+            DiscoverBoardEntry("Credit 积分", "积分流转与服务认证", LinDoIcons.Coins, Color(0xFFF59E0B), "https://credit.linux.do/", requiresAuth = true),
+            DiscoverBoardEntry("CDK 分发", "社区福利领取与发布", LinDoIcons.Gift, Color(0xFFEC4899), "https://cdk.linux.do/", requiresAuth = true),
+            DiscoverBoardEntry("LD Hub", "生态 AI 与聚合中心", LinDoIcons.Sparkles, Color(0xFF8B5CF6), "https://hub.linux.do/", requiresAuth = true),
             DiscoverBoardEntry("社区 Wiki", "共建指南与文档库", LinDoIcons.BookOpen, Color(0xFF10B981), "https://wiki.linux.do/"),
             DiscoverBoardEntry("IDC Flare", "官方云与主机生态站", LinDoIcons.CloudServer, Color(0xFF06B6D4), "https://idcflare.com/"),
-            DiscoverBoardEntry("Lottery 抽奖", "官方楼层开奖工具", LinDoIcons.Trophy, Color(0xFFF97316), "https://lottery.linux.do/")
+            DiscoverBoardEntry("Lottery 抽奖", "官方楼层开奖工具", LinDoIcons.Trophy, Color(0xFFF97316), "https://lottery.linux.do/", requiresAuth = true)
         ).chunked(2)
     }
 
@@ -9419,6 +9714,7 @@ internal fun CommunityDiscoverScreen(
                                     subtitle = entry.subtitle,
                                     icon = entry.icon,
                                     iconTint = entry.tint,
+                                    showLock = entry.requiresAuth && !isAuthorized,
                                     modifier = Modifier.weight(1f),
                                     onClick = { onOpenWebUrl(entry.url) }
                                 )
@@ -9454,7 +9750,8 @@ private data class DiscoverBoardEntry(
     val subtitle: String,
     val icon: ImageVector,
     val tint: Color,
-    val url: String = ""
+    val url: String = "",
+    val requiresAuth: Boolean = false
 )
 
 @Composable
@@ -9463,6 +9760,7 @@ private fun DiscoverPortalCard(
     subtitle: String,
     icon: ImageVector,
     iconTint: Color,
+    showLock: Boolean = false,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
@@ -9475,12 +9773,25 @@ private fun DiscoverPortalCard(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = title,
-            modifier = Modifier.size(16.dp),
-            tint = iconTint
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = title,
+                modifier = Modifier.size(16.dp),
+                tint = iconTint
+            )
+            if (showLock) {
+                Icon(
+                    imageVector = LinDoIcons.FaLock,
+                    contentDescription = "需登录访问",
+                    modifier = Modifier.size(11.dp),
+                    tint = palette.inkSecondary
+                )
+            }
+        }
         Text(
             text = title,
             fontSize = 13.5.sp,
@@ -9625,6 +9936,8 @@ private fun CommunityMessagesScreen(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var showMarkAllConfirm by remember { mutableStateOf(false) }
     var markingAll by remember { mutableStateOf(false) }
     var markAllError by remember { mutableStateOf<String?>(null) }
@@ -9789,11 +10102,17 @@ private fun CommunityMessagesScreen(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
+            if (activeVerify && markAllError?.contains("站点验证") == true) {
+                markAllError = null
+            }
             if (isAuthorized) {
-                if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+                if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                     manualRecoveryRequested = true
                     reloadToken++
                 }
@@ -10169,7 +10488,7 @@ private fun CommunityMessagesScreen(
                             notifications = notifications.map { it.copy(read = true) }
                             onMarkedAllRead()
                         } else {
-                            markAllError = "标记失败"
+                            markAllError = LinuxDoRepository.lastMutationErrorOr("标记失败")
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
                     catch (error: Exception) { markAllError = error.message ?: "标记失败" }
@@ -10236,6 +10555,7 @@ internal fun CommunityProfileScreen(
     onOpenAuthSheet: () -> Unit,
     onOpenWebUrl: (String) -> Unit = {},
     onPrimaryWebLogin: () -> Unit,
+    onRequestGuestLogin: (String, String) -> Unit = { _, _ -> onPrimaryWebLogin() },
     onLogout: () -> Unit,
     listState: androidx.compose.foundation.lazy.LazyListState = androidx.compose.foundation.lazy.rememberLazyListState()
 ) {
@@ -10333,7 +10653,9 @@ internal fun CommunityProfileScreen(
                                     .clip(CircleShape)
                                     .background(palette.subtleSurface)
                                     .border(0.5.dp, palette.hairline, CircleShape)
-                                    .clickable(onClick = onPrimaryWebLogin),
+                                    .clickable {
+                                        onRequestGuestLogin("欢迎登录 LINUX DO", "登录后自动同步个人资料、Connect 保级、收藏与通知")
+                                    },
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
@@ -10423,7 +10745,9 @@ internal fun CommunityProfileScreen(
                             )
                         } else {
                             TextButton(
-                                onClick = onPrimaryWebLogin,
+                                onClick = {
+                                    onRequestGuestLogin("欢迎登录 LINUX DO", "登录后自动同步个人资料、Connect 保级、收藏与通知")
+                                },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 Text(
@@ -10488,16 +10812,20 @@ internal fun CommunityProfileScreen(
                     ) {
                         val topActions = listOf(
                             Triple("收藏", LinDoIcons.Bookmark) {
-                                if (isAuthorized) onOpenBookmarks() else onPrimaryWebLogin()
+                                if (isAuthorized) onOpenBookmarks()
+                                else onRequestGuestLogin("登录后使用我的收藏", "随时收藏干货好帖，跨端同步书签记录")
                             },
                             Triple("历史", LinDoIcons.HistoryClock) {
-                                if (isAuthorized) onOpenReadHistory() else onPrimaryWebLogin()
+                                if (isAuthorized) onOpenReadHistory()
+                                else onRequestGuestLogin("登录后查看阅读历史", "自动记录浏览足迹与阅读楼层进度")
                             },
                             Triple("草稿", LinDoIcons.FileText) {
-                                if (isAuthorized) onOpenCloudDrafts() else onPrimaryWebLogin()
+                                if (isAuthorized) onOpenCloudDrafts()
+                                else onRequestGuestLogin("登录后使用云端草稿", "跨设备实时同步未发布的话题与回复草稿")
                             },
                             Triple("活动", LinDoIcons.Calendar) {
-                                if (isAuthorized) onOpenActivities() else onPrimaryWebLogin()
+                                if (isAuthorized) onOpenActivities()
+                                else onRequestGuestLogin("登录后查看互动足迹", "查看你发布的话题、回复与获赞记录")
                             }
                         )
 
@@ -10551,7 +10879,10 @@ internal fun CommunityProfileScreen(
                     LinDoSettingRow(
                         icon = LinDoIcons.Users,
                         title = "关注与粉丝",
-                        onClick = { if (isAuthorized) onOpenFollowSheet() else onPrimaryWebLogin() }
+                        onClick = {
+                            if (isAuthorized) onOpenFollowSheet()
+                            else onRequestGuestLogin("登录后查看关注与粉丝", "关注感兴趣的佬友，订阅他们的最新动态")
+                        }
                     )
                     LinDoSettingRow(
                         icon = LinDoIcons.Coins,
@@ -10561,13 +10892,19 @@ internal fun CommunityProfileScreen(
                     LinDoSettingRow(
                         icon = LinDoIcons.Sparkles,
                         title = "Connect 保级与成长",
-                        onClick = { if (isAuthorized) onOpenConnectSheet() else onPrimaryWebLogin() }
+                        onClick = {
+                            if (isAuthorized) onOpenConnectSheet()
+                            else onRequestGuestLogin("登录后访问 Connect 中心", "查看信任等级进度、保级指标与专属社区权益")
+                        }
                     )
                     LinDoSettingRow(
                         icon = LinDoIcons.ShieldCheck,
                         title = "账号与偏好设置",
                         showDivider = false,
-                        onClick = { if (isAuthorized) onOpenAccountPreferences() else onPrimaryWebLogin() }
+                        onClick = {
+                            if (isAuthorized) onOpenAccountPreferences()
+                            else onRequestGuestLogin("登录后管理账号设置", "自定义个人主页、头衔徽章与隐私偏好")
+                        }
                     )
 
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -10969,6 +11306,8 @@ private fun BadgeDetailBottomSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
 
     var officialBadge by remember(badge.id) { mutableStateOf<GrantedBadge?>(null) }
     val effectiveBadge = officialBadge ?: badge
@@ -10995,9 +11334,15 @@ private fun BadgeDetailBottomSheet(
             )
         }
     }
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
+            if (activeVerify && titleEquipStatus?.contains("站点验证") == true) {
+                titleEquipStatus = null
+            }
             val id = badge.id.takeIf { it > 0 } ?: return@LaunchedEffect
             if (officialBadge == null) {
                 officialBadge = LinuxDoRepository.fetchBadgeDefinition(id)?.let { def ->
@@ -11141,12 +11486,16 @@ private fun BadgeDetailBottomSheet(
 
             if (titleEquipStatus != null) {
                 Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = titleEquipStatus!!,
-                    fontSize = 11.8.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = if (equippedNow) palette.brandGold else palette.inkSecondary
-                )
+                if (titleEquipStatus!!.contains("站点验证")) {
+                    LinDoFeedbackRow(message = titleEquipStatus!!, state = LinDoMascotState.NetworkError)
+                } else {
+                    Text(
+                        text = titleEquipStatus!!,
+                        fontSize = 11.8.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (equippedNow) palette.brandGold else palette.inkSecondary
+                    )
+                }
             }
         }
     }
@@ -11170,6 +11519,8 @@ private fun CommunityBadgesSheet(
     val focusManager = LocalFocusManager.current
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
 
     var selectedTab by remember(targetUsername) { mutableIntStateOf(if (targetUsername.isBlank()) 1 else 0) }
     var tierFilter by remember { mutableIntStateOf(0) } // 0=全部, 1=金徽章, 2=银徽章, 3=铜徽章, 4=可设头衔
@@ -11241,8 +11592,11 @@ private fun CommunityBadgesSheet(
             isLoading = false
         }
     }
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
             if (ownedError && !loadingOwned && targetUsername.isNotBlank()) {
                 manualRetryOwned = true
@@ -11696,6 +12050,114 @@ private fun UserApiKeyAuthSheet(
     }
 }
 
+/**
+ * 游客模式统一原生登录引导底部弹窗：
+ * 在需要登录才能操作（发帖、回复、点赞、收藏、小火箭、私信）或查看（受限版块、Connect / Credit / CDK / Hub / Lottery、专属页面）时弹出，
+ * 避免无预告直接切入全屏 WebView 登录安全验证页，保留当前浏览位置并提供应用内登录与系统浏览器免密授权双通道。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GuestLoginGuideSheet(
+    prompt: GuestLoginPrompt,
+    onPrimaryWebLogin: () -> Unit,
+    onBrowserOneClickAuth: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val palette = LocalPalette.current
+    if (LocalIsWebModalActive.current) return
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = palette.cardSurface,
+        contentColor = palette.inkPrimary
+    ) {
+        LinDoScaledPopupContent {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(horizontal = 24.dp)
+                    .padding(top = 4.dp, bottom = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                LinDoGlassAppIcon(tileSize = 52.dp)
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Text(
+                    text = prompt.title,
+                    fontSize = 18.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.25).sp,
+                    color = palette.inkPrimary,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = prompt.subtitle,
+                    fontSize = 13.2.sp,
+                    lineHeight = 19.sp,
+                    color = palette.inkSecondary,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(22.dp))
+
+                LinDoPrimaryButton(
+                    label = "使用 LINUX DO 登录",
+                    onClick = onPrimaryWebLogin
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(46.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(palette.subtleSurface)
+                        .clickable(onClick = onBrowserOneClickAuth)
+                        .padding(horizontal = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Globe,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp),
+                        tint = palette.inkPrimary
+                    )
+                    Spacer(modifier = Modifier.width(7.dp))
+                    Text(
+                        text = "通过系统浏览器免密授权",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.inkPrimary,
+                        maxLines = 1
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = "继续以游客浏览",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.inkTertiary,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun GoogleWelcomeLoginScreen(
     onPrimaryWebLogin: () -> Unit,
@@ -11978,6 +12440,19 @@ internal fun LinDoMarkdownWorkbench(
 
     var mentionError by remember { mutableStateOf<String?>(null) }
     var mentionReloadToken by remember { mutableIntStateOf(0) }
+    val wbVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastWbVerifyVer by remember { mutableIntStateOf(wbVerifyVer) }
+    LaunchedEffect(wbVerifyVer) {
+        if (wbVerifyVer > 0 && wbVerifyVer != lastWbVerifyVer) {
+            lastWbVerifyVer = wbVerifyVer
+            if (uploadStatusText?.contains("站点验证") == true) {
+                uploadStatusText = null
+            }
+            if (mentionError != null) {
+                mentionReloadToken++
+            }
+        }
+    }
     LaunchedEffect(mentionSearchTerm, activeSubPanel, inlineMentionActive, mentionReloadToken) {
         if (activeSubPanel != WorkbenchSubPanel.MENTION && !inlineMentionActive) return@LaunchedEffect
         isSearchingMentions = true
@@ -12006,18 +12481,20 @@ internal fun LinDoMarkdownWorkbench(
             onUploadingChange(true)
             uploadStatusText = "正在上传 $fileName…"
             scope.launch {
+                var uploadErrMsg: String? = null
                 val result = try {
                     LinuxDoRepository.uploadMediaToLinuxDo(fileName, mimeType, bytes)
                 } catch (cancelled: kotlinx.coroutines.CancellationException) {
                     throw cancelled
-                } catch (_: Exception) {
+                } catch (error: Exception) {
+                    uploadErrMsg = error.message
                     null
                 } finally {
                     isUploadingMedia = false
                     onUploadingChange(false)
                 }
                 if (result == null) {
-                    uploadStatusText = "上传失败，请重试"
+                    uploadStatusText = uploadErrMsg?.takeIf { it.isNotBlank() } ?: "上传失败，请重试"
                 } else {
                     lastUploadedImage = result.takeIf { it.isImage }
                     uploadStatusText = "已插入 ${result.originalFilename}"
@@ -12186,7 +12663,9 @@ internal fun LinDoMarkdownWorkbench(
                     message = uploadStatusText ?: "图片已插入",
                     state = when {
                         isUploadingMedia -> LinDoMascotState.Loading
-                        uploadStatusText?.contains("失败") == true -> LinDoMascotState.NetworkError
+                        uploadStatusText?.contains("失败") == true ||
+                            uploadStatusText?.contains("验证") == true ||
+                            uploadStatusText?.contains("异常") == true -> LinDoMascotState.NetworkError
                         else -> LinDoMascotState.Success
                     },
                     modifier = Modifier.weight(1f)
@@ -12452,6 +12931,7 @@ internal fun WorkbenchDrawerBottomSheet(
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
+    if (LocalIsWebModalActive.current) return
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -13762,6 +14242,8 @@ internal fun GlobalSearchModalSheet(
     val focusRequester = remember { FocusRequester() }
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
 
     var query by remember { mutableStateOf(initialQuery) }
     var order by remember { mutableStateOf<String?>(null) } // null=相关性, "latest"=最新, "likes"=最多赞
@@ -13883,10 +14365,13 @@ internal fun GlobalSearchModalSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (submittedQuery.isNotBlank() && !isSearching && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (submittedQuery.isNotBlank() && !isSearching && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             } else if (loadMoreError && !isSearching && !isLoadingMore) {
@@ -14296,6 +14781,8 @@ private fun UserNotificationsSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var showMarkAllConfirm by remember { mutableStateOf(false) }
     var markingAll by remember { mutableStateOf(false) }
     var markAllError by remember { mutableStateOf<String?>(null) }
@@ -14369,10 +14856,16 @@ private fun UserNotificationsSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (activeVerify && markAllError?.contains("站点验证") == true) {
+                markAllError = null
+            }
+            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             } else if (loadMoreError && !isLoading && !isLoadingMore) {
@@ -14578,7 +15071,7 @@ private fun UserNotificationsSheet(
                             notifications = notifications.map { it.copy(read = true) }
                             onUnreadCountSynced(0)
                         } else {
-                            markAllError = "标记失败"
+                            markAllError = LinuxDoRepository.lastMutationErrorOr("标记失败")
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
                     catch (error: Exception) { markAllError = error.message ?: "标记失败" }
@@ -14603,6 +15096,8 @@ private fun UserActivitiesSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     val filters = remember {
         listOf("全部动态" to null, "发布主帖" to "4", "我的回复" to "5", "送出的赞" to "1")
     }
@@ -14668,10 +15163,13 @@ private fun UserActivitiesSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             } else if (loadMoreError && !isLoading && !isLoadingMore) {
@@ -14774,6 +15272,8 @@ private fun UserBookmarksSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var items by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var bookmarkPage by remember { mutableIntStateOf(0) }
     var hasMore by remember { mutableStateOf(true) }
@@ -14840,10 +15340,16 @@ private fun UserBookmarksSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (activeVerify && deleteError?.contains("站点验证") == true) {
+                deleteError = null
+            }
+            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             } else if (loadMoreError && !isLoading && !isLoadingMore) {
@@ -14926,7 +15432,7 @@ private fun UserBookmarksSheet(
                                                         if (ok) {
                                                             items = items.filterNot { it.id == item.id }
                                                         } else {
-                                                            deleteError = "移除书签失败，请稍后重试"
+                                                            deleteError = LinuxDoRepository.lastMutationErrorOr("移除书签失败，请稍后重试")
                                                         }
                                                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
                                                         throw cancelled
@@ -14984,6 +15490,8 @@ internal fun UserPrivateMessagesSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     val openedDirectlyInComposer = !initialRecipient.isNullOrBlank() || initialDraft != null
     var pendingArchive by remember { mutableStateOf<TopicSummary?>(null) }
     var archiving by remember { mutableStateOf(false) }
@@ -15102,10 +15610,22 @@ internal fun UserPrivateMessagesSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (tab != 2 && !isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (activeVerify) {
+                if (statusIsError && statusMsg?.contains("站点验证") == true) {
+                    statusMsg = null
+                    statusIsError = false
+                }
+                if (archiveError?.contains("站点验证") == true) {
+                    archiveError = null
+                }
+            }
+            if (tab != 2 && !isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             } else if (tab != 2 && loadMorePmError && !isLoading && !isLoadingMorePm) {
@@ -15417,6 +15937,8 @@ private fun PublicUserCardSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var cardProfile by remember(username) { mutableStateOf<UserFullProfileSummary?>(null) }
     var allActions by remember(username) { mutableStateOf<List<UserActivityItem>>(emptyList()) }
     var topicActions by remember(username) { mutableStateOf<List<UserActivityItem>?>(null) }
@@ -15553,10 +16075,13 @@ private fun PublicUserCardSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             }
@@ -16057,6 +16582,8 @@ private fun UserReadHistorySheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var items by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
     var historyPage by remember { mutableIntStateOf(0) }
     var hasMore by remember { mutableStateOf(true) }
@@ -16116,10 +16643,13 @@ private fun UserReadHistorySheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             } else if (loadMoreError && !isLoading && !isLoadingMore) {
@@ -16210,9 +16740,14 @@ private fun UserReadHistorySheet(
 private fun UserCloudDraftsSheet(onDismiss: () -> Unit, onOpenDraftTopic: (CloudDraftItem) -> Unit) {
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var restoreRemountKey by remember { mutableIntStateOf(0) }
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
             LinuxDoRepository.prepareForManualRecovery()
             restoreRemountKey++
@@ -16238,6 +16773,8 @@ private fun EditProfileModalSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var displayName by remember { mutableStateOf(fullProfile?.displayName.orEmpty()) }
     var userTitle by remember { mutableStateOf(fullProfile?.title.orEmpty()) }
     var location by remember { mutableStateOf(fullProfile?.location.orEmpty()) }
@@ -16284,10 +16821,16 @@ private fun EditProfileModalSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (activeVerify && statusMessage?.contains("站点验证") == true) {
+                statusMessage = null
+            }
+            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             }
@@ -16669,6 +17212,8 @@ private fun UserFollowNetworkSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var activeTab by remember { mutableIntStateOf(0) } // 0=正在关注, 1=我的粉丝, 2=关注动态
     var users by remember { mutableStateOf<List<FollowUserEntry>>(emptyList()) }
     var feedItems by remember { mutableStateOf<List<UserActivityItem>>(emptyList()) }
@@ -16753,10 +17298,16 @@ private fun UserFollowNetworkSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (activeVerify && followActionError?.contains("站点验证") == true) {
+                followActionError = null
+            }
+            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             } else if (activeTab == 2 && loadMoreFeedError && !isLoading && !isLoadingMoreFeed) {
@@ -16938,7 +17489,9 @@ private fun UserFollowNetworkSheet(
                                                     users = users.map {
                                                         if (it.username == user.username) it.copy(isFollowing = prevFollow) else it
                                                     }
-                                                    followActionError = if (targetFollow) "关注失败，请稍后重试" else "取消关注失败，请稍后重试"
+                                                    followActionError = LinuxDoRepository.lastMutationErrorOr(
+                                                        if (targetFollow) "关注失败，请稍后重试" else "取消关注失败，请稍后重试"
+                                                    )
                                                 }
                                             } finally {
                                                 togglingUsernames = togglingUsernames - user.username
@@ -16976,6 +17529,8 @@ private fun CommunityLeaderboardSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     val periods = remember {
         listOf("今日榜" to "daily", "本周榜" to "weekly", "本月榜" to "monthly", "总榜" to "all")
     }
@@ -17056,10 +17611,13 @@ private fun CommunityLeaderboardSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             } else if (loadMoreError && !isLoading && !isLoadingMore) {
@@ -17224,6 +17782,8 @@ private fun UserAccountPreferencesSheet(
     val scope = rememberCoroutineScope()
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var snapshot by remember { mutableStateOf<UserAccountPreferencesSnapshot?>(null) }
     var hidePresence by remember { mutableStateOf(false) }
     var allowPm by remember { mutableStateOf(true) }
@@ -17257,10 +17817,16 @@ private fun UserAccountPreferencesSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && snapshot == null && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (activeVerify && toggleError?.contains("站点验证") == true) {
+                toggleError = null
+            }
+            if (!isLoading && snapshot == null && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             }
@@ -17483,6 +18049,8 @@ private fun CommunityAboutSheet(
     val palette = LocalPalette.current
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
     var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
+    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
+    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var aboutData by remember { mutableStateOf<CommunityAboutData?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -17510,10 +18078,13 @@ private fun CommunityAboutSheet(
         }
     }
 
-    LaunchedEffect(netRestoreVer) {
-        if (netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer) {
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify || passiveRestore) {
+            lastHandledSiteVerifyVer = siteVerifyVer
             lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && aboutData == null && loadError != null && isTransientRecoverableLoadError(loadError)) {
+            if (!isLoading && aboutData == null && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
                 manualRecoveryRequested = true
                 reloadToken++
             }

@@ -52,6 +52,7 @@ internal fun ComposerCategoryPicker(
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
+    if (do_.linux.lindo.ui.components.LocalIsWebModalActive.current) return
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -382,6 +383,7 @@ internal fun ComposerTagPicker(
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
+    if (do_.linux.lindo.ui.components.LocalIsWebModalActive.current) return
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
