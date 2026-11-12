@@ -32,7 +32,6 @@ kotlin {
             implementation(compose.runtime)
             implementation(compose.foundation)
             implementation(compose.material3)
-            implementation(compose.materialIconsExtended)
             implementation(compose.ui)
             implementation(compose.components.resources)
 
@@ -83,8 +82,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 30
-        versionName = "0.2.28"
+        versionCode = 31
+        versionName = "0.2.29"
     }
 
     packaging {
@@ -125,7 +124,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.0.28"
+            packageVersion = "1.0.29"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
 
             macOS {
@@ -163,8 +162,9 @@ tasks.matching { it.name == "packageDmg" }.configureEach {
             "/usr/local/bin/uv"
         ).firstOrNull { File(it).canExecute() } ?: "uv"
         val scriptFile = rootProject.file("scripts/build_macos_dmg.py")
+        val pkgVer = compose.desktop.application.nativeDistributions.packageVersion ?: "1.0.29"
         val appDir = layout.buildDirectory.dir("compose/binaries/main/app/Lindo.app").get().asFile
-        val dmgOut = layout.buildDirectory.file("compose/binaries/main/dmg/Lindo-1.0.28.dmg").get().asFile
+        val dmgOut = layout.buildDirectory.file("compose/binaries/main/dmg/Lindo-$pkgVer.dmg").get().asFile
         val iconFile = project.file("src/desktopMain/resources/icon.icns")
         val markFile = rootProject.file("design/brand-v3/sources/mark-transparent.png")
         if (scriptFile.isFile && appDir.isDirectory) {

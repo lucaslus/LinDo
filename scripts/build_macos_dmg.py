@@ -323,6 +323,7 @@ def build_dmg(
     volume_name: str = "Lindo",
     mark_path: Optional[Path] = None,
     preview_out: Optional[Path] = None,
+    dmg_format: str = "ULMO",
 ) -> None:
     import dmgbuild
 
@@ -362,7 +363,7 @@ def build_dmg(
         settings = {
             "filename": str(out_dmg),
             "volume_name": volume_name,
-            "format": "UDZO",
+            "format": dmg_format,
             "compression_level": 9,
             "files": [str(app_path)],
             "symlinks": {"Applications": "/Applications"},
@@ -400,6 +401,12 @@ def main() -> None:
     parser.add_argument("--volume-name", default="Lindo", help="Mounted volume name")
     parser.add_argument("--mark", default=None, type=Path, help="Optional brand mark PNG")
     parser.add_argument("--preview-out", default=None, type=Path, help="Optional PNG preview output")
+    parser.add_argument(
+        "--format",
+        default="ULMO",
+        choices=["ULMO", "ULFO", "UDBZ", "UDZO"],
+        help="macOS disk image compression format (default: ULMO / LZMA for macOS 10.15+)",
+    )
     args = parser.parse_args()
 
     build_dmg(
@@ -409,6 +416,7 @@ def main() -> None:
         volume_name=args.volume_name,
         mark_path=args.mark.resolve() if args.mark else None,
         preview_out=args.preview_out.resolve() if args.preview_out else None,
+        dmg_format=args.format,
     )
     print(f"Built macOS DMG: {args.out.resolve()} ({args.out.stat().st_size / (1024 * 1024):.1f} MB)")
 
