@@ -6,10 +6,10 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import java.security.InvalidKeyException
+import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.security.ProviderException
 import java.security.UnrecoverableKeyException
-import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -33,6 +33,14 @@ internal class KeystorePreferences(context: Context) : SharedPreferences by cont
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
         }.generateKey()
     }
+    private fun deleteKeyAliasQuietly() = synchronized(keyLock) {
+        runCatching {
+            KeyStore.getInstance("AndroidKeyStore").apply {
+                load(null)
+                deleteEntry(KEY_ALIAS)
+            }
+        }
+    }
     private fun isUnrecoverableKeyError(err: Throwable?): Boolean {
         var cur = err
         while (cur != null) {
@@ -53,15 +61,31 @@ internal class KeystorePreferences(context: Context) : SharedPreferences by cont
             if (stored != defValue) edit().putString(key, stored).apply()
             return stored
         }
-        return runCatching {
+        return try {
             val bytes = Base64.decode(stored.removePrefix(prefix), Base64.NO_WRAP)
+            if (bytes.size <= 12) {
+                backing.edit().remove(key).apply()
+                return defValue
+            }
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
             String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8)
-        }.getOrElse { err ->
-            if (err is AEADBadTagException || err is InvalidKeyException || err is IllegalArgumentException) {
-                backing.edit().remove(key).apply()
+        } catch (err: GeneralSecurityException) {
+            if (isUnrecoverableKeyError(err)) {
+                deleteKeyAliasQuietly()
             }
+            backing.edit().remove(key).apply()
+            defValue
+        } catch (err: ProviderException) {
+            if (isUnrecoverableKeyError(err)) {
+                deleteKeyAliasQuietly()
+            }
+            backing.edit().remove(key).apply()
+            defValue
+        } catch (_: IllegalArgumentException) {
+            backing.edit().remove(key).apply()
+            defValue
+        } catch (_: Exception) {
             defValue
         }
     }
@@ -80,8 +104,6 @@ internal class KeystorePreferences(context: Context) : SharedPreferences by cont
                     }
                     if (stored != null) {
                         editor.putString(key, stored)
-                    } else {
-                        editor.remove(key)
                     }
                 } else {
                     editor.putString(key, value)

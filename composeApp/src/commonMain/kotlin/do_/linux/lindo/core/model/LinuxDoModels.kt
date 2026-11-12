@@ -201,6 +201,8 @@ data class TopicSummary(
     val tags: List<String> = emptyList(),
     val excerpt: String? = null,
     val pinned: Boolean = false,
+    val closed: Boolean = false,
+    val archived: Boolean = false,
     val unseen: Boolean = false,
     val unreadPosts: Int = 0,
     val hasAcceptedAnswer: Boolean = false,
@@ -408,6 +410,8 @@ data class TopicDetailModel(
     val lastReadPostNumber: Int? = null,
     val notificationLevel: Int = 1,
     val unavailable: Boolean = false,
+    val closed: Boolean = false,
+    val archived: Boolean = false,
     val canEditTopic: Boolean = false,
     val categoryId: Int = 4
 )

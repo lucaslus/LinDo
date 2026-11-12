@@ -1,0 +1,102 @@
+name: Verify & Package Windows Desktop (Tests + MSI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional existing GitHub Release tag to upload Windows MSI to (e.g. v0.2.31-draft)"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-package-windows:
+    name: Windows E2E UI Tests & MSI Installer (x64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Ensure WiX Toolset v3.14 is available for jpackage MSI
+        shell: pwsh
+        run: |
+          $wixPaths = @(
+            "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+            "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          )
+          $found = $wixPaths | Where-Object { Test-Path "$_\light.exe" } | Select-Object -First 1
+          if (-not $found) {
+            Write-Host "Installing WiX Toolset 3.14.1 via Chocolatey..."
+            choco install wixtoolset --version=3.14.1 -y --no-progress
+            $found = "C:\Program Files (x86)\WiX Toolset v3.14\bin"
+          }
+          Write-Host "Using WiX bin: $found"
+          echo "$found" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run full Cross-Platform Core + Windows Desktop UI Automated Test Suite
+        shell: pwsh
+        env:
+          LINDO_PREVIEW_DIR: ${{ runner.temp }}\lindo-windows-previews
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:LINDO_PREVIEW_DIR" | Out-Null
+          ./gradlew.bat :composeApp:desktopTest --no-daemon --console=plain
+
+      - name: Upload Windows UI Rendered Verification Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lindo-windows-ui-verification-screenshots
+          path: ${{ runner.temp }}\lindo-windows-previews\*.png
+          if-no-files-found: ignore
+
+      - name: Build Native Windows Distributable & Smoke-Verify Lindo.exe
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force composeApp/build/compose/binaries/main/app -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force composeApp/build/compose/binaries/main/msi -ErrorAction SilentlyContinue
+          ./gradlew.bat :composeApp:createDistributable :composeApp:packageMsi --no-daemon --console=plain
+          $exe = Get-Item "composeApp/build/compose/binaries/main/app/Lindo/Lindo.exe"
+          Write-Host "Built Windows executable: $($exe.FullName) ($([math]::Round($exe.Length / 1KB, 1)) KB)"
+
+          $versionLine = Select-String -Path "composeApp/build.gradle.kts" -Pattern 'versionName = "([^"]+)"' | Select-Object -First 1
+          $ver = $versionLine.Matches[0].Groups[1].Value
+          $tagName = "${{ github.event.inputs.release_tag || github.ref_name }}"
+          $cleanTag = $tagName -replace '^v', ''
+          $effectiveVer = if ($cleanTag) { $cleanTag } else { $ver }
+          $msiSrc = Get-ChildItem "composeApp/build/compose/binaries/main/msi/*.msi" | Select-Object -First 1
+          $outMsi = "composeApp/build/compose/binaries/main/msi/lindo-$effectiveVer-windows-x64.msi"
+          Copy-Item $msiSrc.FullName $outMsi -Force
+          Get-ChildItem "composeApp/build/compose/binaries/main/msi/" | Format-Table Name, Length
+
+      - name: Upload Windows MSI Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lindo-windows-x64-msi
+          path: composeApp/build/compose/binaries/main/msi/lindo-*-windows-x64.msi
+
+      - name: Attach Windows MSI to GitHub Release
+        if: ${{ github.event.inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $targetTag = "${{ github.event.inputs.release_tag || github.ref_name }}"
+          gh release view "$targetTag" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$targetTag" --prerelease --title "$targetTag" --notes "Automated build for $targetTag"
+          }
+          $PSNativeCommandUseErrorActionPreference = $true
+          gh release upload "$targetTag" composeApp/build/compose/binaries/main/msi/lindo-*-windows-x64.msi --clobber

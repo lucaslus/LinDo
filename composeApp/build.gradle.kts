@@ -27,6 +27,7 @@ kotlin {
 
     sourceSets {
         val desktopMain by getting
+        val desktopTest by getting
 
         commonMain.dependencies {
             implementation(compose.runtime)
@@ -69,6 +70,11 @@ kotlin {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutines.swing)
         }
+
+        desktopTest.dependencies {
+            @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+            implementation(compose.uiTest)
+        }
     }
 }
 
@@ -82,8 +88,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 32
-        versionName = "0.2.30"
+        versionCode = 33
+        versionName = "0.2.31"
     }
 
     packaging {
@@ -114,18 +120,22 @@ dependencies {
 compose.desktop {
     application {
         mainClass = "do_.linux.lindo.MainKt"
-        jvmArgs(
-            "-XX:+UseZGC",
-            "-Dskiko.vsync.enabled=true",
-            "-Dsun.java2d.metal=true",
-            "-Dapple.awt.application.name=Lindo"
-        )
+        jvmArgs += buildList {
+            add("-XX:+UseZGC")
+            add("-Dskiko.vsync.enabled=true")
+            add("-Dfile.encoding=UTF-8")
+            if (org.gradle.internal.os.OperatingSystem.current().isMacOsX) {
+                add("-Dsun.java2d.metal=true")
+                add("-Dapple.awt.application.name=Lindo")
+            }
+        }
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.0.30"
+            packageVersion = "1.0.31"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
+            vendor = "Lindo Community"
 
             macOS {
                 bundleID = "do.linux.lindo"
@@ -148,6 +158,21 @@ compose.desktop {
                         <true/>
                     """.trimIndent()
                 }
+            }
+
+            windows {
+                iconFile.set(project.file("src/desktopMain/resources/icon.ico"))
+                menuGroup = "Lindo"
+                shortcut = true
+                dirChooser = true
+                perUserInstall = true
+                upgradeUuid = "9a4e7c31-62b8-4d95-b7f2-8c1e3409a520"
+            }
+
+            linux {
+                iconFile.set(project.file("src/desktopMain/resources/icon.png"))
+                shortcut = true
+                menuGroup = "Network"
             }
         }
     }

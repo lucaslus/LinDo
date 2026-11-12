@@ -129,7 +129,7 @@ internal fun TopicFloorNavigator(
                         }
                         if (!enteringFloor) {
                             TextButton(
-                                onClick = { onJump(target, true) },
+                                onClick = { onJump(target, false) },
                                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                             ) {
                                 Text("跳转", color = palette.activeChipText, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)

@@ -3,9 +3,13 @@ package do_.linux.lindo.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -17,13 +21,32 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.*
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
@@ -238,16 +261,31 @@ private fun PostRichContentBody(
                 node.username?.let { Text("@$it", color = palette.inkSecondary, fontSize = 12.sp) }
                 PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.quotedText)) }, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
             }
-            is PostBlockNode.CodeBlock -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp))) {
-                Row(Modifier.fillMaxWidth().padding(start = 12.dp)) {
-                    Text(node.language.ifBlank { "text" }, Modifier.weight(1f).padding(top = 14.dp), color = palette.inkSecondary, fontSize = 12.sp)
-                    TextButton(onClick = { clipboard.setText(AnnotatedString(node.code)) }, modifier = Modifier.heightIn(min = 48.dp)) {
-                        Text("复制代码", color = palette.activeChipText)
+            is PostBlockNode.CodeBlock -> {
+                var copied by remember(node.code) { mutableStateOf(false) }
+                LaunchedEffect(copied) {
+                    if (copied) {
+                        delay(1800)
+                        copied = false
                     }
                 }
-                SelectablePostText(node.code, onSelectionChange) {
-                    Text(node.code, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 20.sp,
-                        color = palette.inkPrimary, modifier = Modifier.horizontalScroll(rememberScrollState()).padding(12.dp))
+                Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp))) {
+                    Row(Modifier.fillMaxWidth().padding(start = 12.dp)) {
+                        Text(node.language.ifBlank { "text" }, Modifier.weight(1f).padding(top = 14.dp), color = palette.inkSecondary, fontSize = 12.sp)
+                        TextButton(
+                            onClick = {
+                                clipboard.setText(AnnotatedString(node.code))
+                                copied = true
+                            },
+                            modifier = Modifier.heightIn(min = 48.dp)
+                        ) {
+                            Text(if (copied) "已复制" else "复制代码", color = palette.activeChipText)
+                        }
+                    }
+                    SelectablePostText(node.code, onSelectionChange) {
+                        Text(node.code, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 20.sp,
+                            color = palette.inkPrimary, modifier = Modifier.horizontalScroll(rememberScrollState()).padding(12.dp))
+                    }
                 }
             }
             is PostBlockNode.BulletList -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -280,34 +318,58 @@ private fun PostRichContentBody(
                     }
                 }
             }
-            is PostBlockNode.ImageGallery -> node.urls.forEachIndexed { index, url ->
-                var failed by remember(url) { mutableStateOf(false) }
-                val fullUrl = node.fullUrls.getOrElse(index) { url }
-                val linkTarget = node.linkUrls.getOrNull(index)?.takeIf { it.isNotBlank() } ?: fullUrl
-                val alt = node.captions.getOrNull(index).orEmpty().ifBlank { "帖子配图" }
-                if (failed) {
-                    TextButton(onClick = { onOpenLink(linkTarget) }) { Text("$alt · 打开图片", color = palette.activeChipText) }
-                } else {
-                    val context = coil3.compose.LocalPlatformContext.current
-                    val imageRequest = remember(context, url) {
-                        coil3.request.ImageRequest.Builder(context)
-                            .data(url)
-                            .size(coil3.size.Size(coil3.size.Dimension(1440), coil3.size.Dimension.Undefined))
-                            .precision(coil3.size.Precision.INEXACT)
-                            .build()
+            is PostBlockNode.ImageGallery -> {
+                var lightboxIndex by remember(node) { mutableStateOf<Int?>(null) }
+                node.urls.forEachIndexed { index, url ->
+                    var failed by remember(url) { mutableStateOf(false) }
+                    val fullUrl = node.fullUrls.getOrElse(index) { url }
+                    val rawLink = node.linkUrls.getOrNull(index)?.trim().orEmpty()
+                    val linkTarget = rawLink.ifEmpty { fullUrl }
+                    val isExternalArticleLink = rawLink.isNotEmpty() &&
+                        !rawLink.equals(fullUrl, ignoreCase = true) &&
+                        !rawLink.equals(url, ignoreCase = true) &&
+                        !isPostImageAssetUrl(rawLink)
+                    val alt = node.captions.getOrNull(index).orEmpty().ifBlank { "帖子配图" }
+                    if (failed) {
+                        TextButton(onClick = {
+                            if (isExternalArticleLink) onOpenLink(linkTarget) else lightboxIndex = index
+                        }) { Text("$alt · 打开图片", color = palette.activeChipText) }
+                    } else {
+                        val context = coil3.compose.LocalPlatformContext.current
+                        val imageRequest = remember(context, url) {
+                            coil3.request.ImageRequest.Builder(context)
+                                .data(url)
+                                .size(coil3.size.Size(coil3.size.Dimension(1440), coil3.size.Dimension.Undefined))
+                                .precision(coil3.size.Precision.INEXACT)
+                                .build()
+                        }
+                        AsyncImage(
+                            model = imageRequest,
+                            contentDescription = alt,
+                            contentScale = ContentScale.FillWidth,
+                            filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
+                            onError = { failed = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 60.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(palette.subtleSurface)
+                                .clickable {
+                                    if (isExternalArticleLink) {
+                                        onOpenLink(linkTarget)
+                                    } else {
+                                        lightboxIndex = index
+                                    }
+                                }
+                        )
                     }
-                    AsyncImage(
-                        model = imageRequest,
-                        contentDescription = alt,
-                        contentScale = ContentScale.FillWidth,
-                        filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
-                        onError = { failed = true },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 60.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(palette.subtleSurface)
-                            .clickable { onOpenLink(linkTarget) }
+                }
+                lightboxIndex?.let { startIndex ->
+                    PostImageLightboxDialog(
+                        gallery = node,
+                        initialIndex = startIndex,
+                        onOpenLink = onOpenLink,
+                        onDismiss = { lightboxIndex = null }
                     )
                 }
             }
@@ -675,5 +737,356 @@ private fun NativePostPoll(
             }
         }
         error?.let { LinDoFeedbackRow(it, LinDoMascotState.NetworkError) }
+    }
+}
+
+private fun isPostImageAssetUrl(rawUrl: String): Boolean {
+    val cleanPath = rawUrl.substringBefore('#').substringBefore('?').lowercase()
+    return cleanPath.endsWith(".png") ||
+        cleanPath.endsWith(".jpg") ||
+        cleanPath.endsWith(".jpeg") ||
+        cleanPath.endsWith(".webp") ||
+        cleanPath.endsWith(".gif") ||
+        cleanPath.endsWith(".avif") ||
+        cleanPath.endsWith(".svg") ||
+        rawUrl.contains("/uploads/", ignoreCase = true) ||
+        rawUrl.contains("cdn.ldstatic.com", ignoreCase = true)
+}
+
+@Composable
+private fun PostImageLightboxDialog(
+    gallery: PostBlockNode.ImageGallery,
+    initialIndex: Int,
+    onOpenLink: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val totalCount = gallery.urls.size
+    if (totalCount == 0) {
+        LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
+    var currentIndex by remember(gallery, initialIndex) {
+        mutableIntStateOf(initialIndex.coerceIn(0, totalCount - 1))
+    }
+    var scale by remember(currentIndex) { mutableFloatStateOf(1f) }
+    var offset by remember(currentIndex) { mutableStateOf(Offset.Zero) }
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var copiedLink by remember(currentIndex) { mutableStateOf(false) }
+    var loadOriginalFailed by remember(currentIndex) { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(copiedLink) {
+        if (copiedLink) {
+            delay(1800)
+            copiedLink = false
+        }
+    }
+    LaunchedEffect(Unit) {
+        runCatching { focusRequester.requestFocus() }
+    }
+
+    val previewUrl = gallery.urls.getOrElse(currentIndex) { "" }
+    val fullUrl = gallery.fullUrls.getOrElse(currentIndex) { previewUrl }.ifBlank { previewUrl }
+    val displayUrl = if (loadOriginalFailed) previewUrl else fullUrl
+    val rawCaption = gallery.captions.getOrNull(currentIndex).orEmpty().trim()
+
+    fun clampOffset(candidate: Offset, targetScale: Float): Offset {
+        if (targetScale <= 1.01f) return Offset.Zero
+        val maxX = (viewportSize.width * (targetScale - 1f) / 2f).coerceAtLeast(0f)
+        val maxY = (viewportSize.height * (targetScale - 1f) / 2f).coerceAtLeast(0f)
+        return Offset(
+            x = candidate.x.coerceIn(-maxX, maxX),
+            y = candidate.y.coerceIn(-maxY, maxY)
+        )
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.92f))
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .focusRequester(focusRequester)
+                .focusable()
+                .onPreviewKeyEvent { keyEvent ->
+                    if (keyEvent.type == KeyEventType.KeyDown) {
+                        when (keyEvent.key) {
+                            Key.Escape -> {
+                                onDismiss()
+                                true
+                            }
+                            Key.DirectionLeft -> {
+                                if (totalCount > 1 && currentIndex > 0) {
+                                    currentIndex -= 1
+                                    true
+                                } else false
+                            }
+                            Key.DirectionRight -> {
+                                if (totalCount > 1 && currentIndex < totalCount - 1) {
+                                    currentIndex += 1
+                                    true
+                                } else false
+                            }
+                            else -> false
+                        }
+                    } else false
+                }
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { viewportSize = it }
+                    .pointerInput(currentIndex) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (scale > 1.05f) {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                } else {
+                                    scale = 2.5f
+                                    offset = Offset.Zero
+                                }
+                            },
+                            onTap = {
+                                if (scale <= 1.05f) {
+                                    onDismiss()
+                                }
+                            }
+                        )
+                    }
+                    .pointerInput(currentIndex) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            val nextScale = (scale * zoom).coerceIn(1f, 4f)
+                            val nextOffset = if (nextScale > 1.01f) {
+                                clampOffset(offset + pan, nextScale)
+                            } else {
+                                Offset.Zero
+                            }
+                            scale = nextScale
+                            offset = nextOffset
+                        }
+                    }
+                    .pointerInput(currentIndex) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.type == PointerEventType.Scroll) {
+                                    val scrollY = event.changes.firstOrNull()?.scrollDelta?.y ?: 0f
+                                    if (scrollY != 0f) {
+                                        val factor = if (scrollY < 0f) 1.18f else (1f / 1.18f)
+                                        val nextScale = (scale * factor).coerceIn(1f, 4f)
+                                        scale = nextScale
+                                        offset = clampOffset(offset, nextScale)
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                AsyncImage(
+                    model = displayUrl,
+                    contentDescription = rawCaption.ifBlank { "图片预览" },
+                    contentScale = ContentScale.Fit,
+                    filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
+                    onError = {
+                        if (!loadOriginalFailed && previewUrl != fullUrl && previewUrl.isNotBlank()) {
+                            loadOriginalFailed = true
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 24.dp, vertical = 64.dp)
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offset.x
+                            translationY = offset.y
+                        }
+                )
+            }
+
+            // Top bar: gallery index / caption, zoom reset chip, Close button
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (totalCount > 1) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White.copy(alpha = 0.14f))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = "${currentIndex + 1} / $totalCount",
+                            color = Color.White.copy(alpha = 0.92f),
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+                if (rawCaption.isNotBlank()) {
+                    Text(
+                        text = rawCaption,
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+                if (scale > 1.02f) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White.copy(alpha = 0.18f))
+                            .clickable {
+                                scale = 1f
+                                offset = Offset.Zero
+                            }
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = "${(scale * 100f).roundToInt()}% · 重置 100%",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.16f))
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "关闭图片预览",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            // Prev / Next arrows for multi-image galleries
+            if (totalCount > 1) {
+                if (currentIndex > 0) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .padding(start = 14.dp)
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.16f))
+                            .clickable { currentIndex -= 1 },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.ArrowLeft,
+                            contentDescription = "上一张",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+                if (currentIndex < totalCount - 1) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 14.dp)
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.16f))
+                            .clickable { currentIndex += 1 },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.ArrowRight,
+                            contentDescription = "下一张",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+
+            // Bottom subtle action bar
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .border(0.5.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(22.dp))
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                TextButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(fullUrl))
+                        copiedLink = true
+                    },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = if (copiedLink) LinDoIcons.Check else LinDoIcons.Link,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (copiedLink) "已复制图片链接" else "复制图片链接",
+                        color = Color.White,
+                        fontSize = 12.8.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .width(0.5.dp)
+                        .height(16.dp)
+                        .background(Color.White.copy(alpha = 0.25f))
+                )
+                TextButton(
+                    onClick = { onOpenLink(fullUrl) },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.ExternalLink,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "浏览器打开原图",
+                        color = Color.White,
+                        fontSize = 12.8.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
     }
 }

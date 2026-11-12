@@ -3,6 +3,7 @@ package do_.linux.lindo.core.site
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
+import do_.linux.lindo.core.runUiSafeStateWrite
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -84,6 +85,7 @@ object LinuxDoEmojiCatalog {
     )
 
     private val dynamicCustomUrls = ConcurrentHashMap<String, String>()
+    private val catalogLock = Any()
 
     @Volatile
     private var dynamicServerGroups: List<LinuxDoEmojiGroup> = emptyList()
@@ -100,7 +102,11 @@ object LinuxDoEmojiCatalog {
             val resolved = LinuxDoSiteRules.resolveUrl(cleanUrl)
             val prev = dynamicCustomUrls.put(cleanName, resolved)
             if (prev != resolved) {
-                catalogVersion++
+                synchronized(catalogLock) {
+                    runUiSafeStateWrite {
+                        catalogVersion++
+                    }
+                }
             }
         }
     }
@@ -253,10 +259,14 @@ object LinuxDoEmojiCatalog {
             }
         }
         val combined = brandGroups + standardGroups
-        if (combined.isNotEmpty()) {
-            dynamicServerGroups = combined
+        synchronized(catalogLock) {
+            if (combined.isNotEmpty()) {
+                dynamicServerGroups = combined
+            }
+            runUiSafeStateWrite {
+                catalogVersion++
+            }
         }
-        catalogVersion++
     }
 
     /**

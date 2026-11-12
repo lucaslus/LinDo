@@ -91,6 +91,7 @@ import do_.linux.lindo.ui.LinDoMascotState
 import do_.linux.lindo.ui.LinDoStatePanel
 import do_.linux.lindo.ui.LocalLinDoDarkTheme
 import do_.linux.lindo.ui.LinDoWelcomeScreen
+import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.ui.PlatformWebLoginHost
 import java.util.UUID
@@ -203,6 +204,8 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var trailingNetworkRestoreJob: Job? = null
     @Volatile
+    private var pauseWebViewJob: Job? = null
+    @Volatile
     private var lastPausedAtEpochMs: Long = 0L
     private var pendingMediaPickCallback: ((fileName: String, mimeType: String, bytes: ByteArray) -> Unit)? = null
     private var pendingWebFileChooserCallback: ValueCallback<Array<Uri>>? = null
@@ -211,11 +214,18 @@ class MainActivity : ComponentActivity() {
         val callback = pendingWebFileChooserCallback
         pendingWebFileChooserCallback = null
         if (callback == null) return@registerForActivityResult
-        val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
-            ?: result.data?.clipData?.let { clip ->
-                Array(clip.itemCount) { idx -> clip.getItemAt(idx).uri }
+        val uris = if (result.resultCode == android.app.Activity.RESULT_OK) {
+            result.data?.clipData?.let { clip ->
+                (0 until clip.itemCount)
+                    .mapNotNull { idx -> clip.getItemAt(idx)?.uri }
+                    .takeIf { it.isNotEmpty() }
+                    ?.toTypedArray()
             }
-            ?: result.data?.data?.let { arrayOf(it) }
+                ?: WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+                ?: result.data?.data?.let { arrayOf(it) }
+        } else {
+            null
+        }
         callback.onReceiveValue(uris)
     }
 
@@ -227,9 +237,12 @@ class MainActivity : ComponentActivity() {
         pendingWebFileChooserCallback?.onReceiveValue(null)
         pendingWebFileChooserCallback = filePathCallback
         return runCatching {
-            val intent = fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+            val allowMultiple = fileChooserParams?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+            val intent = (fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = "*/*"
+            }).apply {
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple)
             }
             webFileChooserLauncher.launch(intent)
             true
@@ -534,6 +547,7 @@ class MainActivity : ComponentActivity() {
                     remove("user_title")
                     remove("trust_level")
                     remove("read_topic_posts")
+                    remove("composer_drafts")
                     if (remainingCookies.isBlank()) {
                         remove("raw_cookies")
                     } else {
@@ -1442,11 +1456,13 @@ class MainActivity : ComponentActivity() {
         if (bridgeResult != null && bridgeResult!!.first > 0) {
             consecutiveBridgeFailures.set(0)
         } else if (!completedFromJs) {
-            consecutiveBridgeFailures.incrementAndGet()
-            activityScope.launch {
-                rebuildApiWebView(reason = "js_bridge_no_callback", expectedGeneration = observedGen)
+            if (UserPresenceService.isForeground) {
+                consecutiveBridgeFailures.incrementAndGet()
+                activityScope.launch {
+                    rebuildApiWebView(reason = "js_bridge_no_callback", expectedGeneration = observedGen)
+                }
             }
-        } else if (!isBackground) {
+        } else if (!isBackground && UserPresenceService.isForeground) {
             if (consecutiveBridgeFailures.incrementAndGet() >= 2) {
                 activityScope.launch {
                     rebuildApiWebView(reason = "consecutive_status_zero", expectedGeneration = observedGen)
@@ -2290,6 +2306,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         unregisterNetworkRecoveryMonitor()
+        pauseWebViewJob?.cancel()
+        pauseWebViewJob = null
         activityScope.cancel()
         pendingMediaPickCallback = null
         pendingWebFileChooserCallback?.onReceiveValue(null)
@@ -2332,6 +2350,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        pauseWebViewJob?.cancel()
+        pauseWebViewJob = null
         val pausedAt = lastPausedAtEpochMs
         lastPausedAtEpochMs = 0L
         UserPresenceService.setAppForeground(true)
@@ -2353,12 +2373,47 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         lastPausedAtEpochMs = System.currentTimeMillis()
+        val firstPoppedBatch = ScreenTrackEngine.flushCurrentTopic()
         UserPresenceService.setAppForeground(false)
         runCatching {
-            apiWebView?.onPause()
             do_.linux.lindo.core.compose.LocalComposerDrafts.flushPendingPersist()
             CookieManager.getInstance().flush()
             persistSessionToDisk()
+        }
+        val hasTimingFlush = firstPoppedBatch != null || ScreenTrackEngine.hasPendingWork()
+        pauseWebViewJob?.cancel()
+        if (hasTimingFlush && UserApiKeyAuthManager.isAuthorized() && apiWebView != null) {
+            pauseWebViewJob = activityScope.launch {
+                try {
+                    withTimeoutOrNull(500L) {
+                        var next = firstPoppedBatch ?: ScreenTrackEngine.popNextSendableBatch()
+                        while (next != null) {
+                            val batch = next
+                            var status: Int? = null
+                            try {
+                                status = LinuxDoRepository.sendTopicTimings(batch)
+                            } finally {
+                                ScreenTrackEngine.onBatchSendResult(batch, status)
+                            }
+                            if (status == null || status !in 200..299) break
+                            next = ScreenTrackEngine.popNextSendableBatch()
+                        }
+                    }
+                } finally {
+                    if (!UserPresenceService.isForeground) {
+                        runCatching { apiWebView?.onPause() }
+                    }
+                }
+            }
+        } else {
+            if (firstPoppedBatch != null) {
+                ScreenTrackEngine.consolidateBatch(
+                    firstPoppedBatch.topicId,
+                    firstPoppedBatch.topicTimeMs,
+                    firstPoppedBatch.timingsMs
+                )
+            }
+            runCatching { apiWebView?.onPause() }
         }
         super.onPause()
     }
@@ -2415,13 +2470,13 @@ private fun AndroidWebLoginModal(
     var rendererGone by remember { mutableStateOf(false) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     val isDark = LocalLinDoDarkTheme.current
-    val initialTCookie = remember(initialUrl) {
+    val initialTCookie = remember {
         getCookieValue(
             runCatching { CookieManager.getInstance().getCookie("https://linux.do") }.getOrNull(),
             "_t"
         ).takeUnless { it == "demo_session_token" }.orEmpty()
     }
-    val wasAlreadyAuthorizedOnOpen = remember(initialUrl) {
+    val wasAlreadyAuthorizedOnOpen = remember {
         UserApiKeyAuthManager.isAuthorized()
     }
 
@@ -2643,8 +2698,9 @@ private fun AndroidWebLoginModal(
                     }
                 }
                 postLoginProbeMisses += 1
-                // 若在主站已持有有效 `_t` 超过 3 次轮询但 SPA 尚未暴露用户对象，直接凭 `_t` 完成登录回跳并由后台补全资料，防止卡死在登录弹窗
-                if (!wasAlreadyAuthorizedOnOpen && postLoginProbeMisses >= 4) {
+                // 若在主站已持有有效 `_t` 超过 3 次轮询但 SPA 尚未暴露用户对象（含首次登录及切号后 `_t` 已轮换），直接凭 `_t` 完成登录回跳并由后台补全资料，防止卡死在登录弹窗
+                val switchedSessionCookie = currentTCookie.isNotBlank() && currentTCookie != initialTCookie
+                if ((!wasAlreadyAuthorizedOnOpen || switchedSessionCookie) && postLoginProbeMisses >= 4) {
                     completeWithValidatedSessionCookie(rawCookies)
                     return@evaluateJavascript
                 }
@@ -2862,8 +2918,8 @@ private fun AndroidWebLoginModal(
                                     request: WebResourceRequest?
                                 ): Boolean {
                                     val target = request?.url?.toString() ?: return false
-                                    if (target.startsWith("discourse://auth_redirect") ||
-                                        target.startsWith("lindo://auth_redirect")
+                                    if (target.startsWith("discourse://auth_redirect", ignoreCase = true) ||
+                                        target.startsWith("lindo://auth_redirect", ignoreCase = true)
                                     ) {
                                         val ok = UserApiKeyAuthManager.handleAuthRedirectUri(target)
                                         if (ok) {
@@ -2877,7 +2933,32 @@ private fun AndroidWebLoginModal(
                                         return true
                                     }
                                     val scheme = request.url?.scheme?.lowercase().orEmpty()
-                                    if (scheme.isNotBlank() && scheme != "http" && scheme != "https" && scheme != "about" && scheme != "javascript") {
+                                    if (scheme == "blob" || scheme == "data" || scheme == "about" || scheme == "javascript") {
+                                        return false
+                                    }
+                                    if (scheme == "intent") {
+                                        runCatching {
+                                            val parsedIntent = Intent.parseUri(target, Intent.URI_INTENT_SCHEME).apply {
+                                                addCategory(Intent.CATEGORY_BROWSABLE)
+                                                component = null
+                                                selector = null
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                            val fallbackUrl = parsedIntent.getStringExtra("browser_fallback_url")
+                                            try {
+                                                view?.context?.startActivity(parsedIntent)
+                                            } catch (_: android.content.ActivityNotFoundException) {
+                                                if (!fallbackUrl.isNullOrBlank() &&
+                                                    (fallbackUrl.startsWith("https://", ignoreCase = true) ||
+                                                        fallbackUrl.startsWith("http://", ignoreCase = true))
+                                                ) {
+                                                    view?.loadUrl(fallbackUrl)
+                                                }
+                                            }
+                                        }
+                                        return true
+                                    }
+                                    if (scheme.isNotBlank() && scheme != "http" && scheme != "https") {
                                         UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(target)
                                         return true
                                     }

@@ -28,7 +28,14 @@ internal fun requireMutationObject(response: Pair<Int, String>?): JsonObject {
     val rawBody = response?.second
     val root = rawBody?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
     val errorType = root?.get("error_type")?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
-    if (((status == 401 && !looksLikeCloudflareChallenge(rawBody)) || (status == 403 && errorType == "not_logged_in")) &&
+    val isCfChallenge = errorType != "not_logged_in" && looksLikeCloudflareChallenge(rawBody)
+    val isKeyOnlyJson403 = status == 403 &&
+        !isCfChallenge &&
+        !UserApiKeyAuthManager.hasValidWebSessionCookie() &&
+        !UserApiKeyAuthManager.getApiKey().isNullOrBlank() &&
+        (root?.containsKey("errors") == true || errorType.isNotEmpty())
+    if (!isCfChallenge &&
+        (status == 401 || (status == 403 && errorType == "not_logged_in") || isKeyOnlyJson403) &&
         UserApiKeyAuthManager.isAuthorized()
     ) {
         onAuthenticationInvalidated?.invoke()
@@ -116,8 +123,13 @@ internal fun readApiObject(response: Pair<Int, String>?): JsonObject {
         }.joinToString("；").let { if (it.isNotBlank()) org.jsoup.Jsoup.parse(it).text().take(200) else null }
 
         val isCfChallenge = errorType != "not_logged_in" && looksLikeCloudflareChallenge(rawBody)
+        val isKeyOnlyJson403 = status == 403 &&
+            !isCfChallenge &&
+            !UserApiKeyAuthManager.hasValidWebSessionCookie() &&
+            !UserApiKeyAuthManager.getApiKey().isNullOrBlank() &&
+            (jsonErrRoot?.containsKey("errors") == true || errorType.isNotEmpty())
         if (!isCfChallenge &&
-            (status == 401 || (status == 403 && errorType == "not_logged_in")) &&
+            (status == 401 || (status == 403 && errorType == "not_logged_in") || isKeyOnlyJson403) &&
             UserApiKeyAuthManager.isAuthorized()
         ) {
             onAuthenticationInvalidated?.invoke()

@@ -2,6 +2,7 @@ package do_.linux.lindo.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -91,8 +94,8 @@ internal fun LinDoNotificationRow(
             val resolved = LinuxDoRepository.resolveNotificationActor(item)
             if (resolved != null) {
                 resolvedActorUser = resolved
-                postAuthorResolveDone = true
             }
+            postAuthorResolveDone = true
         }
     }
 
@@ -160,9 +163,17 @@ internal fun LinDoNotificationRow(
     ) {
         Box(
             modifier = Modifier.size(48.dp).then(
-                if (actor != null && onInspectUser != null) Modifier.clickable(
-                    onClickLabel = "查看 $actor 的资料", role = Role.Button, onClick = { onInspectUser(actor) }
-                ) else Modifier
+                if (actor != null && onInspectUser != null) {
+                    Modifier
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClickLabel = "查看 $actor 的资料",
+                            role = Role.Button,
+                            onClick = { onInspectUser(actor) }
+                        )
+                } else Modifier
             ),
             contentAlignment = Alignment.Center
         ) {

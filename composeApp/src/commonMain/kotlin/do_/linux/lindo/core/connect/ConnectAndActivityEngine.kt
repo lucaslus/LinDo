@@ -5,7 +5,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.Snapshot
+import do_.linux.lindo.core.runUiSafeStateWrite
 import kotlin.math.roundToInt
 
 /**
@@ -43,7 +43,7 @@ object UserPresenceService {
 
     fun setAppForeground(foreground: Boolean, countAsActivity: Boolean = true) {
         isForeground = foreground
-        Snapshot.withMutableSnapshot {
+        runUiSafeStateWrite {
             isForegroundState = foreground
         }
         if (foreground && countAsActivity) {
@@ -63,7 +63,7 @@ object UserPresenceService {
     }
 
     fun recordSuccessfulForegroundRequest() {
-        Snapshot.withMutableSnapshot {
+        runUiSafeStateWrite {
             todayVisitConfirmed = true
             lastVisitSyncTimeText = "刚刚"
         }
@@ -132,6 +132,7 @@ object ScreenTrackEngine {
     private const val MAX_TRACKING_TIME_PER_POST_MS = 6 * 60 * 1000
     private const val FLUSH_INTERVAL_MS = 15_000L
     private const val MAX_TOPIC_RETRIES = 3
+    private const val MAX_TRACKED_READ_POSTS = 2_000
     private val BACKOFF_DELAYS_MS = longArrayOf(5_000L, 10_000L, 20_000L, 40_000L)
     private val RETRYABLE_STATUS_CODES = setOf(403, 405, 429, 500, 501, 502, 503, 504)
     private val PERMANENT_DROP_STATUS_CODES = setOf(400, 401, 404, 410, 422)
@@ -168,7 +169,18 @@ object ScreenTrackEngine {
     var pendingBatchesCount by mutableIntStateOf(0)
         private set
 
-    private val serverConfirmedReadPosts = HashSet<Pair<Int, Int>>()
+    private val serverConfirmedReadPosts = LinkedHashSet<Pair<Int, Int>>()
+
+    private fun addBoundedReadPostLocked(set: LinkedHashSet<Pair<Int, Int>>, entry: Pair<Int, Int>): Boolean {
+        if (!set.add(entry)) return false
+        while (set.size > MAX_TRACKED_READ_POSTS) {
+            val it = set.iterator()
+            if (!it.hasNext()) break
+            it.next()
+            it.remove()
+        }
+        return true
+    }
 
     var serverConfirmedReadVersion by mutableLongStateOf(0L)
         private set
@@ -180,7 +192,7 @@ object ScreenTrackEngine {
     fun clearServerConfirmedReadPosts() = synchronized(lock) {
         if (serverConfirmedReadPosts.isNotEmpty()) {
             serverConfirmedReadPosts.clear()
-            Snapshot.withMutableSnapshot {
+            runUiSafeStateWrite {
                 serverConfirmedReadVersion += 1L
             }
         }
@@ -200,7 +212,7 @@ object ScreenTrackEngine {
             resetCurrentTopicStateLocked(nowMs)
             currentTopicId = topicId
             onscreenPosts = initialVisiblePosts
-            Snapshot.withMutableSnapshot {
+            runUiSafeStateWrite {
                 sessionTopicsEntered += 1
             }
         }
@@ -227,8 +239,8 @@ object ScreenTrackEngine {
     fun markPostReadLocally(topicId: Int, postNumber: Int) {
         if (topicId > 0 && postNumber > 0) {
             synchronized(lock) {
-                if (readPostsSet.add(topicId to postNumber)) {
-                    Snapshot.withMutableSnapshot {
+                if (addBoundedReadPostLocked(readPostsSet, topicId to postNumber)) {
+                    runUiSafeStateWrite {
                         sessionPostsRead += 1
                     }
                 }
@@ -263,7 +275,7 @@ object ScreenTrackEngine {
         sessionReadingMilliseconds += diffMs
         val nextReadingSeconds = sessionReadingMilliseconds / 1000L
         if (nextReadingSeconds != sessionReadingSeconds) {
-            Snapshot.withMutableSnapshot {
+            runUiSafeStateWrite {
                 sessionReadingSeconds = nextReadingSeconds
             }
         }
@@ -315,13 +327,13 @@ object ScreenTrackEngine {
             if (timeMs > 0 && prevTotal < MAX_TRACKING_TIME_PER_POST_MS) {
                 totalTimingsMs[postNumber] = prevTotal + timeMs
                 newTimings[postNumber] = timeMs
-                if (readPostsSet.add(topicId to postNumber)) {
+                if (addBoundedReadPostLocked(readPostsSet, topicId to postNumber)) {
                     newlyAddedPosts += 1
                 }
             }
         }
         if (newlyAddedPosts > 0) {
-            Snapshot.withMutableSnapshot {
+            runUiSafeStateWrite {
                 sessionPostsRead += newlyAddedPosts
             }
         }
@@ -391,7 +403,7 @@ object ScreenTrackEngine {
                 )
             )
         }
-        Snapshot.withMutableSnapshot {
+        runUiSafeStateWrite {
             pendingBatchesCount = consolidatedQueue.size
         }
         flushSignal.trySend(Unit)
@@ -409,7 +421,7 @@ object ScreenTrackEngine {
         if (consolidatedQueue.isEmpty()) return null
         if (nowMs < blockSendingUntilEpochMs) return null
         val batch = consolidatedQueue.removeAt(0)
-        Snapshot.withMutableSnapshot {
+        runUiSafeStateWrite {
             pendingBatchesCount = consolidatedQueue.size
         }
         return batch
@@ -437,12 +449,12 @@ object ScreenTrackEngine {
             retryCounts.remove(batch.topicId)
             var added = false
             for (postNum in batch.timingsMs.keys) {
-                if (serverConfirmedReadPosts.add(batch.topicId to postNum)) {
+                if (addBoundedReadPostLocked(serverConfirmedReadPosts, batch.topicId to postNum)) {
                     added = true
                 }
             }
             if (added) {
-                Snapshot.withMutableSnapshot {
+                runUiSafeStateWrite {
                     serverConfirmedReadVersion += 1L
                 }
             }
@@ -508,7 +520,7 @@ object ScreenTrackEngine {
         sessionReadingMilliseconds = 0L
         consecutiveFailures = 0
         blockSendingUntilEpochMs = 0L
-        Snapshot.withMutableSnapshot {
+        runUiSafeStateWrite {
             if (hadConfirmed) {
                 serverConfirmedReadVersion += 1L
             }
@@ -535,7 +547,7 @@ object ScreenTrackEngine {
         sessionReadingMilliseconds = 0L
         consecutiveFailures = 0
         blockSendingUntilEpochMs = 0L
-        Snapshot.withMutableSnapshot {
+        runUiSafeStateWrite {
             serverConfirmedReadVersion = 0L
             sessionTopicsEntered = 0
             sessionPostsRead = 0

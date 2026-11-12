@@ -36,8 +36,16 @@ object MarkdownPreview {
         }
         val spoilerRegex = Regex("\\[spoiler]((?:(?!\\[spoiler])[\\s\\S])*?)\\[/spoiler]", RegexOption.IGNORE_CASE)
         for (depth in 0 until 8) {
-            val next = spoilerRegex.replace(source) {
-                "<span class=\"spoiler\">${it.groupValues[1]}</span>"
+            val next = spoilerRegex.replace(source) { match ->
+                val inner = match.groupValues[1]
+                if (Regex("\\r?\\n[ \\t]*\\r?\\n").containsMatchIn(inner)) {
+                    inner.split(Regex("(?:\\r?\\n[ \\t]*){2,}"))
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .joinToString("\n\n") { seg -> "<span class=\"spoiler\">$seg</span>" }
+                } else {
+                    "<span class=\"spoiler\">$inner</span>"
+                }
             }
             if (next == source) break
             source = next

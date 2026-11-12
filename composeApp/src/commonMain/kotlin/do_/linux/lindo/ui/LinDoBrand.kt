@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -145,7 +146,9 @@ internal fun LinDoWelcomeScreen(
     onBrowserOneClickAuth: () -> Unit,
     onToggleDark: () -> Unit,
     onOpenAppIcon: (() -> Unit)? = null,
-    onGuestBrowse: (() -> Unit)? = null
+    onGuestBrowse: (() -> Unit)? = null,
+    secondaryActionLabel: String = "系统浏览器授权",
+    secondaryActionIcon: ImageVector = LinDoIcons.Globe
 ) {
     BoxWithConstraints(Modifier.fillMaxSize().background(brandCanvas(isDark))
         .windowInsetsPadding(WindowInsets.statusBars).windowInsetsPadding(WindowInsets.navigationBars)) {
@@ -216,13 +219,13 @@ internal fun LinDoWelcomeScreen(
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
                 ) {
                     Icon(
-                        LinDoIcons.Globe,
+                        secondaryActionIcon,
                         contentDescription = null,
                         tint = brandSecondary(isDark),
                         modifier = Modifier.size(17.dp)
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("系统浏览器授权", fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                    Text(secondaryActionLabel, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
                 }
                 if (onGuestBrowse != null) {
                     OutlinedButton(

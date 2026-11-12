@@ -523,8 +523,9 @@ class Round3BugFixesRegressionTest {
                     assertEquals("score_poll", form?.get("poll_name"))
                     200 to """{"poll":{"name":"score_poll","voters":5,"options":[{"id":"opt10","votes":5}]," status":"open"},"vote":["opt10"]}"""
                 }
-                url.endsWith("/polls/vote.json") && method == "DELETE" -> {
+                url.contains("/polls/vote.json") && method == "DELETE" -> {
                     observedDelete = true
+                    assertTrue(url.contains("post_id=99") && url.contains("poll_name=score_poll"))
                     assertEquals("99", form?.get("post_id"))
                     200 to """{"poll":{"name":"score_poll","voters":4,"options":[{"id":"opt10","votes":4}],"status":"open"}}"""
                 }

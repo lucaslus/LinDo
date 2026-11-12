@@ -61,6 +61,10 @@ object DiscourseAstParser {
     private data class CacheKey(val postId: Int, val html: String)
     private val astCache = LinkedHashMap<CacheKey, List<PostBlockNode>>(256, .75f, true)
     private var cachedHtmlChars = 0
+    fun clearCache() = synchronized(astCache) {
+        astCache.clear()
+        cachedHtmlChars = 0
+    }
     fun signatureOf(postId: Int, cookedHtml: String) = (postId.toLong() shl 32) xor (cookedHtml.hashCode().toLong() and 0xFFFFFFFFL)
     fun getCached(postId: Int, cookedHtml: String) = synchronized(astCache) { astCache[CacheKey(postId, cookedHtml)] }
     fun parseOrGetCached(postId: Int, cookedHtml: String): List<PostBlockNode> {
@@ -150,7 +154,7 @@ object DiscourseAstParser {
             val tag = node.normalName()
             when {
                 tag in setOf("script", "style", "noscript", "template") || node.hasAttr("hidden") || node.hasClass("meta") -> Unit
-                node.hasClass("spoiler") || node.hasClass("spoilered") -> {
+                node.hasClass("spoiler") || node.hasClass("spoilered") || node.hasClass("spoiled") -> {
                     flush()
                     result += PostBlockNode.Spoiler(blocks(node.childNodes(), nesting + 1))
                 }
@@ -375,10 +379,23 @@ object DiscourseAstParser {
                 }
                 tag == "hr" -> { flush(); result += PostBlockNode.Divider }
                 tag.matches(Regex("h[1-6]")) -> {
-                    flush(); val content = blocks(node.childNodes(), nesting + 1)
-                    val rich = (content.firstOrNull() as? PostBlockNode.Paragraph)?.rich ?: RichText.plain(node.text())
-                    result += PostBlockNode.Heading(tag[1].digitToInt(), rich.text, rich)
-                    result += if (content.firstOrNull() is PostBlockNode.Paragraph) content.drop(1) else content
+                    flush()
+                    val level = tag[1].digitToInt()
+                    val content = blocks(node.childNodes(), nesting + 1)
+                    if (content.isNotEmpty()) {
+                        for (child in content) {
+                            result += if (child is PostBlockNode.Paragraph) {
+                                PostBlockNode.Heading(level, child.rich.text, child.rich)
+                            } else {
+                                child
+                            }
+                        }
+                    } else if (node.selectFirst(".spoiler, .spoilered, .spoiled") == null) {
+                        val plain = node.text().trim()
+                        if (plain.isNotEmpty()) {
+                            result += PostBlockNode.Heading(level, plain, RichText.plain(plain))
+                        }
+                    }
                 }
                 tag == "br" -> pending.add(style.copy(text = "\n"))
                 tag in setOf("p", "div", "section", "article", "figure", "figcaption", "dl", "dt", "dd", "li") -> {

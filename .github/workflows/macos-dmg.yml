@@ -32,6 +32,8 @@ jobs:
           java-version: "21"
           cache: gradle
       - uses: astral-sh/setup-uv@v5
+      - name: Run Core & Desktop Automated UI Tests (arm64)
+        run: ./gradlew :composeApp:desktopTest --no-daemon --console=plain
       - name: Clean stale build outputs before packaging
         run: rm -rf composeApp/build/compose/binaries/main/app composeApp/build/compose/binaries/main/dmg
       - name: Build native Lindo.app (arm64)
@@ -58,6 +60,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TARGET_TAG="${{ github.event.inputs.release_tag || github.ref_name }}"
+          gh release view "${TARGET_TAG}" >/dev/null 2>&1 || gh release create "${TARGET_TAG}" --prerelease --title "${TARGET_TAG}" --notes "Automated build for ${TARGET_TAG}"
           gh release upload "${TARGET_TAG}" composeApp/build/compose/binaries/main/dmg/*arm64.dmg --clobber
 
   build-macos-x64:
@@ -72,6 +75,8 @@ jobs:
           java-version: "21"
           cache: gradle
       - uses: astral-sh/setup-uv@v5
+      - name: Run Core & Desktop Automated UI Tests (x64)
+        run: ./gradlew :composeApp:desktopTest --no-daemon --console=plain
       - name: Clean stale build outputs before packaging
         run: rm -rf composeApp/build/compose/binaries/main/app composeApp/build/compose/binaries/main/dmg
       - name: Build native Lindo.app (x64)
@@ -98,4 +103,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TARGET_TAG="${{ github.event.inputs.release_tag || github.ref_name }}"
+          gh release view "${TARGET_TAG}" >/dev/null 2>&1 || gh release create "${TARGET_TAG}" --prerelease --title "${TARGET_TAG}" --notes "Automated build for ${TARGET_TAG}"
           gh release upload "${TARGET_TAG}" composeApp/build/compose/binaries/main/dmg/*x64.dmg --clobber

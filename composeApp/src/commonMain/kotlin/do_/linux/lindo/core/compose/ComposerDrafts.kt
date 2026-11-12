@@ -61,7 +61,7 @@ object LocalComposerDrafts {
     private var persistJob: Job? = null
     @Volatile
     private var dirtyPersist = false
-    var onPersist: ((String) -> Unit)? = null
+    var onPersist: ((String?) -> Unit)? = null
     private fun id(owner: String, key: String) = "${owner.lowercase()}\u0000$key"
     fun restore(encoded: String?) {
         if (encoded.isNullOrBlank()) return
@@ -81,6 +81,17 @@ object LocalComposerDrafts {
     internal fun recordSequence(owner: String, key: String, value: Int) { sequences[id(owner, key)] = value }
     fun forgetSequence(owner: String, key: String) { sequences.remove(id(owner, key)) }
     fun remove(owner: String, key: String) { drafts.remove(id(owner, key)); schedulePersist(immediate = true) }
+    fun clearAll() {
+        synchronized(persistLock) {
+            persistJob?.cancel()
+            persistJob = null
+            dirtyPersist = false
+        }
+        drafts.clear()
+        sequences.clear()
+        queues.clear()
+        onPersist?.invoke(null)
+    }
     fun flushPendingPersist() {
         val shouldWrite = synchronized(persistLock) {
             persistJob?.cancel()

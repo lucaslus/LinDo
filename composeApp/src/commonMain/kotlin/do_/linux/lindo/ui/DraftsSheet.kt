@@ -69,6 +69,7 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     var deleting by remember { mutableStateOf<CloudDraftItem?>(null) }
+    var showClearAllConfirm by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var deleteError by remember { mutableStateOf<String?>(null) }
     val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
@@ -106,7 +107,25 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
         finally { loading = false }
     }
     LinDoFullScreenPage(onBack = onDismiss, containerColor = palette.cardSurface) {
-        LinDoPageTopBar(title = "草稿箱", onBack = onDismiss)
+        LinDoPageTopBar(
+            title = "草稿箱",
+            onBack = onDismiss,
+            trailingContent = {
+                if (drafts.isNotEmpty() && !busy) {
+                    TextButton(onClick = {
+                        deleteError = null
+                        showClearAllConfirm = true
+                    }) {
+                        Text(
+                            text = "清空全部",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        )
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             error?.let { LinDoLoadFailure(it, { reload++ }) }
             if (loading && drafts.isEmpty()) Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { LinDoLoadingIndicator(label = "读取草稿") }
@@ -210,6 +229,67 @@ internal fun UserDraftsSheet(onDismiss: () -> Unit, onOpen: (CloudDraftItem) -> 
                         throw cancelled
                     } catch (failure: Exception) {
                         deleteError = failure.message ?: "删除失败，草稿已保留"
+                    } finally {
+                        busy = false
+                    }
+                }
+            }
+        )
+    }
+    if (showClearAllConfirm) {
+        LinDoConfirmDialog(
+            title = "要清空全部 ${drafts.size} 份草稿吗？",
+            detail = "清空后云端与本地未发布草稿均不可恢复。",
+            confirmLabel = "清空全部",
+            busy = busy,
+            error = deleteError,
+            destructive = true,
+            onDismiss = { showClearAllConfirm = false },
+            onConfirm = {
+                if (busy) return@LinDoConfirmDialog
+                busy = true
+                deleteError = null
+                val snapshot = drafts.toList()
+                scope.launch {
+                    try {
+                        val remaining = snapshot.toMutableList()
+                        for (item in snapshot) {
+                            val deleted = if (!item.sequenceKnown) {
+                                try {
+                                    val seq = LinuxDoRepository.fetchDraftSequence(item.draftKey)
+                                    LinuxDoRepository.deleteCloudDraft(item.draftKey, seq)
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (apiErr: ApiReadException) {
+                                    if (apiErr.kind == ApiFailureKind.Verification || apiErr.kind == ApiFailureKind.Authentication) {
+                                        throw apiErr
+                                    }
+                                    true
+                                } catch (_: Exception) {
+                                    true
+                                }
+                            } else {
+                                LinuxDoRepository.deleteCloudDraft(item.draftKey, item.sequence) || run {
+                                    val seq = LinuxDoRepository.fetchDraftSequence(item.draftKey)
+                                    LinuxDoRepository.deleteCloudDraft(item.draftKey, seq)
+                                }
+                            }
+                            if (deleted) {
+                                LocalComposerDrafts.remove(owner, item.draftKey)
+                                LocalComposerDrafts.forgetSequence(owner, item.draftKey)
+                                remaining.removeAll { it.draftKey == item.draftKey }
+                            }
+                        }
+                        drafts = remaining.toList()
+                        if (remaining.isEmpty()) {
+                            showClearAllConfirm = false
+                        } else {
+                            deleteError = "部分草稿已在其他设备更新，请刷新后重试"
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        deleteError = failure.message ?: "清空草稿失败，请稍后重试"
                     } finally {
                         busy = false
                     }

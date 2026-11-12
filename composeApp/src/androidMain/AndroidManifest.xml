@@ -23,7 +23,6 @@
             android:exported="true"
             android:resizeableActivity="true"
             android:launchMode="singleTask"
-            android:relinquishTaskIdentity="true"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|layoutDirection|locale|mcc|navigation|smallestScreenSize|touchscreen|uiMode">
             <!-- Deep Link 支持 discourse://auth_redirect 与 lindo://auth_redirect 浏览器一键授权回跳 -->

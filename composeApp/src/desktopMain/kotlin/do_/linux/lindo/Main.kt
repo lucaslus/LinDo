@@ -1,5 +1,7 @@
 package do_.linux.lindo
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -8,6 +10,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -15,21 +28,30 @@ import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import do_.linux.lindo.core.compose.LocalComposerDrafts
+import do_.linux.lindo.core.connect.ConsolidatedTimingBatch
+import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.LinuxDoRepository
+import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.DesktopTrayCommand
 import do_.linux.lindo.ui.LinDoApp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.awt.AWTEvent
 import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.Component
 import java.awt.Desktop
 import java.awt.Dimension
+import java.awt.DisplayMode
 import java.awt.EventQueue
+import java.awt.FileDialog
 import java.awt.Font
 import java.awt.Frame
 import java.awt.GraphicsEnvironment
@@ -56,11 +78,28 @@ import java.awt.event.WindowEvent
 import java.awt.geom.RoundRectangle2D
 import java.awt.image.BaseMultiResolutionImage
 import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FilenameFilter
+import java.io.InputStream
+import java.io.RandomAccessFile
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.URI
+import java.net.URL
+import java.nio.channels.FileLock
+import java.nio.channels.OverlappingFileLockException
+import java.nio.file.FileSystemException
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
 import java.util.Properties
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -71,17 +110,378 @@ import javax.swing.SwingUtilities
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sign
 
-private val IS_MAC_OS: Boolean =
+internal val IS_MAC_OS: Boolean =
     System.getProperty("os.name").orEmpty().contains("Mac", ignoreCase = true)
+
+internal val IS_WINDOWS: Boolean =
+    System.getProperty("os.name").orEmpty().contains("Windows", ignoreCase = true)
+
+private val SUPPORTS_POSIX: Boolean = runCatching {
+    FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
+}.getOrDefault(false)
+
+@Volatile
+internal var currentMainWindow: AwtWindow? = null
 
 internal const val DESKTOP_MIN_WINDOW_WIDTH_DP = 420
 internal const val DESKTOP_MIN_WINDOW_HEIGHT_DP = 580
 internal const val DESKTOP_DEFAULT_WINDOW_WIDTH_DP = 1240
 internal const val DESKTOP_DEFAULT_WINDOW_HEIGHT_DP = 820
+private const val MAX_DESKTOP_UPLOAD_BYTES = 20L * 1024L * 1024L
+
+internal fun defaultDesktopUserAgent(): String = when {
+    IS_MAC_OS ->
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    IS_WINDOWS ->
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    else ->
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+}
+
+internal fun extractDeepLinkArg(args: Array<String>): String? {
+    for (raw in args) {
+        val cleaned = raw.trim().trim('"', '\'').trim()
+        if (cleaned.startsWith("discourse://", ignoreCase = true) ||
+            cleaned.startsWith("lindo://", ignoreCase = true)
+        ) {
+            return cleaned
+        }
+    }
+    return null
+}
+
+internal fun restrictFilePermissionsToOwner(file: File, isDirectory: Boolean = file.isDirectory) {
+    if (!SUPPORTS_POSIX) return
+    runCatching {
+        val perms = PosixFilePermissions.fromString(if (isDirectory) "rwx------" else "rw-------")
+        Files.setPosixFilePermissions(file.toPath(), perms)
+    }
+}
+
+internal fun parseSafeExternalDesktopUri(rawUrl: String): URI? {
+    val trimmed = rawUrl.trim()
+    if (trimmed.isEmpty()) return null
+    val uri = runCatching {
+        val direct = URI(trimmed)
+        URI(direct.toASCIIString())
+    }.getOrElse {
+        runCatching {
+            val u = URL(trimmed)
+            URI(URI(u.protocol, u.userInfo, u.host, u.port, u.path, u.query, u.ref).toASCIIString())
+        }.getOrNull()
+    } ?: return null
+    val scheme = uri.scheme?.lowercase() ?: return null
+    if (scheme !in setOf("http", "https", "mailto")) return null
+    if ((scheme == "http" || scheme == "https") && uri.host.isNullOrBlank()) return null
+    return uri
+}
+
+private val IMAGE_EXTENSION_SET = setOf(
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico", "heic", "heif"
+)
+
+internal fun guessDesktopMimeType(file: File): String {
+    return when (file.extension.lowercase()) {
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "svg" -> "image/svg+xml"
+        "avif" -> "image/avif"
+        "bmp" -> "image/bmp"
+        "ico" -> "image/x-icon"
+        "heic" -> "image/heic"
+        "heif" -> "image/heif"
+        "pdf" -> "application/pdf"
+        "zip" -> "application/zip"
+        "gz", "tgz" -> "application/gzip"
+        "7z" -> "application/x-7z-compressed"
+        "json" -> "application/json"
+        "md", "markdown" -> "text/markdown"
+        "txt", "log" -> "text/plain"
+        "csv" -> "text/csv"
+        "mp4" -> "video/mp4"
+        "mov" -> "video/quicktime"
+        "webm" -> "video/webm"
+        "mp3" -> "audio/mpeg"
+        "wav" -> "audio/wav"
+        "ogg" -> "audio/ogg"
+        "m4a" -> "audio/mp4"
+        else -> runCatching { Files.probeContentType(file.toPath()) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: "application/octet-stream"
+    }
+}
+
+/**
+ * 桌面单实例互斥与本地回环 (`127.0.0.1`) 深度链接转发桥：
+ * - Windows / Linux 下点击 `discourse://auth_redirect` 或 `lindo://auth_redirect` 会拉起第二个进程并传入 CLI 参数；
+ * - 次实例通过本地回环认证通道将深度链接转发给主实例并立即退出，杜绝双开窗口与遗漏一次性 OTP 凭证。
+ */
+internal object DesktopSingleInstanceBridge {
+    private class PrimarySession(
+        val raf: RandomAccessFile,
+        val fileLock: FileLock,
+        val server: ServerSocket,
+        val endpointFile: File
+    ) {
+        val closed = AtomicBoolean(false)
+
+        fun close() {
+            if (!closed.compareAndSet(false, true)) return
+            runCatching { server.close() }
+            runCatching { if (fileLock.isValid) fileLock.release() }
+            runCatching { raf.close() }
+            runCatching { Files.deleteIfExists(endpointFile.toPath()) }
+        }
+    }
+
+    private val stateLock = Any()
+    private var activeSession: PrimarySession? = null
+
+    fun acquireOrForward(
+        lockDir: File = DesktopStateStore.stateDir,
+        deepLink: String? = null,
+        onDeepLink: (String) -> Unit = {},
+        onActivate: () -> Unit = {}
+    ): Boolean {
+        runCatching {
+            lockDir.mkdirs()
+            restrictFilePermissionsToOwner(lockDir, isDirectory = true)
+        }
+        val lockFile = File(lockDir, "instance.lock")
+        val endpointFile = File(lockDir, "instance.endpoint")
+
+        var raf: RandomAccessFile? = null
+        val fileLock: FileLock? = try {
+            val opened = RandomAccessFile(lockFile, "rw")
+            raf = opened
+            restrictFilePermissionsToOwner(lockFile, isDirectory = false)
+            opened.channel.tryLock()
+        } catch (_: OverlappingFileLockException) {
+            null
+        } catch (_: Throwable) {
+            null
+        }
+
+        if (fileLock != null && raf != null) {
+            val server = try {
+                ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
+            } catch (_: Throwable) {
+                runCatching { fileLock.release() }
+                runCatching { raf.close() }
+                return true
+            }
+            val token = UUID.randomUUID().toString()
+            val tokenBytes = token.toByteArray(Charsets.UTF_8)
+            runCatching {
+                endpointFile.writeText("port=${server.localPort}\ntoken=$token\n", Charsets.UTF_8)
+                restrictFilePermissionsToOwner(endpointFile, isDirectory = false)
+            }
+            val session = PrimarySession(
+                raf = raf,
+                fileLock = fileLock,
+                server = server,
+                endpointFile = endpointFile
+            )
+            synchronized(stateLock) {
+                activeSession?.close()
+                activeSession = session
+            }
+            Thread(
+                {
+                    while (!session.closed.get() && !server.isClosed) {
+                        val client = try {
+                            server.accept()
+                        } catch (_: Throwable) {
+                            break
+                        }
+                        try {
+                            client.use { sock ->
+                                sock.soTimeout = 1_500
+                                val line = readBoundedUtf8Line(sock.getInputStream(), maxBytes = 8_192)
+                                if (line != null && line.startsWith("AUTH ")) {
+                                    val rest = line.substring(5)
+                                    val sp = rest.indexOf(' ')
+                                    if (sp > 0) {
+                                        val incomingToken = rest.substring(0, sp)
+                                        val payload = rest.substring(sp + 1).trim()
+                                        if (MessageDigest.isEqual(
+                                                incomingToken.toByteArray(Charsets.UTF_8),
+                                                tokenBytes
+                                            )
+                                        ) {
+                                            if (payload.startsWith("discourse://", ignoreCase = true) ||
+                                                payload.startsWith("lindo://", ignoreCase = true)
+                                            ) {
+                                                runCatching { onDeepLink(payload) }
+                                            }
+                                            runCatching { onActivate() }
+                                            runCatching {
+                                                sock.getOutputStream().write("OK\n".toByteArray(Charsets.UTF_8))
+                                                sock.getOutputStream().flush()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (_: Throwable) {
+                        }
+                    }
+                },
+                "lindo-single-instance-ipc"
+            ).apply {
+                isDaemon = true
+                start()
+            }
+            return true
+        }
+
+        runCatching { raf?.close() }
+        val forwarded = forwardToPrimary(endpointFile, deepLink)
+        return !forwarded
+    }
+
+    private fun forwardToPrimary(endpointFile: File, deepLink: String?): Boolean {
+        if (!endpointFile.isFile) return false
+        return runCatching {
+            var port = 0
+            var token = ""
+            endpointFile.readLines(Charsets.UTF_8).forEach { rawLine ->
+                val line = rawLine.trim()
+                when {
+                    line.startsWith("port=") -> port = line.substringAfter("port=").trim().toIntOrNull() ?: 0
+                    line.startsWith("token=") -> token = line.substringAfter("token=").trim()
+                }
+            }
+            if (port !in 1..65535 || token.isBlank()) return false
+            val sanitizedPayload = deepLink
+                ?.replace("\r", "")
+                ?.replace("\n", "")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: "FOCUS"
+            Socket().use { sock ->
+                sock.connect(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 1_200)
+                sock.soTimeout = 1_200
+                val out = sock.getOutputStream()
+                out.write("AUTH $token $sanitizedPayload\n".toByteArray(Charsets.UTF_8))
+                out.flush()
+                runCatching {
+                    sock.soTimeout = 250
+                    sock.getInputStream().read()
+                }
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun readBoundedUtf8Line(input: InputStream, maxBytes: Int): String? {
+        val buf = ByteArrayOutputStream(minOf(maxBytes, 256))
+        while (buf.size() < maxBytes) {
+            val b = input.read()
+            if (b < 0) {
+                return if (buf.size() == 0) null else buf.toString(Charsets.UTF_8).trimEnd('\r')
+            }
+            if (b == '\n'.code) {
+                return buf.toString(Charsets.UTF_8).trimEnd('\r')
+            }
+            buf.write(b)
+        }
+        return buf.toString(Charsets.UTF_8).trimEnd('\r')
+    }
+
+    fun close() {
+        val session = synchronized(stateLock) {
+            val s = activeSession
+            activeSession = null
+            s
+        }
+        session?.close()
+    }
+}
+
+internal fun shouldRegisterDiscourseProtocolOnWindows(
+    queryExitCode: Int,
+    queryOutput: String,
+    fileExists: (String) -> Boolean = { File(it).isFile }
+): Boolean {
+    if (queryExitCode != 0 || queryOutput.isBlank()) return true
+    val regLine = queryOutput.lineSequence()
+        .firstOrNull { it.contains("REG_SZ", ignoreCase = true) || it.contains("REG_EXPAND_SZ", ignoreCase = true) }
+        ?: return true
+    val valuePart = regLine.replace(Regex("""^.*?\bREG_(?:EXPAND_)?SZ\s+""", RegexOption.IGNORE_CASE), "").trim()
+    if (valuePart.isEmpty()) return true
+    val exePath = if (valuePart.startsWith('"')) {
+        valuePart.substring(1).substringBefore('"').trim()
+    } else {
+        Regex("""([A-Za-z]:[^"\r\n]*?\.exe)""", RegexOption.IGNORE_CASE)
+            .find(valuePart)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?: valuePart.substringBefore(' ').trim()
+    }
+    if (exePath.isEmpty()) return true
+    if (exePath.endsWith("\\Lindo.exe", ignoreCase = true) ||
+        exePath.endsWith("/Lindo.exe", ignoreCase = true) ||
+        exePath.equals("Lindo.exe", ignoreCase = true)
+    ) {
+        return true
+    }
+    return !fileExists(exePath)
+}
+
+private fun ensureWindowsProtocolHandlersRegistered() {
+    if (!IS_WINDOWS) return
+    val appPath = System.getProperty("jpackage.app-path")
+        ?.trim()
+        ?.takeIf { it.endsWith(".exe", ignoreCase = true) && File(it).isFile }
+        ?: return
+
+    fun runRegCommand(vararg cmd: String): Pair<Int, String> {
+        val proc = ProcessBuilder(*cmd)
+            .redirectErrorStream(true)
+            .start()
+        val out = proc.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val finished = proc.waitFor(5, TimeUnit.SECONDS)
+        if (!finished) {
+            proc.destroyForcibly()
+            return -1 to out
+        }
+        return proc.exitValue() to out
+    }
+
+    fun registerScheme(scheme: String) {
+        val baseKey = "HKCU\\Software\\Classes\\$scheme"
+        runCatching {
+            runRegCommand("reg.exe", "add", baseKey, "/ve", "/t", "REG_SZ", "/d", "URL:Lindo Protocol", "/f")
+            runRegCommand("reg.exe", "add", baseKey, "/v", "URL Protocol", "/t", "REG_SZ", "/d", "", "/f")
+            runRegCommand(
+                "reg.exe", "add", "$baseKey\\DefaultIcon",
+                "/ve", "/t", "REG_SZ", "/d", "\"$appPath\",0", "/f"
+            )
+            runRegCommand(
+                "reg.exe", "add", "$baseKey\\shell\\open\\command",
+                "/ve", "/t", "REG_SZ", "/d", "\"$appPath\" \"%1\"", "/f"
+            )
+        }
+    }
+
+    registerScheme("lindo")
+    runCatching {
+        val (exitCode, output) = runRegCommand(
+            "reg.exe", "query", "HKCU\\Software\\Classes\\discourse\\shell\\open\\command", "/ve"
+        )
+        if (shouldRegisterDiscourseProtocolOnWindows(exitCode, output)) {
+            registerScheme("discourse")
+        }
+    }
+}
 
 /**
  * 约束桌面窗口最小宽高（420×580dp）：
@@ -111,14 +511,7 @@ private object DesktopStateStore {
     val stateDir: File by lazy {
         File(System.getProperty("user.home"), ".lindo").apply {
             mkdirs()
-            runCatching {
-                setReadable(false, false)
-                setReadable(true, true)
-                setWritable(false, false)
-                setWritable(true, true)
-                setExecutable(false, false)
-                setExecutable(true, true)
-            }
+            restrictFilePermissionsToOwner(this, isDirectory = true)
         }
     }
     val imageCacheDir: File by lazy {
@@ -144,13 +537,28 @@ private object DesktopStateStore {
             tmp.outputStream().use { out ->
                 props.store(out, "Lindo Desktop State")
             }
-            runCatching {
-                tmp.setReadable(false, false)
-                tmp.setReadable(true, true)
-                tmp.setWritable(false, false)
-                tmp.setWritable(true, true)
+            restrictFilePermissionsToOwner(tmp, isDirectory = false)
+            var moved = false
+            for (attempt in 0 until 3) {
+                try {
+                    Files.move(tmp.toPath(), stateFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    restrictFilePermissionsToOwner(stateFile, isDirectory = false)
+                    moved = true
+                    break
+                } catch (_: FileSystemException) {
+                    if (attempt < 2) {
+                        runCatching { Thread.sleep(15L * (attempt + 1)) }
+                    }
+                }
             }
-            Files.move(tmp.toPath(), stateFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            if (!moved) {
+                runCatching {
+                    val bytes = Files.readAllBytes(tmp.toPath())
+                    Files.write(stateFile.toPath(), bytes)
+                    restrictFilePermissionsToOwner(stateFile, isDirectory = false)
+                }
+                runCatching { Files.deleteIfExists(tmp.toPath()) }
+            }
         }
     }
 
@@ -167,6 +575,9 @@ private object DesktopStateStore {
             update { setProperty("client_id", UserApiKeyAuthManager.getClientId()) }
         }
 
+        UserApiKeyAuthManager.customUserAgent =
+            props.getProperty("custom_user_agent")?.takeIf { it.isNotBlank() } ?: defaultDesktopUserAgent()
+
         UserApiKeyAuthManager.restorePendingPrivateKeyBase64(
             props.getProperty("pending_rsa_priv_b64"),
             props.getProperty("pending_rsa_nonce"),
@@ -178,6 +589,8 @@ private object DesktopStateStore {
         UserApiKeyAuthManager.uiEnableAnimations = props.getProperty("ui_enable_animations")?.toBooleanStrictOrNull() ?: true
         UserApiKeyAuthManager.uiThemeAccent = props.getProperty("ui_theme_accent")?.takeIf { it.isNotBlank() } ?: "OFFICIAL_GOLD"
         UserApiKeyAuthManager.uiCompactFeed = props.getProperty("ui_compact_feed")?.toBooleanStrictOrNull() ?: false
+        UserApiKeyAuthManager.uiSplitFraction =
+            (props.getProperty("ui_split_fraction")?.toFloatOrNull() ?: 0.42f).coerceIn(0.28f, 0.62f)
         LinuxDoRepository.restoreReadTopics(props.getProperty("read_topic_posts"))
 
         val username = props.getProperty("username")?.trim()
@@ -213,7 +626,86 @@ private object DesktopStateStore {
         }
 
         UserApiKeyAuthManager.openExternalUrlLauncher = { url ->
-            runCatching { Desktop.getDesktop().browse(URI(url)) }.isSuccess
+            val safeUri = parseSafeExternalDesktopUri(url)
+            if (safeUri != null) {
+                Thread(
+                    {
+                        runCatching {
+                            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+                                Desktop.getDesktop().browse(safeUri)
+                            }
+                        }
+                    },
+                    "lindo-external-browser"
+                ).apply {
+                    isDaemon = true
+                    start()
+                }
+            }
+        }
+        PlatformMediaPicker.launchPicker = { mimeType, onPicked ->
+            SwingUtilities.invokeLater {
+                runCatching {
+                    val dialog = FileDialog(
+                        currentMainWindow as? Frame,
+                        "选择要上传的图片或附件",
+                        FileDialog.LOAD
+                    )
+                    if (mimeType.startsWith("image/", ignoreCase = true)) {
+                        dialog.filenameFilter = FilenameFilter { _, name ->
+                            val ext = name.substringAfterLast('.', "").lowercase()
+                            ext in IMAGE_EXTENSION_SET
+                        }
+                        if (IS_WINDOWS) {
+                            dialog.file = "*.png;*.jpg;*.jpeg;*.gif;*.webp;*.svg;*.avif;*.bmp"
+                        }
+                    }
+                    dialog.isVisible = true
+                    val dir = dialog.directory
+                    val fileName = dialog.file
+                    if (dir != null && fileName != null) {
+                        val selected = File(dir, fileName)
+                        Thread(
+                            {
+                                runCatching {
+                                    if (!selected.isFile) return@runCatching
+                                    val size = selected.length()
+                                    if (size <= 0L) return@runCatching
+                                    val resolvedMime = guessDesktopMimeType(selected)
+                                    if (size > MAX_DESKTOP_UPLOAD_BYTES) {
+                                        SwingUtilities.invokeLater {
+                                            onPicked(selected.name, resolvedMime, ByteArray(0))
+                                        }
+                                        return@runCatching
+                                    }
+                                    val bytes = selected.inputStream().use { input ->
+                                        val out = ByteArrayOutputStream(size.toInt().coerceIn(4096, MAX_DESKTOP_UPLOAD_BYTES.toInt()))
+                                        val buf = ByteArray(16 * 1024)
+                                        var total = 0L
+                                        while (true) {
+                                            val n = input.read(buf)
+                                            if (n < 0) break
+                                            total += n
+                                            if (total > MAX_DESKTOP_UPLOAD_BYTES) {
+                                                return@use ByteArray(0)
+                                            }
+                                            out.write(buf, 0, n)
+                                        }
+                                        out.toByteArray()
+                                    }
+                                    SwingUtilities.invokeLater {
+                                        onPicked(selected.name, resolvedMime, bytes)
+                                    }
+                                }
+                            },
+                            "lindo-media-picker-io"
+                        ).apply {
+                            isDaemon = true
+                            start()
+                        }
+                    }
+                }
+            }
         }
         UserApiKeyAuthManager.onPersistPendingKey = { pkB64, nonce ->
             update {
@@ -236,12 +728,29 @@ private object DesktopStateStore {
                 setProperty("ui_compact_feed", compactFeed.toString())
             }
         }
+        UserApiKeyAuthManager.onPersistSplitFraction = { splitFraction ->
+            update {
+                setProperty("ui_split_fraction", splitFraction.coerceIn(0.28f, 0.62f).toString())
+            }
+        }
         UserApiKeyAuthManager.onPersistReadTopics = { encoded ->
             update { putOrRemove("read_topic_posts", encoded) }
+        }
+        UserApiKeyAuthManager.onSyncCookieToPlatform = { rawSetCookie ->
+            if (rawSetCookie.contains("_t=") ||
+                rawSetCookie.contains("cf_clearance=") ||
+                rawSetCookie.contains("_forum_session=")
+            ) {
+                val cookies = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
+                update {
+                    putOrRemove("raw_cookies", cookies.takeIf { it.isNotBlank() })
+                }
+            }
         }
         UserApiKeyAuthManager.onPersistSession = { currentProfile, apiKey ->
             update {
                 putOrRemove("api_key", apiKey)
+                putOrRemove("custom_user_agent", UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() })
                 val cookies = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
                 if (currentProfile != null && currentProfile.username != "linuxdo_user") {
                     setProperty("user_id", currentProfile.userId.toString())
@@ -274,6 +783,7 @@ private object DesktopStateStore {
                 remove("user_title")
                 remove("trust_level")
                 remove("read_topic_posts")
+                remove("composer_drafts")
                 val remaining = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
                 putOrRemove("raw_cookies", remaining.takeIf { it.isNotBlank() })
             }
@@ -465,14 +975,14 @@ private class SmoothFrameWheelEvent(
  * 1. 原生触控板连续手势（首帧 `wheelRotation == 0 && abs(precise) < 0.5` 或帧间隔 `<= 14ms`）—— 零延迟原样直通；
  * 2. 实体鼠标离散滚轮刻度 —— 吸收原始跳变刻度，按显示器真实刷新率（144Hz–240Hz）以纳米级 `dt` 指数阻尼积分驱动子像素平滑滚动。
  */
-private object DesktopSmoothWheelEngine {
+internal object DesktopSmoothWheelEngine {
     private var installed = false
 
     @Volatile
     private var trackedWindow: AwtWindow? = null
 
     private val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
-        Thread(runnable, "lindo-144hz-wheel-driver").apply {
+        Thread(runnable, "lindo-high-hz-wheel-driver").apply {
             isDaemon = true
             priority = Thread.MAX_PRIORITY - 1
         }
@@ -480,6 +990,7 @@ private object DesktopSmoothWheelEngine {
 
     private var frameTask: ScheduledFuture<*>? = null
     private var activeFramePeriodNs: Long = 0L
+    private var activeTargetHz: Int = if (IS_MAC_OS) 120 else 60
     private val edtDispatchPending = AtomicBoolean(false)
 
     // 以下状态仅在 AWT EventDispatchThread 访问
@@ -517,16 +1028,60 @@ private object DesktopSmoothWheelEngine {
         }
     }
 
+    internal fun clampRefreshRateHz(reported: Int, isMacOs: Boolean = IS_MAC_OS): Int {
+        return if (reported == DisplayMode.REFRESH_RATE_UNKNOWN || reported <= 0) {
+            if (isMacOs) 120 else 60
+        } else {
+            reported.coerceIn(60, 240)
+        }
+    }
+
+    internal fun isTrackpadInitialFrame(rawInt: Int, rawPrecise: Double): Boolean {
+        val absPrecise = abs(rawPrecise)
+        return rawInt == 0 && absPrecise in 1e-4..0.49
+    }
+
+    internal fun computeWheelStepDelta(
+        rawInt: Int,
+        rawPrecise: Double,
+        velocity: Double = 1.0,
+        isMacOs: Boolean = IS_MAC_OS
+    ): Double {
+        val absPrecise = abs(rawPrecise)
+        if (absPrecise < 1e-5 && rawInt == 0) return 0.0
+        val direction = when {
+            absPrecise > 1e-4 -> sign(rawPrecise)
+            else -> rawInt.toDouble().sign
+        }
+        if (direction == 0.0) return 0.0
+        return if (isMacOs) {
+            if (rawInt == 0 && absPrecise < 1.0) {
+                direction * absPrecise * velocity
+            } else {
+                // MacOSCocoaConfig 每 1.0 precise 单位 (scrollAmount=1) 对应 10dp；
+                // 单格慢速滚轮映射约 6.0 单位 (~60dp)，连续快速拨动平滑加速至 ~150dp/格。
+                val normalizedNotch = max(1.0, absPrecise / 0.12).coerceAtMost(3.2)
+                val step = (5.4 + (normalizedNotch - 1.0) * 1.8) * velocity
+                direction * step.coerceAtMost(26.0)
+            }
+        } else {
+            // Windows / Linux: 仅在实体离散刻度 (rawInt != 0) 时应用 max(1.0, absPrecise)，绝不放大子刻度精确触控板微幅位移！
+            val notches = if (rawInt != 0) {
+                max(1.0, absPrecise).coerceAtMost(4.0)
+            } else {
+                absPrecise.coerceAtMost(4.0)
+            }
+            direction * notches * 1.15 * velocity
+        }
+    }
+
     private fun resolveTargetRefreshHz(window: AwtWindow?): Int {
         val reported = runCatching {
             val dev = window?.graphicsConfiguration?.device
                 ?: GraphicsEnvironment.getLocalGraphicsEnvironment().defaultScreenDevice
-            dev?.displayMode?.refreshRate ?: 0
-        }.getOrDefault(0)
-        return when {
-            reported >= 60 -> reported.coerceIn(120, 240)
-            else -> 144
-        }
+            dev?.displayMode?.refreshRate ?: DisplayMode.REFRESH_RATE_UNKNOWN
+        }.getOrDefault(DisplayMode.REFRESH_RATE_UNKNOWN)
+        return clampRefreshRateHz(reported)
     }
 
     private fun interceptRawWheelIfNeeded(event: MouseWheelEvent): Boolean {
@@ -555,10 +1110,9 @@ private object DesktopSmoothWheelEngine {
             return false
         }
 
-        // 精准识别 Apple 触控板 / Magic Mouse 连续手势：
-        // macOS CPlatformResponder 在触控板 SCROLL_PHASE_BEGAN/CONTINUED 且小位移时 wheelRotation == 0 而 precise != 0；
-        // 实体滚轮 SCROLL_PHASE_UNSUPPORTED 则强制将非零位移设为 wheelRotation = ±1。
-        val isTrackpadInitialSignature = IS_MAC_OS && rawInt == 0 && absPrecise in 1e-4..0.49
+        // 精准识别 Apple 触控板 / Windows Precision Touchpad 连续手势：
+        // 触控板小位移首帧 wheelRotation == 0 而 precise in 1e-4..0.49，零延迟原样直通 Compose 原生滚动
+        val isTrackpadInitialSignature = isTrackpadInitialFrame(rawInt, rawPrecise)
         if (dtMs > 130L) {
             trackpadGestureActive = isTrackpadInitialSignature
         } else if (isTrackpadInitialSignature || (IS_MAC_OS && dtMs <= 13L && abs(rawPrecise - rawInt) <= 0.501)) {
@@ -584,17 +1138,12 @@ private object DesktopSmoothWheelEngine {
             else -> 1.0
         }
 
-        val deltaUnits = if (IS_MAC_OS) {
-            // MacOSCocoaConfig 每 1.0 precise 单位 (scrollAmount=1) 对应 10dp；
-            // 单格慢速滚轮映射约 6.0 单位 (~60dp)，连续快速拨动平滑加速至 ~150dp/格。
-            val normalizedNotch = max(1.0, absPrecise / 0.12).coerceAtMost(3.2)
-            val step = (5.4 + (normalizedNotch - 1.0) * 1.8) * fastNotchVelocity
-            direction * step.coerceAtMost(26.0)
-        } else {
-            // Windows / Linux: 将整数格转换为高帧率浮点 precise 增量 (scrollAmount=1)
-            val notches = max(1.0, absPrecise).coerceAtMost(4.0)
-            direction * notches * 1.15 * fastNotchVelocity
-        }
+        val deltaUnits = computeWheelStepDelta(
+            rawInt = rawInt,
+            rawPrecise = rawPrecise,
+            velocity = fastNotchVelocity
+        )
+        if (deltaUnits == 0.0) return false
 
         anchorComponent = src
         anchorX = event.x
@@ -621,7 +1170,8 @@ private object DesktopSmoothWheelEngine {
 
     private fun ensureHighRefreshLoopRunning(window: AwtWindow) {
         val hz = resolveTargetRefreshHz(window)
-        val periodNs = (1_000_000_000L / hz).coerceIn(4_166_666L, 8_333_333L)
+        activeTargetHz = hz
+        val periodNs = (1_000_000_000L / hz).coerceIn(4_166_666L, 16_666_667L)
         val currentTask = frameTask
         if (currentTask != null && !currentTask.isDone && activeFramePeriodNs == periodNs) {
             return
@@ -664,7 +1214,7 @@ private object DesktopSmoothWheelEngine {
 
         val nowNano = System.nanoTime()
         val dtSec = if (lastFrameNano == 0L) {
-            1.0 / 144.0
+            1.0 / activeTargetHz.coerceIn(60, 240).toDouble()
         } else {
             ((nowNano - lastFrameNano) / 1_000_000_000.0).coerceIn(0.001, 0.032)
         }
@@ -738,6 +1288,8 @@ private object DesktopSmoothWheelEngine {
  * 支持 macOS Retina 2x 菜单栏图标、实时红色未读通知角标、Dock 图标角标同步与快捷操作菜单。
  */
 internal object DesktopTrayController {
+    internal val TRAY_VARIANT_SIZES = intArrayOf(16, 20, 22, 24, 32, 44, 48)
+
     private val baseMark: BufferedImage? by lazy {
         runCatching {
             DesktopTrayController::class.java.getResourceAsStream("/tray_mark.png")?.use { ImageIO.read(it) }
@@ -748,6 +1300,20 @@ internal object DesktopTrayController {
     private var unreadMenuItem: MenuItem? = null
     private var lastRenderedUnread: Int = -1
     private var lastRenderedUsername: String? = null
+    @Volatile
+    private var lastOpenTriggerMs: Long = 0L
+
+    private fun dispatchDebouncedOpen(
+        onOpenMainWindow: () -> Unit,
+        onOpenMessages: () -> Unit
+    ) {
+        val now = System.currentTimeMillis()
+        if (now - lastOpenTriggerMs < 250L) return
+        lastOpenTriggerMs = now
+        SwingUtilities.invokeLater {
+            if (lastRenderedUnread > 0) onOpenMessages() else onOpenMainWindow()
+        }
+    }
 
     fun install(
         onOpenMainWindow: () -> Unit,
@@ -759,16 +1325,24 @@ internal object DesktopTrayController {
         if (trayIcon != null) return true
         return runCatching {
             val popup = PopupMenu()
+            val menuFont = if (IS_WINDOWS) Font("Microsoft YaHei UI", Font.PLAIN, 12) else null
+            if (menuFont != null) {
+                popup.font = menuFont
+            }
             val openItem = MenuItem("打开 Lindo").apply {
+                if (menuFont != null) font = menuFont
                 addActionListener { SwingUtilities.invokeLater(onOpenMainWindow) }
             }
             val messagesItem = MenuItem("消息通知").apply {
+                if (menuFont != null) font = menuFont
                 addActionListener { SwingUtilities.invokeLater(onOpenMessages) }
             }
             val publishItem = MenuItem("发布新话题...").apply {
+                if (menuFont != null) font = menuFont
                 addActionListener { SwingUtilities.invokeLater(onOpenPublish) }
             }
             val quitItem = MenuItem("退出 Lindo").apply {
+                if (menuFont != null) font = menuFont
                 addActionListener { SwingUtilities.invokeLater(onQuitApp) }
             }
             popup.add(openItem)
@@ -779,19 +1353,16 @@ internal object DesktopTrayController {
 
             val initialImage = buildMultiResTrayImage(unreadCount = 0)
             val icon = TrayIcon(initialImage, "Lindo — Linux.do 原生客户端", popup).apply {
-                isImageAutoSize = false
-                addActionListener {
-                    SwingUtilities.invokeLater {
-                        if (lastRenderedUnread > 0) onOpenMessages() else onOpenMainWindow()
+                isImageAutoSize = !IS_MAC_OS
+                if (IS_MAC_OS) {
+                    addActionListener {
+                        dispatchDebouncedOpen(onOpenMainWindow, onOpenMessages)
                     }
-                }
-                if (!IS_MAC_OS) {
+                } else {
                     addMouseListener(object : MouseAdapter() {
-                        override fun mouseClicked(e: MouseEvent) {
-                            if (SwingUtilities.isLeftMouseButton(e)) {
-                                SwingUtilities.invokeLater {
-                                    if (lastRenderedUnread > 0) onOpenMessages() else onOpenMainWindow()
-                                }
+                        override fun mouseReleased(e: MouseEvent) {
+                            if (e.button == MouseEvent.BUTTON1 && !e.isPopupTrigger) {
+                                dispatchDebouncedOpen(onOpenMainWindow, onOpenMessages)
                             }
                         }
                     })
@@ -805,7 +1376,7 @@ internal object DesktopTrayController {
         }.getOrDefault(false)
     }
 
-    fun updateUnreadState(unreadCount: Int, username: String?) {
+    fun updateUnreadState(unreadCount: Int, username: String?, targetWindow: AwtWindow? = currentMainWindow) {
         val normalized = unreadCount.coerceAtLeast(0)
         // 同步更新 macOS Dock / Windows 任务栏角标
         runCatching {
@@ -818,6 +1389,14 @@ internal object DesktopTrayController {
                         else -> normalized.toString()
                     }
                     taskbar.setIconBadge(badgeText)
+                }
+                if (IS_WINDOWS && targetWindow != null && taskbar.isSupported(Taskbar.Feature.ICON_BADGE_IMAGE_WINDOW)) {
+                    val badgeImg = renderWindowsTaskbarBadgeImage(normalized)
+                    SwingUtilities.invokeLater {
+                        runCatching {
+                            taskbar.setWindowIconBadge(targetWindow, badgeImg)
+                        }
+                    }
                 }
             }
         }
@@ -851,10 +1430,49 @@ internal object DesktopTrayController {
         runCatching { SystemTray.getSystemTray().remove(icon) }
     }
 
-    private fun buildMultiResTrayImage(unreadCount: Int): Image {
-        val img1x = renderTrayCanvas(sizePx = 22, scale = 1f, unreadCount = unreadCount)
-        val img2x = renderTrayCanvas(sizePx = 44, scale = 2f, unreadCount = unreadCount)
-        return BaseMultiResolutionImage(img1x, img2x)
+    internal fun buildMultiResTrayImage(unreadCount: Int): Image {
+        val variants = TRAY_VARIANT_SIZES.map { sizePx ->
+            renderTrayCanvas(sizePx = sizePx, scale = sizePx / 22f, unreadCount = unreadCount)
+        }.toTypedArray()
+        return BaseMultiResolutionImage(*variants)
+    }
+
+    internal fun renderWindowsTaskbarBadgeImage(unreadCount: Int): Image? {
+        if (unreadCount <= 0) return null
+        val img16 = renderWindowsTaskbarBadgeCanvas(sizePx = 16, unreadCount = unreadCount)
+        val img32 = renderWindowsTaskbarBadgeCanvas(sizePx = 32, unreadCount = unreadCount)
+        return BaseMultiResolutionImage(img16, img32)
+    }
+
+    private fun renderWindowsTaskbarBadgeCanvas(sizePx: Int, unreadCount: Int): BufferedImage {
+        val out = BufferedImage(sizePx, sizePx, BufferedImage.TYPE_INT_ARGB)
+        val g = out.createGraphics()
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+            val label = if (unreadCount > 99) "99+" else unreadCount.toString()
+            val inset = (sizePx * 0.06f).coerceAtLeast(1f)
+            val d = sizePx - inset * 2f
+            g.color = Color(0xFF, 0xFF, 0xFF, 235)
+            g.fill(RoundRectangle2D.Float(0f, 0f, sizePx.toFloat(), sizePx.toFloat(), sizePx.toFloat(), sizePx.toFloat()))
+            g.color = Color(0xFF, 0x3B, 0x30)
+            g.fill(RoundRectangle2D.Float(inset, inset, d, d, d, d))
+
+            val fontPx = when {
+                label.length >= 3 -> sizePx * 0.40f
+                label.length == 2 -> sizePx * 0.48f
+                else -> sizePx * 0.58f
+            }.roundToInt().coerceAtLeast(8)
+            g.font = Font("SansSerif", Font.BOLD, fontPx)
+            val fm = g.fontMetrics
+            val tx = (sizePx - fm.stringWidth(label)) / 2f
+            val ty = (sizePx - fm.height) / 2f + fm.ascent
+            g.color = Color.WHITE
+            g.drawString(label, tx, ty)
+        } finally {
+            g.dispose()
+        }
+        return out
     }
 
     internal fun renderTrayCanvas(sizePx: Int, scale: Float, unreadCount: Int): BufferedImage {
@@ -934,15 +1552,119 @@ internal object DesktopTrayController {
     }
 }
 
-fun main() {
+internal fun isDesktopBackShortcut(event: KeyEvent): Boolean {
+    if (event.type != KeyEventType.KeyDown) return false
+    if (event.key == Key.Escape &&
+        !event.isAltPressed &&
+        !event.isMetaPressed &&
+        !event.isCtrlPressed &&
+        !event.isShiftPressed
+    ) {
+        return true
+    }
+    if (event.key == Key.DirectionLeft &&
+        event.isAltPressed &&
+        !event.isMetaPressed &&
+        !event.isCtrlPressed &&
+        !event.isShiftPressed
+    ) {
+        return true
+    }
+    if (event.key == Key.LeftBracket &&
+        event.isMetaPressed &&
+        !event.isAltPressed &&
+        !event.isCtrlPressed &&
+        !event.isShiftPressed
+    ) {
+        return true
+    }
+    return false
+}
+
+private fun installDesktopMouseBackSupport(window: AwtWindow): () -> Unit {
+    val listener = AWTEventListener { rawEvent ->
+        val me = rawEvent as? MouseEvent ?: return@AWTEventListener
+        if (me.id != MouseEvent.MOUSE_PRESSED || me.button != 4 || me.isConsumed) return@AWTEventListener
+        val src = me.component ?: return@AWTEventListener
+        val ownerWindow = if (src is AwtWindow) src else SwingUtilities.getWindowAncestor(src)
+        if (ownerWindow !== window) return@AWTEventListener
+        me.consume()
+        SwingUtilities.invokeLater {
+            BackNavigationBridge.dispatchBack()
+        }
+    }
+    Toolkit.getDefaultToolkit().addAWTEventListener(listener, AWTEvent.MOUSE_EVENT_MASK)
+    return {
+        runCatching { Toolkit.getDefaultToolkit().removeAWTEventListener(listener) }
+    }
+}
+
+private fun flushDesktopStateBeforeQuit() {
+    runCatching { LocalComposerDrafts.flushPendingPersist() }
+    runCatching {
+        val popped = ScreenTrackEngine.flushCurrentTopic()
+        if (popped == null && !ScreenTrackEngine.hasPendingWork()) return@runCatching
+        if (!UserApiKeyAuthManager.isAuthorized()) return@runCatching
+        runBlocking(Dispatchers.IO) {
+            withTimeoutOrNull(400L) {
+                var next: ConsolidatedTimingBatch? = popped ?: ScreenTrackEngine.popNextSendableBatch()
+                while (next != null) {
+                    val batch = next
+                    var status: Int? = null
+                    try {
+                        status = LinuxDoRepository.sendTopicTimings(batch)
+                    } finally {
+                        ScreenTrackEngine.onBatchSendResult(batch, status)
+                    }
+                    if (status == null || status !in 200..299) break
+                    next = ScreenTrackEngine.popNextSendableBatch()
+                }
+            }
+        }
+    }
+}
+
+fun main(args: Array<String> = emptyArray()) {
+    val initialDeepLink = extractDeepLinkArg(args)
+    var reopenMainWindowAction: (() -> Unit)? = null
+    var quitApplicationAction: (() -> Unit)? = null
+    val stateInitLatch = CountDownLatch(1)
+
+    val isPrimaryInstance = DesktopSingleInstanceBridge.acquireOrForward(
+        lockDir = DesktopStateStore.stateDir,
+        deepLink = initialDeepLink,
+        onDeepLink = { uri ->
+            runCatching { stateInitLatch.await(2, TimeUnit.SECONDS) }
+            UserApiKeyAuthManager.handleAuthRedirectUri(uri)
+        },
+        onActivate = {
+            SwingUtilities.invokeLater { reopenMainWindowAction?.invoke() }
+        }
+    )
+    if (!isPrimaryInstance) {
+        return
+    }
+
+    Runtime.getRuntime().addShutdownHook(
+        Thread({ DesktopSingleInstanceBridge.close() }, "lindo-single-instance-cleanup")
+    )
+
     if (IS_MAC_OS) {
         System.setProperty("apple.awt.application.name", "Lindo")
     }
-    DesktopStateStore.initAndWire()
-    applyMacSeamlessWindowChrome(window = null, isDark = UserApiKeyAuthManager.uiDarkTheme)
+    if (IS_WINDOWS) {
+        Thread(::ensureWindowsProtocolHandlersRegistered, "lindo-win-protocol-reg").apply {
+            isDaemon = true
+            start()
+        }
+    }
 
-    var reopenMainWindowAction: (() -> Unit)? = null
-    var quitApplicationAction: (() -> Unit)? = null
+    DesktopStateStore.initAndWire()
+    stateInitLatch.countDown()
+    if (initialDeepLink != null) {
+        UserApiKeyAuthManager.handleAuthRedirectUri(initialDeepLink)
+    }
+    applyMacSeamlessWindowChrome(window = null, isDark = UserApiKeyAuthManager.uiDarkTheme)
 
     runCatching {
         if (Desktop.isDesktopSupported()) {
@@ -960,8 +1682,9 @@ fun main() {
             })
             if (desktop.isSupported(Desktop.Action.APP_QUIT_HANDLER)) {
                 desktop.setQuitHandler { _, response ->
-                    LocalComposerDrafts.flushPendingPersist()
+                    flushDesktopStateBeforeQuit()
                     DesktopTrayController.uninstall()
+                    DesktopSingleInstanceBridge.close()
                     quitApplicationAction?.invoke()
                     response.performQuit()
                 }
@@ -1006,8 +1729,9 @@ fun main() {
         }
 
         fun quitCleanly() {
-            LocalComposerDrafts.flushPendingPersist()
+            flushDesktopStateBeforeQuit()
             DesktopTrayController.uninstall()
+            DesktopSingleInstanceBridge.close()
             exitApplication()
         }
 
@@ -1047,7 +1771,7 @@ fun main() {
                 if (profile != null) {
                     latestUnreadCount = profile.unreadNotifications
                     latestUsername = profile.username.takeIf { it.isNotBlank() }
-                    DesktopTrayController.updateUnreadState(latestUnreadCount, latestUsername)
+                    DesktopTrayController.updateUnreadState(latestUnreadCount, latestUsername, activeWindowRef)
                 }
             }
         }
@@ -1069,14 +1793,26 @@ fun main() {
                 }
             },
             state = windowState,
-            title = "Lindo"
+            title = "Lindo",
+            onKeyEvent = { event ->
+                if (isDesktopBackShortcut(event)) {
+                    BackNavigationBridge.dispatchBack()
+                } else {
+                    false
+                }
+            }
         ) {
             DisposableEffect(window) {
                 activeWindowRef = window
+                currentMainWindow = window
                 applyDesktopMinimumWindowSize(window)
                 applyMacSeamlessWindowChrome(window, isDark = UserApiKeyAuthManager.uiDarkTheme)
                 DesktopSmoothWheelEngine.attachToWindow(window)
                 val removeDrag = installMacTitleBarDragSupport(window)
+                val removeMouseBack = installDesktopMouseBackSupport(window)
+                if (latestUnreadCount > 0) {
+                    DesktopTrayController.updateUnreadState(latestUnreadCount, latestUsername, window)
+                }
 
                 val compListener = object : ComponentAdapter() {
                     override fun componentResized(e: ComponentEvent?) {
@@ -1101,10 +1837,14 @@ fun main() {
 
                 onDispose {
                     removeDrag()
+                    removeMouseBack()
                     window.removeComponentListener(compListener)
                     window.removeWindowListener(winListener)
                     if (activeWindowRef === window) {
                         activeWindowRef = null
+                    }
+                    if (currentMainWindow === window) {
+                        currentMainWindow = null
                     }
                 }
             }
@@ -1117,21 +1857,33 @@ fun main() {
             }
 
             val topTitleInset = if (IS_MAC_OS && !isMacFullScreen) 28.dp else 0.dp
-            LinDoApp(
-                onThemeChanged = { isDark ->
-                    applyMacSeamlessWindowChrome(window, isDark = isDark)
-                },
-                onApplyAppIcon = null,
-                imageCacheDir = DesktopStateStore.imageCacheDir,
-                macTitleBarInset = topTitleInset,
-                onUnreadStateChanged = { unreadCount, username ->
-                    latestUnreadCount = unreadCount
-                    latestUsername = username
-                    DesktopTrayController.updateUnreadState(unreadCount, username)
-                },
-                externalDesktopCommand = pendingTrayCommand,
-                onConsumeDesktopCommand = { pendingTrayCommand = null }
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onKeyEvent { event ->
+                        if (isDesktopBackShortcut(event)) {
+                            BackNavigationBridge.dispatchBack()
+                        } else {
+                            false
+                        }
+                    }
+            ) {
+                LinDoApp(
+                    onThemeChanged = { isDark ->
+                        applyMacSeamlessWindowChrome(window, isDark = isDark)
+                    },
+                    onApplyAppIcon = null,
+                    imageCacheDir = DesktopStateStore.imageCacheDir,
+                    macTitleBarInset = topTitleInset,
+                    onUnreadStateChanged = { unreadCount, username ->
+                        latestUnreadCount = unreadCount
+                        latestUsername = username
+                        DesktopTrayController.updateUnreadState(unreadCount, username, window)
+                    },
+                    externalDesktopCommand = pendingTrayCommand,
+                    onConsumeDesktopCommand = { pendingTrayCommand = null }
+                )
+            }
         }
     }
 }

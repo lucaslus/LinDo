@@ -11,6 +11,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import coil3.disk.directory
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -81,14 +82,20 @@ import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -601,7 +608,8 @@ internal fun isGuestLoginRequiredError(
 ): Boolean {
     if (isAuthorized || errorMessage.isNullOrBlank()) return false
     if (errorMessage.contains("站点验证")) return false
-    return errorMessage.contains("登录") ||
+    return errorMessage.contains("403") ||
+        errorMessage.contains("登录") ||
         errorMessage.contains("权限") ||
         errorMessage.contains("无权") ||
         errorMessage.contains("受限") ||
@@ -1507,9 +1515,22 @@ internal fun GoogleAccountRingAvatar(
     flair: FlairInfo? = null
 ) {
     val resolvedUsername = username.trim().ifBlank { letter.trim().ifBlank { "L" } }
-    Box(Modifier.size(avatarSize).let {
-        if (onClick != null) it.clickable(onClick = onClick) else it
-    }, contentAlignment = Alignment.Center) {
+    Box(
+        modifier = Modifier.size(avatarSize).let { base ->
+            if (onClick != null) {
+                base
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onClick
+                    )
+            } else {
+                base
+            }
+        },
+        contentAlignment = Alignment.Center
+    ) {
         SmartAvatar(
             username = resolvedUsername,
             avatarTemplate = avatarUrl,
@@ -1520,6 +1541,22 @@ internal fun GoogleAccountRingAvatar(
             enableAnimations = LocalLinDoAnimations.current
         )
     }
+}
+
+private val lindoSingletonImageLoaderConfigured = java.util.concurrent.atomic.AtomicBoolean(false)
+
+@Suppress("unused")
+private val lindoCoreSingletonStatesWarmedUp: Boolean = run {
+    // Eagerly initialize all singleton Compose State holders in GlobalSnapshot before any UI
+    // Recomposer or background Dispatchers.IO coroutine starts, preventing Snapshot.kt:2108 races
+    // when a singleton object (<clinit>) would otherwise be first loaded mid-recomposition.
+    LinuxDoEmojiCatalog.catalogVersion
+    LinuxDoRepository.readTopicsVersion
+    LinuxDoRepository.categoryCatalogVersion
+    UserPresenceService.isForegroundState
+    ScreenTrackEngine.sessionTopicsEntered
+    androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+    true
 }
 
 @Composable
@@ -1536,27 +1573,31 @@ internal fun LinDoApp(
     addPlatformImageDecoders: coil3.ComponentRegistry.Builder.() -> Unit = {}
 ) {
     remember {
-        coil3.SingletonImageLoader.setSafe { context ->
-            val diskDir = imageCacheDir
-                ?: java.io.File(System.getProperty("java.io.tmpdir"), "lindo_image_cache")
-            coil3.ImageLoader.Builder(context)
-                .memoryCache {
-                    coil3.memory.MemoryCache.Builder()
-                        .maxSizePercent(context, 0.22)
+        if (lindoSingletonImageLoaderConfigured.compareAndSet(false, true)) {
+            runCatching {
+                coil3.SingletonImageLoader.setSafe { context ->
+                    val diskDir = imageCacheDir
+                        ?: java.io.File(System.getProperty("java.io.tmpdir"), "lindo_image_cache")
+                    coil3.ImageLoader.Builder(context)
+                        .memoryCache {
+                            coil3.memory.MemoryCache.Builder()
+                                .maxSizePercent(context, 0.22)
+                                .build()
+                        }
+                        .diskCache {
+                            coil3.disk.DiskCache.Builder()
+                                .directory(diskDir)
+                                .maxSizeBytes(128L * 1024L * 1024L)
+                                .build()
+                        }
+                        .components {
+                            add(coil3.network.ktor3.KtorNetworkFetcherFactory(httpClient = { LinuxDoRepository.imageHttpClient }))
+                            add(coil3.svg.SvgDecoder.Factory())
+                            addPlatformImageDecoders()
+                        }
                         .build()
                 }
-                .diskCache {
-                    coil3.disk.DiskCache.Builder()
-                        .directory(diskDir)
-                        .maxSizeBytes(128L * 1024L * 1024L)
-                        .build()
-                }
-                .components {
-                    add(coil3.network.ktor3.KtorNetworkFetcherFactory(httpClient = { LinuxDoRepository.imageHttpClient }))
-                    add(coil3.svg.SvgDecoder.Factory())
-                    addPlatformImageDecoders()
-                }
-                .build()
+            }
         }
         true
     }
@@ -1637,7 +1678,7 @@ internal fun LinDoApp(
     var pendingNewCount by remember { mutableStateOf(0) }
     var currentPage by remember { mutableStateOf(0) }
     var hasMoreTopics by remember { mutableStateOf(true) }
-    var isLoadingTopics by remember { mutableStateOf(true) }
+    var isLoadingTopics by remember { mutableStateOf(UserApiKeyAuthManager.isAuthorized()) }
     var isLoadingMoreTopics by remember { mutableStateOf(false) }
     var loadMoreError by remember { mutableStateOf(false) }
     var loadMoreErrorMessage by remember { mutableStateOf("网络异常") }
@@ -1665,7 +1706,11 @@ internal fun LinDoApp(
     var badgesCenterUsername by remember { mutableStateOf<String?>(null) }
     var showAppIconPage by remember { mutableStateOf(false) }
     val openAppIconPage: (() -> Unit)? = onApplyAppIcon?.let { { showAppIconPage = true } }
+    val hasEmbeddedWebLogin = PlatformWebLoginHost.webLoginRenderer != null
     var showAuthSheet by remember { mutableStateOf(false) }
+    var showManualAuthExpanded by remember { mutableStateOf(false) }
+    var desktopAuthStatusHint by remember { mutableStateOf<String?>(null) }
+    var showDesktopSiteVerifySheet by remember { mutableStateOf(false) }
     var showConnectSheet by remember { mutableStateOf(false) }
     var showGlobalSearchSheet by remember { mutableStateOf(false) }
     var showCreateTopicSheet by remember { mutableStateOf(false) }
@@ -1716,10 +1761,15 @@ internal fun LinDoApp(
     fun openWebPage(url: String) {
         rootKeyboardController?.hide()
         guestLoginPrompt = null
-        if (PlatformWebLoginHost.webLoginRenderer != null) {
+        if (hasEmbeddedWebLogin) {
             activeWebLoginUrl = url
         } else {
-            UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
+            val normalized = url.trim().trimEnd('/')
+            if (normalized.equals("https://linux.do", ignoreCase = true)) {
+                showDesktopSiteVerifySheet = true
+            } else {
+                UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
+            }
         }
     }
 
@@ -1731,12 +1781,40 @@ internal fun LinDoApp(
         guestLoginPrompt = GuestLoginPrompt(title = title, subtitle = subtitle)
     }
 
+    fun triggerPrimaryLogin() {
+        rootKeyboardController?.hide()
+        guestLoginPrompt = null
+        if (hasEmbeddedWebLogin) {
+            openWebPage("https://linux.do/login")
+        } else {
+            desktopAuthStatusHint = "已在系统浏览器打开 LINUX DO 授权页，点击「批准」即可自动返回登录"
+            showManualAuthExpanded = false
+            showAuthSheet = true
+            UserApiKeyAuthManager.startBrowserOneClickAuth()
+        }
+    }
+
+    fun triggerManualCredentialLogin() {
+        rootKeyboardController?.hide()
+        guestLoginPrompt = null
+        desktopAuthStatusHint = null
+        showManualAuthExpanded = true
+        showAuthSheet = true
+    }
+
     fun triggerBrowserOneClickLogin() {
         guestLoginPrompt = null
-        showAuthSheet = false
-        val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
-        if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
-            openWebPage(url)
+        if (hasEmbeddedWebLogin) {
+            showAuthSheet = false
+            val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
+            if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
+                openWebPage(url)
+            }
+        } else {
+            desktopAuthStatusHint = "已在系统浏览器打开授权页，点击「批准」后将自动完成登录"
+            showManualAuthExpanded = false
+            showAuthSheet = true
+            UserApiKeyAuthManager.startBrowserOneClickAuth()
         }
     }
 
@@ -1952,7 +2030,11 @@ internal fun LinDoApp(
                             refreshUpToDateNotice = false
                         }
                     }
-                    feedListState.scrollToItem(0)
+                    if (topics.isNotEmpty() &&
+                        (feedListState.firstVisibleItemIndex != 0 || feedListState.firstVisibleItemScrollOffset != 0)
+                    ) {
+                        feedListState.requestScrollToItem(0)
+                    }
                 } else {
                     topics = emptyList()
                     hasMoreTopics = false
@@ -2077,6 +2159,7 @@ internal fun LinDoApp(
         activeTopicDetail = null
         activeTopicSummary = topic
         activeTargetPostNumber = targetPostNumber
+        currentTab = MainTab.HOME
         mobileShowingDetail = true
         detailLoadJob = scope.launch {
             isLoadingDetail = true
@@ -2175,7 +2258,13 @@ internal fun LinDoApp(
             // 优先在后台静默兑换 OTP 令牌，免弹 WebView 页面以避免二次触发 Cloudflare Turnstile 验证
             val redeemed = LinuxDoRepository.redeemOtpSilently(otp)
             if (!redeemed) {
-                openWebPage("https://linux.do/session/otp/$otp")
+                if (hasEmbeddedWebLogin) {
+                    openWebPage("https://linux.do/session/otp/$otp")
+                } else {
+                    desktopAuthStatusHint = "已收到授权回调，但自动建立会话被站点拦截。请在下方粘贴浏览器 Cookie 或 cURL 完成登录"
+                    showManualAuthExpanded = true
+                    showAuthSheet = true
+                }
                 return@LaunchedEffect
             }
         } else if (UserApiKeyAuthManager.isAuthorized() &&
@@ -2331,25 +2420,49 @@ internal fun LinDoApp(
         categoryColorHex: String = ""
     ) {
         if (topicId <= 0) return
+        val currentSummary = activeTopicSummary?.takeIf { it.id == topicId }
+        val currentDetail = activeTopicDetail?.takeIf { currentSummary != null && !it.unavailable && it.loadError == null }
+        if (currentSummary != null && currentDetail != null && targetPostNumber != null &&
+            currentDetail.posts.any { it.postNumber == targetPostNumber }
+        ) {
+            dismissCoveringSheets()
+            currentTab = MainTab.HOME
+            mobileShowingDetail = true
+            activeTargetPostNumber = targetPostNumber
+            targetFloorJumpNonce++
+            return
+        }
         val catMeta = LinuxDoRepository.findCategoryById(categoryId)
         val resolvedCatId = catMeta?.id ?: categoryId ?: 0
         val resolvedCatName = categoryName.ifBlank { catMeta?.displayName.orEmpty() }
         val resolvedCatColor = categoryColorHex.ifBlank { catMeta?.colorHex ?: "808281" }
         val safePostsCount = if (targetPostNumber != null && targetPostNumber < 999_999) maxOf(1, targetPostNumber) else 1
-        val existing = topics.firstOrNull { it.id == topicId } ?: TopicSummary(
-            id = topicId,
-            title = fallbackTitle,
-            postsCount = safePostsCount,
-            replyCount = 0,
-            views = 0,
-            likeCount = 0,
-            categoryId = resolvedCatId,
-            categoryName = resolvedCatName,
-            categoryColorHex = resolvedCatColor,
-            tags = emptyList(),
-            lastPostedAt = "",
-            originalPoster = TopicUser(id = 0, username = "linuxdo")
-        )
+        val knownSummary = currentSummary
+            ?: topics.firstOrNull { it.id == topicId }
+            ?: discoverHotTopics.firstOrNull { it.id == topicId }
+        val existing = if (knownSummary != null) {
+            val hasRealFallbackTitle = fallbackTitle.isNotBlank() && fallbackTitle != "话题 #$topicId"
+            if (knownSummary.title.startsWith("话题 #") && hasRealFallbackTitle) {
+                knownSummary.copy(title = fallbackTitle)
+            } else {
+                knownSummary
+            }
+        } else {
+            TopicSummary(
+                id = topicId,
+                title = fallbackTitle,
+                postsCount = safePostsCount,
+                replyCount = 0,
+                views = 0,
+                likeCount = 0,
+                categoryId = resolvedCatId,
+                categoryName = resolvedCatName,
+                categoryColorHex = resolvedCatColor,
+                tags = emptyList(),
+                lastPostedAt = "",
+                originalPoster = TopicUser(id = 0, username = "linuxdo")
+            )
+        }
         openTopic(existing, targetPostNumber)
     }
 
@@ -2394,8 +2507,21 @@ internal fun LinDoApp(
 
     // 站内链接原生智能路由：点击帖子内的话题、标签、分类、用户名片或 Connect 链接时直接在 App 原生界面打开，避免跳转 WebView 触发 Cloudflare 验证
     fun openSmartUrl(rawUrl: String) {
-        val trimmed = rawUrl.trim()
-        if (trimmed.isEmpty()) return
+        val rawTrimmed = rawUrl.trim()
+        if (rawTrimmed.isEmpty()) return
+        val trimmed = when {
+            rawTrimmed.startsWith("//") -> "https:$rawTrimmed"
+            rawTrimmed.startsWith("/t/") ||
+                rawTrimmed.startsWith("/u/") ||
+                rawTrimmed.startsWith("/tag/") ||
+                rawTrimmed.startsWith("/c/") ||
+                rawTrimmed.startsWith("/badges") ||
+                rawTrimmed.startsWith("/about") ||
+                rawTrimmed.startsWith("/leaderboard") ||
+                rawTrimmed.startsWith("/my/") ||
+                (rawTrimmed.startsWith("/") && !rawTrimmed.startsWith("//")) -> "https://linux.do$rawTrimmed"
+            else -> rawTrimmed
+        }
         if (!isAuthorized) {
             resolveGuestLoginPromptForUrl(trimmed)?.let { prompt ->
                 requestGuestLogin(title = prompt.title, subtitle = prompt.subtitle)
@@ -2511,8 +2637,14 @@ internal fun LinDoApp(
         }
     }
 
-    LaunchedEffect(Unit) {
-        loadTopics(FeedSortFilter.LATEST, null)
+    var initialFeedBootstrapped by remember { mutableStateOf(false) }
+    LaunchedEffect(isAuthorized, isGuestMode) {
+        if (!isAuthorized && !isGuestMode) return@LaunchedEffect
+        if (initialFeedBootstrapped) return@LaunchedEffect
+        initialFeedBootstrapped = true
+        if (topics.isEmpty() && loadTopicsJob?.isActive != true) {
+            loadTopics(FeedSortFilter.LATEST, null)
+        }
         if (UserApiKeyAuthManager.isAuthorized()) {
             launch {
                 delay(1500L)
@@ -2596,6 +2728,8 @@ internal fun LinDoApp(
     SideEffect {
         val canIntercept = BackNavigationBridge.hasActiveInterceptors ||
             activeWebLoginUrl != null ||
+            showDesktopSiteVerifySheet ||
+            showAuthSheet ||
             inspectedBadge != null ||
             inspectedUsername != null ||
             showAppIconPage ||
@@ -2616,7 +2750,6 @@ internal fun LinDoApp(
             showAccountPreferencesSheet ||
             showAboutSheet ||
             showConnectSheet ||
-            showAuthSheet ||
             (mobileShowingDetail && !isWideLayout) ||
             currentTab != MainTab.HOME
         BackNavigationBridge.canGoBack = canIntercept
@@ -2624,6 +2757,14 @@ internal fun LinDoApp(
             when {
                 activeWebLoginUrl != null -> {
                     closeWebPage()
+                    true
+                }
+                showDesktopSiteVerifySheet -> {
+                    showDesktopSiteVerifySheet = false
+                    true
+                }
+                showAuthSheet -> {
+                    showAuthSheet = false
                     true
                 }
                 showLogoutConfirm -> {
@@ -2707,10 +2848,6 @@ internal fun LinDoApp(
                 }
                 showConnectSheet -> {
                     showConnectSheet = false
-                    true
-                }
-                showAuthSheet -> {
-                    showAuthSheet = false
                     true
                 }
                 mobileShowingDetail && !isWideLayout -> {
@@ -2837,15 +2974,16 @@ internal fun LinDoApp(
                         ) {
                             GoogleWelcomeLoginScreen(
                                 onOpenAppIcon = openAppIconPage,
-                                onPrimaryWebLogin = {
-                                    openWebPage("https://linux.do/login")
-                                },
+                                onPrimaryWebLogin = ::triggerPrimaryLogin,
                                 onBrowserOneClickAuth = {
-                                    val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
-                                    if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
-                                        openWebPage(url)
+                                    if (hasEmbeddedWebLogin) {
+                                        triggerBrowserOneClickLogin()
+                                    } else {
+                                        triggerManualCredentialLogin()
                                     }
                                 },
+                                secondaryActionLabel = if (hasEmbeddedWebLogin) "系统浏览器授权" else "粘贴 Cookie / 回调链接登录",
+                                secondaryActionIcon = if (hasEmbeddedWebLogin) LinDoIcons.Globe else LinDoIcons.Link,
                                 onToggleDark = { updateThemePref(!isDarkTheme) },
                                 onGuestBrowse = {
                                     isGuestMode = true
@@ -2869,7 +3007,10 @@ internal fun LinDoApp(
                                 unreadCount = fullUserProfile?.unreadNotifications ?: 0,
                                 compactWidth = isCompactWideRail,
                                 topWindowInset = macTitleBarInset,
-                                onSelectTab = { currentTab = it },
+                                onSelectTab = {
+                                    mobileShowingDetail = false
+                                    currentTab = it
+                                },
                                 onPublishClick = {
                                     if (isAuthorized) {
                                         pendingNewTopicDraft = null
@@ -2941,9 +3082,7 @@ internal fun LinDoApp(
                                                     isAuthorized = isAuthorized,
                                                     currentUser = currentUser,
                                                     unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
-                                                    onRequestLogin = {
-                                                        requestGuestLogin()
-                                                    },
+                                                    onRequestLogin = ::triggerPrimaryLogin,
                                                     onSearchChange = { searchQuery = it },
                                                     onOpenGlobalSearch = { showGlobalSearchSheet = true },
                                                     onOpenCreateTopic = {
@@ -3022,12 +3161,7 @@ internal fun LinDoApp(
                                                     onInspectUser = { inspectedUsername = it },
                                                     onSelectTag = { tag -> selectTagExternally(tag) },
                                                     onOpenWebUrl = { openSmartUrl(it) },
-                                                    onRequestLogin = {
-                                                        requestGuestLogin(
-                                                            title = "登录后参与互动",
-                                                            subtitle = "登录 LINUX DO 账号后即可回复话题、点赞表态、收藏与投票"
-                                                        )
-                                                    }
+                                                    onRequestLogin = ::triggerPrimaryLogin
                                                 )
                                             }
                                         }
@@ -3083,12 +3217,7 @@ internal fun LinDoApp(
                                         isAuthorized = isAuthorized,
                                         username = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
                                         globalUnreadCount = fullUserProfile?.unreadNotifications ?: 0,
-                                        onRequestLogin = {
-                                            requestGuestLogin(
-                                                title = "登录后查看消息与私信",
-                                                subtitle = "实时接收回复、提及、点赞通知与佬友私信"
-                                            )
-                                        },
+                                        onRequestLogin = ::triggerPrimaryLogin,
                                         onSelectTopicId = { tid, title, postNum ->
                                             currentTab = MainTab.HOME
                                             openTopicById(tid, title, postNum)
@@ -3165,11 +3294,13 @@ internal fun LinDoApp(
                                                 )
                                             }
                                         },
-                                        onOpenAuthSheet = { showAuthSheet = true },
-                                        onOpenWebUrl = { openSmartUrl(it) },
-                                        onPrimaryWebLogin = {
-                                            requestGuestLogin()
+                                        onOpenAuthSheet = {
+                                            desktopAuthStatusHint = null
+                                            showManualAuthExpanded = false
+                                            showAuthSheet = true
                                         },
+                                        onOpenWebUrl = { openSmartUrl(it) },
+                                        onPrimaryWebLogin = ::triggerPrimaryLogin,
                                         onRequestGuestLogin = ::requestGuestLogin,
                                         onLogout = {
                                             showLogoutConfirm = true
@@ -3212,12 +3343,7 @@ internal fun LinDoApp(
                                 onInspectUser = { inspectedUsername = it },
                                 onSelectTag = { tag -> selectTagExternally(tag) },
                                 onOpenWebUrl = { openSmartUrl(it) },
-                                onRequestLogin = {
-                                    requestGuestLogin(
-                                        title = "登录后参与互动",
-                                        subtitle = "登录 LINUX DO 账号后即可回复话题、点赞表态、收藏与投票"
-                                    )
-                                }
+                                onRequestLogin = ::triggerPrimaryLogin
                             )
                         } else {
                             Box(modifier = Modifier.fillMaxSize()) {
@@ -3249,9 +3375,7 @@ internal fun LinDoApp(
                                                 isAuthorized = isAuthorized,
                                                 currentUser = currentUser,
                                                 unreadNotificationCount = fullUserProfile?.unreadNotifications ?: 0,
-                                                onRequestLogin = {
-                                                    requestGuestLogin()
-                                                },
+                                                onRequestLogin = ::triggerPrimaryLogin,
                                                 onSearchChange = { searchQuery = it },
                                                 onOpenGlobalSearch = { showGlobalSearchSheet = true },
                                                 onOpenCreateTopic = {
@@ -3317,12 +3441,7 @@ internal fun LinDoApp(
                                                 isAuthorized = isAuthorized,
                                                 username = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
                                                 globalUnreadCount = fullUserProfile?.unreadNotifications ?: 0,
-                                                onRequestLogin = {
-                                                    requestGuestLogin(
-                                                        title = "登录后查看消息与私信",
-                                                        subtitle = "实时接收回复、提及、点赞通知与佬友私信"
-                                                    )
-                                                },
+                                                onRequestLogin = ::triggerPrimaryLogin,
                                                 onSelectTopicId = { tid, title, postNum -> openTopicById(tid, title, postNum) },
                                                 onSelectMessageTopic = { topic -> openTopic(topic) },
                                                 onInspectUser = { uname -> inspectedUsername = uname },
@@ -3393,11 +3512,13 @@ internal fun LinDoApp(
                                                         )
                                                     }
                                                 },
-                                                onOpenAuthSheet = { showAuthSheet = true },
-                                                onOpenWebUrl = { openSmartUrl(it) },
-                                                onPrimaryWebLogin = {
-                                                    requestGuestLogin()
+                                                onOpenAuthSheet = {
+                                                    desktopAuthStatusHint = null
+                                                    showManualAuthExpanded = false
+                                                    showAuthSheet = true
                                                 },
+                                                onOpenWebUrl = { openSmartUrl(it) },
+                                                onPrimaryWebLogin = ::triggerPrimaryLogin,
                                                 onRequestGuestLogin = ::requestGuestLogin,
                                                 onLogout = {
                                                     showLogoutConfirm = true
@@ -3613,29 +3734,6 @@ internal fun LinDoApp(
                     )
                 }
 
-                if (showAuthSheet) {
-                    UserApiKeyAuthSheet(
-                        isAuthorized = isAuthorized,
-                        currentUser = currentUser,
-                        onPrimaryWebLogin = {
-                            showAuthSheet = false
-                            openWebPage("https://linux.do/login")
-                        },
-                        onBrowserOneClickAuth = {
-                            showAuthSheet = false
-                            val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
-                            if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
-                                openWebPage(url)
-                            }
-                        },
-                        onLogout = {
-                            showLogoutConfirm = true
-                            showAuthSheet = false
-                        },
-                        onDismiss = { showAuthSheet = false }
-                    )
-                }
-
                 if (showPrivateMessagesSheet) {
                     val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
                     UserPrivateMessagesSheet(
@@ -3831,12 +3929,89 @@ internal fun LinDoApp(
                 guestLoginPrompt?.let { prompt ->
                     GuestLoginGuideSheet(
                         prompt = prompt,
-                        onPrimaryWebLogin = {
-                            guestLoginPrompt = null
-                            openWebPage("https://linux.do/login")
+                        hasEmbeddedWebLogin = hasEmbeddedWebLogin,
+                        onPrimaryWebLogin = ::triggerPrimaryLogin,
+                        onBrowserOneClickAuth = {
+                            if (hasEmbeddedWebLogin) {
+                                triggerBrowserOneClickLogin()
+                            } else {
+                                triggerManualCredentialLogin()
+                            }
                         },
-                        onBrowserOneClickAuth = ::triggerBrowserOneClickLogin,
                         onDismiss = { guestLoginPrompt = null }
+                    )
+                }
+
+                if (showAuthSheet) {
+                    UserApiKeyAuthSheet(
+                        isAuthorized = isAuthorized,
+                        currentUser = currentUser,
+                        hasEmbeddedWebLogin = hasEmbeddedWebLogin,
+                        desktopStatusHint = desktopAuthStatusHint,
+                        initialExpandManual = showManualAuthExpanded,
+                        onUpdateStatusHint = { desktopAuthStatusHint = it },
+                        onPrimaryWebLogin = {
+                            if (hasEmbeddedWebLogin) {
+                                showAuthSheet = false
+                                openWebPage("https://linux.do/login")
+                            } else {
+                                desktopAuthStatusHint = "已在系统浏览器打开授权页，点击「批准」后将自动完成登录"
+                                UserApiKeyAuthManager.startBrowserOneClickAuth()
+                            }
+                        },
+                        onBrowserOneClickAuth = {
+                            if (hasEmbeddedWebLogin) {
+                                showAuthSheet = false
+                                val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
+                                if (UserApiKeyAuthManager.openExternalUrlLauncher == null) {
+                                    openWebPage(url)
+                                }
+                            } else {
+                                desktopAuthStatusHint = "已在系统浏览器打开授权页，点击「批准」后将自动完成登录"
+                                UserApiKeyAuthManager.startBrowserOneClickAuth()
+                            }
+                        },
+                        onManualAuthSucceeded = {
+                            desktopAuthStatusHint = null
+                            showManualAuthExpanded = false
+                            showAuthSheet = false
+                            authVersion++
+                        },
+                        onLogout = {
+                            showLogoutConfirm = true
+                            showAuthSheet = false
+                        },
+                        onDismiss = { showAuthSheet = false }
+                    )
+                }
+
+                if (showDesktopSiteVerifySheet) {
+                    DesktopSiteVerificationSheet(
+                        onOpenBrowserVerify = {
+                            UserApiKeyAuthManager.openExternalUrlLauncher?.invoke("https://linux.do/")
+                        },
+                        onRetryVerified = { pastedInput ->
+                            if (pastedInput.isNotBlank()) {
+                                LinuxDoRepository.importCloudflareClearanceInput(pastedInput)
+                            }
+                            showDesktopSiteVerifySheet = false
+                            scope.launch {
+                                LinuxDoRepository.prepareForManualRecovery()
+                                siteVerificationRestoreVersion++
+                                networkRestoreVersion++
+                                if (feedError != null || topics.isEmpty()) {
+                                    loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+                                }
+                                if (loadMoreError) {
+                                    loadMoreError = false
+                                    loadNextPageTopics(forcePrepareRecovery = true)
+                                }
+                                if (activeTopicDetail?.loadError != null && activeTopicSummary != null) {
+                                    openTopic(activeTopicSummary!!, activeTargetPostNumber, isManualRetry = true)
+                                }
+                            }
+                        },
+                        onDismiss = { showDesktopSiteVerifySheet = false }
                     )
                 }
 
@@ -4971,6 +5146,22 @@ internal fun CommunityHomeFeedPane(
                                 contentDescription = if (isCategoryBarExpanded) "收起分类筛选" else "展开分类筛选",
                                 modifier = Modifier.size(LinDoTokens.IconXS),
                                 tint = if (isCategoryBarExpanded || activeCategoryMeta != null) palette.activeChipText else palette.inkSecondary
+                            )
+                        }
+
+                        // 右侧「刷新列表」快捷按钮（方便桌面端与鼠标用户一键手动刷新）
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(LinDoTokens.ShapeXS)
+                                .clickable(enabled = !isLoading) { onRefresh() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = LinDoIcons.Refresh,
+                                contentDescription = "刷新列表",
+                                modifier = Modifier.size(LinDoTokens.IconS),
+                                tint = if (isLoading) palette.inkTertiary else palette.inkSecondary
                             )
                         }
 
@@ -6543,6 +6734,12 @@ internal fun CommunityTopicReaderPane(
     var loadMorePostsError by remember(summary.id) { mutableStateOf(false) }
     var floorLoadError by remember(summary.id) { mutableStateOf<String?>(null) }
     var copiedShareLink by remember(summary.id) { mutableStateOf(false) }
+    LaunchedEffect(copiedShareLink) {
+        if (copiedShareLink) {
+            delay(2000L)
+            copiedShareLink = false
+        }
+    }
     var showFloorNavigator by remember(summary.id) { mutableStateOf(false) }
 
     // 回复编辑器状态
@@ -6631,9 +6828,13 @@ internal fun CommunityTopicReaderPane(
     val floorByPostId = remember(posts) { posts.associate { it.id to it.postNumber } }
     val visibleFloorState = remember(readerListState, floorByPostId) {
         derivedStateOf {
-            readerListState.layoutInfo.visibleItemsInfo.asReversed().firstNotNullOfOrNull {
-                floorByPostId[it.key as? Int]
-            } ?: 1
+            if (readerListState.firstVisibleItemIndex == 0) {
+                1
+            } else {
+                readerListState.layoutInfo.visibleItemsInfo.asReversed().firstNotNullOfOrNull {
+                    floorByPostId[it.key as? Int]
+                } ?: 1
+            }
         }
     }
     LaunchedEffect(pendingJumpFloor, jumpFetchedWindow, posts) {
@@ -6666,7 +6867,7 @@ internal fun CommunityTopicReaderPane(
         if (draft.topicId == summary.id) {
             replyTargetPostNumber = draft.replyToPostNumber
             replyTargetUsername = null
-            replyInitialQuote = draft.raw.ifBlank { draft.excerpt }
+            replyInitialQuote = ""
             replyCloudDraft = draft
             showReplySheet = true
             onConsumeReplyDraft()
@@ -6677,14 +6878,14 @@ internal fun CommunityTopicReaderPane(
     var jumpedToTargetFloor by remember(summary.id, targetPostNumber, targetFloorJumpNonce) { mutableStateOf(false) }
     LaunchedEffect(summary.id, targetPostNumber, targetFloorJumpNonce, posts.size) {
         val targetFloor = targetPostNumber
-        if (!jumpedToTargetFloor && targetFloor != null && targetFloor > 1 && posts.isNotEmpty()) {
+        if (!jumpedToTargetFloor && targetFloor != null && (targetFloor > 1 || readerListState.firstVisibleItemIndex > 0) && posts.isNotEmpty()) {
             val targetIdx = resolveJumpPostIndex(posts, targetFloor, allowNearestFallback = true)
             if (targetIdx != null) {
                 jumpedToTargetFloor = true
                 if (targetIdx == 0) {
-                    readerListState.scrollToItem(0)
+                    readerListState.requestScrollToItem(0)
                 } else {
-                    readerListState.scrollToItem(targetIdx + 1)
+                    readerListState.requestScrollToItem(targetIdx + 1)
                 }
             }
         }
@@ -6706,6 +6907,7 @@ internal fun CommunityTopicReaderPane(
                 val batchIds = if (earlier) candidateIds.takeLast(batchSize) else candidateIds.take(batchSize)
                 val knownAuthorBadges = currentDetail.posts.associate { it.userId to it.authorBadges }
                 val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds, knownAuthorBadges)
+                val missingIds = batchIds.toSet() - morePosts.map { it.id }.toSet()
                 if (morePosts.isNotEmpty()) {
                     val prevPosts = latestDetail?.posts.orEmpty()
                     val prevMinFloor = prevPosts.minOfOrNull { it.postNumber } ?: Int.MAX_VALUE
@@ -6716,7 +6918,10 @@ internal fun CommunityTopicReaderPane(
                     val anchorOffset = anchorItem?.offset ?: 0
                     val merged = mergeTopicPosts(prevPosts, morePosts)
                     val prependedCount = if (earlier) merged.count { it.postNumber < prevMinFloor } else 0
-                    latestDetail?.let { onDetailUpdated(it.copy(posts = merged)) }
+                    latestDetail?.let { cur ->
+                        val prunedStream = if (missingIds.isEmpty()) cur.streamIds else cur.streamIds.filterNot { it in missingIds }
+                        onDetailUpdated(cur.copy(posts = merged, streamIds = prunedStream))
+                    }
                     if (earlier && prependedCount > 0) {
                         withFrameNanos { }
                         if (anchorPostId != null) {
@@ -6728,9 +6933,10 @@ internal fun CommunityTopicReaderPane(
                             readerListState.scrollToItem(1 + prependedCount, 0)
                         }
                     }
-                } else {
-                    loadMorePostsError = true
-                    floorLoadError = "楼层加载失败"
+                } else if (missingIds.isNotEmpty()) {
+                    latestDetail?.let { cur ->
+                        onDetailUpdated(cur.copy(streamIds = cur.streamIds.filterNot { it in missingIds }))
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -6752,9 +6958,13 @@ internal fun CommunityTopicReaderPane(
                 val batchIds = gapIds.take(batchSize)
                 val knownAuthorBadges = currentDetail.posts.associate { it.userId to it.authorBadges }
                 val morePosts = LinuxDoRepository.fetchMoreTopicPosts(summary.id, batchIds, knownAuthorBadges)
-                if (morePosts.isNotEmpty()) {
-                    val merged = mergeTopicPosts(latestDetail?.posts.orEmpty(), morePosts)
-                    latestDetail?.let { onDetailUpdated(it.copy(posts = merged)) }
+                val missingIds = batchIds.toSet() - morePosts.map { it.id }.toSet()
+                latestDetail?.let { cur ->
+                    val merged = if (morePosts.isNotEmpty()) mergeTopicPosts(cur.posts, morePosts) else cur.posts
+                    val prunedStream = if (missingIds.isEmpty()) cur.streamIds else cur.streamIds.filterNot { it in missingIds }
+                    if (morePosts.isNotEmpty() || missingIds.isNotEmpty()) {
+                        onDetailUpdated(cur.copy(posts = merged, streamIds = prunedStream))
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -7578,7 +7788,40 @@ internal fun CommunityTopicReaderPane(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val readerAuthorized = UserApiKeyAuthManager.isAuthorized()
-                if (readerAuthorized) {
+                val staffSummary = UserApiKeyAuthManager.fullProfileCache
+                val isStaffUser = staffSummary?.admin == true || staffSummary?.moderator == true
+                val isTopicArchived = detail?.archived == true
+                val isTopicClosed = detail?.closed == true
+                val isDetailInitialLoading = detail == null && isLoading
+                val isReplyLocked = (isTopicArchived || isTopicClosed) && !isStaffUser
+                if (isDetailInitialLoading) {
+                    Spacer(modifier = Modifier.weight(1f))
+                } else if (isReplyLocked) {
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .heightIn(min = 38.dp)
+                                .clip(RoundedCornerShape(19.dp))
+                                .background(palette.subtleSurface.copy(alpha = 0.55f))
+                                .border(0.5.dp, palette.hairline, RoundedCornerShape(19.dp))
+                                .padding(horizontal = 14.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            Icon(LinDoIcons.FaLock, null, Modifier.size(13.dp), tint = palette.inkTertiary)
+                            Text(
+                                text = if (isTopicArchived) "话题已归档" else "话题已关闭",
+                                fontSize = 13.sp,
+                                color = palette.inkTertiary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                } else if (readerAuthorized) {
                     Box(
                         modifier = Modifier.weight(1f),
                         contentAlignment = Alignment.CenterStart
@@ -7616,10 +7859,7 @@ internal fun CommunityTopicReaderPane(
                             .clip(RoundedCornerShape(19.dp))
                             .background(palette.subtleSurface.copy(alpha = 0.72f))
                             .border(0.5.dp, palette.hairline, RoundedCornerShape(19.dp))
-                            .clickable {
-                                requestGuestLogin?.invoke("登录后参与回复", "登录 LINUX DO 账号，参与话题讨论与互动")
-                                    ?: onRequestLogin()
-                            }
+                            .clickable { onRequestLogin() }
                             .padding(horizontal = 14.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -7788,7 +8028,7 @@ internal fun CommunityTopicReaderPane(
             replyToAvatarUrl = replyAvatarUrl,
             replyToAnimatedAvatar = replyAnimatedAvatar,
             replyToContentSnippet = replyPreviewSnippet,
-            initialRaw = replyInitialQuote,
+            initialRaw = if (replyCloudDraft != null) "" else replyInitialQuote,
             initialDraft = replyCloudDraft,
             onDismiss = { showReplySheet = false },
             onPostCreated = { newPost ->
@@ -8207,7 +8447,11 @@ internal fun CommunityPostFloor(
             Box(
                 modifier = Modifier
                     .graphicsLayer { alpha = 0.55f }
-                    .clickable { onInspectUser(post.username) }
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { onInspectUser(post.username) }
             ) {
                 SmartAvatar(
                     username = post.username,
@@ -8289,7 +8533,11 @@ internal fun CommunityPostFloor(
         ) {
             Box(
                 modifier = Modifier
-                    .clickable { onInspectUser(post.username) }
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { onInspectUser(post.username) }
             ) {
                 SmartAvatar(
                     username = post.username,
@@ -8630,15 +8878,22 @@ internal fun CommunityPostFloor(
                         modifier = Modifier.padding(start = 8.dp)
                     )
                 }
-                Icon(
-                    imageVector = LinDoIcons.Close,
-                    contentDescription = "关闭提示",
+                Box(
                     modifier = Modifier
-                        .padding(start = 8.dp)
-                        .size(13.dp)
+                        .padding(start = 6.dp)
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .pointerHoverIcon(PointerIcon.Hand)
                         .clickable { floorActionError = null },
-                    tint = palette.inkTertiary
-                )
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Close,
+                        contentDescription = "关闭提示",
+                        modifier = Modifier.size(13.dp),
+                        tint = palette.inkTertiary
+                    )
+                }
             }
         }
 
@@ -9011,6 +9266,7 @@ internal fun CommunityPostFloor(
                         .clip(CircleShape)
                         .combinedClickable(
                             onClick = {
+                                if (isOwnPost) return@combinedClickable
                                 if (showReactionPopover) {
                                     showReactionPopover = false
                                 } else {
@@ -9019,7 +9275,11 @@ internal fun CommunityPostFloor(
                                     toggleReaction(targetId, targetEmoji)
                                 }
                             },
+                            onDoubleClick = {
+                                if (isOwnPost) return@combinedClickable
+                            },
                             onLongClick = {
+                                if (isOwnPost) return@combinedClickable
                                 if (!UserApiKeyAuthManager.isAuthorized()) {
                                     requestGuestLogin?.invoke("登录后点赞与表态", "登录 LINUX DO 账号后即可点赞或用表情回应帖子")
                                         ?: onRequestLogin()
@@ -9316,7 +9576,11 @@ internal fun CommunityPostFloor(
                         Box(
                             modifier = Modifier
                                 .padding(top = 1.5.dp)
-                                .clickable { onInspectUser(child.username) }
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null
+                                ) { onInspectUser(child.username) }
                         ) {
                             SmartAvatar(
                                 username = child.username,
@@ -9695,14 +9959,21 @@ internal fun CommunityDiscoverScreen(
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
         LinDoPageHeader(title = "发现") {
-            Icon(
-                imageVector = LinDoIcons.Search,
-                contentDescription = "搜索",
+            Box(
                 modifier = Modifier
-                    .size(LinDoTokens.IconL)
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .pointerHoverIcon(PointerIcon.Hand)
                     .clickable(onClick = onOpenGlobalSearch),
-                tint = palette.inkPrimary
-            )
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.Search,
+                    contentDescription = "搜索",
+                    modifier = Modifier.size(LinDoTokens.IconL),
+                    tint = palette.inkPrimary
+                )
+            }
         }
 
         LazyColumn(
@@ -10267,7 +10538,9 @@ private fun CommunityMessagesScreen(
                 } else {
                     onUnreadCountSynced(maxOf(globalUnreadCount, pageUnread))
                 }
-                notifListState.scrollToItem(0)
+                if (notifListState.firstVisibleItemIndex != 0 || notifListState.firstVisibleItemScrollOffset != 0) {
+                    notifListState.requestScrollToItem(0)
+                }
             } else if (subTab == 1) {
                 val effectiveUsername = username.ifBlank {
                     LinuxDoRepository.fetchCurrentUserProfile()?.username.orEmpty()
@@ -10278,7 +10551,9 @@ private fun CommunityMessagesScreen(
                     privateMessages = loadedPm
                     pmPage = 0
                     hasMorePm = loadedPm.size >= 20
-                    pmListState.scrollToItem(0)
+                    if (pmListState.firstVisibleItemIndex != 0 || pmListState.firstVisibleItemScrollOffset != 0) {
+                        pmListState.requestScrollToItem(0)
+                    }
                 }
             }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -10315,8 +10590,8 @@ private fun CommunityMessagesScreen(
     }
 
     LaunchedEffect(categoryFilter, subTab) {
-        if (subTab == 0) {
-            notifListState.scrollToItem(0)
+        if (subTab == 0 && (notifListState.firstVisibleItemIndex != 0 || notifListState.firstVisibleItemScrollOffset != 0)) {
+            notifListState.requestScrollToItem(0)
         }
     }
 
@@ -10782,26 +11057,40 @@ internal fun CommunityProfileScreen(
             .background(palette.canvas)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        // 顶栏：我的 + 右上角同步资料 + 昼夜主题切换（小太阳/月亮），严格对齐 16dp 边距与 22dp 图标
+        // 顶栏：我的 + 右上角同步资料 + 昼夜主题切换（小太阳/月亮），圆形悬停热区对齐 34dp
         LinDoPageHeader(title = "我的") {
             if (isAuthorized) {
-                Icon(
-                    imageVector = LinDoIcons.Refresh,
-                    contentDescription = "同步资料",
+                Box(
                     modifier = Modifier
-                        .size(LinDoTokens.IconL)
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .pointerHoverIcon(PointerIcon.Hand)
                         .clickable(onClick = onRefreshProfile),
-                    tint = palette.inkSecondary
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Refresh,
+                        contentDescription = "同步资料",
+                        modifier = Modifier.size(LinDoTokens.IconL),
+                        tint = palette.inkSecondary
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .clickable(onClick = onToggleDark),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isDarkTheme) LinDoIcons.Sun else LinDoIcons.Moon,
+                    contentDescription = if (isDarkTheme) "切换浅色模式" else "切换深色模式",
+                    modifier = Modifier.size(LinDoTokens.IconL),
+                    tint = palette.inkPrimary
                 )
             }
-            Icon(
-                imageVector = if (isDarkTheme) LinDoIcons.Sun else LinDoIcons.Moon,
-                contentDescription = if (isDarkTheme) "切换浅色模式" else "切换深色模式",
-                modifier = Modifier
-                    .size(LinDoTokens.IconL)
-                    .clickable(onClick = onToggleDark),
-                tint = palette.inkPrimary
-            )
         }
 
         LazyColumn(
@@ -10923,19 +11212,24 @@ internal fun CommunityProfileScreen(
                         }
 
                         if (isAuthorized) {
-                            Icon(
-                                imageVector = LinDoIcons.Edit,
-                                contentDescription = "编辑资料",
+                            Box(
                                 modifier = Modifier
-                                    .size(LinDoTokens.IconM)
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .pointerHoverIcon(PointerIcon.Hand)
                                     .clickable(onClick = onOpenEditProfile),
-                                tint = palette.inkSecondary
-                            )
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = LinDoIcons.Edit,
+                                    contentDescription = "编辑资料",
+                                    modifier = Modifier.size(LinDoTokens.IconM),
+                                    tint = palette.inkSecondary
+                                )
+                            }
                         } else {
                             TextButton(
-                                onClick = {
-                                    onRequestGuestLogin("欢迎登录 LINUX DO", "登录后自动同步个人资料、Connect 保级、收藏与通知")
-                                },
+                                onClick = onPrimaryWebLogin,
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 Text(
@@ -11088,12 +11382,21 @@ internal fun CommunityProfileScreen(
                     LinDoSettingRow(
                         icon = LinDoIcons.ShieldCheck,
                         title = "账号与偏好设置",
-                        showDivider = false,
+                        showDivider = isAuthorized,
                         onClick = {
                             if (isAuthorized) onOpenAccountPreferences()
                             else onRequestGuestLogin("登录后管理账号设置", "自定义个人主页、头衔徽章与隐私偏好")
                         }
                     )
+                    if (isAuthorized) {
+                        LinDoSettingRow(
+                            icon = LinDoIcons.Globe,
+                            title = "账号与会话管理",
+                            value = "切换账号",
+                            showDivider = false,
+                            onClick = onOpenAuthSheet
+                        )
+                    }
 
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
@@ -11262,10 +11565,36 @@ internal fun CommunityProfileScreen(
                         }
                     )
 
-                    // 3.5 关于社区
+                    // 3.5 清理本地缓存
+                    var cacheClearedFeedback by remember { mutableStateOf(false) }
+                    val context = coil3.compose.LocalPlatformContext.current
+                    val cacheScope = rememberCoroutineScope()
+                    LaunchedEffect(cacheClearedFeedback) {
+                        if (cacheClearedFeedback) {
+                            delay(2500L)
+                            cacheClearedFeedback = false
+                        }
+                    }
+                    LinDoSettingRow(
+                        icon = LinDoIcons.Trash,
+                        title = "清理本地缓存",
+                        value = if (cacheClearedFeedback) "已清理图片与解析缓存" else "",
+                        onClick = {
+                            LinuxDoRepository.clearAllLocalCaches()
+                            val imageLoader = runCatching { coil3.SingletonImageLoader.get(context) }.getOrNull()
+                            runCatching { imageLoader?.memoryCache?.clear() }
+                            cacheScope.launch(Dispatchers.IO) {
+                                runCatching { imageLoader?.diskCache?.clear() }
+                            }
+                            cacheClearedFeedback = true
+                        }
+                    )
+
+                    // 3.6 关于社区
                     LinDoSettingRow(
                         icon = LinDoIcons.InfoCircle,
                         title = "关于社区",
+                        value = "Lindo v0.2.31",
                         showDivider = false,
                         onClick = onOpenAboutSheet
                     )
@@ -11302,6 +11631,22 @@ internal fun CommunityProfileScreen(
                         )
                     }
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                }
+            }
+
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 18.dp, bottom = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Lindo v0.2.31",
+                        fontSize = 11.5.sp,
+                        letterSpacing = 0.4.sp,
+                        color = palette.inkTertiary
+                    )
                 }
             }
         }
@@ -12124,21 +12469,35 @@ private fun ConnectTrustLevelSheet(onDismiss: () -> Unit) {
 }
 
 /**
- * 极简无框账号登录与切换独立页面
+ * 极简无框账号登录与切换独立页面（支持桌面端浏览器一键授权 + 手动粘贴 Cookie / 回调链接 / cURL 兜底）
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun UserApiKeyAuthSheet(
     isAuthorized: Boolean,
     currentUser: AuthenticatedUserProfile?,
+    hasEmbeddedWebLogin: Boolean = true,
+    desktopStatusHint: String? = null,
+    initialExpandManual: Boolean = false,
+    onUpdateStatusHint: (String?) -> Unit = {},
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
+    onManualAuthSucceeded: () -> Unit = {},
     onLogout: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val palette = LocalPalette.current
-    val primaryCapsuleBg = if (palette.isDark) palette.publishBtnBg else Color(0xFF111827)
-    val primaryCapsuleFg = if (palette.isDark) palette.publishBtnContent else Color.White
+    val scope = rememberCoroutineScope()
+    var manualExpanded by remember(initialExpandManual) { mutableStateOf(initialExpandManual) }
+    var manualInput by remember { mutableStateOf("") }
+    var isImportingManual by remember { mutableStateOf(false) }
+    var manualError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(initialExpandManual) {
+        if (initialExpandManual) {
+            manualExpanded = true
+        }
+    }
 
     LinDoFullScreenPage(
         onBack = onDismiss,
@@ -12148,92 +12507,406 @@ private fun UserApiKeyAuthSheet(
             title = if (isAuthorized) "账号与会话管理" else "登录 LINUX DO",
             onBack = onDismiss
         )
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.TopCenter
         ) {
-            LinDoGlassAppIcon(tileSize = 56.dp)
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            Text(
-                text = if (isAuthorized) "Linux.do 账号会话" else "欢迎来到 LINUX DO",
-                fontSize = 19.sp,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = (-0.3).sp,
-                color = palette.inkPrimary,
-                maxLines = 1
-            )
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Text(
-                text = if (isAuthorized && currentUser != null) {
-                    "@${currentUser.username} · Lv.${currentUser.trustLevel} 连登与阅读时长自动同步中"
-                } else {
-                    "登录后自动同步 Connect 保级、阅读进度与专属分区"
-                },
-                fontSize = 12.5.sp,
-                color = palette.inkSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Spacer(modifier = Modifier.height(22.dp))
-
-            // 主力登录按钮（统一 LinDoPrimaryButton 圆角与主题色规范 D3）
-            LinDoPrimaryButton(
-                label = if (isAuthorized) "重新验证或切换账号" else "账号一键登录",
-                onClick = onPrimaryWebLogin
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 次级登录按钮（统一 12dp 圆角与柔和浅灰底）
-            Row(
+            Column(
                 modifier = Modifier
+                    .widthIn(max = 520.dp)
                     .fillMaxWidth()
-                    .height(46.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(palette.subtleSurface)
-                    .clickable(onClick = onBrowserOneClickAuth)
-                    .padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Icon(
-                    imageVector = LinDoIcons.Globe,
-                    contentDescription = null,
-                    modifier = Modifier.size(15.dp),
-                    tint = palette.inkPrimary
-                )
-                Spacer(modifier = Modifier.width(7.dp))
+                LinDoGlassAppIcon(tileSize = 56.dp)
+
+                Spacer(modifier = Modifier.height(14.dp))
+
                 Text(
-                    text = "通过系统浏览器免密授权",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    text = if (isAuthorized) "Linux.do 账号会话" else "欢迎来到 LINUX DO",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = (-0.3).sp,
                     color = palette.inkPrimary,
                     maxLines = 1
                 )
-            }
 
-            if (isAuthorized) {
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(4.dp))
+
                 Text(
-                    text = "退出当前账号",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.inkTertiary,
+                    text = if (isAuthorized && currentUser != null) {
+                        "@${currentUser.username} · Lv.${currentUser.trustLevel} 连登与阅读时长自动同步中"
+                    } else {
+                        "登录后自动同步 Connect 保级、阅读进度与专属分区"
+                    },
+                    fontSize = 12.5.sp,
+                    color = palette.inkSecondary,
+                    maxLines = 2,
+                    textAlign = TextAlign.Center,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                if (!desktopStatusHint.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(palette.subtleSurface)
+                            .border(0.5.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.InfoCircle,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = palette.brandGold
+                        )
+                        Text(
+                            text = desktopStatusHint,
+                            fontSize = 12.5.sp,
+                            lineHeight = 18.sp,
+                            color = palette.inkPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(22.dp))
+
+                if (hasEmbeddedWebLogin) {
+                    LinDoPrimaryButton(
+                        label = if (isAuthorized) "重新验证或切换账号" else "账号一键登录",
+                        onClick = onPrimaryWebLogin
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(palette.subtleSurface)
+                            .clickable(onClick = onBrowserOneClickAuth)
+                            .padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.Globe,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                            tint = palette.inkPrimary
+                        )
+                        Spacer(modifier = Modifier.width(7.dp))
+                        Text(
+                            text = "通过系统浏览器免密授权",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.inkPrimary,
+                            maxLines = 1
+                        )
+                    }
+                } else {
+                    LinDoPrimaryButton(
+                        label = if (isAuthorized) "重新授权或切换账号" else "浏览器一键授权登录",
+                        onClick = {
+                            onUpdateStatusHint("已在系统浏览器打开授权页，点击「批准」后将自动完成登录")
+                            UserApiKeyAuthManager.startBrowserOneClickAuth()
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 可展开「手动粘贴 Cookie / 回调链接 / cURL」兜底区
+                Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = onLogout)
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(palette.subtleSurface.copy(alpha = 0.55f))
+                        .border(0.5.dp, palette.hairline, RoundedCornerShape(12.dp))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { manualExpanded = !manualExpanded }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.Link,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                            tint = palette.inkSecondary
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "手动粘贴 Cookie / 回调链接 / cURL",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.inkPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            imageVector = if (manualExpanded) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
+                            contentDescription = if (manualExpanded) "收起手动登录" else "展开手动登录",
+                            modifier = Modifier.size(15.dp),
+                            tint = palette.inkTertiary
+                        )
+                    }
+
+                    AnimatedVisibility(visible = manualExpanded) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = "若系统拦截协议回调或触发站点验证，可在浏览器按 F12 从 Application 复制 _t，或在 Network 右键任一请求 Copy as cURL 粘贴至下方。",
+                                fontSize = 11.8.sp,
+                                lineHeight = 17.sp,
+                                color = palette.inkSecondary
+                            )
+
+                            OutlinedTextField(
+                                value = manualInput,
+                                onValueChange = {
+                                    manualInput = it
+                                    if (manualError != null) manualError = null
+                                },
+                                enabled = !isImportingManual,
+                                minLines = 3,
+                                maxLines = 6,
+                                placeholder = {
+                                    Text(
+                                        text = "粘贴 discourse:// 授权回调链接、_t Cookie 值，或浏览器 DevTools Copy as cURL...",
+                                        fontSize = 12.5.sp,
+                                        lineHeight = 18.sp,
+                                        color = palette.inkTertiary
+                                    )
+                                },
+                                textStyle = LocalTextStyle.current.copy(
+                                    fontSize = 12.8.sp,
+                                    lineHeight = 18.sp,
+                                    color = palette.inkPrimary
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = palette.brandGold,
+                                    unfocusedBorderColor = palette.hairline,
+                                    focusedContainerColor = palette.cardSurface,
+                                    unfocusedContainerColor = palette.cardSurface,
+                                    cursorColor = palette.brandGold
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            manualError?.let { err ->
+                                LinDoFeedbackRow(
+                                    message = err,
+                                    state = LinDoMascotState.NetworkError,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            Button(
+                                onClick = {
+                                    val trimmed = manualInput.trim()
+                                    if (trimmed.isEmpty() || isImportingManual) return@Button
+                                    isImportingManual = true
+                                    manualError = null
+                                    scope.launch {
+                                        val res = LinuxDoRepository.importManualAuthInput(trimmed)
+                                        isImportingManual = false
+                                        if (res.isSuccess) {
+                                            manualInput = ""
+                                            onManualAuthSucceeded()
+                                        } else {
+                                            manualError = res.exceptionOrNull()?.message
+                                                ?.takeIf { it.isNotBlank() }
+                                                ?: "凭证校验失败，请确认粘贴了有效的回调链接、_t Cookie 或 cURL"
+                                        }
+                                    }
+                                },
+                                enabled = manualInput.isNotBlank() && !isImportingManual,
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = palette.brandGold,
+                                    contentColor = Color(0xFF342820)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 44.dp)
+                            ) {
+                                LinDoBusyButtonLabel(
+                                    busy = isImportingManual,
+                                    busyLabel = "验证登录中",
+                                    label = "验证并登录",
+                                    color = if (manualInput.isNotBlank() || isImportingManual) Color(0xFF342820) else palette.inkTertiary
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (isAuthorized) {
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "退出当前账号",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkTertiary,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onLogout)
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+            }
+        }
+    }
+}
+
+/**
+ * 桌面端 Cloudflare 站点验证恢复抽屉：
+ * 提供打开系统浏览器完成验证、可选粘贴 cf_clearance / Copy as cURL 同步，以及一键恢复重试闭环。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DesktopSiteVerificationSheet(
+    onOpenBrowserVerify: () -> Unit,
+    onRetryVerified: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var clearanceInput by remember { mutableStateOf("") }
+    var syncFeedback by remember { mutableStateOf<String?>(null) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = palette.cardSurface,
+        contentColor = palette.inkPrimary
+    ) {
+        LinDoScaledPopupContent {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp)
+                    .padding(top = 4.dp, bottom = 22.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "完成站点安全验证",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.inkPrimary
+                )
+                Text(
+                    text = "当前请求被 Cloudflare 站点验证拦截。请先在系统浏览器打开 linux.do 通过验证；若仍提示拦截，可将浏览器的 Cookie 或 Copy as cURL 粘贴至下方同步 cf_clearance。",
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    color = palette.inkSecondary
+                )
+
+                OutlinedButton(
+                    onClick = onOpenBrowserVerify,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, palette.hairline),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = palette.subtleSurface.copy(alpha = 0.6f),
+                        contentColor = palette.inkPrimary
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 46.dp)
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Globe,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = palette.inkSecondary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "1. 在系统浏览器打开 linux.do 验证",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                OutlinedTextField(
+                    value = clearanceInput,
+                    onValueChange = {
+                        clearanceInput = it
+                        if (syncFeedback != null) syncFeedback = null
+                    },
+                    minLines = 2,
+                    maxLines = 5,
+                    placeholder = {
+                        Text(
+                            text = "粘贴浏览器 Cookie 或 Copy as cURL（可选，用于同步 cf_clearance）",
+                            fontSize = 12.5.sp,
+                            lineHeight = 18.sp,
+                            color = palette.inkTertiary
+                        )
+                    },
+                    textStyle = LocalTextStyle.current.copy(
+                        fontSize = 12.8.sp,
+                        lineHeight = 18.sp,
+                        color = palette.inkPrimary
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = palette.brandGold,
+                        unfocusedBorderColor = palette.hairline,
+                        focusedContainerColor = palette.subtleSurface.copy(alpha = 0.35f),
+                        unfocusedContainerColor = palette.subtleSurface.copy(alpha = 0.25f),
+                        cursorColor = palette.brandGold
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (clearanceInput.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = syncFeedback ?: "点击重试时将自动解析并同步 cf_clearance",
+                            fontSize = 12.sp,
+                            color = if (syncFeedback?.contains("未识别") == true) MaterialTheme.colorScheme.error else palette.inkSecondary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = {
+                                val ok = LinuxDoRepository.importCloudflareClearanceInput(clearanceInput)
+                                syncFeedback = if (ok) "已同步验证凭证" else "未识别到 cf_clearance，请检查粘贴内容"
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("仅同步凭证", fontSize = 12.2.sp, color = palette.activeChipText, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+
+                LinDoPrimaryButton(
+                    label = "已完成验证，立即重试",
+                    onClick = { onRetryVerified(clearanceInput.trim()) }
                 )
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
         }
     }
 }
@@ -12247,6 +12920,7 @@ private fun UserApiKeyAuthSheet(
 @Composable
 private fun GuestLoginGuideSheet(
     prompt: GuestLoginPrompt,
+    hasEmbeddedWebLogin: Boolean = true,
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
     onDismiss: () -> Unit
@@ -12314,14 +12988,14 @@ private fun GuestLoginGuideSheet(
                     horizontalArrangement = Arrangement.Center
                 ) {
                     Icon(
-                        imageVector = LinDoIcons.Globe,
+                        imageVector = if (hasEmbeddedWebLogin) LinDoIcons.Globe else LinDoIcons.Link,
                         contentDescription = null,
                         modifier = Modifier.size(15.dp),
                         tint = palette.inkPrimary
                     )
                     Spacer(modifier = Modifier.width(7.dp))
                     Text(
-                        text = "通过系统浏览器免密授权",
+                        text = if (hasEmbeddedWebLogin) "通过系统浏览器免密授权" else "粘贴 Cookie / 回调链接登录",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = palette.inkPrimary,
@@ -12350,6 +13024,8 @@ private fun GuestLoginGuideSheet(
 private fun GoogleWelcomeLoginScreen(
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
+    secondaryActionLabel: String = "系统浏览器授权",
+    secondaryActionIcon: ImageVector = LinDoIcons.Globe,
     onToggleDark: () -> Unit = {},
     onOpenAppIcon: (() -> Unit)? = null,
     onGuestBrowse: (() -> Unit)? = null
@@ -12360,7 +13036,9 @@ private fun GoogleWelcomeLoginScreen(
         onBrowserOneClickAuth = onBrowserOneClickAuth,
         onToggleDark = onToggleDark,
         onOpenAppIcon = onOpenAppIcon,
-        onGuestBrowse = onGuestBrowse
+        onGuestBrowse = onGuestBrowse,
+        secondaryActionLabel = secondaryActionLabel,
+        secondaryActionIcon = secondaryActionIcon
     )
 }
 
@@ -12863,7 +13541,11 @@ internal fun LinDoMarkdownWorkbench(
                         WorkbenchToolChip(
                             label = pct,
                             onClick = {
-                                val scaledTag = "![${latestImg.originalFilename}|${latestImg.width}x${latestImg.height}, $pct](${latestImg.shortUrl})"
+                                val safeName = latestImg.originalFilename
+                                    .replace("[", "")
+                                    .replace("]", "")
+                                    .replace("|", "_")
+                                val scaledTag = "![$safeName|${latestImg.width}x${latestImg.height}, $pct](${latestImg.shortUrl})"
                                 val replaced = tfv.text.replace(latestImg.markdownSnippet, scaledTag)
                                 updateTfv(tfv.copy(text = replaced))
                                 lastUploadedImage = latestImg.copy(markdownSnippet = scaledTag)
@@ -14786,15 +15468,28 @@ internal fun GlobalSearchModalSheet(
                     }
                 }
             } else if (loadError != null && results.isEmpty()) {
+                val errText = loadError!!
+                val guestNeedsLogin = isGuestLoginRequiredError(UserApiKeyAuthManager.isAuthorized(), errText)
                 item {
+                    val requestLogin = LocalRequestGuestLogin.current
                     Box(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         LinDoStatePanel(
                             state = LinDoMascotState.NetworkError,
-                            detail = loadError!!,
-                            onRetry = { performSearch(isManualRetry = true) }
+                            detail = errText,
+                            iconOverride = if (guestNeedsLogin) LinDoIcons.FaLock else null,
+                            actionLabel = if (guestNeedsLogin && requestLogin != null) "去登录" else "重试",
+                            showActionIcon = !guestNeedsLogin,
+                            emphasizeAction = guestNeedsLogin,
+                            onRetry = {
+                                if (guestNeedsLogin && requestLogin != null) {
+                                    requestLogin("登录后使用全站搜索", "登录 LINUX DO 账号后可搜索全站帖子与历史讨论")
+                                } else {
+                                    performSearch(isManualRetry = true)
+                                }
+                            }
                         )
                     }
                 }
@@ -16298,17 +16993,85 @@ private fun PublicUserCardSheet(
     ) {
         val p = cardProfile
         val isViewingSelf = currentUsername.isNotBlank() && username.equals(currentUsername, ignoreCase = true)
+        val requestGuestLogin = LocalRequestGuestLogin.current
+        var isFollowingUser by remember(username) { mutableStateOf(false) }
+        var isTogglingFollow by remember(username) { mutableStateOf(false) }
+        var followActionError by remember(username) { mutableStateOf<String?>(null) }
+
+        LaunchedEffect(username, currentUsername) {
+            if (!isViewingSelf && UserApiKeyAuthManager.isAuthorized() && currentUsername.isNotBlank()) {
+                runCatching {
+                    val myFollowing = LinuxDoRepository.fetchUserFollowList(currentUsername, followers = false)
+                    isFollowingUser = myFollowing.any { it.username.equals(username, ignoreCase = true) }
+                }
+            }
+        }
+        LaunchedEffect(followActionError) {
+            if (followActionError != null) {
+                delay(3200L)
+                followActionError = null
+            }
+        }
+
         LinDoPageTopBar(
             title = "用户主页",
             onBack = onDismiss,
             trailingContent = {
                 if (!isViewingSelf) {
+                    TextButton(
+                        enabled = !isTogglingFollow,
+                        onClick = {
+                            if (!UserApiKeyAuthManager.isAuthorized()) {
+                                requestGuestLogin?.invoke(
+                                    "登录后关注用户",
+                                    "登录 LINUX DO 账号后可关注 @$username 并追踪最新动态"
+                                )
+                                return@TextButton
+                            }
+                            if (isTogglingFollow) return@TextButton
+                            val prevFollow = isFollowingUser
+                            val targetFollow = !prevFollow
+                            followActionError = null
+                            isFollowingUser = targetFollow
+                            isTogglingFollow = true
+                            scope.launch {
+                                try {
+                                    val ok = LinuxDoRepository.toggleFollowUser(username, follow = targetFollow)
+                                    if (!ok) {
+                                        isFollowingUser = prevFollow
+                                        followActionError = LinuxDoRepository.lastMutationErrorOr(
+                                            if (targetFollow) "关注失败，请稍后重试" else "取消关注失败，请稍后重试"
+                                        )
+                                    }
+                                } finally {
+                                    isTogglingFollow = false
+                                }
+                            }
+                        }
+                    ) {
+                        Text(
+                            text = if (isFollowingUser) "已关注" else "+ 关注",
+                            color = when {
+                                isTogglingFollow -> palette.inkTertiary
+                                isFollowingUser -> palette.inkSecondary
+                                else -> palette.brandGold
+                            },
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                     TextButton(onClick = { onSendPrivateMessage(username) }) {
-                        Text("私信", color = palette.inkPrimary)
+                        Text("发私信", color = palette.inkPrimary)
                     }
                 }
             }
         )
+        followActionError?.let { msg ->
+            LinDoFeedbackRow(
+                message = msg,
+                state = LinDoMascotState.NetworkError,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
@@ -17849,16 +18612,27 @@ private fun CommunityLeaderboardSheet(
                 LinDoLoadingIndicator(label = "加载排行榜中")
             }
         } else if (loadError != null && entries.isEmpty()) {
+            val errText = loadError!!
+            val guestNeedsLogin = isGuestLoginRequiredError(UserApiKeyAuthManager.isAuthorized(), errText)
+            val requestLogin = LocalRequestGuestLogin.current
             Box(
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
                 contentAlignment = Alignment.Center
             ) {
                 LinDoStatePanel(
                     state = LinDoMascotState.NetworkError,
-                    detail = loadError!!,
+                    detail = errText,
+                    iconOverride = if (guestNeedsLogin) LinDoIcons.FaLock else null,
+                    actionLabel = if (guestNeedsLogin && requestLogin != null) "去登录" else "重试",
+                    showActionIcon = !guestNeedsLogin,
+                    emphasizeAction = guestNeedsLogin,
                     onRetry = {
-                        manualRecoveryRequested = true
-                        reloadToken++
+                        if (guestNeedsLogin && requestLogin != null) {
+                            requestLogin("登录后查看积分与活跃榜", "登录 LINUX DO 账号后可查看社区排行与互动统计")
+                        } else {
+                            manualRecoveryRequested = true
+                            reloadToken++
+                        }
                     }
                 )
             }
@@ -18318,12 +19092,25 @@ private fun CommunityAboutSheet(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text(
-                            text = info?.title ?: "LINUX DO · 新的理想型社区",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.inkPrimary
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = info?.title ?: "LINUX DO · 新的理想型社区",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.inkPrimary,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Text(
+                                text = "Lindo v0.2.31",
+                                fontSize = 11.8.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.inkTertiary
+                            )
+                        }
                         Text(
                             text = info?.description ?: "真诚、友善、团结、专业，共建你我引以为荣之社区。",
                             fontSize = 13.2.sp,
