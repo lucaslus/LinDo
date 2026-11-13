@@ -4,12 +4,19 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.runtime.saveable.rememberSaveable
 import coil3.disk.directory
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -4571,228 +4578,202 @@ internal fun GoogleM3NavigationBar(
 
     val outerCapsuleShape = RoundedCornerShape(99.dp)
     val innerPillShape = RoundedCornerShape(99.dp)
+    val activeSlot = when (currentTab) {
+        MainTab.HOME -> 0
+        MainTab.DISCOVER -> 1
+        MainTab.MESSAGES -> 3
+        MainTab.PROFILE -> 4
+    }
 
     Box(
         modifier = modifier
             .fillMaxWidth()
             .background(
                 brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color.Transparent,
-                        palette.canvas.copy(alpha = 0.82f),
-                        palette.canvas.copy(alpha = 0.96f)
-                    )
+                    0f to Color.Transparent,
+                    0.45f to palette.canvas.copy(alpha = 0.58f),
+                    1f to palette.canvas.copy(alpha = 0.90f)
                 )
             )
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 10.dp),
+            .padding(start = 24.dp, end = 24.dp, top = 6.dp, bottom = 10.dp),
         contentAlignment = Alignment.Center
     ) {
-        Row(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .shadow(
-                    elevation = if (palette.isDark) 20.dp else 14.dp,
+                    elevation = 10.dp,
                     shape = outerCapsuleShape,
-                    ambientColor = Color.Black.copy(alpha = if (palette.isDark) 0.55f else 0.16f),
-                    spotColor = Color.Black.copy(alpha = if (palette.isDark) 0.65f else 0.20f)
+                    ambientColor = Color.Black.copy(alpha = if (palette.isDark) 0.55f else 0.12f),
+                    spotColor = Color.Black.copy(alpha = if (palette.isDark) 0.65f else 0.16f)
                 )
                 .clip(outerCapsuleShape)
                 .background(
                     brush = Brush.verticalGradient(
                         colors = if (palette.isDark) {
                             listOf(
-                                Color(0xFF1F2430).copy(alpha = 0.95f),
-                                Color(0xFF151922).copy(alpha = 0.95f)
+                                Color(0xFF202226).copy(alpha = 0.98f),
+                                Color(0xFF17191C).copy(alpha = 0.98f)
                             )
                         } else {
                             listOf(
-                                Color(0xFFF1F4F9).copy(alpha = 0.96f),
-                                Color(0xFFE8ECF3).copy(alpha = 0.94f)
+                                Color(0xFFF9FAFB).copy(alpha = 0.98f),
+                                Color(0xFFF0F1F3).copy(alpha = 0.98f)
                             )
                         }
                     )
                 )
                 .border(
-                    width = 1.dp,
+                    width = 0.7.dp,
                     brush = Brush.verticalGradient(
-                        colors = if (palette.isDark) {
-                            listOf(
-                                Color.White.copy(alpha = 0.20f),
-                                Color.White.copy(alpha = 0.06f)
-                            )
-                        } else {
-                            listOf(
-                                Color.White,
-                                Color(0xFFD5DCE6).copy(alpha = 0.80f)
-                            )
-                        }
+                        0f to if (palette.isDark) Color.White.copy(alpha = 0.20f) else Color.White,
+                        0.45f to if (palette.isDark) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.35f),
+                        1f to if (palette.isDark) Color.White.copy(alpha = 0.09f) else Color(0xFFD2DAE6).copy(alpha = 0.72f)
                     ),
                     shape = outerCapsuleShape
                 )
-                .padding(horizontal = 6.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically
         ) {
-            leftTabs.forEach { tab ->
-                val selected = currentTab == tab
-                val tabModifier = if (selected) {
-                    Modifier
-                        .weight(1f)
+            val horizontalPad = 5.dp
+            val verticalPad = 4.dp
+            val slotWidth = ((maxWidth - horizontalPad * 2) / 5f).coerceAtLeast(0.dp)
+            val indicatorOffsetX by animateDpAsState(
+                targetValue = slotWidth * activeSlot,
+                animationSpec = spring(
+                    dampingRatio = 0.9f,
+                    stiffness = Spring.StiffnessMediumLow
+                ),
+                label = "navigationSelectionOffset"
+            )
+
+            // 轻量磨砂玻璃高光；没有背景采样，不把透明渐变伪装成真实折射。
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        brush = Brush.verticalGradient(
+                            0f to Color.White.copy(alpha = if (palette.isDark) 0.055f else 0.28f),
+                            0.42f to Color.Transparent,
+                            1f to Color.White.copy(alpha = if (palette.isDark) 0.015f else 0.04f)
+                        )
+                    )
+            )
+
+            // 共用一个滑动选区，位移在放置阶段读取，避免动画逐帧触发布局测量。
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .padding(horizontal = horizontalPad, vertical = verticalPad)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .offset { androidx.compose.ui.unit.IntOffset(indicatorOffsetX.roundToPx(), 0) }
+                        .width(slotWidth)
+                        .fillMaxHeight()
                         .shadow(
-                            elevation = if (palette.isDark) 6.dp else 4.dp,
+                            elevation = 2.dp,
                             shape = innerPillShape,
-                            ambientColor = Color.Black.copy(alpha = if (palette.isDark) 0.35f else 0.10f),
-                            spotColor = Color.Black.copy(alpha = if (palette.isDark) 0.40f else 0.12f)
+                            ambientColor = Color.Black.copy(alpha = if (palette.isDark) 0.30f else 0.06f),
+                            spotColor = Color.Black.copy(alpha = if (palette.isDark) 0.35f else 0.08f)
                         )
                         .clip(innerPillShape)
                         .background(
                             brush = Brush.verticalGradient(
                                 colors = if (palette.isDark) {
                                     listOf(
-                                        Color(0xFF2C3344),
-                                        Color(0xFF232938)
+                                        Color.White.copy(alpha = 0.10f),
+                                        Color.White.copy(alpha = 0.045f)
                                     )
                                 } else {
                                     listOf(
-                                        Color.White,
-                                        Color(0xFFF9FAFC)
+                                        Color.White.copy(alpha = 0.96f),
+                                        Color(0xFFF6F8FC).copy(alpha = 0.86f)
                                     )
                                 }
                             )
                         )
                         .border(
-                            width = 0.7.dp,
-                            color = if (palette.isDark) Color.White.copy(alpha = 0.18f) else Color.White,
+                            width = 0.6.dp,
+                            brush = Brush.verticalGradient(
+                                colors = if (palette.isDark) {
+                                    listOf(
+                                        Color.White.copy(alpha = 0.20f),
+                                        Color.White.copy(alpha = 0.06f)
+                                    )
+                                } else {
+                                    listOf(
+                                        Color.White,
+                                        Color.White.copy(alpha = 0.40f)
+                                    )
+                                }
+                            ),
                             shape = innerPillShape
                         )
-                } else {
-                    Modifier
-                        .weight(1f)
-                        .clip(innerPillShape)
-                }
-
-                Column(
-                    modifier = tabModifier
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { onSelectTab(tab) }
-                        .padding(vertical = 6.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Box(
-                        modifier = Modifier.size(width = 34.dp, height = 22.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (tab == MainTab.HOME) {
-                            Image(
-                                painter = painterResource(Res.drawable.lindo_brand_mark),
-                                contentDescription = tab.title,
-                                modifier = Modifier.size(22.dp),
-                                alpha = if (selected) 1f else 0.72f,
-                                contentScale = ContentScale.Fit
-                            )
-                        } else {
-                            Icon(
-                                imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                contentDescription = tab.title,
-                                modifier = Modifier.size(20.dp),
-                                tint = if (selected) palette.inkPrimary else palette.inkSecondary
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(
-                        text = tab.title,
-                        fontSize = 10.5.sp,
-                        lineHeight = 12.sp,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (selected) palette.inkPrimary else palette.inkSecondary,
-                        maxLines = 1
-                    )
-                }
-            }
-
-            // 中央「+ 发布」：不带任何背景色块，直接使用主题色（官方金/所选主题色）纯加号图标 + 文字
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(innerPillShape)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { onPublishClick() }
-                    .padding(vertical = 6.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Box(
-                    modifier = Modifier.size(width = 34.dp, height = 22.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Plus,
-                        contentDescription = LinDoCommonCopy.PUBLISH.text,
-                        modifier = Modifier.size(22.dp),
-                        tint = palette.tabIndicatorColor
-                    )
-                }
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = LinDoCommonCopy.PUBLISH.text,
-                    fontSize = 10.5.sp,
-                    lineHeight = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = palette.tabIndicatorColor,
-                    maxLines = 1
                 )
             }
 
-            rightTabs.forEach { tab ->
-                val selected = currentTab == tab
-                val tabModifier = if (selected) {
-                    Modifier
-                        .weight(1f)
-                        .shadow(
-                            elevation = if (palette.isDark) 6.dp else 4.dp,
-                            shape = innerPillShape,
-                            ambientColor = Color.Black.copy(alpha = if (palette.isDark) 0.35f else 0.10f),
-                            spotColor = Color.Black.copy(alpha = if (palette.isDark) 0.40f else 0.12f)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = horizontalPad, vertical = verticalPad),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                leftTabs.forEach { tab ->
+                    val selected = currentTab == tab
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(innerPillShape)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { onSelectTab(tab) }
+                            .padding(vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Box(
+                            modifier = Modifier.size(width = 34.dp, height = 22.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (tab == MainTab.HOME) {
+                                Image(
+                                    painter = painterResource(Res.drawable.lindo_brand_mark),
+                                    contentDescription = tab.title,
+                                    modifier = Modifier.size(22.dp),
+                                    alpha = if (selected) 1f else 0.72f,
+                                    contentScale = ContentScale.Fit
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                    contentDescription = tab.title,
+                                    modifier = Modifier.size(20.dp),
+                                    tint = if (selected) palette.inkPrimary else palette.inkSecondary
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = tab.title,
+                            fontSize = 10.5.sp,
+                            lineHeight = 12.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            color = if (selected) palette.inkPrimary else palette.inkSecondary,
+                            maxLines = 1
                         )
-                        .clip(innerPillShape)
-                        .background(
-                            brush = Brush.verticalGradient(
-                                colors = if (palette.isDark) {
-                                    listOf(
-                                        Color(0xFF2C3344),
-                                        Color(0xFF232938)
-                                    )
-                                } else {
-                                    listOf(
-                                        Color.White,
-                                        Color(0xFFF9FAFC)
-                                    )
-                                }
-                            )
-                        )
-                        .border(
-                            width = 0.7.dp,
-                            color = if (palette.isDark) Color.White.copy(alpha = 0.18f) else Color.White,
-                            shape = innerPillShape
-                        )
-                } else {
-                    Modifier
-                        .weight(1f)
-                        .clip(innerPillShape)
+                    }
                 }
 
+                // 中央「+ 发布」：不带任何背景色块，直接使用主题色（官方金/所选主题色）纯加号图标 + 文字
                 Column(
-                    modifier = tabModifier
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(innerPillShape)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) { onSelectTab(tab) }
+                        ) { onPublishClick() }
                         .padding(vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
@@ -4802,53 +4783,90 @@ internal fun GoogleM3NavigationBar(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                            contentDescription = tab.title,
-                            modifier = Modifier.size(20.dp),
-                            tint = if (selected) palette.inkPrimary else palette.inkSecondary
+                            imageVector = LinDoIcons.Plus,
+                            contentDescription = LinDoCommonCopy.PUBLISH.text,
+                            modifier = Modifier.size(22.dp),
+                            tint = palette.tabIndicatorColor
                         )
-                        if (tab == MainTab.MESSAGES && unreadCount > 0) {
-                            val badgeText = if (unreadCount > 99) LinDoCommonCopy.BADGE_OVERFLOW_99.text else unreadCount.toString()
-                            val isSingleDigit = badgeText.length == 1
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .offset(x = if (isSingleDigit) (-1).dp else 2.dp, y = (-2).dp)
-                                    .then(
-                                        if (isSingleDigit) {
-                                            Modifier.size(15.dp)
-                                        } else {
-                                            Modifier
-                                                .height(15.dp)
-                                                .widthIn(min = 19.dp)
-                                        }
-                                    )
-                                    .clip(CircleShape)
-                                    .background(palette.logoDoColor)
-                                    .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = badgeText,
-                                    fontSize = 9.sp,
-                                    lineHeight = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (palette.themeOption == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                            }
-                        }
                     }
                     Spacer(modifier = Modifier.height(3.dp))
                     Text(
-                        text = tab.title,
+                        text = LinDoCommonCopy.PUBLISH.text,
                         fontSize = 10.5.sp,
                         lineHeight = 12.sp,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (selected) palette.inkPrimary else palette.inkSecondary,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.tabIndicatorColor,
                         maxLines = 1
                     )
+                }
+
+                rightTabs.forEach { tab ->
+                    val selected = currentTab == tab
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(innerPillShape)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { onSelectTab(tab) }
+                            .padding(vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Box(
+                            modifier = Modifier.size(width = 34.dp, height = 22.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                contentDescription = tab.title,
+                                modifier = Modifier.size(20.dp),
+                                tint = if (selected) palette.inkPrimary else palette.inkSecondary
+                            )
+                            if (tab == MainTab.MESSAGES && unreadCount > 0) {
+                                val badgeText = if (unreadCount > 99) LinDoCommonCopy.BADGE_OVERFLOW_99.text else unreadCount.toString()
+                                val isSingleDigit = badgeText.length == 1
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = if (isSingleDigit) (-1).dp else 2.dp, y = (-2).dp)
+                                        .then(
+                                            if (isSingleDigit) {
+                                                Modifier.size(15.dp)
+                                            } else {
+                                                Modifier
+                                                    .height(15.dp)
+                                                    .widthIn(min = 19.dp)
+                                            }
+                                        )
+                                        .clip(CircleShape)
+                                        .background(palette.logoDoColor)
+                                        .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = badgeText,
+                                        fontSize = 9.sp,
+                                        lineHeight = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (palette.themeOption == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = tab.title,
+                            fontSize = 10.5.sp,
+                            lineHeight = 12.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            color = if (selected) palette.inkPrimary else palette.inkSecondary,
+                            maxLines = 1
+                        )
+                    }
                 }
             }
         }
@@ -5021,7 +5039,11 @@ internal fun CommunityHomeFeedPane(
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // 1. 理想型社区品牌顶栏：Lindo + 真诚 · 友善 · 团结 · 专业 + 右侧刷新/通知/头像（整体高度与字号呼吸感升级）
+            var isSearchExpanded by rememberSaveable { mutableStateOf(searchQuery.isNotEmpty()) }
+            LaunchedEffect(searchQuery) {
+                if (searchQuery.isNotEmpty()) isSearchExpanded = true
+            }
+            // 1. 理想型社区品牌顶栏：Lindo + 真诚 · 友善 · 团结 · 专业 + 右侧搜索开关/通知/头像（整体高度与字号呼吸感升级）
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -5048,6 +5070,32 @@ internal fun CommunityHomeFeedPane(
                             showMotto = true
                         )
                     }
+
+                    // 顶部搜索开关图标：点击动态展开/收起首页搜索栏
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (isSearchExpanded) palette.subtleSurface else Color.Transparent)
+                            .clickable {
+                                if (isSearchExpanded) {
+                                    isSearchExpanded = false
+                                    if (searchQuery.isNotEmpty()) onSearchChange("")
+                                } else {
+                                    isSearchExpanded = true
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.Search,
+                            contentDescription = if (isSearchExpanded) "收起搜索" else "展开搜索",
+                            modifier = Modifier.size(19.dp),
+                            tint = if (isSearchExpanded) palette.activeChipText else palette.inkPrimary
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
 
                     if (isAuthorized) {
                         // 顶部通知铃铛（带主题色未读小红点/琥珀点）
@@ -5104,59 +5152,67 @@ internal fun CommunityHomeFeedPane(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(11.dp))
-
-                // 2. 统一大圆角胶囊搜索入口（与新动态胶囊、底栏胶囊圆角体系严格统一，点击唤起全站实时搜索）
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(38.dp)
-                        .clip(CircleShape)
-                        .background(palette.subtleSurface)
-                        .border(0.6.dp, palette.hairline, CircleShape)
-                        .clickable { onOpenGlobalSearch() }
-                        .padding(horizontal = 15.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                // 2. 可动态展开/收起的统一大圆角胶囊搜索入口（点击唤起全站实时搜索）
+                AnimatedVisibility(
+                    visible = isSearchExpanded,
+                    enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
+                    exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut()
                 ) {
-                    Icon(
-                        imageVector = LinDoIcons.Search,
-                        contentDescription = LinDoFeedCopy.GLOBAL_SEARCH_DESC.text,
-                        modifier = Modifier.size(15.5.dp),
-                        tint = palette.inkTertiary
-                    )
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Spacer(modifier = Modifier.height(11.dp))
 
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        Text(
-                            text = if (searchQuery.isEmpty()) LinDoFeedCopy.SEARCH_PLACEHOLDER.text else searchQuery,
-                            style = TextStyle(
-                                fontSize = 13.2.sp,
-                                lineHeight = 16.sp,
-                                color = if (searchQuery.isEmpty()) palette.inkTertiary else palette.inkPrimary
-                            ),
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    if (searchQuery.isNotEmpty()) {
-                        Icon(
-                            imageVector = LinDoIcons.Close,
-                            contentDescription = LinDoCommonCopy.CLEAR_SHORT.text,
+                        Row(
                             modifier = Modifier
-                                .size(16.dp)
+                                .fillMaxWidth()
+                                .height(38.dp)
                                 .clip(CircleShape)
-                                .clickable { onSearchChange("") }
-                                .padding(1.dp),
-                            tint = palette.inkSecondary
-                        )
+                                .background(palette.subtleSurface)
+                                .border(0.6.dp, palette.hairline, CircleShape)
+                                .clickable { onOpenGlobalSearch() }
+                                .padding(horizontal = 15.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = LinDoIcons.Search,
+                                contentDescription = LinDoFeedCopy.GLOBAL_SEARCH_DESC.text,
+                                modifier = Modifier.size(15.5.dp),
+                                tint = palette.inkTertiary
+                            )
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight(),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    text = if (searchQuery.isEmpty()) LinDoFeedCopy.SEARCH_PLACEHOLDER.text else searchQuery,
+                                    style = TextStyle(
+                                        fontSize = 13.2.sp,
+                                        lineHeight = 16.sp,
+                                        color = if (searchQuery.isEmpty()) palette.inkTertiary else palette.inkPrimary
+                                    ),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            if (searchQuery.isNotEmpty()) {
+                                Icon(
+                                    imageVector = LinDoIcons.Close,
+                                    contentDescription = LinDoCommonCopy.CLEAR_SHORT.text,
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .clip(CircleShape)
+                                        .clickable { onSearchChange("") }
+                                        .padding(1.dp),
+                                    tint = palette.inkSecondary
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -5187,43 +5243,49 @@ internal fun CommunityHomeFeedPane(
                     }
                 }
 
-                // 3. 统一字阶频道 Tab（选中 17sp Bold，未选中 15sp Normal，底部 14x2.5dp 胶囊横条）+ 右侧「分类 ⌄」与布局切换严格底部对齐
+                // 相同字阶、行高和文字度量；指示条独立定位，不参与文字/图标的垂直居中。
+                val toolbarHeight = with(LocalDensity.current) { 22.sp.toDp() + 8.dp }.coerceAtLeast(30.dp)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.Bottom
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
                         modifier = Modifier
                             .weight(1f)
                             .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(22.dp),
-                        verticalAlignment = Alignment.Bottom
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         val visibleSorts = remember(isAuthorized) {
                             if (isAuthorized) FeedSortFilter.entries else listOf(FeedSortFilter.LATEST, FeedSortFilter.TOP)
                         }
                         visibleSorts.forEach { sort ->
                             val selected = currentSort == sort
-                            Column(
+                            Box(
                                 modifier = Modifier
+                                    .height(toolbarHeight)
                                     .clickable(
                                         interactionSource = remember { MutableInteractionSource() },
                                         indication = null
-                                    ) { onSelectSort(sort) }
-                                    .padding(vertical = 1.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                                    ) { onSelectSort(sort) },
+                                contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = sort.label,
-                                    fontSize = if (selected) LinDoTokens.Title else LinDoTokens.Body,
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = LinDoTokens.Headline,
+                                    lineHeight = 22.sp,
+                                    style = TextStyle(lineHeightStyle = androidx.compose.ui.text.style.LineHeightStyle(
+                                        alignment = androidx.compose.ui.text.style.LineHeightStyle.Alignment.Center,
+                                        trim = androidx.compose.ui.text.style.LineHeightStyle.Trim.None
+                                    )),
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                                     color = if (selected) palette.inkPrimary else palette.inkSecondary,
                                     maxLines = 1,
                                     softWrap = false
                                 )
-                                Spacer(modifier = Modifier.height(6.dp))
                                 Box(
                                     modifier = Modifier
+                                        .align(Alignment.BottomCenter)
                                         .width(14.dp)
                                         .height(2.5.dp)
                                         .clip(CircleShape)
@@ -5235,14 +5297,15 @@ internal fun CommunityHomeFeedPane(
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // 右侧「分类 ⌄」与布局切换图标：与左侧 Tab 严格同基线
+                    // 分类与频道标签使用相同文字度量，三个操作图标共用同一行中心。
                     Row(
-                        modifier = Modifier.padding(bottom = 8.dp),
+                        modifier = Modifier.height(toolbarHeight),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Row(
                             modifier = Modifier
+                                .height(toolbarHeight)
                                 .clip(LinDoTokens.ShapeXS)
                                 .clickable { isCategoryBarExpanded = !isCategoryBarExpanded },
                             verticalAlignment = Alignment.CenterVertically,
@@ -5250,8 +5313,13 @@ internal fun CommunityHomeFeedPane(
                         ) {
                             Text(
                                 text = LinDoFeedCopy.CATEGORY_FILTER_BUTTON.text,
-                                fontSize = LinDoTokens.Sub,
-                                fontWeight = if (isCategoryBarExpanded || activeCategoryMeta != null) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = LinDoTokens.Headline,
+                                lineHeight = 22.sp,
+                                style = TextStyle(lineHeightStyle = androidx.compose.ui.text.style.LineHeightStyle(
+                                        alignment = androidx.compose.ui.text.style.LineHeightStyle.Alignment.Center,
+                                        trim = androidx.compose.ui.text.style.LineHeightStyle.Trim.None
+                                    )),
+                                fontWeight = if (isCategoryBarExpanded || activeCategoryMeta != null) FontWeight.SemiBold else FontWeight.Normal,
                                 color = if (isCategoryBarExpanded || activeCategoryMeta != null) palette.activeChipText else palette.inkSecondary,
                                 maxLines = 1,
                                 softWrap = false
@@ -5263,7 +5331,7 @@ internal fun CommunityHomeFeedPane(
                                 } else {
                                     LinDoFeedCopy.EXPAND_CATEGORY_FILTER_DESC.text
                                 },
-                                modifier = Modifier.size(LinDoTokens.IconXS),
+                                modifier = Modifier.size(LinDoTokens.IconS),
                                 tint = if (isCategoryBarExpanded || activeCategoryMeta != null) palette.activeChipText else palette.inkSecondary
                             )
                         }
@@ -5271,7 +5339,7 @@ internal fun CommunityHomeFeedPane(
                         // 右侧「刷新列表」快捷按钮（方便桌面端与鼠标用户一键手动刷新）
                         Box(
                             modifier = Modifier
-                                .size(22.dp)
+                                .size(width = 24.dp, height = toolbarHeight)
                                 .clip(LinDoTokens.ShapeXS)
                                 .clickable(enabled = !isLoading) { onRefresh() },
                             contentAlignment = Alignment.Center
@@ -5287,7 +5355,7 @@ internal fun CommunityHomeFeedPane(
                         // 右侧「宽松 / 紧凑」展示形式切换（统一 16dp IconS）
                         Box(
                             modifier = Modifier
-                                .size(22.dp)
+                                .size(width = 24.dp, height = toolbarHeight)
                                 .clip(LinDoTokens.ShapeXS)
                                 .clickable { onToggleCompactMode() },
                             contentAlignment = Alignment.Center

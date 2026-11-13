@@ -594,7 +594,35 @@ class PreLaunchFullAppUiE2ETest {
             "Compact 430dp viewport must use single-column layout rather than split-pane"
         )
 
+        // Text baselines and icon centers must stay aligned; the selection underline
+        // must not affect the toolbar's text geometry.
+        onEdt {
+            fun baseline(label: String): Float {
+                val node = onNodeWithText(label, useUnmergedTree = true)
+                val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+                node.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) {
+                    it(layouts)
+                }
+                return node.fetchSemanticsNode().positionInRoot.y + layouts.single().firstBaseline
+            }
+            val categoryBaseline = baseline("分类")
+            for (label in listOf("最新", "热门")) {
+                assertTrue(kotlin.math.abs(baseline(label) - categoryBaseline) <= 1f,
+                    "$label and 分类 must share a baseline")
+            }
+            val iconCenters = listOf("展开分类筛选", "刷新列表", "切换列表展示形式").map { description ->
+                onNodeWithContentDescription(description, useUnmergedTree = true)
+                    .fetchSemanticsNode().boundsInRoot.center.y
+            }
+            assertTrue(iconCenters.max() - iconCenters.min() <= 1f,
+                "Category arrow, refresh and layout icons must share a center")
+        }
         savePreviewSnapshotIfConfigured("e2e_5_compact_mobile_feed.png")
+        onEdt { AppAppearance.appearance = "dark" }
+        waitForIdle()
+        savePreviewSnapshotIfConfigured("toolbar_navigation_dark.png")
+        onEdt { AppAppearance.appearance = "light" }
+        waitForIdle()
 
         // Switch compact bottom tabs and return to Home
         onNodeWithText("发现").edtClick()
