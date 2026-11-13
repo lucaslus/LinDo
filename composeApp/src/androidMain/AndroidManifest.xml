@@ -8,8 +8,8 @@
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
-        android:icon="@mipmap/ic_lindo_happy_white"
-        android:roundIcon="@mipmap/ic_lindo_happy_white"
+        android:icon="@mipmap/ic_lindo_happy_system"
+        android:roundIcon="@mipmap/ic_lindo_happy_system"
         android:label="Lindo"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
@@ -39,7 +39,7 @@
         <activity-alias
             android:name=".LauncherIcon_happy_white"
             android:targetActivity=".MainActivity"
-            android:enabled="true"
+            android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_lindo_happy_white">
             <intent-filter>
@@ -186,6 +186,54 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_lindo_official_black">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name=".LauncherIcon_happy_system"
+            android:targetActivity=".MainActivity" android:enabled="true"
+            android:exported="true" android:icon="@mipmap/ic_lindo_happy_system">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name=".LauncherIcon_classic_system"
+            android:targetActivity=".MainActivity" android:enabled="false"
+            android:exported="true" android:icon="@mipmap/ic_lindo_classic_system">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name=".LauncherIcon_wink_system"
+            android:targetActivity=".MainActivity" android:enabled="false"
+            android:exported="true" android:icon="@mipmap/ic_lindo_wink_system">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name=".LauncherIcon_surprised_system"
+            android:targetActivity=".MainActivity" android:enabled="false"
+            android:exported="true" android:icon="@mipmap/ic_lindo_surprised_system">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name=".LauncherIcon_sleepy_system"
+            android:targetActivity=".MainActivity" android:enabled="false"
+            android:exported="true" android:icon="@mipmap/ic_lindo_sleepy_system">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name=".LauncherIcon_official_system"
+            android:targetActivity=".MainActivity" android:enabled="false"
+            android:exported="true" android:icon="@mipmap/ic_lindo_official_system">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

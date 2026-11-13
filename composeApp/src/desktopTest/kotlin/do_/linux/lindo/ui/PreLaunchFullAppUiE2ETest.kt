@@ -107,7 +107,15 @@ class PreLaunchFullAppUiE2ETest {
         UserApiKeyAuthManager.onSyncCookieToPlatform = null
         UserApiKeyAuthManager.customUserAgent = null
 
-        UserApiKeyAuthManager.uiFontScale = 0.92f
+        AppAppearance.appearance = "light"
+        AppAppearance.iconAppearance = "system"
+        AppAppearance.onPersist = null
+        AppAppearance.onApplyIconAppearance = null
+        AppAppearance.onSystemAppearanceChanged = null
+        PlatformSessionRecovery.loginSession = null
+        PlatformSessionRecovery.verifySession = null
+        PlatformSessionRecovery.verificationMessage = null
+        UserApiKeyAuthManager.uiFontScale = 1f
         UserApiKeyAuthManager.uiDarkTheme = false
         UserApiKeyAuthManager.uiEnableAnimations = false
         UserApiKeyAuthManager.uiThemeAccent = "OFFICIAL_GOLD"
@@ -212,7 +220,7 @@ class PreLaunchFullAppUiE2ETest {
             ?: return
         waitForIdle()
         val outDir = File(rawDir).apply { mkdirs() }
-        val awtImage = onEdt { onRoot().captureToImage().toAwtImage() }
+        val awtImage = onEdt { onAllNodes(isRoot()).onLast().captureToImage().toAwtImage() }
         assertTrue(awtImage.width > 0 && awtImage.height > 0, "Captured snapshot $fileName must have non-zero dimensions")
         ImageIO.write(awtImage, "png", File(outDir, fileName))
     }
@@ -235,13 +243,13 @@ class PreLaunchFullAppUiE2ETest {
         setContent { LinDoApp(systemAnimationsEnabled = false) }
         waitForText("使用 LINUX DO 登录")
         onNodeWithText("使用 LINUX DO 登录").edtClick()
-        waitForText("登录 LINUX DO")
+        waitForText("登录 Lindo")
         onEdt {
             UserApiKeyAuthManager.pendingOtpToken = "test_callback_otp"
             UserApiKeyAuthManager.onAuthStateChanged?.invoke()
         }
         waitUntil(timeoutMillis = 8_000L) { completed.get() && UserApiKeyAuthManager.currentUser?.username == "lucas" }
-        waitForTextGone("登录 LINUX DO")
+        waitForTextGone("登录 Lindo")
         waitForTextGone("你好，佬友。")
         assertEquals(1, exchanges.get())
     }
@@ -265,7 +273,8 @@ class PreLaunchFullAppUiE2ETest {
         // =========================================================================
         onNodeWithText("你好，佬友。").edtAssertDisplayed()
         onNodeWithText("使用 LINUX DO 登录").edtAssertDisplayed()
-        onNodeWithText("粘贴 Cookie / 回调链接登录").edtAssertDisplayed()
+        onNodeWithText("系统浏览器授权").edtAssertDisplayed()
+        onAllNodesWithText("粘贴 Cookie / 回调链接登录").assertCountEquals(0)
         onNodeWithText("以游客模式浏览").edtAssertDisplayed()
         assertEquals(0, backend.feedRequestCount.get(), "Zero feed requests must fire before user consent")
 
@@ -332,30 +341,20 @@ class PreLaunchFullAppUiE2ETest {
         // Guest Gate -> Open Desktop Login Sheet
         onNodeWithContentDescription("发布新话题").edtClick()
         waitForText("登录后发布话题")
-        onAllNodesWithText("粘贴 Cookie / 回调链接登录").onLast().edtClick()
-
-        // =========================================================================
-        // Step 3 — Desktop Auth Login (cURL / Cookie Import)
-        // =========================================================================
-        waitForText("登录 LINUX DO")
-        waitForText("验证并登录")
-        waitUntil(timeoutMillis = 5_000L) {
-            onAllNodes(hasSetTextAction()).edtCount() > 0
+        PlatformSessionRecovery.loginSession = {
+            UserApiKeyAuthManager.onSessionAuthenticated(
+                do_.linux.lindo.core.network.AuthenticatedUserProfile(userId = 1, username = "lucas", displayName = "Lucas", trustLevel = 3),
+                rawCookies = "_t=e2e_valid_session_token; cf_clearance=e2e_cf"
+            )
+            true
         }
-
-        val curlAuthInput =
-            "curl 'https://linux.do/latest.json' " +
-                "-H 'user-agent: Mozilla/5.0 Chrome/131' " +
-                "-H 'cookie: _t=e2e_valid_session_token; cf_clearance=e2e_cf'"
-        onAllNodes(hasSetTextAction()).onLast().edtScrollInput(curlAuthInput)
-        waitForIdle()
-        onNodeWithText("验证并登录").edtScrollClick()
-
+        onAllNodesWithText("使用 LINUX DO 登录").onLast().edtClick()
+        waitForText("登录 Lindo")
+        onNodeWithText("继续登录").edtClick()
         waitUntil(timeoutMillis = 5_000L) {
-            UserApiKeyAuthManager.isAuthorized() &&
-                UserApiKeyAuthManager.currentUser?.username == "lucas"
+            UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.currentUser?.username == "lucas"
         }
-        waitForTextGone("登录 LINUX DO")
+        waitForTextGone("登录 Lindo")
         waitForText("回复话题")
 
         // =========================================================================
@@ -540,8 +539,8 @@ class PreLaunchFullAppUiE2ETest {
 
         // Scroll Profile LazyColumn down to Settings / Cache Clear / Version v0.2.32
         onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(3)
-        waitForText("Lindo v0.2.32")
-        onAllNodesWithText("Lindo v0.2.32").onFirst().edtAssertDisplayed()
+        waitForText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY)
+        onAllNodesWithText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY).onFirst().edtAssertDisplayed()
 
         onNodeWithText("清理本地缓存").edtScrollClick()
         waitForText("仅清理图片与数据缓存")
@@ -636,31 +635,47 @@ class PreLaunchFullAppUiE2ETest {
         waitForText("去验证")
 
         onNodeWithText("去验证").edtClick()
-        waitForText("完成站点安全验证")
-        waitForText("已完成验证，立即重试")
-
-        // Verify browser verification launcher button inside DesktopSiteVerificationSheet
-        onNodeWithText("1. 在系统浏览器打开 linux.do 验证").edtClick()
-        waitUntil(timeoutMillis = 5_000L) {
-            openedExternalUrls.any { it == "https://linux.do/" }
+        waitForText("还差一次确认")
+        assertEquals(0, onAllNodes(hasSetTextAction()).edtCount(), "Recovery must not ask users to paste cookies")
+        savePreviewSnapshotIfConfigured("shared_compact_verification.png")
+        PlatformSessionRecovery.verifySession = {
+            CookieSentinel.ingestRawCookieString("cf_clearance=e2e_cf_verified", domain = "linux.do")
+            true
         }
-
-        // Paste cf_clearance token and click retry -> automatic feed recovery!
-        waitUntil(timeoutMillis = 5_000L) {
-            onAllNodes(hasSetTextAction()).edtCount() > 0
-        }
-        onAllNodes(hasSetTextAction()).onLast().edtInput("cf_clearance=e2e_cf_verified")
-        onNodeWithText("已完成验证，立即重试").edtScrollClick()
-
-        waitForTextGone("完成站点安全验证")
+        onNodeWithText("继续验证").edtClick()
+        waitForTextGone("还差一次确认")
         waitForTextGone("去验证")
         waitForText("Cloudflare 验证恢复后实时同步测试贴")
-        assertEquals(
-            "e2e_cf_verified",
-            CookieSentinel.resolveWinningCookies()["cf_clearance"]?.value,
-            "DesktopSiteVerificationSheet must sync pasted cf_clearance into CookieSentinel"
-        )
+
     }
+
+    @Test fun sharedAppearanceCompactViewport() = runDesktopComposeUiTest(width = 430, height = 900) {
+        verifySharedAppearance("shared_compact_settings.png")
+    }
+
+    @Test fun sharedAppearanceWideViewport() = runDesktopComposeUiTest(width = 1280, height = 900) {
+        verifySharedAppearance("shared_wide_settings.png")
+    }
+
+    private fun ComposeUiTest.verifySharedAppearance(snapshot: String) {
+        setContent { LinDoApp(systemAnimationsEnabled = false, appIcon = LinDoAppIcon.Default, onApplyAppIcon = { true }) }
+        waitForText("以游客模式浏览")
+        onNodeWithText("以游客模式浏览").edtClick()
+        waitForText("我的")
+        onNodeWithText("我的").edtClick()
+        waitForText("外观")
+        onAllNodesWithText("外观").onLast().edtScrollToVisible()
+        onNodeWithText("图标底色").edtScrollToVisible()
+        assertTrue(onAllNodesWithText("跟随系统").edtCount() >= 2)
+        onNodeWithText("深色").edtClick()
+        waitUntil { AppAppearance.dark }
+        savePreviewSnapshotIfConfigured(snapshot.replace(".png", "_dark.png"))
+        onNodeWithText("浅色").edtClick()
+        waitUntil { !AppAppearance.dark }
+        savePreviewSnapshotIfConfigured(snapshot)
+    }
+
+    private fun SemanticsNodeInteraction.edtScrollToVisible() { onEdt { performScrollTo() } }
 
     /**
      * Stateful in-memory Discourse + Linux.do backend supporting Guest mode, cURL/Cookie session auth,

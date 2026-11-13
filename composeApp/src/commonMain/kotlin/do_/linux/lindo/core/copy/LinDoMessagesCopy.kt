@@ -254,6 +254,7 @@ enum class LinDoMessagesCopy(override val text: String) : LinDoCopyEntry {
     ABOUT_TAB_MODERATORS("版主团队 {0}"),
 
     // 应用图标页
+    ICON_BG_SYSTEM("跟随系统"),
     ICON_BG_LIGHT("白底"),
     ICON_BG_DARK("黑底"),
     ICON_BG_CLASSIC("经典金底"),
@@ -264,7 +265,7 @@ enum class LinDoMessagesCopy(override val text: String) : LinDoCopyEntry {
     ICON_ART_SLEEPY("困困"),
     ICON_DESC_LOGO("LINUX DO 标志"),
     ICON_DESC_MASCOT("零度娘（{0}）"),
-    APPLY_ICON_AND_RESTART("应用并重启"),
+    APPLY_ICON_AND_RESTART("应用图标"),
     ICON_SECTION_ARTWORK("图案"),
     ICON_SECTION_BACKGROUND("底色"),
     SWITCH_ICON_FAILED("切换图标失败"),

@@ -563,7 +563,10 @@ private object DesktopStateStore {
             props.getProperty("pending_rsa_created_at")?.toLongOrNull() ?: 0L
         )
 
-        UserApiKeyAuthManager.uiFontScale = props.getProperty("ui_font_scale_v2")?.toFloatOrNull() ?: 0.92f
+        UserApiKeyAuthManager.uiFontScale = do_.linux.lindo.ui.AppAppearance.migrateFontScale(
+            (props.getProperty("ui_font_scale_v3") ?: props.getProperty("ui_font_scale_mac_v3"))?.toFloatOrNull(),
+            props.getProperty("ui_font_scale_v2")?.toFloatOrNull() ?: 0.92f
+        )
         UserApiKeyAuthManager.uiDarkTheme = props.getProperty("ui_dark_theme")?.toBooleanStrictOrNull() ?: false
         UserApiKeyAuthManager.uiEnableAnimations = props.getProperty("ui_enable_animations")?.toBooleanStrictOrNull() ?: true
         UserApiKeyAuthManager.uiThemeAccent = props.getProperty("ui_theme_accent")?.takeIf { it.isNotBlank() } ?: "OFFICIAL_GOLD"
@@ -702,7 +705,7 @@ private object DesktopStateStore {
         }
         UserApiKeyAuthManager.onPersistUiPrefs = { fontScale, darkTheme, enableAnimations ->
             update {
-                setProperty(if (IS_MAC_OS) "ui_font_scale_mac_v3" else "ui_font_scale_v2", fontScale.toString())
+                setProperty("ui_font_scale_v3", fontScale.toString())
                 setProperty("ui_dark_theme", darkTheme.toString())
                 setProperty("ui_enable_animations", enableAnimations.toString())
             }
@@ -1761,6 +1764,24 @@ fun main(args: Array<String> = emptyArray()) {
     }
 
     DesktopStateStore.initAndWire()
+    val appearancePrefs = DesktopStateStore.load()
+    do_.linux.lindo.ui.AppAppearance.appearance = appearancePrefs.getProperty("ui_appearance")
+        ?: appearancePrefs.getProperty("mac_appearance")
+        ?: if (appearancePrefs.containsKey("ui_dark_theme")) { if (UserApiKeyAuthManager.uiDarkTheme) "dark" else "light" } else "system"
+    do_.linux.lindo.ui.AppAppearance.iconAppearance = appearancePrefs.getProperty("ui_icon_appearance")
+        ?: appearancePrefs.getProperty("mac_icon_appearance", "system")
+    do_.linux.lindo.ui.AppAppearance.onPersist = {
+        DesktopStateStore.update {
+            setProperty("ui_appearance", do_.linux.lindo.ui.AppAppearance.appearance)
+            setProperty("ui_icon_appearance", do_.linux.lindo.ui.AppAppearance.iconAppearance)
+        }
+    }
+    DesktopAppIconManager.install(appearancePrefs) { icon ->
+        DesktopStateStore.update {
+            setProperty("ui_app_icon", icon.key)
+            setProperty("ui_icon_appearance", icon.background.appearanceMode)
+        }
+    }
     if (IS_MAC_OS) {
         MacDesktopSettings.install(DesktopStateStore.load()) { change -> DesktopStateStore.update(mutator = change) }
         MacBrowserTransport.install(DesktopStateStore.load().getProperty("mac_browser_session") == "true", { enabled ->
@@ -1994,7 +2015,8 @@ fun main(args: Array<String> = emptyArray()) {
                     onThemeChanged = { isDark ->
                         applyMacSeamlessWindowChrome(window, isDark = isDark)
                     },
-                    onApplyAppIcon = null,
+                    appIcon = DesktopAppIconManager.current,
+                    onApplyAppIcon = DesktopAppIconManager::select,
                     imageCacheDir = DesktopStateStore.imageCacheDir,
                     macTitleBarInset = topTitleInset,
                     onUnreadStateChanged = { unreadCount, username ->

@@ -1,7 +1,7 @@
 package do_.linux.lindo
 
 import do_.linux.lindo.core.network.*
-import do_.linux.lindo.ui.MacDesktopExperience
+import do_.linux.lindo.ui.AppAppearance
 import kotlinx.coroutines.*
 import java.nio.file.Files
 import java.util.Properties
@@ -17,8 +17,8 @@ class MacDesktopDeliveryTest {
         DesktopNetworkPolicy.verifying = false
         NetworkRecoveryPolicy.androidEnabled = false
         NetworkRecoveryPolicy.reads.clear()
-        MacDesktopExperience.enabled = false
-        MacDesktopExperience.onPersist = null
+
+        AppAppearance.onPersist = null
         UserApiKeyAuthManager.webViewHttpExecutor = null
         UserApiKeyAuthManager.requireBrowserTransportOnly = false
         LinuxDoRepository.clearChallengeCooldown()
@@ -100,11 +100,11 @@ class MacDesktopDeliveryTest {
         }
     }
     @Test fun appearanceAndIconFollowSystemIndependently() {
-        MacDesktopExperience.appearance="system"; MacDesktopExperience.iconAppearance="light"; MacDesktopExperience.systemDark=true
-        assertTrue(MacDesktopExperience.dark); assertFalse(MacDesktopExperience.darkIcon)
-        MacDesktopExperience.systemDark=false
-        assertFalse(MacDesktopExperience.dark)
-        MacDesktopExperience.selectAppearance("dark")
-        assertTrue(MacDesktopExperience.dark)
+        AppAppearance.appearance="system"; AppAppearance.iconAppearance="light"; AppAppearance.systemDark=true
+        assertTrue(AppAppearance.dark); assertFalse(AppAppearance.darkIcon)
+        AppAppearance.systemDark=false
+        assertFalse(AppAppearance.dark)
+        AppAppearance.selectAppearance("dark")
+        assertTrue(AppAppearance.dark)
     }
 }

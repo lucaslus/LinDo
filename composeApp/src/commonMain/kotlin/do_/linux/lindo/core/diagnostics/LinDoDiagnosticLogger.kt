@@ -52,7 +52,8 @@ data class DiagnosticLogEntry(
  */
 object LinDoDiagnosticLogger {
     const val APP_VERSION_NAME: String = "0.2.32"
-    const val APP_VERSION_DISPLAY: String = "Lindo v$APP_VERSION_NAME"
+    const val APP_BUILD: Int = 35
+    const val APP_VERSION_DISPLAY: String = "Lindo v$APP_VERSION_NAME · build $APP_BUILD"
 
     private const val MAX_MEMORY_ENTRIES = 320
     private const val MAX_SINGLE_LOG_FILE_BYTES = 768L * 1024L

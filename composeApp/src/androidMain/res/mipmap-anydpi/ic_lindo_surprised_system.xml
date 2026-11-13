@@ -1,0 +1,11 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape>
+            <size android:width="48dp" android:height="48dp"/>
+            <solid android:color="@color/ic_launcher_system"/>
+            <corners android:radius="12dp"/>
+        </shape>
+    </item>
+    <item android:drawable="@drawable/ic_lindo_foreground_legacy"/>
+    <item android:drawable="@drawable/ic_lindo_expression_surprised_legacy"/>
+</layer-list>

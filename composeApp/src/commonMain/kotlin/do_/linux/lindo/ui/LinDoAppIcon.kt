@@ -56,11 +56,17 @@ internal enum class LinDoIconBackground(
     val labelCopy: LinDoMessagesCopy,
     val color: Color
 ) {
+    System("system", LinDoMessagesCopy.ICON_BG_SYSTEM, Color.White),
     White("white", LinDoMessagesCopy.ICON_BG_LIGHT, Color.White),
     Black("black", LinDoMessagesCopy.ICON_BG_DARK, Color(0xFF121212)),
     Amber("amber", LinDoMessagesCopy.ICON_BG_CLASSIC, Color(0xFFF6B73C));
 
     val label: String get() = labelCopy.text
+    val appearanceMode: String get() = when (this) { System -> "system"; Black -> "dark"; White -> "light"; Amber -> "amber" }
+    val resolvedColor: Color get() = if (this == System && AppAppearance.systemDark) Black.color else color
+    companion object {
+        fun fromAppearance(mode: String) = when (mode) { "dark" -> Black; "light" -> White; else -> System }
+    }
 }
 
 internal enum class LinDoIconArtwork(
@@ -86,7 +92,7 @@ internal enum class LinDoIconArtwork(
 
     val backgrounds: List<LinDoIconBackground>
         get() = if (this == Classic) LinDoIconBackground.entries
-        else listOf(LinDoIconBackground.White, LinDoIconBackground.Black)
+        else listOf(LinDoIconBackground.System, LinDoIconBackground.White, LinDoIconBackground.Black)
 }
 
 internal data class LinDoAppIcon(val artwork: LinDoIconArtwork, val background: LinDoIconBackground) {
@@ -97,7 +103,7 @@ internal data class LinDoAppIcon(val artwork: LinDoIconArtwork, val background: 
     val key: String get() = "${artwork.key}_${background.key}"
 
     companion object {
-        val Default = LinDoAppIcon(LinDoIconArtwork.Happy, LinDoIconBackground.White)
+        val Default = LinDoAppIcon(LinDoIconArtwork.Happy, LinDoIconBackground.System)
         val Classic = LinDoAppIcon(LinDoIconArtwork.Classic, LinDoIconBackground.Amber)
         val Choices = LinDoIconArtwork.entries.flatMap { art -> art.backgrounds.map { LinDoAppIcon(art, it) } }
     }
@@ -126,7 +132,7 @@ internal fun LinDoLauncherIconTile(icon: LinDoAppIcon, modifier: Modifier) {
     LinDoIconArtworkImage(
         artwork = icon.artwork,
         modifier = modifier.clip(shape)
-            .background(icon.background.color)
+            .background(icon.background.resolvedColor)
             .border(0.5.dp, Color.Black.copy(alpha = 0.12f), shape)
             .padding(4.dp),
         contentDescription = null
@@ -209,7 +215,7 @@ internal fun LinDoAppIconPage(
                             Modifier.size(32.dp)
                                 .border(2.dp, if (selected) palette.accent else Color.Transparent, CircleShape)
                                 .padding(4.dp)
-                                .background(background.color, CircleShape)
+                                .background(background.resolvedColor, CircleShape)
                                 .border(1.dp, palette.inkSecondary.copy(alpha = 0.4f), CircleShape)
                         )
                         Text(

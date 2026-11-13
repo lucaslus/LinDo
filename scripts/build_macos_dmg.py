@@ -9,11 +9,14 @@ Produces a clean, native Apple-HIG drag-to-install macOS disk image containing:
   - Pixel-accurate Finder window frame accounting for macOS's 29pt titlebar
   - ULMO (LZMA level 9) high-ratio disk image compression (macOS 10.15+)
 
+Build the current checkout first: ./gradlew :composeApp:createReleaseDistributable
+This script only packages the supplied .app; it does not compile source code.
+
 Usage (via uv, zero osascript / TCC permissions required):
   uv run --with dmgbuild,pillow python3 scripts/build_macos_dmg.py \
-      --app composeApp/build/compose/binaries/main/app/Lindo.app \
+      --app composeApp/build/compose/binaries/main-release/app/Lindo.app \
       --icon composeApp/src/desktopMain/resources/icon.icns \
-      --out composeApp/build/compose/binaries/main/dmg/Lindo-1.0.29.dmg \
+      --out composeApp/build/compose/binaries/main-release/dmg/Lindo.dmg \
       --preview-out build/dmg_installer_preview.png
 """
 

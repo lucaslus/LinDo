@@ -35,9 +35,9 @@ jobs:
       - name: Run Core & Desktop Automated UI Tests (arm64)
         run: ./gradlew :composeApp:desktopTest --no-daemon --console=plain
       - name: Clean stale build outputs before packaging
-        run: rm -rf composeApp/build/compose/binaries/main/app composeApp/build/compose/binaries/main/dmg
+        run: rm -rf composeApp/build/compose/binaries/main-release/app composeApp/build/compose/binaries/main-release/dmg
       - name: Build native Lindo.app (arm64)
-        run: ./gradlew :composeApp:createDistributable --no-daemon --console=plain
+        run: ./gradlew :composeApp:createReleaseDistributable --no-daemon --console=plain
       - name: Package Drag-to-Applications DMG (arm64)
         run: |
           VERSION=$(grep -E 'versionName = "' composeApp/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
@@ -45,15 +45,15 @@ jobs:
           CLEAN_TAG="${TAG_NAME#v}"
           OUT_NAME="lindo-${CLEAN_TAG:-$VERSION}-macos-arm64.dmg"
           uv run --with dmgbuild,pillow python3 scripts/build_macos_dmg.py \
-            --app composeApp/build/compose/binaries/main/app/Lindo.app \
+            --app composeApp/build/compose/binaries/main-release/app/Lindo.app \
             --icon composeApp/src/desktopMain/resources/icon.icns \
             --mark design/brand-v3/sources/mark-transparent.png \
-            --out "composeApp/build/compose/binaries/main/dmg/${OUT_NAME}"
-          ls -lh "composeApp/build/compose/binaries/main/dmg/${OUT_NAME}"
+            --out "composeApp/build/compose/binaries/main-release/dmg/${OUT_NAME}"
+          ls -lh "composeApp/build/compose/binaries/main-release/dmg/${OUT_NAME}"
       - uses: actions/upload-artifact@v4
         with:
           name: lindo-macos-arm64-dmg
-          path: composeApp/build/compose/binaries/main/dmg/*arm64.dmg
+          path: composeApp/build/compose/binaries/main-release/dmg/*arm64.dmg
       - name: Attach arm64 DMG to GitHub Release
         if: ${{ github.event.inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/v') }}
         env:
@@ -61,7 +61,7 @@ jobs:
         run: |
           TARGET_TAG="${{ github.event.inputs.release_tag || github.ref_name }}"
           gh release view "${TARGET_TAG}" >/dev/null 2>&1 || gh release create "${TARGET_TAG}" --prerelease --title "${TARGET_TAG}" --notes "Automated build for ${TARGET_TAG}"
-          gh release upload "${TARGET_TAG}" composeApp/build/compose/binaries/main/dmg/*arm64.dmg --clobber
+          gh release upload "${TARGET_TAG}" composeApp/build/compose/binaries/main-release/dmg/*arm64.dmg --clobber
 
   build-macos-x64:
     name: Build macOS DMG (Intel x64)
@@ -78,9 +78,9 @@ jobs:
       - name: Run Core & Desktop Automated UI Tests (x64)
         run: ./gradlew :composeApp:desktopTest --no-daemon --console=plain
       - name: Clean stale build outputs before packaging
-        run: rm -rf composeApp/build/compose/binaries/main/app composeApp/build/compose/binaries/main/dmg
+        run: rm -rf composeApp/build/compose/binaries/main-release/app composeApp/build/compose/binaries/main-release/dmg
       - name: Build native Lindo.app (x64)
-        run: ./gradlew :composeApp:createDistributable --no-daemon --console=plain
+        run: ./gradlew :composeApp:createReleaseDistributable --no-daemon --console=plain
       - name: Package Drag-to-Applications DMG (x64)
         run: |
           VERSION=$(grep -E 'versionName = "' composeApp/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
@@ -88,15 +88,15 @@ jobs:
           CLEAN_TAG="${TAG_NAME#v}"
           OUT_NAME="lindo-${CLEAN_TAG:-$VERSION}-macos-x64.dmg"
           uv run --with dmgbuild,pillow python3 scripts/build_macos_dmg.py \
-            --app composeApp/build/compose/binaries/main/app/Lindo.app \
+            --app composeApp/build/compose/binaries/main-release/app/Lindo.app \
             --icon composeApp/src/desktopMain/resources/icon.icns \
             --mark design/brand-v3/sources/mark-transparent.png \
-            --out "composeApp/build/compose/binaries/main/dmg/${OUT_NAME}"
-          ls -lh "composeApp/build/compose/binaries/main/dmg/${OUT_NAME}"
+            --out "composeApp/build/compose/binaries/main-release/dmg/${OUT_NAME}"
+          ls -lh "composeApp/build/compose/binaries/main-release/dmg/${OUT_NAME}"
       - uses: actions/upload-artifact@v4
         with:
           name: lindo-macos-x64-dmg
-          path: composeApp/build/compose/binaries/main/dmg/*x64.dmg
+          path: composeApp/build/compose/binaries/main-release/dmg/*x64.dmg
       - name: Attach x64 DMG to GitHub Release
         if: ${{ github.event.inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/v') }}
         env:
@@ -104,4 +104,4 @@ jobs:
         run: |
           TARGET_TAG="${{ github.event.inputs.release_tag || github.ref_name }}"
           gh release view "${TARGET_TAG}" >/dev/null 2>&1 || gh release create "${TARGET_TAG}" --prerelease --title "${TARGET_TAG}" --notes "Automated build for ${TARGET_TAG}"
-          gh release upload "${TARGET_TAG}" composeApp/build/compose/binaries/main/dmg/*x64.dmg --clobber
+          gh release upload "${TARGET_TAG}" composeApp/build/compose/binaries/main-release/dmg/*x64.dmg --clobber

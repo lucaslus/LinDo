@@ -81,6 +81,8 @@ import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.site.LinuxDoSiteRules
+import do_.linux.lindo.ui.AppAppearance
+import do_.linux.lindo.ui.LinDoIconBackground
 import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.LinDoReadRegressionPreview
 import do_.linux.lindo.ui.LinDoApp
@@ -535,6 +537,17 @@ class MainActivity : ComponentActivity() {
             }
         }
         restoreSessionFromDisk()
+        AppAppearance.appearance = prefs.getString("ui_appearance", null)
+            ?: if (prefs.contains("ui_dark_theme")) { if (UserApiKeyAuthManager.uiDarkTheme) "dark" else "light" } else "system"
+        AppAppearance.iconAppearance = appIcon.background.appearanceMode
+        AppAppearance.onPersist = {
+            prefs.edit().putString("ui_appearance", AppAppearance.appearance)
+                .putString("ui_icon_appearance", AppAppearance.iconAppearance).apply()
+        }
+        AppAppearance.onApplyIconAppearance = { mode ->
+            val background = LinDoIconBackground.fromAppearance(mode)
+            iconManager.apply(appIcon, appIcon.copy(background = background))
+        }
         do_.linux.lindo.core.compose.LocalComposerDrafts.restore(prefs.getString("composer_drafts", null))
         do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist = { encoded -> prefs.edit().putString("composer_drafts", encoded).apply() }
 
@@ -558,7 +571,7 @@ class MainActivity : ComponentActivity() {
         UserApiKeyAuthManager.onPersistUiPrefs = { fontScale, darkTheme, enableAnimations ->
             runCatching {
                 prefs.edit()
-                    .putFloat("ui_font_scale_v2", fontScale)
+                    .putFloat("ui_font_scale_v3", fontScale)
                     .putBoolean("ui_dark_theme", darkTheme)
                     .putBoolean("ui_enable_animations", enableAnimations)
                     .apply()
@@ -792,7 +805,14 @@ class MainActivity : ComponentActivity() {
                             onThemeChanged = updateSystemBars,
                             systemAnimationsEnabled = systemAnimationsEnabled,
                             appIcon = appIcon,
-                            onApplyAppIcon = { iconManager.apply(appIcon, it) },
+                            onApplyAppIcon = { selected ->
+                                iconManager.apply(appIcon, selected).also { applied ->
+                                    if (applied) {
+                                        AppAppearance.iconAppearance = selected.background.appearanceMode
+                                        AppAppearance.onPersist?.invoke()
+                                    }
+                                }
+                            },
                             imageCacheDir = java.io.File(cacheDir, "lindo_image_cache"),
                             onUnreadStateChanged = { unreadCount, _ ->
                                 runCatching {
@@ -2148,7 +2168,10 @@ class MainActivity : ComponentActivity() {
             UserApiKeyAuthManager.restorePendingPrivateKeyBase64(savedPendingPrivKey, savedPendingNonce, prefs.getLong("pending_rsa_created_at", 0L))
 
             // 恢复用户的阅读密度/字号、深色模式、动效与主题色偏好（默认官方黑白黄，标准字号默认 0.92f）
-            UserApiKeyAuthManager.uiFontScale = prefs.getFloat("ui_font_scale_v2", 0.92f)
+            UserApiKeyAuthManager.uiFontScale = AppAppearance.migrateFontScale(
+                if (prefs.contains("ui_font_scale_v3")) prefs.getFloat("ui_font_scale_v3", 1f) else null,
+                prefs.getFloat("ui_font_scale_v2", 0.92f)
+            )
             UserApiKeyAuthManager.uiDarkTheme = prefs.getBoolean("ui_dark_theme", false)
             UserApiKeyAuthManager.uiEnableAnimations = prefs.getBoolean("ui_enable_animations", true)
             UserApiKeyAuthManager.uiThemeAccent = prefs.getString("ui_theme_accent", "OFFICIAL_GOLD") ?: "OFFICIAL_GOLD"
@@ -2469,6 +2492,8 @@ class MainActivity : ComponentActivity() {
         pendingBinaryCallbacks.clear()
         if (activeInstance === this) {
             activeInstance = null
+            AppAppearance.onPersist = null
+            AppAppearance.onApplyIconAppearance = null
             do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist = null
             UserApiKeyAuthManager.onPersistPendingKey = null
             UserApiKeyAuthManager.openExternalUrlLauncher = null
@@ -2627,6 +2652,7 @@ private fun AndroidWebLoginModal(
     onLoginSuccess: () -> Unit,
     onLaunchFileChooser: ((ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Boolean)? = null
 ) {
+    val isVerificationFlow = remember(initialUrl) { initialUrl == "https://linux.do/#lindo-verify" }
     val isLoginFlow = remember(initialUrl) {
         initialUrl.contains("/login") ||
             initialUrl.contains("/session/otp/") ||
@@ -2635,6 +2661,9 @@ private fun AndroidWebLoginModal(
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember { mutableStateOf(false) }
+    var verificationRateRetries by remember { mutableStateOf(0) }
+    var verificationProbeRunning by remember { mutableStateOf(false) }
+    var verificationNavigated by remember { mutableStateOf(false) }
     var csrfSyncedInModal by remember(initialUrl) { mutableStateOf(false) }
     var postLoginProbeMisses by remember(initialUrl) { mutableStateOf(0) }
     var pageLoadError by remember { mutableStateOf<String?>(null) }
@@ -2657,6 +2686,7 @@ private fun AndroidWebLoginModal(
         pendingUrl = url
         pageLoadError = null
         rendererGone = false
+        verificationRateRetries = 0
         if (view?.url == url) view.reload() else view?.loadUrl(url)
     }
 
@@ -2728,6 +2758,60 @@ private fun AndroidWebLoginModal(
 
         // 非登录流（如应用广场、官网验证、Connect/Credit 等内置容器模式）：
         // 同步最新 Cookie（如 cf_clearance），不自动关闭窗口
+        if (isVerificationFlow && pageLoadError == null && !verificationProbeRunning && !LinuxDoRepository.isRateLimitedNow()) {
+            verificationProbeRunning = true
+            webView.evaluateJavascript("""
+                (function() {
+                    if (location.origin !== 'https://linux.do' || document.readyState !== 'complete' ||
+                        document.querySelector('#challenge-running,#challenge-stage,#challenge-form')) return '';
+                    if (window.__lindoRecoveryResult) {
+                        const value = window.__lindoRecoveryResult; delete window.__lindoRecoveryResult;
+                        return JSON.stringify(value);
+                    }
+                    try {
+                        const visible = JSON.parse(document.body.innerText);
+                        if (visible.topic_list) return JSON.stringify({ok:true});
+                    } catch (_) {}
+                    if (!document.querySelector('meta[name="csrf-token"]') || window.__lindoRecoveryProbeSent) return '';
+                    window.__lindoRecoveryProbeSent = true;
+                    (async function() {
+                        try {
+                            const r = await fetch('/latest.json', {credentials:'include',signal:AbortSignal.timeout(12000)});
+                            if (r.headers.get('cf-mitigated') === 'challenge') { window.__lindoRecoveryResult={challenge:true}; return; }
+                            if (r.status === 429) { window.__lindoRecoveryResult={status:429,retryAfter:r.headers.get('Retry-After')||''}; return; }
+                            if (!r.ok) return;
+                            const data = await r.json(); window.__lindoRecoveryResult={ok:!!data.topic_list};
+                        } catch (_) {}
+                    })();
+                    return '';
+                })();
+            """.trimIndent()) { raw ->
+                verificationProbeRunning = false
+                if (!completed) {
+                    val result = decodeJsStringResult(raw)?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    if (result?.optInt("status") == 429) {
+                        val retryAfter = result.optString("retryAfter")
+                        LinuxDoRepository.noteRetryAfter(retryAfter)
+                        if (verificationRateRetries++ == 0 && NetworkRecoveryPolicy.retryAfterMillis(retryAfter) <= 10_000L) {
+                            webView.evaluateJavascript("window.__lindoRecoveryProbeSent = false;", null)
+                        } else {
+                            pageLoadError = "站点请求较频繁，请稍后重试。"
+                        }
+                    }
+                    if (result?.optBoolean("ok") == true) {
+                        completed = true
+                        CookieManager.getInstance().flush()
+                        CookieSentinel.syncFromAuthoritativeBrowserCookieString(CookieManager.getInstance().getCookie("https://linux.do").orEmpty())
+                        LinuxDoRepository.clearChallengeCooldown()
+                        UserApiKeyAuthManager.persistSessionQuietly()
+                        onLoginSuccess()
+                    } else if (result?.optBoolean("challenge") == true && !verificationNavigated) {
+                        verificationNavigated = true
+                        webView.loadUrl("https://linux.do/latest.json")
+                    }
+                }
+            }
+        }
         if (!isLoginFlow) {
             val latestCookies = cookieManager.getCookie("https://linux.do").orEmpty().ifBlank { rawCookies }
             if (latestCookies.isNotBlank()) {
@@ -2925,10 +3009,10 @@ private fun AndroidWebLoginModal(
     }
 
     // 仅在登录流开启时轮询探测登录完成状态（非登录容器页如 Connect / Credit 不轮询）
-    LaunchedEffect(webViewRef, completed, isLoginFlow) {
-        if (!isLoginFlow) return@LaunchedEffect
+    LaunchedEffect(webViewRef, completed, isLoginFlow, isVerificationFlow) {
+        if (!isLoginFlow && !isVerificationFlow) return@LaunchedEffect
         while (!completed && webViewRef != null) {
-            delay(800L)
+            delay(2000L)
             tryExtractSessionAndComplete(webViewRef)
         }
     }

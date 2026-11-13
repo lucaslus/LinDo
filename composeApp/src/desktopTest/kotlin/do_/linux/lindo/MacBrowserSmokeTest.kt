@@ -1,7 +1,8 @@
 package do_.linux.lindo
 
 import do_.linux.lindo.core.network.DesktopNetworkPolicy
-import do_.linux.lindo.ui.MacDesktopExperience
+import do_.linux.lindo.ui.AppAppearance
+import do_.linux.lindo.ui.PlatformSessionRecovery
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assume.assumeTrue
@@ -13,9 +14,9 @@ class MacBrowserSmokeTest {
     @Test fun guestVerificationReturnsToApp() = runBlocking {
         assumeTrue(System.getenv("LINDO_VERIFY_BROWSER_SMOKE") == "1")
         DesktopNetworkPolicy.enabled = true
-        MacDesktopExperience.enabled = true
+
         MacBrowserTransport.install(false, {}, {})
-        val success = withTimeoutOrNull(45_000) { MacDesktopExperience.verifySession!!.invoke() } == true
-        assertTrue(success, "${MacDesktopExperience.verificationMessage}; ${MacBrowserTransport.verificationDiagnostic}")
+        val success = withTimeoutOrNull(45_000) { PlatformSessionRecovery.verifySession!!.invoke() } == true
+        assertTrue(success, "${PlatformSessionRecovery.verificationMessage}; ${MacBrowserTransport.verificationDiagnostic}")
     }
 }

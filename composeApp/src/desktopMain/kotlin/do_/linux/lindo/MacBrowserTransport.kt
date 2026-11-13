@@ -1,7 +1,8 @@
 package do_.linux.lindo
 
 import do_.linux.lindo.core.network.*
-import do_.linux.lindo.ui.MacDesktopExperience
+import do_.linux.lindo.ui.AppAppearance
+import do_.linux.lindo.ui.PlatformSessionRecovery
 import kotlinx.coroutines.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
@@ -40,8 +41,8 @@ internal object MacBrowserTransport {
     )
     fun install(wasEnabled: Boolean, persistEnabled: (Boolean) -> Unit, ready: () -> Unit) {
         persist = persistEnabled; onReady = ready
-        MacDesktopExperience.verifySession = { verify(login = false) }
-        MacDesktopExperience.loginSession = { verify(login = true) }
+        PlatformSessionRecovery.verifySession = { verify(login = false) }
+        PlatformSessionRecovery.loginSession = { verify(login = true) }
         if (wasEnabled) bind()
         val previousLogout = UserApiKeyAuthManager.onLogoutPlatformClear
         UserApiKeyAuthManager.onLogoutPlatformClear = {
@@ -116,7 +117,7 @@ internal object MacBrowserTransport {
     }
     private suspend fun verify(login: Boolean): Boolean = withContext(Dispatchers.IO) {
         if (LinuxDoRepository.isRateLimitedNow()) {
-            MacDesktopExperience.verificationMessage = "站点暂时限制了请求，请稍后再试。"
+            PlatformSessionRecovery.verificationMessage = "站点暂时限制了请求，请稍后再试。"
             return@withContext false
         }
         if (!recovery.tryLock()) return@withContext false
@@ -124,7 +125,7 @@ internal object MacBrowserTransport {
         val generation = UserApiKeyAuthManager.sessionGeneration
         try {
             verificationDiagnostic = "opening"
-            MacDesktopExperience.verificationMessage = "请在打开的网页中完成确认，完成后会自动接续。"
+            PlatformSessionRecovery.verificationMessage = "请在打开的网页中完成确认，完成后会自动接续。"
             val cdp = attach(true) ?: return@withContext false
             seedSession(cdp)
             val initialUrl = if (login) "https://linux.do/login" else lastChallengeUrl ?: "https://linux.do/session/current.json"
@@ -152,7 +153,7 @@ internal object MacBrowserTransport {
                     delay(8000); continue
                 }
                 if (response.first >= 500) { delay(8000); continue }
-                if (response.first == 429) { MacDesktopExperience.verificationMessage = "站点暂时限制了请求，请稍后再试。"; return@withContext false }
+                if (response.first == 429) { PlatformSessionRecovery.verificationMessage = "站点暂时限制了请求，请稍后再试。"; return@withContext false }
                 val user = runCatching { json.parseToJsonElement(response.second).jsonObject["current_user"] as? JsonObject }.getOrNull()
                 if (response.first in 200..299 && user != null && user["username"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true) {
                     bind(); syncCookies()
@@ -171,7 +172,7 @@ internal object MacBrowserTransport {
                     val public = request("https://linux.do/latest.json", "GET", null, emptyMap(), cdp)
                     verificationDiagnostic = "public-status-${public?.first}-challenge-${public?.let { looksLikeCloudflareChallenge(it.second) }}"
                     if (public?.first == 429 && !looksLikeCloudflareChallenge(public.second)) {
-                        MacDesktopExperience.verificationMessage = "站点暂时限制了请求，请稍后再试。"
+                        PlatformSessionRecovery.verificationMessage = "站点暂时限制了请求，请稍后再试。"
                         return@withContext false
                     }
                     if (public != null && looksLikeCloudflareChallenge(public.second) && visitedChallenges.add("https://linux.do/latest.json")) {
@@ -185,16 +186,16 @@ internal object MacBrowserTransport {
                 }
                 if (!requestedLogin && UserApiKeyAuthManager.isAuthorized() && response.first in setOf(401, 403, 404)) {
                     requestedLogin = true
-                    MacDesktopExperience.verificationMessage = "会话已过期，请在网页中登录，完成后会自动返回。"
+                    PlatformSessionRecovery.verificationMessage = "会话已过期，请在网页中登录，完成后会自动返回。"
                     cdp.call("Page.navigate", buildJsonObject { put("url", "https://linux.do/login") })
                 }
             }
-            MacDesktopExperience.verificationMessage = "暂时没有收到完成结果。你可以继续网页确认，然后再试一次。"
+            PlatformSessionRecovery.verificationMessage = "暂时没有收到完成结果。你可以继续网页确认，然后再试一次。"
             false
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Throwable) {
             verificationDiagnostic = "failed-${error.javaClass.simpleName}"
-            MacDesktopExperience.verificationMessage = (error as? IllegalStateException)?.message?.takeIf { it.isNotBlank() }
+            PlatformSessionRecovery.verificationMessage = (error as? IllegalStateException)?.message?.takeIf { it.isNotBlank() }
                 ?: "连接未完成，请确认 Chrome 或 Edge 可用后重试。"
             false
         }
@@ -204,7 +205,7 @@ internal object MacBrowserTransport {
         persist?.invoke(true)
         LinuxDoRepository.clearChallengeCooldown()
         UserApiKeyAuthManager.notifyNetworkRestored()
-        MacDesktopExperience.verificationMessage = null
+        PlatformSessionRecovery.verificationMessage = null
         lastChallengeUrl = null
         runCatching {
             val window = cdp.call("Browser.getWindowForTarget", buildJsonObject { put("targetId", cdp.target) })
@@ -226,7 +227,7 @@ internal object MacBrowserTransport {
         if (!allowed(url)) return@withContext null
         if (LinuxDoRepository.isRateLimitedNow()) return@withContext 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
         val cdp = active ?: attach(false) ?: run {
-            MacDesktopExperience.verificationMessage = "浏览器会话已关闭，点击继续即可恢复连接。"
+            PlatformSessionRecovery.verificationMessage = "浏览器会话已关闭，点击继续即可恢复连接。"
             return@withContext null
         }
         val safeHeaders = mapOf("Accept" to "application/json", "X-Requested-With" to "XMLHttpRequest") + headers.filterKeys { it.lowercase() !in setOf("cookie","host","origin","referer","user-agent","content-length") }
