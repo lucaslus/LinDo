@@ -11,9 +11,10 @@ Produces a clean, native Apple-HIG drag-to-install macOS disk image containing:
 
 Usage (via uv, zero osascript / TCC permissions required):
   uv run --with dmgbuild,pillow python3 scripts/build_macos_dmg.py \
-      --app composeApp/build/compose/binaries/main/app/Lindo.app \
-      --icon composeApp/src/desktopMain/resources/icon.icns \
-      --out composeApp/build/compose/binaries/main/dmg/Lindo-1.0.29.dmg \
+      --app build/macos/Build/Products/Release/Lindo.app \
+      --icon assets/desktop/icon.icns \
+      --mark design/brand-v3/sources/mark-transparent.png \
+      --out dist/lindo-0.3.0-macos-arm64.dmg \
       --preview-out build/dmg_installer_preview.png
 """
 

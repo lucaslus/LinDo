@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Optional existing GitHub Release tag to upload DMG assets to (e.g. v0.2.27-draft)"
+        description: "Optional existing GitHub Release tag to upload DMG assets to (e.g. v0.3.0-draft)"
         required: false
         type: string
       arch_filter:
@@ -20,88 +20,93 @@ permissions:
   contents: write
 
 jobs:
-  build-macos-arm64:
-    name: Build macOS DMG (Apple Silicon arm64)
-    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.arch_filter || 'all') == 'all' || github.event.inputs.arch_filter == 'arm64' }}
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: gradle
-      - uses: astral-sh/setup-uv@v5
-      - name: Run Core & Desktop Automated UI Tests (arm64)
-        run: ./gradlew :composeApp:desktopTest --no-daemon --console=plain
-      - name: Clean stale build outputs before packaging
-        run: rm -rf composeApp/build/compose/binaries/main/app composeApp/build/compose/binaries/main/dmg
-      - name: Build native Lindo.app (arm64)
-        run: ./gradlew :composeApp:createDistributable --no-daemon --console=plain
-      - name: Package Drag-to-Applications DMG (arm64)
-        run: |
-          VERSION=$(grep -E 'versionName = "' composeApp/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
-          TAG_NAME="${{ github.event.inputs.release_tag || github.ref_name }}"
-          CLEAN_TAG="${TAG_NAME#v}"
-          OUT_NAME="lindo-${CLEAN_TAG:-$VERSION}-macos-arm64.dmg"
-          uv run --with dmgbuild,pillow python3 scripts/build_macos_dmg.py \
-            --app composeApp/build/compose/binaries/main/app/Lindo.app \
-            --icon composeApp/src/desktopMain/resources/icon.icns \
-            --mark design/brand-v3/sources/mark-transparent.png \
-            --out "composeApp/build/compose/binaries/main/dmg/${OUT_NAME}"
-          ls -lh "composeApp/build/compose/binaries/main/dmg/${OUT_NAME}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: lindo-macos-arm64-dmg
-          path: composeApp/build/compose/binaries/main/dmg/*arm64.dmg
-      - name: Attach arm64 DMG to GitHub Release
-        if: ${{ github.event.inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/v') }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TARGET_TAG="${{ github.event.inputs.release_tag || github.ref_name }}"
-          gh release view "${TARGET_TAG}" >/dev/null 2>&1 || gh release create "${TARGET_TAG}" --prerelease --title "${TARGET_TAG}" --notes "Automated build for ${TARGET_TAG}"
-          gh release upload "${TARGET_TAG}" composeApp/build/compose/binaries/main/dmg/*arm64.dmg --clobber
+  build-macos:
+    name: Build macOS DMG (${{ matrix.arch }})
+    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.arch_filter || 'all') == 'all' || github.event.inputs.arch_filter == matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            os: macos-15
+          - arch: x64
+            os: macos-15-intel
 
-  build-macos-x64:
-    name: Build macOS DMG (Intel x64)
-    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.arch_filter || 'all') == 'all' || github.event.inputs.arch_filter == 'x64' }}
-    runs-on: macos-15-intel
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
         with:
-          distribution: temurin
-          java-version: "21"
-          cache: gradle
-      - uses: astral-sh/setup-uv@v5
-      - name: Run Core & Desktop Automated UI Tests (x64)
-        run: ./gradlew :composeApp:desktopTest --no-daemon --console=plain
-      - name: Clean stale build outputs before packaging
-        run: rm -rf composeApp/build/compose/binaries/main/app composeApp/build/compose/binaries/main/dmg
-      - name: Build native Lindo.app (x64)
-        run: ./gradlew :composeApp:createDistributable --no-daemon --console=plain
-      - name: Package Drag-to-Applications DMG (x64)
+          channel: "stable"
+          cache: true
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Flutter dependencies
         run: |
-          VERSION=$(grep -E 'versionName = "' composeApp/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
-          TAG_NAME="${{ github.event.inputs.release_tag || github.ref_name }}"
-          CLEAN_TAG="${TAG_NAME#v}"
-          OUT_NAME="lindo-${CLEAN_TAG:-$VERSION}-macos-x64.dmg"
+          flutter config --enable-macos-desktop
+          flutter pub get
+
+      - name: Run Flutter unit & widget test suite
+        run: flutter test
+
+      - name: Build native Lindo.app (${{ matrix.arch }})
+        run: |
+          rm -rf build/macos dist
+          flutter build macos --release
+          test -d build/macos/Build/Products/Release/Lindo.app
+          codesign --force --deep --sign - build/macos/Build/Products/Release/Lindo.app
+          codesign --verify --deep --strict build/macos/Build/Products/Release/Lindo.app
+
+      - name: Package Drag-to-Applications DMG (${{ matrix.arch }})
+        id: pkg
+        env:
+          INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          GITHUB_REF_FULL: ${{ github.ref }}
+          GITHUB_REF_SHORT: ${{ github.ref_name }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: |
+          PUBSPEC_VER=$(sed -nE 's/^version:[[:space:]]*([^+[:space:]]+).*/\1/p' pubspec.yaml | head -n1)
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            VERSION="${INPUT_RELEASE_TAG#v}"
+          elif [[ "${GITHUB_REF_FULL}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_SHORT#v}"
+          else
+            VERSION="${PUBSPEC_VER:-0.3.0}"
+          fi
+          mkdir -p dist
+          OUT_DMG="dist/lindo-${VERSION}-macos-${MATRIX_ARCH}.dmg"
           uv run --with dmgbuild,pillow python3 scripts/build_macos_dmg.py \
-            --app composeApp/build/compose/binaries/main/app/Lindo.app \
-            --icon composeApp/src/desktopMain/resources/icon.icns \
+            --app build/macos/Build/Products/Release/Lindo.app \
+            --icon assets/desktop/icon.icns \
             --mark design/brand-v3/sources/mark-transparent.png \
-            --out "composeApp/build/compose/binaries/main/dmg/${OUT_NAME}"
-          ls -lh "composeApp/build/compose/binaries/main/dmg/${OUT_NAME}"
-      - uses: actions/upload-artifact@v4
+            --out "${OUT_DMG}"
+          ls -lh "${OUT_DMG}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=${OUT_DMG}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS ${{ matrix.arch }} DMG Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: lindo-macos-x64-dmg
-          path: composeApp/build/compose/binaries/main/dmg/*x64.dmg
-      - name: Attach x64 DMG to GitHub Release
+          name: lindo-macos-${{ matrix.arch }}-dmg
+          path: ${{ steps.pkg.outputs.dmg_path }}
+
+      - name: Attach ${{ matrix.arch }} DMG to GitHub Release
         if: ${{ github.event.inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/v') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+          DMG_PATH: ${{ steps.pkg.outputs.dmg_path }}
         run: |
-          TARGET_TAG="${{ github.event.inputs.release_tag || github.ref_name }}"
-          gh release view "${TARGET_TAG}" >/dev/null 2>&1 || gh release create "${TARGET_TAG}" --prerelease --title "${TARGET_TAG}" --notes "Automated build for ${TARGET_TAG}"
-          gh release upload "${TARGET_TAG}" composeApp/build/compose/binaries/main/dmg/*x64.dmg --clobber
+          PRERELEASE_ARGS=()
+          if [[ "${TARGET_TAG}" == *-* ]]; then
+            PRERELEASE_ARGS+=(--prerelease)
+          fi
+          gh release view "${TARGET_TAG}" >/dev/null 2>&1 || \
+            gh release create "${TARGET_TAG}" "${PRERELEASE_ARGS[@]}" --title "${TARGET_TAG}" --notes "Automated build for ${TARGET_TAG}" || \
+            gh release view "${TARGET_TAG}" >/dev/null 2>&1
+          gh release upload "${TARGET_TAG}" "${DMG_PATH}" --clobber
