@@ -2665,20 +2665,15 @@ private fun AndroidWebLoginModal(
     var verificationProbeRunning by remember { mutableStateOf(false) }
     var verificationNavigated by remember { mutableStateOf(false) }
     var csrfSyncedInModal by remember(initialUrl) { mutableStateOf(false) }
-    var postLoginProbeMisses by remember(initialUrl) { mutableStateOf(0) }
+    var loginDocumentReady by remember(initialUrl) { mutableStateOf(false) }
+    var loginNavigationEpoch by remember(initialUrl) { mutableStateOf(0) }
+    var confirmingLogin by remember(initialUrl) { mutableStateOf(false) }
+    var loginProbeRunning by remember(initialUrl) { mutableStateOf(false) }
+    var loginRateLimitEvent by remember(initialUrl) { mutableStateOf<String?>(null) }
     var pageLoadError by remember { mutableStateOf<String?>(null) }
     var rendererGone by remember { mutableStateOf(false) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     val isDark = LocalLinDoDarkTheme.current
-    val initialTCookie = remember {
-        getCookieValue(
-            runCatching { CookieManager.getInstance().getCookie("https://linux.do") }.getOrNull(),
-            "_t"
-        ).takeUnless { it == "demo_session_token" }.orEmpty()
-    }
-    val wasAlreadyAuthorizedOnOpen = remember {
-        UserApiKeyAuthManager.isAuthorized()
-    }
 
     fun retryPage() {
         val view = webViewRef
@@ -2687,6 +2682,8 @@ private fun AndroidWebLoginModal(
         pageLoadError = null
         rendererGone = false
         verificationRateRetries = 0
+        confirmingLogin = false
+        loginRateLimitEvent = null
         if (view?.url == url) view.reload() else view?.loadUrl(url)
     }
 
@@ -2699,6 +2696,7 @@ private fun AndroidWebLoginModal(
         val username = u.optString("username").trim()
         if (username.isBlank() || username == "linuxdo_user") return
         val userId = u.optInt("id", 0)
+        if (userId <= 0) return
         val displayName = u.optString("name").ifBlank { username }
         val rawTpl = u.optString("avatar_template").ifBlank { u.optString("avatar") }
         val avatarUrl = LinuxDoSiteRules.resolveStaticAvatarUrl(rawTpl, 144)
@@ -2709,7 +2707,7 @@ private fun AndroidWebLoginModal(
         val cookieManager = CookieManager.getInstance()
         cookieManager.flush()
         val rawCookies = cookieManager.getCookie("https://linux.do").orEmpty()
-        println("LinDoAuth: Modal authenticated user=$username, trustLevel=$trust")
+        println("LinDoAuth: Modal authenticated session confirmed")
         UserApiKeyAuthManager.onSessionAuthenticated(
             profile = AuthenticatedUserProfile(
                 userId = userId,
@@ -2722,18 +2720,6 @@ private fun AndroidWebLoginModal(
             ),
             rawCookies = rawCookies
         )
-        onLoginSuccess()
-    }
-
-    fun completeWithValidatedSessionCookie(rawCookies: String) {
-        if (completed) return
-        val tVal = getCookieValue(rawCookies, "_t").takeUnless { it == "demo_session_token" }.orEmpty()
-        if (tVal.isEmpty()) return
-        completed = true
-        CookieManager.getInstance().flush()
-        CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
-        UserApiKeyAuthManager.persistSessionQuietly()
-        UserApiKeyAuthManager.onAuthStateChanged?.invoke()
         onLoginSuccess()
     }
 
@@ -2835,155 +2821,35 @@ private fun AndroidWebLoginModal(
             return
         }
 
-        // 在登录表单、OTP 兑换或 /user-api-key/ 授权确认页绝不提前关闭弹窗，等待登录/授权跳回主站
-        val currentUri = runCatching { Uri.parse(webView.url ?: pendingUrl.orEmpty()) }.getOrNull()
-        val currentHost = currentUri?.host?.lowercase().orEmpty()
-        val currentPath = currentUri?.path.orEmpty()
-        if (currentHost != "linux.do" && !currentHost.endsWith(".linux.do")) {
-            return
-        }
-        if (currentPath.startsWith("/user-api-key/") ||
-            currentPath.startsWith("/login") ||
-            currentPath.startsWith("/session/otp/") ||
-            currentPath.startsWith("/session/sso") ||
-            currentPath.startsWith("/auth/")
-        ) {
-            postLoginProbeMisses = 0
-            return
-        }
-
-        // 关键防风控守卫：在原生 CookieManager 尚未检测到真实 Discourse `_t` 凭证前，
-        // 严禁向页面注入任何探测脚本或发起轮询请求，保持 `/login` 与 Cloudflare Turnstile 页面 100% 纯净零干扰！
-        val currentTCookie = getCookieValue(rawCookies, "_t").takeUnless { it == "demo_session_token" }.orEmpty()
-        if (currentTCookie.isEmpty()) {
-            postLoginProbeMisses = 0
-            return
-        }
-        // 若用户原本已登录（如打开 /login 切换账号），在 `_t` 未更新前绝不秒关窗口！
-        if (wasAlreadyAuthorizedOnOpen && initialUrl.contains("/login") && currentTCookie == initialTCookie) {
-            return
-        }
-
-        // 已检测到 `_t` 会话 Cookie 且已离开 /login：先确认当前并非 Cloudflare 验证挑战页，再提取当前用户资料与 CSRF Token
-        val probeJs = """
-            (function() {
-                try {
-                    var title = document.title || '';
-                    if (/Just a moment|请稍候|Attention Required/i.test(title) ||
-                        document.querySelector('#challenge-running, #challenge-stage, .cf-turnstile, iframe[src*="challenges.cloudflare.com"]')) {
-                        return '__CF_CHALLENGE__';
-                    }
-                    var path = window.location.pathname || '';
-                    if (path.indexOf('/login') === 0 ||
-                        path.indexOf('/user-api-key/') === 0 ||
-                        path.indexOf('/session/otp/') === 0 ||
-                        path.indexOf('/session/sso') === 0 ||
-                        path.indexOf('/auth/') === 0) {
-                        return '__ON_LOGIN_PATH__';
-                    }
-                    var metaCsrf = document.querySelector('meta[name="csrf-token"]');
-                    var csrfVal = (metaCsrf && metaCsrf.content) ? metaCsrf.content : '';
-                    if (window.__lindoResolvedCurrentUser && window.__lindoResolvedOwner === ${JSONObject.quote(csrfOwnerTag(rawCookies))}) {
-                        var cachedU = JSON.parse(window.__lindoResolvedCurrentUser);
-                        if (cachedU && cachedU.username) {
-                            if (csrfVal && !cachedU.__csrf) cachedU.__csrf = csrfVal;
-                            return JSON.stringify(cachedU);
-                        }
-                    }
-                    var container = (window.Discourse && window.Discourse.__container__) || null;
-                    var cuSvc = (container && typeof container.lookup === 'function')
-                        ? container.lookup('service:current-user')
-                        : null;
-                    var du = cuSvc || ((window.Discourse && Discourse.User && Discourse.User.current) ? Discourse.User.current() : null);
-                    if (du && du.username) {
-                        return JSON.stringify({
-                            id: du.id || 0,
-                            username: du.username || '',
-                            name: du.name || du.username || '',
-                            avatar_template: du.avatar_template || '',
-                            animated_avatar: du.animated_avatar || '',
-                            title: du.title || '',
-                            trust_level: typeof du.trust_level === 'number' ? du.trust_level : 1,
-                            __csrf: csrfVal
-                        });
-                    }
-                    var el = document.getElementById('data-preloaded');
-                    if (el && el.dataset && el.dataset.preloaded) {
-                        var p = JSON.parse(el.dataset.preloaded);
-                        if (p && p.currentUser) {
-                            var u = JSON.parse(p.currentUser);
-                            if (u && u.username) {
-                                if (csrfVal) u.__csrf = csrfVal;
-                                return JSON.stringify(u);
-                            }
-                        }
-                    }
-                    if (csrfVal) {
-                        return '__CSRF_ONLY__:' + csrfVal;
-                    }
-                } catch (e) {}
-                return '';
-            })();
-        """.trimIndent()
-
-        val expectedOwnerTag = csrfOwnerTag(rawCookies)
-        webView.evaluateJavascript(probeJs) { rawJson ->
-            if (completed) return@evaluateJavascript
-            val decoded = decodeJsStringResult(rawJson)?.takeIf { it.isNotBlank() }
-            if (decoded == "__CF_CHALLENGE__" || decoded == "__ON_LOGIN_PATH__") {
-                postLoginProbeMisses = 0
-                return@evaluateJavascript
+        // An unchanged _t is normal when the browser already has a valid session.
+        // Confirm the real user instead of requiring cookie rotation or trusting _t alone.
+        if (loginProbeRunning || !loginDocumentReady) return
+        val probeEpoch = loginNavigationEpoch
+        loginProbeRunning = true
+        val owner = getCookieValue(rawCookies, "_t").orEmpty().let { "${it.hashCode()}_${it.length}" }
+        webView.evaluateJavascript(do_.linux.lindo.core.network.webLoginSessionProbeScript(owner)) { raw ->
+            if (probeEpoch != loginNavigationEpoch) return@evaluateJavascript
+            loginProbeRunning = false
+            if (completed || webView !== webViewRef) return@evaluateJavascript
+            val currentT = cookieManager.getCookie("https://linux.do").orEmpty().let { getCookieValue(it, "_t").orEmpty() }
+            if (owner != "${currentT.hashCode()}_${currentT.length}") return@evaluateJavascript
+            val result = runCatching { JSONObject(decodeJsStringResult(raw).orEmpty()) }.getOrNull()
+                ?: return@evaluateJavascript
+            val event = result.optInt("rateLimitAttempt", 0)
+            if (event > 0 && loginRateLimitEvent != "$owner:$event") {
+                loginRateLimitEvent = "$owner:$event"
+                LinuxDoRepository.noteRetryAfter(result.optString("retryAfter"))
             }
-            if (decoded != null && !decoded.startsWith("__CSRF_ONLY__:")) {
-                runCatching {
-                    val obj = JSONObject(decoded)
-                    val csrf = obj.optString("__csrf").trim()
-                    if (csrf.isNotEmpty()) {
+            confirmingLogin = result.optString("state") == "waiting"
+            when (result.optString("state")) {
+                "ready" -> {
+                    result.optString("csrf").takeIf { it.isNotBlank() }?.let {
                         csrfSyncedInModal = true
-                        LinuxDoRepository.updateCsrfToken(csrf)
+                        LinuxDoRepository.updateCsrfToken(it)
                     }
-                    completeWithUserObject(obj)
+                    result.optJSONObject("user")?.let(::completeWithUserObject)
                 }
-            } else if (!completed && hasCookieNamed(rawCookies, "_t")) {
-                if (decoded != null && decoded.startsWith("__CSRF_ONLY__:")) {
-                    val csrf = decoded.removePrefix("__CSRF_ONLY__:").trim()
-                    if (csrf.isNotEmpty()) {
-                        csrfSyncedInModal = true
-                        LinuxDoRepository.updateCsrfToken(csrf)
-                    }
-                }
-                postLoginProbeMisses += 1
-                // 若在主站已持有有效 `_t` 超过 3 次轮询但 SPA 尚未暴露用户对象（含首次登录及切号后 `_t` 已轮换），直接凭 `_t` 完成登录回跳并由后台补全资料，防止卡死在登录弹窗
-                val switchedSessionCookie = currentTCookie.isNotBlank() && currentTCookie != initialTCookie
-                if ((!wasAlreadyAuthorizedOnOpen || switchedSessionCookie) && postLoginProbeMisses >= 4) {
-                    completeWithValidatedSessionCookie(rawCookies)
-                    return@evaluateJavascript
-                }
-                // 在同源上下文单飞请求 `/session/current.json` 提取当前登录账号资料
-                webView.evaluateJavascript(
-                    """
-                    (function() {
-                        if (window.location.origin !== 'https://linux.do') return;
-                        if (window.__lindoCurrentUserProbeInFlight) return;
-                        window.__lindoCurrentUserProbeInFlight = true;
-                        var owner = ${JSONObject.quote(expectedOwnerTag)};
-                        fetch('/session/current.json', {
-                            headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
-                            credentials: 'include',
-                            cache: 'no-store'
-                        }).then(function(r) { return r.ok ? r.json() : null; })
-                          .then(function(d) {
-                              if (d && d.current_user && d.current_user.username) {
-                                  window.__lindoResolvedOwner = owner;
-                                  window.__lindoResolvedCurrentUser = JSON.stringify(d.current_user);
-                              }
-                          })
-                          .catch(function() {})
-                          .finally(function() { window.__lindoCurrentUserProbeInFlight = false; });
-                    })();
-                    """.trimIndent(),
-                    null
-                )
+                "error" -> pageLoadError = if (event > 0) "网站暂时繁忙，请稍后重试" else "暂时无法确认登录状态，请重试"
             }
         }
     }
@@ -3170,14 +3036,9 @@ private fun AndroidWebLoginModal(
                                     if (target.startsWith("discourse://auth_redirect", ignoreCase = true) ||
                                         target.startsWith("lindo://auth_redirect", ignoreCase = true)
                                     ) {
-                                        val ok = UserApiKeyAuthManager.handleAuthRedirectUri(target)
-                                        if (ok) {
-                                            val otp = UserApiKeyAuthManager.consumePendingOtpToken()
-                                            if (!otp.isNullOrBlank()) {
-                                                view?.loadUrl("https://linux.do/session/otp/$otp")
-                                            } else {
-                                                view?.loadUrl("https://linux.do/")
-                                            }
+                                        // The shared OTP collector is the sole consumer of this one-time token.
+                                        if (!UserApiKeyAuthManager.handleAuthRedirectUri(target)) {
+                                            pageLoadError = "授权已失效，请重新登录"
                                         }
                                         return true
                                     }
@@ -3223,6 +3084,10 @@ private fun AndroidWebLoginModal(
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     super.onPageStarted(view, url, favicon)
                                     if (view === webViewRef) {
+                                        loginDocumentReady = false
+                                        loginNavigationEpoch++
+                                        loginProbeRunning = false
+                                        confirmingLogin = false
                                         if (url != null &&
                                             (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))
                                         ) {
@@ -3235,6 +3100,7 @@ private fun AndroidWebLoginModal(
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     super.onPageFinished(view, url)
+                                    if (view === webViewRef && url == view?.url) loginDocumentReady = true
                                     tryExtractSessionAndComplete(view, isPageFinished = true)
                                 }
                             }
@@ -3254,6 +3120,13 @@ private fun AndroidWebLoginModal(
                         if (!rendererGone) releaseNativeWebView(view)
                     }
                 )
+                if (confirmingLogin && pageLoadError == null) {
+                    Box(Modifier.fillMaxSize().background(barBg).pointerInput(Unit) {
+                        awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+                    }, contentAlignment = Alignment.Center) {
+                        LinDoLoadingIndicator(label = "正在完成登录…")
+                    }
+                }
                 val loadError = pageLoadError
                 if (loadError != null) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

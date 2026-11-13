@@ -1776,6 +1776,7 @@ internal fun LinDoApp(
     val hasEmbeddedWebLogin = PlatformWebLoginHost.webLoginRenderer != null
     var showAuthSheet by remember { mutableStateOf(false) }
     var authStatusHint by remember { mutableStateOf<String?>(null) }
+    var authCompleting by remember { mutableStateOf(UserApiKeyAuthManager.pendingOtpToken != null) }
     var showSiteVerifySheet by remember { mutableStateOf(false) }
     var siteVerificationForLogin by remember { mutableStateOf(false) }
     var showConnectSheet by remember { mutableStateOf(false) }
@@ -2294,6 +2295,7 @@ internal fun LinDoApp(
     DisposableEffect(Unit) {
         val prevCallback = UserApiKeyAuthManager.onAuthStateChanged
         UserApiKeyAuthManager.onAuthStateChanged = {
+            if (UserApiKeyAuthManager.pendingOtpToken != null) authCompleting = true
             prevCallback?.invoke()
             authVersion++
         }
@@ -2363,28 +2365,33 @@ internal fun LinDoApp(
     LaunchedEffect(Unit) {
         androidx.compose.runtime.snapshotFlow { authVersion }.collect {
             val otp = UserApiKeyAuthManager.consumePendingOtpToken() ?: return@collect
-            val redeemed = LinuxDoRepository.redeemOtpSilently(otp)
-            if (redeemed) {
-                // Reauthorizing the same cached account is still a completed login.
-                authStatusHint = null
-                showAuthSheet = false
-                showSiteVerifySheet = false
-                guestLoginPrompt = null
-                activeWebLoginUrl = null
-                isGuestMode = false
-                authVersion++
-            } else if (hasEmbeddedWebLogin) {
-                openWebPage("https://linux.do/session/otp/$otp")
-            } else {
-                if (PlatformSessionRecovery.loginSession != null) {
-                    authStatusHint = "还需在网页中确认一次，完成后自动返回。"
+            authCompleting = true
+            try {
+                val redeemed = LinuxDoRepository.redeemOtpSilently(otp)
+                if (redeemed) {
+                    // Reauthorizing the same cached account is still a completed login.
+                    authStatusHint = null
                     showAuthSheet = false
-                    siteVerificationForLogin = true
-                    showSiteVerifySheet = true
+                    showSiteVerifySheet = false
+                    guestLoginPrompt = null
+                    activeWebLoginUrl = null
+                    isGuestMode = false
+                    authVersion++
+                } else if (hasEmbeddedWebLogin) {
+                    openWebPage("https://linux.do/session/otp/$otp")
                 } else {
-                    authStatusHint = "登录尚未完成，请重新打开网页确认。"
-                    showAuthSheet = true
+                    if (PlatformSessionRecovery.loginSession != null) {
+                        authStatusHint = "还需在网页中确认一次，完成后自动返回。"
+                        showAuthSheet = false
+                        siteVerificationForLogin = true
+                        showSiteVerifySheet = true
+                    } else {
+                        authStatusHint = "登录尚未完成，请重新打开网页确认。"
+                        showAuthSheet = true
+                    }
                 }
+            } finally {
+                authCompleting = false
             }
         }
     }
@@ -4090,7 +4097,7 @@ internal fun LinDoApp(
                     )
                 }
 
-                if (showAuthSheet) {
+                if (showAuthSheet && !authCompleting) {
                     UserApiKeyAuthSheet(
                         isAuthorized = isAuthorized,
                         currentUser = currentUser,
@@ -4107,7 +4114,7 @@ internal fun LinDoApp(
                     )
                 }
 
-                if (showSiteVerifySheet) {
+                if (showSiteVerifySheet && !authCompleting) {
                     SiteVerificationSheet(
                         forLogin = siteVerificationForLogin,
                         onOpenBrowserVerify = {
@@ -4189,6 +4196,13 @@ internal fun LinDoApp(
                             {
                                 val wasAlreadyAuth = wasAuthorized
                                 activeWebLoginUrl = null
+                                if (UserApiKeyAuthManager.isAuthorized()) {
+                                    showAuthSheet = false
+                                    showSiteVerifySheet = false
+                                    guestLoginPrompt = null
+                                    authStatusHint = null
+                                    isGuestMode = false
+                                }
                                 authVersion++
                                 scope.launch {
                                     LinuxDoRepository.prepareForManualRecovery()
@@ -4204,6 +4218,15 @@ internal fun LinDoApp(
                                 }
                             }
                         )
+                    }
+                }
+                if (authCompleting) {
+                    Box(Modifier.fillMaxSize().background(palette.canvas)
+                        .testTag("auth_completion_loading")
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+                        }, contentAlignment = Alignment.Center) {
+                        LinDoLoadingIndicator(label = "正在完成登录…")
                     }
                 }
             }
@@ -8846,7 +8869,8 @@ internal fun CommunityPostFloor(
                 ) {
                     Row(
                         modifier = Modifier
-                            .weight(1f, fill = false)
+                            .weight(1f)
+                            .alignByBaseline()
                             .clip(RoundedCornerShape(6.dp))
                             .pointerHoverIcon(PointerIcon.Hand)
                             .clickable { onInspectUser(post.username) }
@@ -8927,10 +8951,10 @@ internal fun CommunityPostFloor(
 
                     }
 
-                    Spacer(modifier = Modifier.weight(1f))
                     Spacer(modifier = Modifier.width(8.dp))
 
                     Row(
+                        modifier = Modifier.alignByBaseline().testTag("post_floor_meta_${post.postNumber}"),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {

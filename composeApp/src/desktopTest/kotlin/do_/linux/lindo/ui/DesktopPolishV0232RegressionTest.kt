@@ -1,5 +1,7 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -257,6 +259,48 @@ class DesktopPolishV0232RegressionTest {
             onEdt { onAllNodesWithText("重试").fetchSemanticsNodes().isNotEmpty() }
         }
         onEdt { onAllNodesWithText("未找到匹配的帖子").assertCountEquals(0) }
+    }
+
+    @Test
+    fun floorMetadataStaysAtRightEdgeForDifferentNames() = runDesktopComposeUiTest(width = 390, height = 960) {
+        verifyFloorMetadataAlignment()
+    }
+
+    @Test
+    fun floorMetadataStaysAtRightEdgeOnWideWindows() = runDesktopComposeUiTest(width = 1000, height = 960) {
+        verifyFloorMetadataAlignment()
+    }
+
+    private fun ComposeUiTest.verifyFloorMetadataAlignment() {
+        val names = listOf("试图用美貌掩盖一切的很长昵称", "UNI", "水星", "1811960541", "Oreki")
+        setContent {
+            TestThemeHost {
+                androidx.compose.foundation.layout.Column(
+                    androidx.compose.ui.Modifier.fillMaxWidth().verticalScroll(androidx.compose.foundation.rememberScrollState())
+                ) {
+                    names.forEachIndexed { index, name ->
+                        CommunityPostFloor(
+                            post = PostItemModel(id = 900 + index, postNumber = index + 3, userId = index + 1,
+                                username = "reader$index", displayName = name, cookedHtml = "<p>早点休息。</p>",
+                                userTitle = if (index == 0) "活跃用户" else null,
+                                iosDeviceName = if (index == 0) "iPhone 15 Pro Max" else null,
+                                createdAtText = if (index == 0) "2h" else "1h"),
+                            isUnread = index % 2 == 0,
+                            opUsername = "owner", fontScale = 1f, enableAnimations = false,
+                            onInspectBadge = {}, onInspectUser = {}, onReplyFloor = {}, onQuoteFloor = { _, _ -> }, onRequestLogin = {}
+                        )
+                    }
+                }
+            }
+        }
+        waitForIdle()
+        val edges = names.indices.map { index ->
+            onEdt {
+                onNodeWithTag("post_floor_meta_${index + 3}").performScrollTo()
+                onNodeWithTag("post_floor_meta_${index + 3}").fetchSemanticsNode().boundsInRoot.right
+            }
+        }
+        assertTrue(edges.max() - edges.min() <= 1f, "Floor metadata must have a fixed right edge: $edges")
     }
 
     @Test

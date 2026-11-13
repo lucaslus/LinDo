@@ -229,12 +229,13 @@ class PreLaunchFullAppUiE2ETest {
     fun browserOtpSurvivesAuthNotificationAndClosesLoginSheet() = runDesktopComposeUiTest(width = 1000, height = 800) {
         val exchanges = AtomicInteger(0)
         val completed = AtomicBoolean(false)
+        val allowExchange = kotlinx.coroutines.CompletableDeferred<Unit>()
         UserApiKeyAuthManager.webViewHttpExecutor = { url, method, form, headers ->
             if (url.contains("/session/otp/")) {
                 exchanges.incrementAndGet()
                 // Reproduce the notification that used to cancel LaunchedEffect(authVersion).
                 UserApiKeyAuthManager.onAuthStateChanged?.invoke()
-                kotlinx.coroutines.delay(150)
+                allowExchange.await()
                 CookieSentinel.ingestRawCookieString("_t=e2e_valid_session_token", domain = "linux.do")
                 completed.set(true)
                 302 to ""
@@ -248,10 +249,15 @@ class PreLaunchFullAppUiE2ETest {
             UserApiKeyAuthManager.pendingOtpToken = "test_callback_otp"
             UserApiKeyAuthManager.onAuthStateChanged?.invoke()
         }
+        waitUntil { onEdt { onAllNodesWithTag("auth_completion_loading").fetchSemanticsNodes().isNotEmpty() } }
+        assertEquals(0, onAllNodesWithText("登录 Lindo").edtCount())
+        assertEquals(0, onAllNodesWithText("Linux.do 账号会话").edtCount())
+        allowExchange.complete(Unit)
         waitUntil(timeoutMillis = 8_000L) { completed.get() && UserApiKeyAuthManager.currentUser?.username == "lucas" }
         waitForTextGone("登录 Lindo")
         waitForTextGone("你好，佬友。")
         assertEquals(1, exchanges.get())
+        waitUntil { onEdt { onAllNodesWithTag("auth_completion_loading").fetchSemanticsNodes().isEmpty() } }
     }
 
     @Test
