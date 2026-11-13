@@ -1778,7 +1778,7 @@ internal fun LinDoApp(
     var authStatusHint by remember { mutableStateOf<String?>(null) }
     var authCompleting by remember { mutableStateOf(UserApiKeyAuthManager.pendingOtpToken != null) }
     var showSiteVerifySheet by remember { mutableStateOf(false) }
-    var siteVerificationForLogin by remember { mutableStateOf(false) }
+    var primaryLoginRunning by remember { mutableStateOf(false) }
     var showConnectSheet by remember { mutableStateOf(false) }
     var showGlobalSearchSheet by remember { mutableStateOf(false) }
     var showCreateTopicSheet by remember { mutableStateOf(false) }
@@ -1838,14 +1838,12 @@ internal fun LinDoApp(
         guestLoginPrompt = null
         val isSiteRecovery = url.trim().trimEnd('/').equals("https://linux.do", ignoreCase = true)
         if (isSiteRecovery) {
-            siteVerificationForLogin = false
             showSiteVerifySheet = true
         } else if (hasEmbeddedWebLogin) {
             activeWebLoginUrl = url
         } else {
             val normalized = url.trim().trimEnd('/')
             if (normalized.equals("https://linux.do", ignoreCase = true)) {
-                siteVerificationForLogin = false
                 showSiteVerifySheet = true
             } else {
                 UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
@@ -1865,21 +1863,53 @@ internal fun LinDoApp(
         requestGuestLogin(scenario.titleCopy.text, scenario.subtitleCopy.text)
     }
 
-    fun triggerPrimaryLogin() {
-        rootKeyboardController?.hide()
-        guestLoginPrompt = null
-        showAuthSheet = false
-        siteVerificationForLogin = true
-        showSiteVerifySheet = true
-    }
-
     fun triggerBrowserOneClickLogin() {
         rootKeyboardController?.hide()
         guestLoginPrompt = null
-        authStatusHint = LinDoAuthCopy.BROWSER_AUTH_OPENED_APPROVE_HINT.text
-        showAuthSheet = true
+        showSiteVerifySheet = false
+        showAuthSheet = false
+        authStatusHint = null
         val url = UserApiKeyAuthManager.startBrowserOneClickAuth()
         if (UserApiKeyAuthManager.openExternalUrlLauncher == null && hasEmbeddedWebLogin) openWebPage(url)
+    }
+
+    fun triggerPrimaryLogin() {
+        if (primaryLoginRunning || activeWebLoginUrl != null) return
+        rootKeyboardController?.hide()
+        guestLoginPrompt = null
+        showAuthSheet = false
+        showSiteVerifySheet = false
+        authStatusHint = null
+        val nativeLogin = PlatformSessionRecovery.loginSession
+        when {
+            hasEmbeddedWebLogin -> activeWebLoginUrl = "https://linux.do/login"
+            nativeLogin != null -> {
+                primaryLoginRunning = true
+                scope.launch {
+                    try {
+                        if (nativeLogin()) {
+                            isGuestMode = false
+                            authVersion++
+                            LinuxDoRepository.prepareForManualRecovery()
+                            siteVerificationRestoreVersion++
+                            networkRestoreVersion++
+                        } else {
+                            authStatusHint = PlatformSessionRecovery.verificationMessage
+                                ?: "登录尚未完成，请重试。"
+                            showAuthSheet = true
+                        }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        authStatusHint = "暂时无法打开登录，请重试或使用系统浏览器授权。"
+                        showAuthSheet = true
+                    } finally {
+                        primaryLoginRunning = false
+                    }
+                }
+            }
+            else -> triggerBrowserOneClickLogin()
+        }
     }
 
     fun dismissCoveringSheets() {
@@ -2381,10 +2411,7 @@ internal fun LinDoApp(
                     openWebPage("https://linux.do/session/otp/$otp")
                 } else {
                     if (PlatformSessionRecovery.loginSession != null) {
-                        authStatusHint = "还需在网页中确认一次，完成后自动返回。"
-                        showAuthSheet = false
-                        siteVerificationForLogin = true
-                        showSiteVerifySheet = true
+                        triggerPrimaryLogin()
                     } else {
                         authStatusHint = "登录尚未完成，请重新打开网页确认。"
                         showAuthSheet = true
@@ -4116,11 +4143,10 @@ internal fun LinDoApp(
 
                 if (showSiteVerifySheet && !authCompleting) {
                     SiteVerificationSheet(
-                        forLogin = siteVerificationForLogin,
                         onOpenBrowserVerify = {
                             showSiteVerifySheet = false
                             if (hasEmbeddedWebLogin) {
-                                activeWebLoginUrl = if (siteVerificationForLogin) "https://linux.do/login" else "https://linux.do/#lindo-verify"
+                                activeWebLoginUrl = "https://linux.do/#lindo-verify"
                             } else {
                                 UserApiKeyAuthManager.startBrowserOneClickAuth()
                             }
@@ -4148,13 +4174,7 @@ internal fun LinDoApp(
                                 }
                             }
                         },
-                        onDismiss = { showSiteVerifySheet = false },
-                        onFallbackSystemLogin = {
-                            showSiteVerifySheet = false
-                            authStatusHint = LinDoAuthCopy.BROWSER_AUTH_OPENED_AUTO_RETURN.text
-                            showAuthSheet = true
-                            UserApiKeyAuthManager.startBrowserOneClickAuth()
-                        }
+                        onDismiss = { showSiteVerifySheet = false }
                     )
                 }
 
@@ -12954,18 +12974,14 @@ private fun UserApiKeyAuthSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SiteVerificationSheet(
-    forLogin: Boolean = false,
     onOpenBrowserVerify: () -> Unit,
     onRetryVerified: () -> Unit,
-    onDismiss: () -> Unit,
-    onFallbackSystemLogin: (() -> Unit)? = null
+    onDismiss: () -> Unit
 ) {
     SiteVerificationCard(
-        forLogin = forLogin,
         onVerified = onRetryVerified,
         onDismiss = onDismiss,
-        onOpenWebPage = onOpenBrowserVerify,
-        onFallbackSystemLogin = onFallbackSystemLogin
+        onOpenWebPage = onOpenBrowserVerify
     )
 }
 
@@ -19419,11 +19435,9 @@ private fun AppearanceChoices(selected: String, onSelect: (String) -> Unit, icon
 
 @Composable
 private fun SiteVerificationCard(
-    forLogin: Boolean,
     onVerified: () -> Unit,
     onDismiss: () -> Unit,
-    onOpenWebPage: () -> Unit,
-    onFallbackSystemLogin: (() -> Unit)? = null
+    onOpenWebPage: () -> Unit
 ) {
     val p = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -19436,24 +19450,18 @@ private fun SiteVerificationCard(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 LinDoIconArtworkImage(LinDoIconArtwork.Wink, Modifier.size(38.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(if (busy) "正在等待网页确认" else if (forLogin) "登录 Lindo" else "还差一次确认", color = p.inkPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                    Text(if (forLogin) "在网页中登录，完成后自动返回" else "阅读位置已保留，完成后接着看", color = p.inkSecondary, fontSize = 12.5.sp)
+                    Text(if (busy) "正在等待网页确认" else "还差一次确认", color = p.inkPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Text("阅读位置已保留，完成后接着看", color = p.inkSecondary, fontSize = 12.5.sp)
                 }
             }
             Text(PlatformSessionRecovery.verificationMessage ?: "在打开的网页中完成站点确认，Lindo 会自动接续。", color = p.inkSecondary, fontSize = 13.sp, lineHeight = 19.sp)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                if (forLogin && onFallbackSystemLogin != null && !busy) {
-                    TextButton(onClick = { job?.cancel(); onFallbackSystemLogin() }) {
-                        Text("系统浏览器登录", color = p.inkSecondary)
-                    }
-                    Spacer(Modifier.weight(1f))
-                }
                 TextButton(onClick = { job?.cancel(); onDismiss() }) { Text("稍后", color = p.inkSecondary) }
                 TextButton(enabled = !busy, onClick = {
                     busy = true
                     job = scope.launch {
                         try {
-                            val handler = if (forLogin) PlatformSessionRecovery.loginSession else PlatformSessionRecovery.verifySession
+                            val handler = PlatformSessionRecovery.verifySession
                             if (handler != null) {
                                 if (handler.invoke()) onVerified()
                             } else {
@@ -19461,7 +19469,7 @@ private fun SiteVerificationCard(
                             }
                         } finally { busy = false }
                     }
-                }) { Text(if (busy) "等待确认…" else if (forLogin) "继续登录" else "继续验证", color = if (busy) p.inkSecondary else p.brandGold, fontWeight = FontWeight.SemiBold) }
+                }) { Text(if (busy) "等待确认…" else "继续验证", color = if (busy) p.inkSecondary else p.brandGold, fontWeight = FontWeight.SemiBold) }
             }
         }
     }

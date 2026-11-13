@@ -226,6 +226,66 @@ class PreLaunchFullAppUiE2ETest {
     }
 
     @Test
+    fun primaryLoginOpensEmbeddedPageDirectlyAndCanCancelOrComplete() = runDesktopComposeUiTest(width = 390, height = 840) {
+        val opened = CopyOnWriteArrayList<String>()
+        PlatformWebLoginHost.webLoginRenderer = { url, dismiss, success ->
+            androidx.compose.runtime.LaunchedEffect(url) { opened.add(url) }
+            androidx.compose.foundation.layout.Column {
+                androidx.compose.material3.TextButton(onClick = dismiss) { androidx.compose.material3.Text("测试取消网页") }
+                androidx.compose.material3.TextButton(onClick = {
+                    UserApiKeyAuthManager.onSessionAuthenticated(
+                        do_.linux.lindo.core.network.AuthenticatedUserProfile(userId = 1, username = "lucas", displayName = "Lucas", trustLevel = 3),
+                        rawCookies = "_t=e2e_valid_session_token"
+                    )
+                    success()
+                }) { androidx.compose.material3.Text("测试完成网页登录") }
+            }
+        }
+        setContent { LinDoApp(systemAnimationsEnabled = false) }
+        waitForText("使用 LINUX DO 登录")
+        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        waitForText("测试取消网页")
+        assertEquals(listOf("https://linux.do/login"), opened.toList())
+        assertEquals(0, onAllNodesWithText("继续登录").edtCount())
+        assertEquals(0, onAllNodesWithText("登录 Lindo").edtCount())
+        onNodeWithText("测试取消网页").edtClick()
+        waitForTextGone("测试取消网页")
+        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        waitForText("测试完成网页登录")
+        onNodeWithText("测试完成网页登录").edtClick()
+        waitForTextGone("测试完成网页登录")
+        waitForTextGone("你好，佬友。")
+        assertTrue(UserApiKeyAuthManager.isAuthorized())
+        assertEquals(2, opened.size)
+    }
+
+    @Test
+    fun primaryLoginInvokesNativeAdapterOnceWithoutConfirmation() = runDesktopComposeUiTest(width = 1000, height = 800) {
+        val opened = AtomicInteger(0)
+        val finish = kotlinx.coroutines.CompletableDeferred<Unit>()
+        PlatformSessionRecovery.loginSession = {
+            opened.incrementAndGet()
+            finish.await()
+            UserApiKeyAuthManager.onSessionAuthenticated(
+                do_.linux.lindo.core.network.AuthenticatedUserProfile(userId = 1, username = "lucas", displayName = "Lucas", trustLevel = 3),
+                rawCookies = "_t=e2e_valid_session_token"
+            )
+            true
+        }
+        setContent { LinDoApp(systemAnimationsEnabled = false) }
+        waitForText("使用 LINUX DO 登录")
+        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        waitUntil { opened.get() == 1 }
+        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        assertEquals(1, opened.get())
+        assertEquals(0, onAllNodesWithText("继续登录").edtCount())
+        assertEquals(0, onAllNodesWithText("登录 Lindo").edtCount())
+        finish.complete(Unit)
+        waitForTextGone("你好，佬友。")
+        assertTrue(UserApiKeyAuthManager.isAuthorized())
+    }
+
+    @Test
     fun browserOtpSurvivesAuthNotificationAndClosesLoginSheet() = runDesktopComposeUiTest(width = 1000, height = 800) {
         val exchanges = AtomicInteger(0)
         val completed = AtomicBoolean(false)
@@ -243,8 +303,9 @@ class PreLaunchFullAppUiE2ETest {
         }
         setContent { LinDoApp(systemAnimationsEnabled = false) }
         waitForText("使用 LINUX DO 登录")
-        onNodeWithText("使用 LINUX DO 登录").edtClick()
-        waitForText("登录 Lindo")
+        onNodeWithText("系统浏览器授权").edtClick()
+        waitUntil { openedExternalUrls.size == 1 }
+        assertEquals(0, onAllNodesWithText("登录 Lindo").edtCount())
         onEdt {
             UserApiKeyAuthManager.pendingOtpToken = "test_callback_otp"
             UserApiKeyAuthManager.onAuthStateChanged?.invoke()
@@ -344,7 +405,7 @@ class PreLaunchFullAppUiE2ETest {
             onAllNodesWithContentDescription("关闭图片预览").edtCount() == 0
         }
 
-        // Guest Gate -> Open Desktop Login Sheet
+        // Guest Gate -> Open Desktop Login Directly
         onNodeWithContentDescription("发布新话题").edtClick()
         waitForText("登录后发布话题")
         PlatformSessionRecovery.loginSession = {
@@ -355,8 +416,7 @@ class PreLaunchFullAppUiE2ETest {
             true
         }
         onAllNodesWithText("使用 LINUX DO 登录").onLast().edtClick()
-        waitForText("登录 Lindo")
-        onNodeWithText("继续登录").edtClick()
+        assertEquals(0, onAllNodesWithText("继续登录").edtCount())
         waitUntil(timeoutMillis = 5_000L) {
             UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.currentUser?.username == "lucas"
         }
