@@ -483,12 +483,12 @@ class DesktopPolishV0232RegressionTest {
             onEdt { onNodeWithText("我的").performClick() }
             waitForIdle()
 
-            // Open "关于社区" — even though /about.json fails with 503, top bar version trigger works offline!
+            // Local About Lindo keeps the version/debug entry available offline.
             onEdt {
                 onAllNodes(hasScrollToIndexAction()).onFirst().performScrollToIndex(2)
             }
             waitForIdle()
-            onEdt { onNodeWithText("关于社区").performClick() }
+            onEdt { onNodeWithText("关于 Lindo").performScrollTo().performClick() }
             waitForIdle()
 
             repeat(7) {

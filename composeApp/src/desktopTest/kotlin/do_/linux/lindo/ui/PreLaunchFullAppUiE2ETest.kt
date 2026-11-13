@@ -539,8 +539,11 @@ class PreLaunchFullAppUiE2ETest {
 
         // Scroll Profile LazyColumn down to Settings / Cache Clear / Version v0.2.32
         onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(3)
+        onNodeWithText("关于 Lindo").edtScrollClick()
         waitForText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY)
-        onAllNodesWithText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY).onFirst().edtAssertDisplayed()
+        onNodeWithText("Linux DO 社区客户端").edtAssertDisplayed()
+        runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
+        waitForTextGone("Linux DO 社区客户端")
 
         onNodeWithText("清理本地缓存").edtScrollClick()
         waitForText("仅清理图片与数据缓存")
@@ -686,21 +689,71 @@ class PreLaunchFullAppUiE2ETest {
     }
 
     private fun ComposeUiTest.verifySharedAppearance(snapshot: String) {
+        // Scroll targets above the floating navigation before pointer clicks; a LazyColumn's
+        // own viewport does not include the sibling navigation overlay's occlusion.
+        fun pickSetting(label: String) {
+            val target = onNodeWithText(label)
+            target.edtScrollToVisible()
+            waitForIdle()
+            onEdt {
+                val bottom = target.fetchSemanticsNode().boundsInRoot.bottom
+                val safeBottom = onRoot().fetchSemanticsNode().boundsInRoot.bottom - 150f
+                if (bottom > safeBottom) {
+                    onAllNodes(hasScrollToIndexAction()).onFirst()
+                        .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.ScrollBy) { it(0f, bottom - safeBottom) }
+                }
+            }
+            waitForIdle()
+            target.edtClick()
+            waitForIdle()
+        }
         setContent { LinDoApp(systemAnimationsEnabled = false, appIcon = LinDoAppIcon.Default, onApplyAppIcon = { true }) }
         waitForText("以游客模式浏览")
         onNodeWithText("以游客模式浏览").edtClick()
         waitForText("我的")
         onNodeWithText("我的").edtClick()
         waitForText("外观")
-        onAllNodesWithText("外观").onLast().edtScrollToVisible()
-        onNodeWithText("图标底色").edtScrollToVisible()
-        assertTrue(onAllNodesWithText("跟随系统").edtCount() >= 2)
+        onNodeWithText("深色").edtScrollToVisible()
         onNodeWithText("深色").edtClick()
         waitUntil { AppAppearance.dark }
+        onEdt {
+            val title = onAllNodesWithText("外观", useUnmergedTree = true).onLast().fetchSemanticsNode().boundsInRoot
+            val options = listOf("浅色", "深色").map { onNodeWithText(it).fetchSemanticsNode().boundsInRoot }
+            assertTrue(options.all { it.top >= title.bottom }, "Choices must be below the setting title")
+            assertTrue(kotlin.math.abs(options[0].width - options[1].width) <= 1f, "Choice widths must match")
+            onNodeWithText("深色").assertIsSelected()
+        }
         savePreviewSnapshotIfConfigured(snapshot.replace(".png", "_dark.png"))
         onNodeWithText("浅色").edtClick()
         waitUntil { !AppAppearance.dark }
         savePreviewSnapshotIfConfigured(snapshot)
+        onNodeWithText("图标底色").edtScrollToVisible()
+        pickSetting("黑底")
+        waitUntil { AppAppearance.iconAppearance == "dark" }
+        pickSetting("紧凑")
+        onEdt { onNodeWithText("紧凑").assertIsSelected() }
+        pickSetting("大字号")
+        onEdt { onNodeWithText("大字号").assertIsSelected() }
+        pickSetting("标准")
+        onEdt { onNodeWithText("标准").assertIsSelected() }
+        savePreviewSnapshotIfConfigured(snapshot.replace(".png", "_reading.png"))
+        onNodeWithText("关于 Lindo").edtScrollToVisible()
+        assertEquals(0, onAllNodesWithText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY).edtCount())
+        pickSetting("关于 Lindo")
+        waitForText("Linux DO 社区客户端")
+        onNodeWithText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY).edtAssertDisplayed()
+        assertEquals(0, backend.aboutRequestCount.get(), "About Lindo must not fetch community information")
+        savePreviewSnapshotIfConfigured(snapshot.replace(".png", "_about.png"))
+        onNodeWithText("项目主页").edtClick()
+        waitUntil { openedExternalUrls.contains("https://github.com/lucaslus/LinDo") }
+        onNodeWithText("问题反馈").edtClick()
+        waitUntil { openedExternalUrls.contains("https://github.com/lucaslus/LinDo/issues") }
+        onNodeWithText("开源许可").edtClick()
+        waitForText("Compose Multiplatform")
+        runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
+        waitForText("Linux DO 社区客户端")
+        runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
+        waitForTextGone("Linux DO 社区客户端")
     }
 
     private fun SemanticsNodeInteraction.edtScrollToVisible() { onEdt { performScrollTo() } }
@@ -711,6 +764,7 @@ class PreLaunchFullAppUiE2ETest {
      * search, notifications, private messages, media uploads, replies, new topics, drafts, and profile endpoints.
      */
     private class MockLinuxDoBackend {
+        val aboutRequestCount = AtomicInteger(0)
         data class CreatedReply(
             val postId: Int,
             val topicId: Int,
@@ -1122,6 +1176,7 @@ class PreLaunchFullAppUiE2ETest {
                 }
 
                 upperMethod == "GET" && path == "/about.json" -> {
+                    aboutRequestCount.incrementAndGet()
                     200 to """{"about":{"description":"LINUX DO 社区","title":"LINUX DO","stats":{"topics_count":100000,"posts_count":2000000,"users_count":500000,"active_users_7_days":60000,"active_users_30_days":180000,"likes_count":5000000},"moderator_ids":[],"admin_ids":[]},"users":[]}"""
                 }
 

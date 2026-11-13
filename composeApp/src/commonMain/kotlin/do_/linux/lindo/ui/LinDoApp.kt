@@ -205,7 +205,6 @@ import do_.linux.lindo.core.network.ApiFailureKind
 import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CloudDraftItem
-import do_.linux.lindo.core.network.CommunityAboutData
 import do_.linux.lindo.core.network.FollowUserEntry
 import do_.linux.lindo.core.network.LeaderboardUserEntry
 import do_.linux.lindo.core.network.LinuxDoCategoryMeta
@@ -3873,9 +3872,9 @@ internal fun LinDoApp(
                 }
 
                 if (showAboutSheet) {
-                    CommunityAboutSheet(
+                    LindoAboutPage(
                         onDismiss = { showAboutSheet = false },
-                        onInspectUser = { targetUser -> inspectedUsername = targetUser },
+                        onOpenLink = { openSmartUrl(it) },
                         onOpenDebugDiagnostics = { showDebugDiagnosticsSheet = true }
                     )
                 }
@@ -10270,7 +10269,6 @@ internal fun CommunityDiscoverScreen(
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_CONNECT_TITLE.text, LinDoFeedCopy.PORTAL_CONNECT_SUB.text, LinDoIcons.ShieldCheck, Color(0xFF3B82F6), "https://connect.linux.do/", requiresAuth = true),
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_LEADERBOARD_TITLE.text, LinDoFeedCopy.PORTAL_LEADERBOARD_SUB.text, LinDoIcons.Trophy, Color(0xFFF59E0B), "https://linux.do/leaderboard"),
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_BADGES_TITLE.text, LinDoFeedCopy.PORTAL_BADGES_SUB.text, LinDoIcons.AwardBadge, Color(0xFFEAB308), "https://linux.do/badges"),
-            DiscoverBoardEntry(LinDoFeedCopy.PORTAL_ABOUT_TITLE.text, LinDoFeedCopy.PORTAL_ABOUT_SUB.text, LinDoIcons.InfoCircle, Color(0xFF6366F1), "https://linux.do/about"),
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_CREDIT_TITLE.text, LinDoFeedCopy.PORTAL_CREDIT_SUB.text, LinDoIcons.Coins, Color(0xFFF59E0B), "https://credit.linux.do/", requiresAuth = true),
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_CDK_TITLE.text, LinDoFeedCopy.PORTAL_CDK_SUB.text, LinDoIcons.Gift, Color(0xFFEC4899), "https://cdk.linux.do/", requiresAuth = true),
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_HUB_TITLE.text, LinDoFeedCopy.PORTAL_HUB_SUB.text, LinDoIcons.Sparkles, Color(0xFF8B5CF6), "https://hub.linux.do/", requiresAuth = true),
@@ -11356,7 +11354,7 @@ private fun formatReadDuration(seconds: Int): String {
  * 3. 顶部 4 项线性图标快捷栏：`我的收藏` | `阅读历史` | `草稿箱` | `我的活动`
  * 4. 暖米金成长激励横幅卡：「每一次分享，都有回响 · 查看等级、徽章与成长记录」
  * 5. 主题色与双模式布局卡片：支持 `官方黑白黄（默认）` / `理想绯红` / `极客海蓝` / `竹林青绿` 一键切换，以及 `精巧卡片 / 紧凑列表` 密度切换
- * 6. 极简双行功能菜单列表：`我的社区`、`关注与粉丝`、`社区积分`、`订阅与权益`、`生态服务`、`创作与管理`、`关于社区`
+ * 6. 极简双行功能菜单列表：`我的社区`、`关注与粉丝`、`社区积分`、`订阅与权益`、`生态服务`、`创作与管理`、`关于 Lindo`
  */
 @Composable
 internal fun CommunityProfileScreen(
@@ -11786,157 +11784,54 @@ internal fun CommunityProfileScreen(
                 }
             }
 
-            // 3. 外观分组（主题配色、应用图标、首页列表视图、阅读字号、关于社区）
+            // Inline settings share one restrained layout on every platform.
             item {
                 val fontScalePreset = ReaderFontScalePreset.fromScale(fontScale)
-                fun scaleFor(preset: ReaderFontScalePreset) = preset.scale
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(palette.cardSurface)
-                ) {
+                Column(Modifier.fillMaxWidth().background(palette.cardSurface)) {
                     LinDoGroupHeader(text = LinDoMessagesCopy.SECTION_APPEARANCE.text)
-
-                    Column {
-                        LinDoSettingRow(icon = LinDoIcons.Sun, title = "外观", trailing = {
-                            AppearanceChoices(AppAppearance.appearance, AppAppearance::selectAppearance)
-                        })
-                        LinDoSettingRow(icon = LinDoIcons.AppsGrid, title = "图标底色", trailing = {
-                            AppearanceChoices(AppAppearance.iconAppearance, AppAppearance::selectIconAppearance, icon = true)
-                        })
-                        if (AppAppearance.iconChangeFailed) Text("图标未能更新，请稍后重试", color = palette.inkSecondary, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 20.dp))
+                    StackedSetting(LinDoIcons.Sun, "外观") {
+                        AppearanceChoices(AppAppearance.appearance, AppAppearance::selectAppearance)
                     }
-
-                    // 3.1 主题配色（内联 4 色圆点选择器）
-                    LinDoSettingRow(
-                        icon = LinDoIcons.Palette,
-                        title = LinDoMessagesCopy.ROW_THEME_COLOR.text,
-                        trailing = {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                BrandThemeOption.entries.forEach { option ->
-                                    val selected = themeOption == option
-                                    Box(
-                                        modifier = Modifier
-                                            .size(20.dp)
-                                            .clip(CircleShape)
-                                            .background(option.swatchColor.copy(alpha = if (selected) 1f else 0.35f))
-                                            .border(
-                                                width = if (selected) 1.8.dp else 0.5.dp,
-                                                color = if (selected) palette.inkPrimary else palette.hairline,
-                                                shape = CircleShape
-                                            )
-                                            .clickable { onSelectThemeOption(option) },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (selected) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(6.dp)
-                                                    .clip(CircleShape)
-                                                    .background(Color.White)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    )
-
+                    StackedSetting(LinDoIcons.AppsGrid, "图标底色") {
+                        AppearanceChoices(AppAppearance.iconAppearance, AppAppearance::selectIconAppearance, icon = true)
+                        if (AppAppearance.iconChangeFailed) Text("图标未能更新，请稍后重试",
+                            color = palette.inkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                    }
+                    StackedSetting(LinDoIcons.Palette, LinDoMessagesCopy.ROW_THEME_COLOR.text) {
+                        SettingsThemeChoices(themeOption, onSelectThemeOption)
+                    }
                     if (onOpenAppIcon != null) {
                         val icon = LocalLinDoAppIcon.current ?: LinDoAppIcon.Classic
-                        LinDoSettingRow(
-                            icon = LinDoIcons.AppsGrid,
-                            title = LinDoMessagesCopy.ROW_APP_ICON.text,
-                            value = "${icon.artwork.label} · ${icon.background.label}",
-                            onClick = onOpenAppIcon
-                        )
+                        StackedSetting(LinDoIcons.AppsGrid, LinDoMessagesCopy.ROW_APP_ICON.text) {
+                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                .clip(RoundedCornerShape(8.dp)).clickable(onClick = onOpenAppIcon)
+                                .padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                LinDoLauncherIconTile(icon, Modifier.size(36.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Text(icon.artwork.label, fontSize = 14.sp, color = palette.inkSecondary, modifier = Modifier.weight(1f))
+                                Text("更换", fontSize = 13.sp, color = palette.inkTertiary)
+                                Spacer(Modifier.width(6.dp))
+                                Icon(LinDoIcons.ChevronRight, null, Modifier.size(14.dp), tint = palette.inkTertiary)
+                            }
+                        }
                     }
-
-                    // 3.2 首页列表视图（无框细分割线切换）
-                    LinDoSettingRow(
-                        icon = if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
-                        title = LinDoMessagesCopy.ROW_HOME_FEED_VIEW.text,
-                        onClick = onToggleCompactFeed,
-                        trailing = {
-                            val feedModes = FeedDensityMode.entries
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                feedModes.forEachIndexed { idx, mode ->
-                                    val selected = isCompactFeed == mode.isCompact
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(LinDoTokens.ShapeXS)
-                                            .clickable {
-                                                if (isCompactFeed != mode.isCompact) onToggleCompactFeed()
-                                            }
-                                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = mode.labelCopy.text,
-                                            fontSize = LinDoTokens.Meta,
-                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (selected) palette.brandGold else palette.inkSecondary
-                                        )
-                                    }
-                                    if (idx < feedModes.lastIndex) {
-                                        Box(
-                                            modifier = Modifier
-                                                .width(0.5.dp)
-                                                .height(12.dp)
-                                                .background(palette.hairline)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    )
-
-                    // 3.3 阅读字号（小字号 0.85f / 标准 0.92f / 大字号 1.00f，无框细分割线切换）
-                    LinDoSettingRow(
-                        icon = LinDoIcons.Sliders,
-                        title = LinDoMessagesCopy.ROW_READING_FONT_SCALE.text,
-                        onClick = { onChangeFontScale(scaleFor(fontScalePreset.nextCycle())) },
-                        trailing = {
-                            val scalePresets = ReaderFontScalePreset.entries
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                scalePresets.forEachIndexed { idx, preset ->
-                                    val selected = fontScalePreset == preset
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(LinDoTokens.ShapeXS)
-                                            .clickable { onChangeFontScale(scaleFor(preset)) }
-                                            .padding(horizontal = 7.dp, vertical = 4.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = preset.labelCopy.text,
-                                            fontSize = LinDoTokens.Meta,
-                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (selected) palette.brandGold else palette.inkSecondary
-                                        )
-                                    }
-                                    if (idx < scalePresets.lastIndex) {
-                                        Box(
-                                            modifier = Modifier
-                                                .width(0.5.dp)
-                                                .height(12.dp)
-                                                .background(palette.hairline)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    )
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                    LinDoGroupHeader(text = "阅读")
+                    StackedSetting(
+                        if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
+                        LinDoMessagesCopy.ROW_HOME_FEED_VIEW.text
+                    ) {
+                        SettingsChoices(FeedDensityMode.entries, FeedDensityMode.entries.first { it.isCompact == isCompactFeed },
+                            label = { it.labelCopy.text }, onSelect = { if (it.isCompact != isCompactFeed) onToggleCompactFeed() })
+                    }
+                    StackedSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text) {
+                        SettingsChoices(ReaderFontScalePreset.entries, fontScalePreset,
+                            label = { it.labelCopy.text }, onSelect = { onChangeFontScale(it.scale) })
+                        Text("恰好的字号，让阅读更舒服。", fontSize = 16.sp, lineHeight = 24.sp,
+                            color = palette.inkSecondary, modifier = Modifier.padding(top = 12.dp))
+                    }
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                    LinDoGroupHeader(text = "通用")
 
                     // 3.4 界面与头像动效
                     LinDoSettingRow(
@@ -11994,11 +11889,10 @@ internal fun CommunityProfileScreen(
                         )
                     }
 
-                    // 3.6 关于社区
+                    // Version and diagnostics live only in the local About Lindo page.
                     LinDoSettingRow(
                         icon = LinDoIcons.InfoCircle,
-                        title = LinDoMessagesCopy.ROW_ABOUT_COMMUNITY.text,
-                        value = LinDoDiagnosticLogger.APP_VERSION_DISPLAY,
+                        title = "关于 Lindo",
                         showDivider = false,
                         onClick = onOpenAboutSheet
                     )
@@ -12039,39 +11933,7 @@ internal fun CommunityProfileScreen(
                 }
             }
 
-            item {
-                val (debugHint, onVersionTap) = rememberDebugUnlockTapState(onUnlocked = onOpenDebugDiagnostics)
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 16.dp, bottom = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    Text(
-                        text = LinDoDiagnosticLogger.APP_VERSION_DISPLAY,
-                        fontSize = 11.5.sp,
-                        letterSpacing = 0.4.sp,
-                        color = palette.inkTertiary,
-                        modifier = Modifier
-                            .testTag("profile_version_debug_trigger")
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = onVersionTap
-                            )
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
-                    if (debugHint != null) {
-                        Text(
-                            text = debugHint,
-                            fontSize = 11.sp,
-                            color = palette.brandGold
-                        )
-                    }
-                }
-            }
+
         }
     }
 }
@@ -19492,251 +19354,6 @@ private fun PreferenceInfoRow(label: String, value: String, onClick: (() -> Unit
     }
 }
 
-/**
- * 官方功能 16：原生关于社区与管理团队页面 (`GET /about.json`)
- */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
-@Composable
-private fun CommunityAboutSheet(
-    onDismiss: () -> Unit,
-    onInspectUser: (String) -> Unit,
-    onOpenDebugDiagnostics: () -> Unit = {}
-) {
-    val palette = LocalPalette.current
-    val (aboutDebugHint, onAboutVersionTap) = rememberDebugUnlockTapState(onUnlocked = onOpenDebugDiagnostics)
-    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
-    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
-    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
-    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
-    var aboutData by remember { mutableStateOf<CommunityAboutData?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var reloadToken by remember { mutableIntStateOf(0) }
-    var manualRecoveryRequested by remember { mutableStateOf(false) }
-    var activeTeamTab by remember { mutableStateOf(AboutTeamTab.ADMINS) }
-
-    LaunchedEffect(reloadToken) {
-        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
-        manualRecoveryRequested = false
-        isLoading = true
-        loadError = null
-        try {
-            if (shouldPrepareRecovery) {
-                LinuxDoRepository.prepareForManualRecovery()
-            }
-            aboutData = LinuxDoRepository.fetchCommunityAboutInfo()
-                ?: throw ApiReadException(ApiFailureKind.Connection)
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            loadError = error.message ?: LinDoMessagesCopy.ABOUT_LOAD_FAILED.text
-        } finally {
-            isLoading = false
-        }
-    }
-
-    LaunchedEffect(netRestoreVer, siteVerifyVer) {
-        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
-        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
-        if (activeVerify || passiveRestore) {
-            lastHandledSiteVerifyVer = siteVerifyVer
-            lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && aboutData == null && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
-                manualRecoveryRequested = true
-                reloadToken++
-            }
-        }
-    }
-
-    LinDoFullScreenPage(
-        onBack = onDismiss,
-        containerColor = palette.cardSurface
-    ) {
-        LinDoPageTopBar(
-            title = LinDoMessagesCopy.ABOUT_SHEET_TITLE.text,
-            onBack = onDismiss
-        ) {
-            Text(
-                text = aboutDebugHint ?: LinDoDiagnosticLogger.APP_VERSION_DISPLAY,
-                fontSize = 11.5.sp,
-                fontWeight = FontWeight.Medium,
-                color = if (aboutDebugHint != null) palette.brandGold else palette.inkTertiary,
-                modifier = Modifier
-                    .testTag("about_version_debug_trigger")
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = onAboutVersionTap
-                    )
-                    .padding(horizontal = 6.dp, vertical = 4.dp)
-            )
-        }
-        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-
-        if (isLoading && aboutData == null) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                LinDoLoadingIndicator(label = LinDoCommonCopy.LOADING.text)
-            }
-        } else if (loadError != null && aboutData == null) {
-            Box(
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                LinDoStatePanel(
-                    state = LinDoMascotState.NetworkError,
-                    detail = loadError!!,
-                    onRetry = {
-                        manualRecoveryRequested = true
-                        reloadToken++
-                    }
-                )
-            }
-        } else {
-            val info = aboutData
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                item(key = "about_intro") {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = info?.title ?: LinDoMessagesCopy.ABOUT_HEADLINE.text,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.inkPrimary,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            Text(
-                                text = LinDoDiagnosticLogger.APP_VERSION_DISPLAY,
-                                fontSize = 11.8.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = palette.inkTertiary,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = null,
-                                        onClick = onAboutVersionTap
-                                    )
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                            )
-                        }
-                        Text(
-                            text = info?.description ?: LinDoCommonCopy.ABOUT_MOTTO_FULL.text,
-                            fontSize = 13.2.sp,
-                            lineHeight = 19.sp,
-                            color = palette.inkSecondary
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                }
-
-                if (info != null) {
-                    item(key = "about_stats") {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Row(Modifier.fillMaxWidth()) {
-                                ProfileMetric(formatCompactNumber(info.topicCount), LinDoMessagesCopy.STAT_TOTAL_TOPICS.text, Modifier.weight(1f))
-                                ProfileMetric(formatCompactNumber(info.postCount), LinDoMessagesCopy.STAT_TOTAL_POSTS.text, Modifier.weight(1f))
-                                ProfileMetric(formatCompactNumber(info.userCount), LinDoMessagesCopy.STAT_TOTAL_USERS.text, Modifier.weight(1f))
-                            }
-                            Row(Modifier.fillMaxWidth()) {
-                                ProfileMetric(formatCompactNumber(info.activeUsers7Days), LinDoMessagesCopy.STAT_ACTIVE_7D.text, Modifier.weight(1f))
-                                ProfileMetric(formatCompactNumber(info.activeUsers30Days), LinDoMessagesCopy.STAT_ACTIVE_30D.text, Modifier.weight(1f))
-                                ProfileMetric(formatCompactNumber(info.likeCount), LinDoMessagesCopy.STAT_TOTAL_LIKES.text, Modifier.weight(1f))
-                            }
-                        }
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                    }
-
-                    stickyHeader(key = "team_tabs") {
-                        Column(Modifier.fillMaxWidth().background(palette.cardSurface)) {
-                            LinDoSectionTabs(
-                                labels = listOf(
-                                    LinDoMessagesCopy.ABOUT_TAB_ADMINS.format(info.admins.size),
-                                    LinDoMessagesCopy.ABOUT_TAB_MODERATORS.format(info.moderators.size)
-                                ),
-                                selectedIndex = activeTeamTab.ordinal,
-                                fontSize = 13.8.sp
-                            ) { idx ->
-                                AboutTeamTab.entries.getOrNull(idx)?.let { activeTeamTab = it }
-                            }
-                            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                        }
-                    }
-
-                    val activeMembers = when (activeTeamTab) {
-                        AboutTeamTab.ADMINS -> info.admins
-                        AboutTeamTab.MODERATORS -> info.moderators
-                    }
-                    itemsIndexed(activeMembers, key = { _, u -> "${activeTeamTab.name}_${u.username}" }) { _, member ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .pointerHoverIcon(PointerIcon.Hand)
-                                .clickable { onInspectUser(member.username) }
-                                .padding(horizontal = 4.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            GoogleAccountRingAvatar(
-                                letter = member.displayName,
-                                username = member.username,
-                                avatarUrl = member.avatarUrl,
-                                animatedAvatar = member.animatedAvatar,
-                                avatarSize = 40.dp
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = member.displayName,
-                                        fontSize = 14.8.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = palette.inkPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
-                                    )
-                                    if (!member.displayName.equals(member.username, ignoreCase = true)) {
-                                        Text(
-                                            text = LinDoCommonCopy.AT_USERNAME.format(member.username),
-                                            fontSize = 12.sp,
-                                            color = palette.inkSecondary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    if (member.title.isNotBlank()) {
-                                        UserTitleTag(title = member.title)
-                                    }
-                                }
-                            }
-                            Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
-                        }
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                    }
-                }
-            }
-        }
-    }
-}
-
 /** Debug host uses production sheets and renderer without logging out the current account. */
 @Composable
 fun LinDoReadRegressionPreview(scene: String, cooked: String = "", onClose: () -> Unit, onOpenLink: (String) -> Unit) {
@@ -19768,16 +19385,12 @@ fun LinDoReadRegressionPreview(scene: String, cooked: String = "", onClose: () -
 
 @Composable
 private fun AppearanceChoices(selected: String, onSelect: (String) -> Unit, icon: Boolean = false) {
-    val palette = LocalPalette.current
-    Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-        listOf("system" to "跟随系统", "light" to if (icon) "白底" else "浅色", "dark" to if (icon) "黑底" else "深色").forEach { (key, label) ->
-            Text(label, fontSize = 12.sp, fontWeight = if (selected == key) FontWeight.SemiBold else FontWeight.Normal,
-                color = if (selected == key) palette.brandGold else palette.inkSecondary,
-                modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                    .background(if (selected == key) palette.subtleSurface else Color.Transparent)
-                    .clickable { onSelect(key) }.padding(horizontal = 7.dp, vertical = 7.dp))
-        }
-    }
+    SettingsChoices(listOf("system", "light", "dark"), selected,
+        label = { when (it) {
+            "light" -> if (icon) "白底" else "浅色"
+            "dark" -> if (icon) "黑底" else "深色"
+            else -> "跟随系统"
+        } }, onSelect = onSelect)
 }
 
 @Composable
