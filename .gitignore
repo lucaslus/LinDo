@@ -1,49 +1,20 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
-
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
+.gradle/
+.kotlin/
+build/
+**/build/
+local.properties
 .idea/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
-.pub-cache/
-.pub/
-/build/
-/dist/
-
-# Android related
-**/android/**/gradle-wrapper.jar
-**/android/.gradle
-**/android/captures/
-**/android/gradlew
-**/android/gradlew.bat
-**/android/local.properties
-**/android/**/GeneratedPluginRegistrant.java
-**/android/key.properties
-*.jks
-
-# macOS / Windows build artifacts
-**/macos/Flutter/ephemeral/
-**/macos/Pods/
-**/windows/flutter/ephemeral/
-*.dmg
-*.msi
+*.iml
+.DS_Store
+__pycache__/
+captures/
+.externalNativeBuild/
+.cxx/
 *.apk
+*.aab
+*.ap_
+*.dex
+
+# Local authentication material and account-identifying captures
+lindo-session-import.json
+docs/review-evidence/2026-11-06/connect-native.png
