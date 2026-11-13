@@ -977,8 +977,8 @@ object LinDoTokens {
     val Headline = 16.sp
     val Body = 15.sp
     val Sub = 14.sp
-    val Meta = 12.sp
-    val Caption = 11.sp
+    val Meta get() = if (MacDesktopExperience.enabled) 12.5.sp else 12.sp
+    val Caption get() = if (MacDesktopExperience.enabled) 12.sp else 11.sp
 
     val RadiusXS = 6.dp
     val RadiusS = 10.dp
@@ -1656,6 +1656,12 @@ internal fun LinDoApp(
         true
     }
     var isDarkTheme by remember { mutableStateOf(UserApiKeyAuthManager.uiDarkTheme) }
+    LaunchedEffect(MacDesktopExperience.enabled, MacDesktopExperience.dark) {
+        if (MacDesktopExperience.enabled) {
+            isDarkTheme = MacDesktopExperience.dark
+            UserApiKeyAuthManager.uiDarkTheme = isDarkTheme
+        }
+    }
     LaunchedEffect(isDarkTheme) { onThemeChanged(isDarkTheme) }
     var fontScale by remember { mutableStateOf(UserApiKeyAuthManager.uiFontScale) }
     var enableAnimations by remember { mutableStateOf(UserApiKeyAuthManager.uiEnableAnimations) }
@@ -1666,6 +1672,7 @@ internal fun LinDoApp(
     }
 
     fun updateThemePref(dark: Boolean) {
+        if (MacDesktopExperience.enabled) MacDesktopExperience.selectAppearance(if (dark) "dark" else "light")
         isDarkTheme = dark
         UserApiKeyAuthManager.updateUiPrefs(
             fontScale = fontScale,
@@ -1765,6 +1772,7 @@ internal fun LinDoApp(
     var showManualAuthExpanded by remember { mutableStateOf(false) }
     var desktopAuthStatusHint by remember { mutableStateOf<String?>(null) }
     var showDesktopSiteVerifySheet by remember { mutableStateOf(false) }
+    var desktopVerificationForLogin by remember { mutableStateOf(false) }
     var showConnectSheet by remember { mutableStateOf(false) }
     var showGlobalSearchSheet by remember { mutableStateOf(false) }
     var showCreateTopicSheet by remember { mutableStateOf(false) }
@@ -1827,6 +1835,7 @@ internal fun LinDoApp(
         } else {
             val normalized = url.trim().trimEnd('/')
             if (normalized.equals("https://linux.do", ignoreCase = true)) {
+                desktopVerificationForLogin = false
                 showDesktopSiteVerifySheet = true
             } else {
                 UserApiKeyAuthManager.openExternalUrlLauncher?.invoke(url)
@@ -1847,6 +1856,13 @@ internal fun LinDoApp(
     }
 
     fun triggerPrimaryLogin() {
+        if (MacDesktopExperience.enabled && MacDesktopExperience.loginSession != null) {
+            guestLoginPrompt = null
+            showAuthSheet = false
+            desktopVerificationForLogin = true
+            showDesktopSiteVerifySheet = true
+            return
+        }
         rootKeyboardController?.hide()
         guestLoginPrompt = null
         if (hasEmbeddedWebLogin) {
@@ -2123,7 +2139,7 @@ internal fun LinDoApp(
                             refreshUpToDateNotice = false
                         }
                     }
-                    if (topics.isNotEmpty() &&
+                    if (!(MacDesktopExperience.enabled && isManualRefresh && hadPreviousError) && topics.isNotEmpty() &&
                         (feedListState.firstVisibleItemIndex != 0 || feedListState.firstVisibleItemScrollOffset != 0)
                     ) {
                         feedListState.requestScrollToItem(0)
@@ -2249,8 +2265,11 @@ internal fun LinDoApp(
         detailLoadJob?.cancel()
         // Dismiss any full-screen overlay sheets so the Topic Reader is never hidden underneath (C5)
         dismissCoveringSheets()
-        targetFloorJumpNonce++
-        activeTopicDetail = null
+        val keepReader = MacDesktopExperience.enabled && isManualRetry && activeTopicSummary?.id == topic.id && activeTopicDetail?.posts?.isNotEmpty() == true
+        if (!keepReader) {
+            targetFloorJumpNonce++
+            activeTopicDetail = null
+        }
         activeTopicSummary = topic
         activeTargetPostNumber = targetPostNumber
         currentTab = MainTab.HOME
@@ -2281,7 +2300,7 @@ internal fun LinDoApp(
                         }
                     }
                 }
-                if (activeTopicSummary?.id == topic.id) activeTopicDetail = loaded
+                if (activeTopicSummary?.id == topic.id && !(keepReader && loaded.loadError != null)) activeTopicDetail = loaded
             } finally {
                 if (kotlinx.coroutines.currentCoroutineContext().isActive && activeTopicSummary?.id == topic.id) {
                     isLoadingDetail = false
@@ -2356,23 +2375,43 @@ internal fun LinDoApp(
         }
     }
 
-    LaunchedEffect(authVersion) {
-        val otp = UserApiKeyAuthManager.consumePendingOtpToken()
-        var preFetchedProfile: UserFullProfileSummary? = null
-        if (!otp.isNullOrBlank()) {
-            // 优先在后台静默兑换 OTP 令牌，免弹 WebView 页面以避免二次触发 Cloudflare Turnstile 验证
+    // Auth notifications are emitted during OTP redemption (including profile
+    // hydration). A LaunchedEffect(authVersion) cancels its own exchange at that
+    // point. Collect serially in a stable effect instead of restarting the job.
+    LaunchedEffect(Unit) {
+        androidx.compose.runtime.snapshotFlow { authVersion }.collect {
+            val otp = UserApiKeyAuthManager.consumePendingOtpToken() ?: return@collect
             val redeemed = LinuxDoRepository.redeemOtpSilently(otp)
-            if (!redeemed) {
-                if (hasEmbeddedWebLogin) {
-                    openWebPage("https://linux.do/session/otp/$otp")
+            if (redeemed) {
+                // Reauthorizing the same cached account is still a completed login.
+                desktopAuthStatusHint = null
+                showManualAuthExpanded = false
+                showAuthSheet = false
+                guestLoginPrompt = null
+                activeWebLoginUrl = null
+                isGuestMode = false
+                authVersion++
+            } else if (hasEmbeddedWebLogin) {
+                openWebPage("https://linux.do/session/otp/$otp")
+            } else {
+                if (MacDesktopExperience.enabled) {
+                    desktopAuthStatusHint = "还需在网页中确认一次，完成后自动返回。"
+                    showManualAuthExpanded = false
+                    showAuthSheet = false
+                    desktopVerificationForLogin = true
+                    showDesktopSiteVerifySheet = true
                 } else {
                     desktopAuthStatusHint = LinDoAuthCopy.OTP_CALLBACK_BLOCKED_MANUAL_HINT.text
                     showManualAuthExpanded = true
                     showAuthSheet = true
                 }
-                return@LaunchedEffect
             }
-        } else if (UserApiKeyAuthManager.isAuthorized() &&
+        }
+    }
+
+    LaunchedEffect(authVersion) {
+        var preFetchedProfile: UserFullProfileSummary? = null
+        if (UserApiKeyAuthManager.isAuthorized() &&
             UserApiKeyAuthManager.currentUser?.username?.takeIf { it.isNotBlank() && it != "linuxdo_user" } == null
         ) {
             LinuxDoRepository.fetchCurrentUserProfile()?.let { profile ->
@@ -3115,18 +3154,18 @@ internal fun LinDoApp(
                                 onOpenAppIcon = openAppIconPage,
                                 onPrimaryWebLogin = ::triggerPrimaryLogin,
                                 onBrowserOneClickAuth = {
-                                    if (hasEmbeddedWebLogin) {
+                                    if (hasEmbeddedWebLogin || MacDesktopExperience.enabled) {
                                         triggerBrowserOneClickLogin()
                                     } else {
                                         triggerManualCredentialLogin()
                                     }
                                 },
-                                secondaryActionLabel = if (hasEmbeddedWebLogin) {
+                                secondaryActionLabel = if (hasEmbeddedWebLogin || MacDesktopExperience.enabled) {
                                     LinDoAuthCopy.SYSTEM_BROWSER_AUTH.text
                                 } else {
                                     LinDoAuthCopy.PASTE_COOKIE_OR_CALLBACK_LOGIN.text
                                 },
-                                secondaryActionIcon = if (hasEmbeddedWebLogin) LinDoIcons.Globe else LinDoIcons.Link,
+                                secondaryActionIcon = if (hasEmbeddedWebLogin || MacDesktopExperience.enabled) LinDoIcons.Globe else LinDoIcons.Link,
                                 onToggleDark = { updateThemePref(!isDarkTheme) },
                                 onGuestBrowse = {
                                     isGuestMode = true
@@ -4076,7 +4115,7 @@ internal fun LinDoApp(
                         hasEmbeddedWebLogin = hasEmbeddedWebLogin,
                         onPrimaryWebLogin = ::triggerPrimaryLogin,
                         onBrowserOneClickAuth = {
-                            if (hasEmbeddedWebLogin) {
+                            if (hasEmbeddedWebLogin || MacDesktopExperience.enabled) {
                                 triggerBrowserOneClickLogin()
                             } else {
                                 triggerManualCredentialLogin()
@@ -4095,7 +4134,9 @@ internal fun LinDoApp(
                         initialExpandManual = showManualAuthExpanded,
                         onUpdateStatusHint = { desktopAuthStatusHint = it },
                         onPrimaryWebLogin = {
-                            if (hasEmbeddedWebLogin) {
+                            if (MacDesktopExperience.enabled) {
+                                triggerPrimaryLogin()
+                            } else if (hasEmbeddedWebLogin) {
                                 showAuthSheet = false
                                 openWebPage("https://linux.do/login")
                             } else {
@@ -4131,6 +4172,7 @@ internal fun LinDoApp(
 
                 if (showDesktopSiteVerifySheet) {
                     DesktopSiteVerificationSheet(
+                        forLogin = desktopVerificationForLogin,
                         onOpenBrowserVerify = {
                             UserApiKeyAuthManager.openExternalUrlLauncher?.invoke("https://linux.do/")
                         },
@@ -4139,6 +4181,12 @@ internal fun LinDoApp(
                                 LinuxDoRepository.importCloudflareClearanceInput(pastedInput)
                             }
                             showDesktopSiteVerifySheet = false
+                            if (MacDesktopExperience.enabled && UserApiKeyAuthManager.isAuthorized()) {
+                                showAuthSheet = false
+                                showManualAuthExpanded = false
+                                isGuestMode = false
+                                authVersion++
+                            }
                             scope.launch {
                                 LinuxDoRepository.prepareForManualRecovery()
                                 siteVerificationRestoreVersion++
@@ -4155,7 +4203,14 @@ internal fun LinDoApp(
                                 }
                             }
                         },
-                        onDismiss = { showDesktopSiteVerifySheet = false }
+                        onDismiss = { showDesktopSiteVerifySheet = false },
+                        onFallbackSystemLogin = {
+                            showDesktopSiteVerifySheet = false
+                            desktopAuthStatusHint = LinDoAuthCopy.BROWSER_AUTH_OPENED_AUTO_RETURN.text
+                            showManualAuthExpanded = false
+                            showAuthSheet = true
+                            UserApiKeyAuthManager.startBrowserOneClickAuth()
+                        }
                     )
                 }
 
@@ -6492,9 +6547,9 @@ private fun CommunityTopicItem(
                     Text(
                         text = titleAnnotated,
                         inlineContent = titleInlineContent,
-                        fontSize = 15.8.sp,
+                        fontSize = if (MacDesktopExperience.enabled) 16.sp else 15.8.sp,
                         lineHeight = 21.5.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = if (MacDesktopExperience.enabled) FontWeight.SemiBold else FontWeight.Medium,
                         color = palette.inkPrimary,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -6503,9 +6558,9 @@ private fun CommunityTopicItem(
                 } else {
                     Text(
                         text = topic.title,
-                        fontSize = 15.8.sp,
+                        fontSize = if (MacDesktopExperience.enabled) 16.sp else 15.8.sp,
                         lineHeight = 21.5.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = if (MacDesktopExperience.enabled) FontWeight.SemiBold else FontWeight.Medium,
                         color = palette.inkPrimary,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -8862,7 +8917,7 @@ internal fun CommunityPostFloor(
                         if (isOp) {
                             Text(
                                 text = LinDoReaderCopy.OP_BADGE.text,
-                                fontSize = 11.sp,
+                                fontSize = if (MacDesktopExperience.enabled) 12.sp else 11.sp,
                                 lineHeight = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = palette.brandGold,
@@ -8939,7 +8994,7 @@ internal fun CommunityPostFloor(
                             )
                         }
                         if (hasIosDevice) {
-                            if (hasUserTitle) Text("·", color = palette.inkTertiary, fontSize = 11.5.sp, lineHeight = 15.sp)
+                            if (hasUserTitle) Text("·", color = palette.inkTertiary, fontSize = if (MacDesktopExperience.enabled) 12.5.sp else 11.5.sp, lineHeight = 15.sp)
                             Row(
                                 modifier = Modifier.weight(1.25f, fill = false),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -8955,7 +9010,7 @@ internal fun CommunityPostFloor(
                                 )
                                 Text(
                                     text = post.iosDeviceName.orEmpty(),
-                                    fontSize = 11.5.sp,
+                                    fontSize = if (MacDesktopExperience.enabled) 12.5.sp else 11.5.sp,
                                     lineHeight = 15.sp,
                                     color = palette.inkSecondary,
                                     maxLines = 1,
@@ -8970,15 +9025,15 @@ internal fun CommunityPostFloor(
                                 description = LinDoReaderCopy.BADGE_GRANTED_ON_POST.format(post.username, badge.name)
                             )
                         }
-                        if (post.isTodayBirthday) Text("🎂", fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1)
-                        if (post.isTodayCakeday) Text("🍰", fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1)
+                        if (post.isTodayBirthday) Text("🎂", fontSize = if (MacDesktopExperience.enabled) 12.sp else 11.sp, lineHeight = 14.sp, maxLines = 1)
+                        if (post.isTodayCakeday) Text("🍰", fontSize = if (MacDesktopExperience.enabled) 12.sp else 11.sp, lineHeight = 14.sp, maxLines = 1)
                     }
                 }
                 if (showStatusDescription && statusDescText != null) {
                     Text(
                         text = statusDescText,
                         modifier = Modifier.padding(top = 3.dp),
-                        fontSize = 11.sp,
+                        fontSize = if (MacDesktopExperience.enabled) 12.sp else 11.sp,
                         color = palette.inkSecondary,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
@@ -9050,7 +9105,7 @@ internal fun CommunityPostFloor(
                         if (isExpanded) {
                             Text(
                                 text = LinDoCommonCopy.AT_USERNAME.format(boost.username),
-                                fontSize = 11.sp,
+                                fontSize = if (MacDesktopExperience.enabled) 12.sp else 11.sp,
                                 color = palette.inkTertiary,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
@@ -9060,7 +9115,7 @@ internal fun CommunityPostFloor(
                             if (boost.canDelete) {
                                 Text(
                                     text = if (isDeletingBoostId == boost.id) LinDoCommonCopy.DELETING_ELLIPSIS.text else LinDoCommonCopy.DELETE.text,
-                                    fontSize = 11.sp,
+                                    fontSize = if (MacDesktopExperience.enabled) 12.sp else 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFFEF4444),
                                     modifier = Modifier
@@ -9245,7 +9300,7 @@ internal fun CommunityPostFloor(
                     } else {
                         LinDoReaderCopy.BOOST_LIMIT_CHARS_TAG.format(BoostInputStats.MAX_BOOST_VISIBLE_LENGTH)
                     },
-                    color = MaterialTheme.colorScheme.error, fontSize = 11.5.sp
+                    color = MaterialTheme.colorScheme.error, fontSize = if (MacDesktopExperience.enabled) 12.5.sp else 11.5.sp
                 )
 
                 // 一体化单行小火箭输入条（左侧纯矢量表情按钮 + 中部无框输入 + 右侧字数与发送/关闭图标）
@@ -9311,7 +9366,7 @@ internal fun CommunityPostFloor(
                     // 右侧：精简字数提示 + 纯图标发送按钮 + 关闭按钮
                     Text(
                         text = "${boostStats.visibleLength}/${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH}",
-                        fontSize = 11.sp,
+                        fontSize = if (MacDesktopExperience.enabled) 12.sp else 11.sp,
                         fontWeight = if (counterOverLimit) FontWeight.Bold else FontWeight.Medium,
                         color = if (counterOverLimit) Color(0xFFEF4444) else palette.inkTertiary,
                         maxLines = 1
@@ -9363,7 +9418,7 @@ internal fun CommunityPostFloor(
                     ) {
                         Text(
                             text = LinDoReaderCopy.PREVIEW_PREFIX.text,
-                            fontSize = 11.sp,
+                            fontSize = if (MacDesktopExperience.enabled) 12.sp else 11.sp,
                             color = palette.inkTertiary
                         )
                         BoostInlineContent(
@@ -10090,7 +10145,7 @@ private fun CommunityPostContent(
                     if (repliedSnippet.isNotBlank() && !loadingReplyTarget) {
                         Spacer(modifier = Modifier.height(1.dp))
                         Text(
-                            repliedSnippet, fontSize = 11.5.sp, lineHeight = 14.5.sp, color = palette.inkTertiary,
+                            repliedSnippet, fontSize = if (MacDesktopExperience.enabled) 12.5.sp else 11.5.sp, lineHeight = if (MacDesktopExperience.enabled) 18.sp else 14.5.sp, color = if (MacDesktopExperience.enabled) palette.inkSecondary else palette.inkTertiary,
                             maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -11734,7 +11789,10 @@ internal fun CommunityProfileScreen(
 
             // 3. 外观分组（主题配色、应用图标、首页列表视图、阅读字号、关于社区）
             item {
-                val fontScalePreset = ReaderFontScalePreset.fromScale(fontScale)
+                val fontScalePreset = if (MacDesktopExperience.enabled) ReaderFontScalePreset.entries[
+                    MacDesktopExperience.fontScales.indices.minBy { kotlin.math.abs(MacDesktopExperience.fontScales[it] - fontScale) }
+                ] else ReaderFontScalePreset.fromScale(fontScale)
+                fun scaleFor(preset: ReaderFontScalePreset) = if (MacDesktopExperience.enabled) MacDesktopExperience.fontScales[preset.ordinal] else preset.scale
 
                 Column(
                     modifier = Modifier
@@ -11742,6 +11800,15 @@ internal fun CommunityProfileScreen(
                         .background(palette.cardSurface)
                 ) {
                     LinDoGroupHeader(text = LinDoMessagesCopy.SECTION_APPEARANCE.text)
+
+                    if (MacDesktopExperience.enabled) {
+                        LinDoSettingRow(icon = LinDoIcons.Sun, title = "外观", trailing = {
+                            MacAppearanceChoices(MacDesktopExperience.appearance, MacDesktopExperience::selectAppearance)
+                        })
+                        LinDoSettingRow(icon = LinDoIcons.AppsGrid, title = "图标底色", trailing = {
+                            MacAppearanceChoices(MacDesktopExperience.iconAppearance, MacDesktopExperience::selectIconAppearance, icon = true)
+                        })
+                    }
 
                     // 3.1 主题配色（内联 4 色圆点选择器）
                     LinDoSettingRow(
@@ -11837,7 +11904,7 @@ internal fun CommunityProfileScreen(
                     LinDoSettingRow(
                         icon = LinDoIcons.Sliders,
                         title = LinDoMessagesCopy.ROW_READING_FONT_SCALE.text,
-                        onClick = { onChangeFontScale(fontScalePreset.nextCycle().scale) },
+                        onClick = { onChangeFontScale(scaleFor(fontScalePreset.nextCycle())) },
                         trailing = {
                             val scalePresets = ReaderFontScalePreset.entries
                             Row(
@@ -11849,7 +11916,7 @@ internal fun CommunityProfileScreen(
                                     Box(
                                         modifier = Modifier
                                             .clip(LinDoTokens.ShapeXS)
-                                            .clickable { onChangeFontScale(preset.scale) }
+                                            .clickable { onChangeFontScale(scaleFor(preset)) }
                                             .padding(horizontal = 7.dp, vertical = 4.dp),
                                         contentAlignment = Alignment.Center
                                     ) {
@@ -12957,7 +13024,7 @@ private fun UserApiKeyAuthSheet(
 
                 Spacer(modifier = Modifier.height(22.dp))
 
-                if (hasEmbeddedWebLogin) {
+                if (hasEmbeddedWebLogin || MacDesktopExperience.enabled) {
                     LinDoPrimaryButton(
                         label = if (isAuthorized) LinDoAuthCopy.REVERIFY_OR_SWITCH_ACCOUNT.text else LinDoAuthCopy.ONE_CLICK_ACCOUNT_LOGIN.text,
                         onClick = onPrimaryWebLogin
@@ -13003,8 +13070,8 @@ private fun UserApiKeyAuthSheet(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // 可展开「手动粘贴 Cookie / 回调链接 / cURL」兜底区
-                Column(
+                // Manual import remains available on other platforms; macOS uses browser recovery.
+                if (!MacDesktopExperience.enabled) Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
@@ -13162,10 +13229,21 @@ private fun UserApiKeyAuthSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DesktopSiteVerificationSheet(
+    forLogin: Boolean = false,
     onOpenBrowserVerify: () -> Unit,
     onRetryVerified: (String) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onFallbackSystemLogin: (() -> Unit)? = null
 ) {
+    if (MacDesktopExperience.enabled) {
+        MacSiteVerificationCard(
+            forLogin = forLogin,
+            onVerified = { onRetryVerified("") },
+            onDismiss = onDismiss,
+            onFallbackSystemLogin = onFallbackSystemLogin
+        )
+        return
+    }
     val palette = LocalPalette.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var clearanceInput by remember { mutableStateOf("") }
@@ -13374,14 +13452,14 @@ private fun GuestLoginGuideSheet(
                     horizontalArrangement = Arrangement.Center
                 ) {
                     Icon(
-                        imageVector = if (hasEmbeddedWebLogin) LinDoIcons.Globe else LinDoIcons.Link,
+                        imageVector = if (hasEmbeddedWebLogin || MacDesktopExperience.enabled) LinDoIcons.Globe else LinDoIcons.Link,
                         contentDescription = null,
                         modifier = Modifier.size(15.dp),
                         tint = palette.inkPrimary
                     )
                     Spacer(modifier = Modifier.width(7.dp))
                     Text(
-                        text = if (hasEmbeddedWebLogin) {
+                        text = if (hasEmbeddedWebLogin || MacDesktopExperience.enabled) {
                             LinDoAuthCopy.SYSTEM_BROWSER_PASSWORDLESS_AUTH.text
                         } else {
                             LinDoAuthCopy.PASTE_COOKIE_OR_CALLBACK_LOGIN.text
@@ -19980,6 +20058,65 @@ fun LinDoReadRegressionPreview(scene: String, cooked: String = "", onClose: () -
                 .verticalScroll(rememberScrollState()).padding(16.dp)) {
                 Text(LinDoReaderCopy.RICH_REGRESSION_TITLE.text, fontWeight = FontWeight.Bold)
                 PostRichContent(nodes, LightPalette, onOpenLink, "https://linux.do/")
+            }
+        }
+    }
+}
+
+@Composable
+private fun MacAppearanceChoices(selected: String, onSelect: (String) -> Unit, icon: Boolean = false) {
+    val palette = LocalPalette.current
+    Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+        listOf("system" to "跟随系统", "light" to if (icon) "白底" else "浅色", "dark" to if (icon) "黑底" else "深色").forEach { (key, label) ->
+            Text(label, fontSize = 12.sp, fontWeight = if (selected == key) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (selected == key) palette.brandGold else palette.inkSecondary,
+                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                    .background(if (selected == key) palette.subtleSurface else Color.Transparent)
+                    .clickable { onSelect(key) }.padding(horizontal = 7.dp, vertical = 7.dp))
+        }
+    }
+}
+
+@Composable
+private fun MacSiteVerificationCard(
+    forLogin: Boolean,
+    onVerified: () -> Unit,
+    onDismiss: () -> Unit,
+    onFallbackSystemLogin: (() -> Unit)? = null
+) {
+    val p = LocalPalette.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    DisposableEffect(Unit) { onDispose { job?.cancel() } }
+    androidx.compose.ui.window.Dialog(onDismissRequest = { job?.cancel(); onDismiss() }) {
+        Column(Modifier.widthIn(max = 440.dp).clip(RoundedCornerShape(16.dp)).background(p.cardSurface)
+            .border(0.5.dp, p.hairline, RoundedCornerShape(16.dp)).padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                LinDoIconArtworkImage(LinDoIconArtwork.Wink, Modifier.size(38.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(if (busy) "正在等待网页确认" else if (forLogin) "登录 Lindo" else "还差一次确认", color = p.inkPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Text(if (forLogin) "在网页中登录，完成后自动返回" else "阅读位置已保留，完成后接着看", color = p.inkSecondary, fontSize = 12.5.sp)
+                }
+            }
+            Text(MacDesktopExperience.verificationMessage ?: "在打开的网页中完成站点确认，Lindo 会自动接续。", color = p.inkSecondary, fontSize = 13.sp, lineHeight = 19.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                if (forLogin && onFallbackSystemLogin != null && !busy) {
+                    TextButton(onClick = { job?.cancel(); onFallbackSystemLogin() }) {
+                        Text("系统浏览器登录", color = p.inkSecondary)
+                    }
+                    Spacer(Modifier.weight(1f))
+                }
+                TextButton(onClick = { job?.cancel(); onDismiss() }) { Text("稍后", color = p.inkSecondary) }
+                TextButton(enabled = !busy, onClick = {
+                    busy = true
+                    job = scope.launch {
+                        try {
+                            val handler = if (forLogin) MacDesktopExperience.loginSession else MacDesktopExperience.verifySession
+                            if (handler?.invoke() == true) onVerified()
+                        } finally { busy = false }
+                    }
+                }) { Text(if (busy) "等待确认…" else if (forLogin) "继续登录" else "继续验证", color = if (busy) p.inkSecondary else p.brandGold, fontWeight = FontWeight.SemiBold) }
             }
         }
     }

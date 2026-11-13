@@ -76,6 +76,7 @@ import androidx.compose.ui.zIndex
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX
 import do_.linux.lindo.core.network.CookieSentinel
+import do_.linux.lindo.core.network.NetworkRecoveryPolicy
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
@@ -395,6 +396,13 @@ class MainActivity : ComponentActivity() {
         }
 
         @JavascriptInterface
+        fun onHttpResultWithRetryAfter(reqId: String, status: Int, body: String, cfMitigated: String, retryAfter: String) {
+            // Publish the cooldown before resuming the waiting request coroutine.
+            if (pendingHttpCallbacks.containsKey(reqId) && status == 429) LinuxDoRepository.noteRetryAfter(retryAfter)
+            onHttpResultWithMeta(reqId, status, body, cfMitigated)
+        }
+
+        @JavascriptInterface
         fun onBinaryResult(reqId: String, status: Int, contentType: String, base64Body: String) {
             pendingBinaryCallbacks.remove(reqId)?.complete(Triple(status, contentType, base64Body))
         }
@@ -458,6 +466,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        NetworkRecoveryPolicy.androidEnabled = true
         activeInstance = this
         UserApiKeyAuthManager.requireBrowserTransportOnly = true
         coil3.SingletonImageLoader.setSafe { context ->
@@ -1213,6 +1222,7 @@ class MainActivity : ComponentActivity() {
         formParams: Map<String, String>?,
         headers: Map<String, String>
     ): Pair<Int, String>? {
+        if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
         val isRead = method.equals("GET", true) || method.equals("HEAD", true)
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
             rebuildApiWebView(reason = "pending_network_recycle", force = true)
@@ -1296,9 +1306,11 @@ class MainActivity : ComponentActivity() {
                         try { currentAttemptCtrl.abort(); } catch (_) {}
                     }
                 };
-                function reportHttp(status, body, cfMitigated) {
+                function reportHttp(status, body, cfMitigated, retryAfter) {
                     if (cancelledByKotlin) return;
-                    if (window.LinDoJsBridge && window.LinDoJsBridge.onHttpResultWithMeta) {
+                    if (window.LinDoJsBridge && window.LinDoJsBridge.onHttpResultWithRetryAfter) {
+                        window.LinDoJsBridge.onHttpResultWithRetryAfter(reqKey, status, body || '', cfMitigated || '', retryAfter || '');
+                    } else if (window.LinDoJsBridge && window.LinDoJsBridge.onHttpResultWithMeta) {
                         window.LinDoJsBridge.onHttpResultWithMeta(reqKey, status, body || '', cfMitigated || '');
                     } else if (window.LinDoJsBridge) {
                         window.LinDoJsBridge.onHttpResult(reqKey, status, body || '');
@@ -1348,6 +1360,7 @@ class MainActivity : ComponentActivity() {
                     let csrfLastStatus = 0;
                     let csrfLastBody = '';
                     let csrfLastMitigated = '';
+                    let csrfLastRetryAfter = '';
                     async function refreshCsrfToken(force) {
                         if (!force && window.__lindoCsrf) {
                             return window.__lindoCsrf;
@@ -1378,6 +1391,7 @@ class MainActivity : ComponentActivity() {
                                     const csrfResp = csrfOut.resp;
                                     csrfLastStatus = csrfResp.status || 0;
                                     csrfLastMitigated = csrfResp.headers.get('cf-mitigated') || '';
+                                csrfLastRetryAfter = csrfResp.headers.get('Retry-After') || '';
                                     if (csrfResp.ok && !csrfLastMitigated) {
                                         const csrfData = JSON.parse(csrfOut.text || '{}');
                                         if (csrfData && csrfData.csrf) {
@@ -1412,7 +1426,7 @@ class MainActivity : ComponentActivity() {
                         const token = cachedCsrf || (await refreshCsrfToken(false));
                         if (!token) {
                             const body = csrfLastBody || JSON.stringify({errors: [${JSONObject.quote(LinDoNetworkCopy.JS_BRIDGE_VERIFY_SESSION_FAILED.text)}]});
-                            reportHttp(csrfLastStatus || 0, body, csrfLastMitigated);
+                            reportHttp(csrfLastStatus || 0, body, csrfLastMitigated, csrfLastRetryAfter);
                             return;
                         }
                         hdrs['X-CSRF-Token'] = token;
@@ -1461,11 +1475,11 @@ class MainActivity : ComponentActivity() {
                             text = retryOut.text;
                             cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
                         } else if (csrfLastMitigated || csrfLastStatus === 403 || csrfLastStatus === 503 || csrfLastStatus === 429) {
-                            reportHttp(csrfLastStatus || resp.status, csrfLastBody || text, csrfLastMitigated);
+                            reportHttp(csrfLastStatus || resp.status, csrfLastBody || text, csrfLastMitigated, csrfLastRetryAfter);
                             return;
                         }
                     }
-                    reportHttp(resp.status, text, cfMitigated);
+                    reportHttp(resp.status, text, cfMitigated, resp.headers.get('Retry-After'));
                 } catch (err) {
                     reportHttp(0, '', '');
                 } finally {
@@ -1509,6 +1523,7 @@ class MainActivity : ComponentActivity() {
                     return null
                 }
             }
+            if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
             pendingHttpCallbacks[reqId] = deferred
             val launched = withContext(Dispatchers.Main) {
                 val liveWv = apiWebView ?: return@withContext false
@@ -1808,6 +1823,7 @@ class MainActivity : ComponentActivity() {
         mimeType: String,
         rawBytes: ByteArray
     ): Pair<Int, String>? {
+        if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
             rebuildApiWebView(reason = "pending_network_recycle", force = true)
         }
@@ -1836,6 +1852,7 @@ class MainActivity : ComponentActivity() {
         var completedFromJs = false
         var dispatchedWv: WebView? = null
         try {
+            if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
             pendingUploadPayloads[reqId] = rawBytes
             pendingHttpCallbacks[reqId] = deferred
             if (apiWebView == null && !isFinishing && !isDestroyed) {
@@ -1896,9 +1913,12 @@ class MainActivity : ComponentActivity() {
                         let csrfLastStatus = 0;
                         let csrfLastBody = '';
                         let csrfLastMitigated = '';
-                        function reportUpload(status, body, cfMitigated) {
+                        let csrfLastRetryAfter = '';
+                        function reportUpload(status, body, cfMitigated, retryAfter) {
                             if (cancelledByKotlin) return;
-                            if (window.LinDoJsBridge && window.LinDoJsBridge.onHttpResultWithMeta) {
+                            if (window.LinDoJsBridge && window.LinDoJsBridge.onHttpResultWithRetryAfter) {
+                                window.LinDoJsBridge.onHttpResultWithRetryAfter(reqKey, status, body || '', cfMitigated || '', retryAfter || '');
+                            } else if (window.LinDoJsBridge && window.LinDoJsBridge.onHttpResultWithMeta) {
                                 window.LinDoJsBridge.onHttpResultWithMeta(reqKey, status, body || '', cfMitigated || '');
                             } else if (window.LinDoJsBridge) {
                                 window.LinDoJsBridge.onHttpResult(reqKey, status, body || '');
@@ -1924,6 +1944,7 @@ class MainActivity : ComponentActivity() {
                                 const csrfResp = await fetch('https://linux.do/session/csrf.json', csrfOpts);
                                 csrfLastStatus = csrfResp.status || 0;
                                 csrfLastMitigated = csrfResp.headers.get('cf-mitigated') || '';
+                                csrfLastRetryAfter = csrfResp.headers.get('Retry-After') || '';
                                 if (csrfResp.ok && !csrfLastMitigated) {
                                     const csrfData = await csrfResp.json();
                                     if (csrfData && csrfData.csrf) {
@@ -1964,7 +1985,7 @@ class MainActivity : ComponentActivity() {
                             }
                             const csrf = await refreshCsrfToken(false);
                             if (!csrf) {
-                                reportUpload(csrfLastStatus || 0, csrfLastBody, csrfLastMitigated);
+                                reportUpload(csrfLastStatus || 0, csrfLastBody, csrfLastMitigated, csrfLastRetryAfter);
                                 return;
                             }
                             hdrs['X-CSRF-Token'] = csrf;
@@ -2029,11 +2050,11 @@ class MainActivity : ComponentActivity() {
                                     text = await resp.text();
                                     cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
                                 } else if (csrfLastMitigated || csrfLastStatus === 403 || csrfLastStatus === 503 || csrfLastStatus === 429) {
-                                    reportUpload(csrfLastStatus || resp.status, csrfLastBody || text, csrfLastMitigated);
+                                    reportUpload(csrfLastStatus || resp.status, csrfLastBody || text, csrfLastMitigated, csrfLastRetryAfter);
                                     return;
                                 }
                             }
-                            reportUpload(resp.status, text, cfMitigated);
+                            reportUpload(resp.status, text, cfMitigated, resp.headers.get('Retry-After'));
                         } catch (err) {
                             reportUpload(0, '', '');
                         } finally {

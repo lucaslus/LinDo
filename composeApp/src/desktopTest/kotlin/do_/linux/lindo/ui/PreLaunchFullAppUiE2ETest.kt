@@ -218,6 +218,35 @@ class PreLaunchFullAppUiE2ETest {
     }
 
     @Test
+    fun browserOtpSurvivesAuthNotificationAndClosesLoginSheet() = runDesktopComposeUiTest(width = 1000, height = 800) {
+        val exchanges = AtomicInteger(0)
+        val completed = AtomicBoolean(false)
+        UserApiKeyAuthManager.webViewHttpExecutor = { url, method, form, headers ->
+            if (url.contains("/session/otp/")) {
+                exchanges.incrementAndGet()
+                // Reproduce the notification that used to cancel LaunchedEffect(authVersion).
+                UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+                kotlinx.coroutines.delay(150)
+                CookieSentinel.ingestRawCookieString("_t=e2e_valid_session_token", domain = "linux.do")
+                completed.set(true)
+                302 to ""
+            } else backend.handleHttp(url, method, form, headers)
+        }
+        setContent { LinDoApp(systemAnimationsEnabled = false) }
+        waitForText("使用 LINUX DO 登录")
+        onNodeWithText("使用 LINUX DO 登录").edtClick()
+        waitForText("登录 LINUX DO")
+        onEdt {
+            UserApiKeyAuthManager.pendingOtpToken = "test_callback_otp"
+            UserApiKeyAuthManager.onAuthStateChanged?.invoke()
+        }
+        waitUntil(timeoutMillis = 8_000L) { completed.get() && UserApiKeyAuthManager.currentUser?.username == "lucas" }
+        waitForTextGone("登录 LINUX DO")
+        waitForTextGone("你好，佬友。")
+        assertEquals(1, exchanges.get())
+    }
+
+    @Test
     fun desktopWideSplitPaneFullFeatureJourneyE2E() = runDesktopComposeUiTest(
         width = 1280,
         height = 840

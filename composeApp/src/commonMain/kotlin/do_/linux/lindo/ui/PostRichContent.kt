@@ -84,8 +84,8 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
             Text(
                 plain.text,
                 color = palette.inkPrimary,
-                fontSize = if (heading) 17.sp else 15.sp,
-                lineHeight = 24.sp,
+                fontSize = if (heading) 17.sp else if (MacDesktopExperience.enabled) 16.sp else 15.sp,
+                lineHeight = if (MacDesktopExperience.enabled) 25.sp else 24.sp,
                 fontWeight = if (heading) FontWeight.SemiBold else null,
                 onTextLayout = { plainLayoutResult = it }
             )
@@ -152,8 +152,8 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
             annotated,
             inlineContent = inlineImages,
             color = palette.inkPrimary,
-            fontSize = if (heading) 17.sp else 15.sp,
-            lineHeight = 24.sp,
+            fontSize = if (heading) 17.sp else if (MacDesktopExperience.enabled) 16.sp else 15.sp,
+            lineHeight = if (MacDesktopExperience.enabled) 25.sp else 24.sp,
             onTextLayout = { richLayoutResult = it }
         )
     }
@@ -530,27 +530,28 @@ private fun PostRichContentBody(
                     if (failed) {
                         TextButton(onClick = {
                             if (isExternalArticleLink) onOpenLink(linkTarget) else lightboxIndex = index
-                        }) { Text(LinDoReaderCopy.OPEN_IMAGE_LABEL.format(alt), color = palette.activeChipText) }
+                        }) { Text(if (MacDesktopExperience.enabled) "查看图片" else LinDoReaderCopy.OPEN_IMAGE_LABEL.format(alt), color = palette.activeChipText) }
                     } else {
                         val context = coil3.compose.LocalPlatformContext.current
-                        val imageRequest = remember(context, url) {
+                        val imageDensity = androidx.compose.ui.platform.LocalDensity.current.density
+                        val imageRequest = remember(context, url, imageDensity) {
                             coil3.request.ImageRequest.Builder(context)
                                 .data(url)
-                                .size(coil3.size.Size(coil3.size.Dimension(1440), coil3.size.Dimension.Undefined))
+                                .size(if (MacDesktopExperience.enabled)
+                                    coil3.size.Size((560 * imageDensity).toInt(), (360 * imageDensity).toInt())
+                                else coil3.size.Size(coil3.size.Dimension(1440), coil3.size.Dimension.Undefined))
                                 .precision(coil3.size.Precision.INEXACT)
                                 .build()
                         }
                         AsyncImage(
                             model = imageRequest,
                             contentDescription = alt,
-                            contentScale = ContentScale.FillWidth,
+                            contentScale = if (MacDesktopExperience.enabled) ContentScale.Inside else ContentScale.FillWidth,
                             filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
                             onError = { failed = true },
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 60.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(palette.subtleSurface)
+                                .then(if (MacDesktopExperience.enabled) Modifier.widthIn(max = 560.dp).heightIn(max = 360.dp)
+                                    else Modifier.fillMaxWidth().heightIn(min = 60.dp).clip(RoundedCornerShape(8.dp)).background(palette.subtleSurface))
                                 .clickable {
                                     if (isExternalArticleLink) {
                                         onOpenLink(linkTarget)

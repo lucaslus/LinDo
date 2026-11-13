@@ -482,7 +482,7 @@ object UserApiKeyAuthManager {
     }
 
     fun notifyNetworkRestored() {
-        LinuxDoRepository.clearTransientRateLimit()
+        if (!NetworkRecoveryPolicy.enabled) LinuxDoRepository.clearTransientRateLimit()
         onNetworkRestored?.invoke()
     }
     data class BinaryHttpPayload(
@@ -826,6 +826,7 @@ object UserApiKeyAuthManager {
             }
             if (!otp.isNullOrBlank()) pendingOtpToken = otp
             onPersistSession?.invoke(currentUser, activeUserApiKey)
+            LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "BrowserAuth", "Callback accepted; OTP present=${!otp.isNullOrBlank()}")
             onAuthStateChanged?.invoke()
             true
         }.getOrDefault(false)
@@ -1997,6 +1998,8 @@ object LinuxDoRepository {
         runCatching { uploadConnectionPool.evictAll() }
     }
 
+    private val otpExchangeClient: HttpClient by lazy { createOtpExchangeClient() }
+
     private val sharedClient: HttpClient by lazy {
         HttpClient(OkHttp) {
             engine {
@@ -2317,10 +2320,23 @@ object LinuxDoRepository {
     private val rateLimitedUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val challengeBlockedUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val foregroundPriorityUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val readRateLimitRecovery = ReadRateLimitRecovery(
+        remainingMillis = { (rateLimitedUntilMs.get() - System.currentTimeMillis()).coerceAtLeast(0L) },
+        interruptedResponse = {
+            if (DesktopNetworkPolicy.enabled && (isChallengeCooldownActive() || DesktopNetworkPolicy.verifying))
+                403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>需要完成站点验证</html>"
+            else null
+        }
+    )
 
-    private fun noteRateLimitHit(cooldownMs: Long = 8_000L) {
-        val until = System.currentTimeMillis() + cooldownMs
+    private fun noteRateLimitHit(cooldownMs: Long = if (NetworkRecoveryPolicy.enabled) 2_000L else 8_000L) {
+        val now = System.currentTimeMillis()
+        val until = now + cooldownMs.coerceIn(0L, Long.MAX_VALUE - now)
         rateLimitedUntilMs.updateAndGet { prev -> maxOf(prev, until) }
+    }
+
+    fun noteRetryAfter(value: String?) {
+        if (NetworkRecoveryPolicy.enabled) noteRateLimitHit(NetworkRecoveryPolicy.retryAfterMillis(value))
     }
 
     private fun noteChallengeHit(cooldownMs: Long = 60_000L) {
@@ -2336,6 +2352,7 @@ object LinuxDoRepository {
 
     internal fun clearTransientRateLimit() {
         rateLimitedUntilMs.set(0L)
+        readRateLimitRecovery.reset()
     }
 
     internal fun clearChallengeCooldown() {
@@ -2345,13 +2362,15 @@ object LinuxDoRepository {
 
     /**
      * 用户主动下拉刷新或点击「重试」前的自愈预备：
-     * 1. 立即清零瞬态 429 冷却窗口与站点验证熔断窗口；
+     * 1. macOS / Android 保留服务器限流窗口；Android 继续检查原有 WebView 的健康状态；
      * 2. 触发底层传输通道活性自检与坏死连接池重建（如 Android 常驻 WebView 桥接挂起或 VPN 切网后 H2/QUIC 僵尸连接）。
      */
     suspend fun prepareForManualRecovery() {
-        clearTransientRateLimit()
-        clearChallengeCooldown()
-        evictHttpConnectionPools()
+        if (!NetworkRecoveryPolicy.enabled) clearTransientRateLimit()
+        if (!DesktopNetworkPolicy.enabled) {
+            clearChallengeCooldown()
+            evictHttpConnectionPools()
+        }
         try {
             UserApiKeyAuthManager.onPrepareManualRecovery?.invoke()
         } catch (cancelled: CancellationException) {
@@ -2380,6 +2399,24 @@ object LinuxDoRepository {
      * 2. 注意：当存在 `_t` 会话 Cookie 或走同源 WebView 时，绝不附加仅含 `one_time_password` 权限的 `User-Api-Key` 标头，避免 Discourse 因 Scope 限制返回 403 Forbidden！
      */
     private suspend fun executeHttp(
+        url: String, method: String = "GET", formParams: Map<String, String>? = null,
+        extraHeaders: Map<String, String> = emptyMap(), preserveFailure: Boolean = false,
+        clientOverride: HttpClient = sharedClient
+    ): Pair<Int, String>? {
+        if (!NetworkRecoveryPolicy.enabled || method.uppercase() !in setOf("GET", "HEAD")) {
+            return executeHttpUncoalesced(url, method, formParams, extraHeaders, preserveFailure, clientOverride)
+        }
+        val key = "${UserApiKeyAuthManager.sessionGeneration}|$method|$url|${extraHeaders.toSortedMap()}|${System.identityHashCode(clientOverride)}"
+        val generation = UserApiKeyAuthManager.sessionGeneration
+        return NetworkRecoveryPolicy.shareRead(key) {
+            readRateLimitRecovery.read(foreground = extraHeaders["Discourse-Background"] != "true") {
+                if (generation != UserApiKeyAuthManager.sessionGeneration) throw CancellationException("Session changed while waiting")
+                executeHttpUncoalesced(url, method, formParams, extraHeaders, true, clientOverride)
+            }?.takeIf { preserveFailure || isSuccessfulApiResponse(it.first, it.second) }
+        }
+    }
+
+    private suspend fun executeHttpUncoalesced(
         url: String,
         method: String = "GET",
         formParams: Map<String, String>? = null,
@@ -2387,6 +2424,13 @@ object LinuxDoRepository {
         preserveFailure: Boolean = false,
         clientOverride: HttpClient = sharedClient
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
+        if (DesktopNetworkPolicy.enabled) {
+            val verificationProbe = DesktopNetworkPolicy.verifying && java.net.URI(url).path == "/session/current.json"
+            if (isChallengeCooldownActive() && !verificationProbe) {
+                return@withContext if (preserveFailure) 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>cf-browser-verification</html>" else null
+            }
+        }
+        if (NetworkRecoveryPolicy.enabled && isRateLimitedNow()) return@withContext if (preserveFailure) 429 to "{\"errors\":[\"请求较频繁，请稍后再试\"]}" else null
         val isReadMethod = method.equals("GET", true) || method.equals("HEAD", true)
         val winningCookies = CookieSentinel.resolveWinningCookies()
         val rawT = winningCookies["_t"]?.value.orEmpty()
@@ -2465,7 +2509,7 @@ object LinuxDoRepository {
             // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
             if (!isReadMethod && UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 val writeResult = callWebView()
-                if (writeResult?.first == 429) noteRateLimitHit()
+                if (writeResult?.first == 429 && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
                 if (writeResult != null && looksLikeCloudflareChallenge(writeResult.second)) {
                     noteChallengeHit()
                 } else if (writeResult != null && isSuccessfulApiResponse(writeResult.first, writeResult.second)) {
@@ -2484,13 +2528,13 @@ object LinuxDoRepository {
             if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 for (attempt in 0 until maxReadAttempts) {
                     val candidate = callWebView()
-                    if (candidate?.first == 429) noteRateLimitHit()
+                    if (candidate?.first == 429 && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
                     if (candidate != null && looksLikeCloudflareChallenge(candidate.second)) {
                         noteChallengeHit()
                     }
                     if (candidate != null && isSuccessfulApiResponse(candidate.first, candidate.second)) {
                         if (isForegroundRequest) {
-                            rateLimitedUntilMs.set(0L)
+                            if (!NetworkRecoveryPolicy.enabled) rateLimitedUntilMs.set(0L)
                             UserPresenceService.recordSuccessfulForegroundRequest()
                         }
                         return@withContext candidate
@@ -2502,7 +2546,7 @@ object LinuxDoRepository {
                         candidate.first in setOf(429, 500, 502, 503, 504) &&
                             !looksLikeCloudflareChallenge(candidate.second)
                     )
-                    if (!retryable || attempt >= maxReadAttempts - 1) break
+                    if (!retryable || attempt >= maxReadAttempts - 1 || (NetworkRecoveryPolicy.enabled && candidate?.first == 429)) break
                     if (candidate == null) {
                         try {
                             UserApiKeyAuthManager.onPrepareManualRecovery?.invoke()
@@ -2564,7 +2608,7 @@ object LinuxDoRepository {
                     }
                     var status = response.status.value
                     var (text, cfMitigated, cfRay) = decorateOkHttpChallengeBody(response.headers, response.bodyAsText())
-                    if (status == 429) noteRateLimitHit()
+                    if (status == 429 && !NetworkRecoveryPolicy.enabled) noteRateLimitHit()
                     if (looksLikeCloudflareChallenge(text)) noteChallengeHit()
                     if (isMutation && status in setOf(403, 422) && !looksLikeCloudflareChallenge(text) && text.contains("CSRF", ignoreCase = true) && hasWebCookie) {
                         val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
@@ -2598,6 +2642,8 @@ object LinuxDoRepository {
                         cfRay = decorated.third
                         if (looksLikeCloudflareChallenge(text)) noteChallengeHit()
                     }
+                    // Include a 429 returned by an authentication/CSRF recovery request as well.
+                    if (status == 429 && NetworkRecoveryPolicy.enabled) noteRetryAfter(response.headers["Retry-After"])
                     // 避免在已挂载 WebView 的平台上，用 OkHttp 缺少 cf_clearance 触发的 Cloudflare HTML 403 覆盖真实响应
                     val trimmedBody = text.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart()
                     val isHtmlChallenge403 = status == 403 &&
@@ -2608,8 +2654,10 @@ object LinuxDoRepository {
                     }
                     if (isSuccessfulApiResponse(status, text)) {
                         if (isForegroundRequest) {
-                            rateLimitedUntilMs.set(0L)
-                            challengeBlockedUntilMs.set(0L)
+                            if (!NetworkRecoveryPolicy.enabled) rateLimitedUntilMs.set(0L)
+                            if (!DesktopNetworkPolicy.enabled) {
+                                challengeBlockedUntilMs.set(0L)
+                            }
                             UserPresenceService.recordSuccessfulForegroundRequest()
                         }
                         return@withContext status to text
@@ -2626,10 +2674,11 @@ object LinuxDoRepository {
                             responseSnippet = trimmedBody
                         )
                     }
+                    if (NetworkRecoveryPolicy.enabled && status == 429) return@withContext if (preserveFailure) status to text else null
                     if (looksLikeCloudflareChallenge(text) || status in listOf(404, 410) || (status == 403 && !isHtmlChallenge403)) {
                         break
                     }
-                    if (status in 500..599 && attempt < maxReadAttempts - 1) {
+                    if (!DesktopNetworkPolicy.enabled && status in 500..599 && attempt < maxReadAttempts - 1) {
                         evictHttpConnectionPools()
                     }
                 } catch (cancelled: CancellationException) {
@@ -2678,7 +2727,7 @@ object LinuxDoRepository {
 
     /**
      * 静默无感兑换系统浏览器回调的 OTP 令牌（免打开 WebView 页面，从而规避整页 HTML 导航的 Cloudflare Turnstile 验证）：
-     * - 先通过 OkHttp `sharedClient` 获取 `/session/csrf.json` 与 `_forum_session`；
+     * - 先通过不跟随重定向的专用客户端获取 `/session/csrf.json` 与 `_forum_session`；
      * - 再 POST `/session/otp/$otp` 直接捕获服务端下发的 `_t` 会话 Cookie 并同步至系统 `CookieManager`；
      * - 若直连兑换成功返回 `true`（直接完成登录），若被拦截则返回 `false` 交由 WebView 兜底。
      */
@@ -2756,39 +2805,7 @@ object LinuxDoRepository {
                 return@withContext false
             }
 
-            val initialCookie = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
-            val csrfResp = sharedClient.get("https://linux.do/session/csrf.json") {
-                header("Accept", "application/json")
-                header("X-Requested-With", "XMLHttpRequest")
-                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
-                if (initialCookie.isNotEmpty()) header("Cookie", initialCookie)
-            }
-            csrfResp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                ingestSetCookieHeader(setCookie, domain = "linux.do")
-                UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke(setCookie)
-            }
-            val csrfBody = csrfResp.bodyAsText()
-            val csrfToken = runCatching {
-                json.parseToJsonElement(csrfBody).jsonObject["csrf"]?.jsonPrimitive?.contentOrNull
-            }.getOrNull() ?: return@withContext false
-
-            val updatedCookie = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
-            val otpResp = sharedClient.submitForm(
-                url = "https://linux.do/session/otp/${otp.trim()}",
-                formParameters = Parameters.Empty
-            ) {
-                header("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
-                header("X-CSRF-Token", csrfToken)
-                header("X-Requested-With", "XMLHttpRequest")
-                UserApiKeyAuthManager.customUserAgent?.let { header("User-Agent", it) }
-                if (updatedCookie.isNotEmpty()) header("Cookie", updatedCookie)
-            }
-            otpResp.headers.getAll("Set-Cookie")?.forEach { setCookie ->
-                ingestSetCookieHeader(setCookie, domain = "linux.do")
-                UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke(setCookie)
-            }
-            val otpBody = runCatching { otpResp.bodyAsText() }.getOrDefault("")
-            if (otpResp.status.value in 200..399 && !looksLikeCloudflareChallenge(otpBody)) {
+            if (exchangeOtpSessionCookies(otp, otpExchangeClient)) {
                 return@withContext verifyAndFinalizeOtpSession(previousT)
             }
         } catch (ce: kotlinx.coroutines.CancellationException) {
@@ -3262,6 +3279,9 @@ object LinuxDoRepository {
     private fun isConfirmedDiscourseUnauthenticatedSessionResponse(status: Int, rawBody: String): Boolean {
         if (looksLikeCloudflareChallenge(rawBody)) return false
         val trimmed = rawBody.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart()
+        // Discourse SessionController.current returns an EMPTY 404 for guests.
+        // The caller still confirms twice; HTML gateway errors remain excluded.
+        if (status == 404 && trimmed.isBlank()) return true
         if (!trimmed.startsWith("{")) return false
         val root = runCatching { json.parseToJsonElement(trimmed) as? JsonObject }.getOrNull() ?: return false
         val rawErrorType = root["error_type"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
@@ -3306,6 +3326,11 @@ object LinuxDoRepository {
      * 3. `/u/{username}/summary.json`（获取 days_visited、time_read、posts_read_count、likes_received、likes_given、topic_count、post_count、badges）
      */
     suspend fun fetchCurrentUserProfile(background: Boolean = false): UserFullProfileSummary? = withContext(Dispatchers.IO) {
+        // The dedicated browser owns session recovery until it finishes. An old
+        // transport's background 404 must not log out and cancel that recovery.
+        if (DesktopNetworkPolicy.enabled && DesktopNetworkPolicy.verifying) {
+            return@withContext UserApiKeyAuthManager.fullProfileCache
+        }
         val generation = UserApiKeyAuthManager.sessionGeneration
         val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
         val cachedAccount = UserApiKeyAuthManager.currentUser

@@ -48,6 +48,7 @@ import do_.linux.lindo.ui.BackNavigationBridge
 import do_.linux.lindo.ui.DesktopTrayCommand
 import do_.linux.lindo.ui.LinDoApp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -535,48 +536,10 @@ private object DesktopStateStore {
     }
     private val stateFile: File by lazy { File(stateDir, "session.properties") }
 
-    fun load(): Properties = synchronized(lock) {
-        val props = Properties()
-        if (stateFile.isFile) {
-            runCatching {
-                stateFile.inputStream().use { props.load(it) }
-            }
-        }
-        props
-    }
-
-    fun update(mutator: Properties.() -> Unit) = synchronized(lock) {
-        runCatching {
-            val props = load()
-            props.mutator()
-            val tmp = File(stateDir, "session.properties.tmp")
-            tmp.outputStream().use { out ->
-                props.store(out, "Lindo Desktop State")
-            }
-            restrictFilePermissionsToOwner(tmp, isDirectory = false)
-            var moved = false
-            for (attempt in 0 until 3) {
-                try {
-                    Files.move(tmp.toPath(), stateFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    restrictFilePermissionsToOwner(stateFile, isDirectory = false)
-                    moved = true
-                    break
-                } catch (_: FileSystemException) {
-                    if (attempt < 2) {
-                        runCatching { Thread.sleep(15L * (attempt + 1)) }
-                    }
-                }
-            }
-            if (!moved) {
-                runCatching {
-                    val bytes = Files.readAllBytes(tmp.toPath())
-                    Files.write(stateFile.toPath(), bytes)
-                    restrictFilePermissionsToOwner(stateFile, isDirectory = false)
-                }
-                runCatching { Files.deleteIfExists(tmp.toPath()) }
-            }
-        }
-    }
+    private val store by lazy { DesktopPreferenceStore(stateFile) }
+    fun load(): Properties = store.load()
+    fun update(immediate: Boolean = false, mutator: Properties.() -> Unit) = store.update(immediate, mutator)
+    fun flush() = store.flush()
 
     private fun Properties.putOrRemove(key: String, value: String?) {
         if (value == null) remove(key) else setProperty(key, value)
@@ -730,7 +693,7 @@ private object DesktopStateStore {
             }
         }
         UserApiKeyAuthManager.onPersistPendingKey = { pkB64, nonce ->
-            update {
+            update(immediate = true) {
                 putOrRemove("pending_rsa_priv_b64", pkB64)
                 putOrRemove("pending_rsa_nonce", nonce)
                 setProperty("pending_rsa_created_at", UserApiKeyAuthManager.pendingAuthorizationCreatedAt().toString())
@@ -739,7 +702,7 @@ private object DesktopStateStore {
         }
         UserApiKeyAuthManager.onPersistUiPrefs = { fontScale, darkTheme, enableAnimations ->
             update {
-                setProperty("ui_font_scale_v2", fontScale.toString())
+                setProperty(if (IS_MAC_OS) "ui_font_scale_mac_v3" else "ui_font_scale_v2", fontScale.toString())
                 setProperty("ui_dark_theme", darkTheme.toString())
                 setProperty("ui_enable_animations", enableAnimations.toString())
             }
@@ -989,19 +952,9 @@ private class SmoothFrameWheelEvent(
 )
 
 /**
- * 120Hz–240Hz VSync 帧锁平滑滚轮引擎：
- *
- * 根因修复：
- * 1. OpenJDK macOS (`CPlatformResponder$DeltaAccumulator`) 在使用实体刻度鼠标滚轮（`SCROLL_PHASE_UNSUPPORTED`）时，
- *    固定发出 `wheelRotation = ±1` 且 `preciseWheelRotation = wheelRotation * 0.1`、`scrollAmount = 1`。
- *    Compose Desktop (`DesktopScrollable.desktop.kt`) 检查 `abs(precise - wheelRotation) > 0.001` 为 true，
- *    误判实体鼠标滚轮为触控板而关闭平滑插值，每格仅步进 `0.1 * 10dp = 1dp`。
- * 2. 反之，Apple 原生触控板 / Magic Mouse / Windows Precision Touchpad 已经具备系统内核级 120Hz/144Hz 像素惯性曲线，
- *    若被二次定时拦截（哪怕只有首帧 `abs(precise) >= 0.5` 时误拦截），就会因 `ScheduledExecutorService` 与 Metal/DirectX VSync 异频拍频而产生明显掉帧感！
- *
- * 本引擎因此严格分离两条通道：
- * - **原生触控板 / Magic Mouse / Precision Touchpad**：100% 零拦截、零延迟原样直通 Skiko VSync 管线；
- * - **仅限实体刻度鼠标滚轮**（严格满足 `isDiscreteMouseWheelNotch` 硬件特征）：由 Compose `withFrameNanos` 严格锁定显示器真实 VSync 帧驱动子像素阻尼平滑，彻底废除异步线程池定时器拍频抖动。
+ * Frame-driven smoothing for recognized notched wheels. Fractional trackpad
+ * input keeps the native path. The macOS 0.1 ratio is a conservative heuristic,
+ * not a guarantee for every mouse/driver. Event frequency is not a device type.
  */
 internal object DesktopSmoothWheelEngine {
     private var installed = false
@@ -1010,7 +963,7 @@ internal object DesktopSmoothWheelEngine {
     private var trackedWindow: AwtWindow? = null
 
     private var activeTargetHz: Int = if (IS_MAC_OS) 120 else 60
-    private var vsyncDemandTick by mutableIntStateOf(0)
+    private val frameRequests = Channel<Unit>(Channel.CONFLATED)
 
     // 以下状态仅在 AWT EventDispatchThread（亦即 Compose Desktop UI 主线程）访问
     private var remainingUnitsY: Double = 0.0
@@ -1029,6 +982,17 @@ internal object DesktopSmoothWheelEngine {
     private var anchorBaseModifiers: Int = 0
 
     fun attachToWindow(window: AwtWindow?) {
+        if (trackedWindow !== window) {
+            remainingUnitsY = 0.0
+            remainingUnitsX = 0.0
+            lastFrameNano = 0L
+            lastRawEventMs = 0L
+            lastNotchMs = 0L
+            fastNotchVelocity = 1.0
+            trackpadGestureActive = false
+            anchorComponent = null
+            while (frameRequests.tryReceive().isSuccess) { }
+        }
         trackedWindow = window
         if (!installed) {
             installed = true
@@ -1049,15 +1013,17 @@ internal object DesktopSmoothWheelEngine {
 
     @Composable
     fun VSyncDriver() {
-        val demand = vsyncDemandTick
-        if (demand <= 0) return
-        LaunchedEffect(demand) {
-            lastFrameNano = 0L
-            while (true) {
-                val keepGoing = withFrameNanos { frameTimeNanos ->
-                    stepOnVsyncFrame(frameTimeNanos)
-                }
-                if (!keepGoing) break
+        // Keep one coroutine for this window. Additional notches only add motion;
+        // they must not cancel the frame await or reset its elapsed time.
+        LaunchedEffect(Unit) {
+            for (request in frameRequests) {
+                lastFrameNano = 0L
+                do {
+                    val keepGoing = withFrameNanos { frameTimeNanos ->
+                        while (frameRequests.tryReceive().isSuccess) { /* coalesce wakeups, not motion */ }
+                        stepOnVsyncFrame(frameTimeNanos)
+                    }
+                } while (keepGoing)
             }
         }
     }
@@ -1075,12 +1041,7 @@ internal object DesktopSmoothWheelEngine {
         return rawInt == 0 && absPrecise in 1e-4..0.49
     }
 
-    /**
-     * 精准判定是否为「实体离散刻度鼠标滚轮」事件：
-     * - macOS (`CPlatformResponder.java`): 仅当底层 `scrollPhase == SCROLL_PHASE_UNSUPPORTED`（非触控板/非 Magic Mouse）时，
-     *   OpenJDK 才会合成 `rawInt != 0` 且 `rawPrecise == rawInt * 0.1` 的固定比例刻度；其余任何连续像素浮点值均为原生触控板，必须零拦截直通！
-     * - Windows / Linux: 实体滚轮刻度必为整数步进 (`rawInt != 0 && abs(rawPrecise - rawInt) < 1e-3`)，Precision Touchpad 小数帧全部直通。
-     */
+    /** Preserve continuous trackpad input; never reject a macOS notch just because it arrived quickly. */
     internal fun isDiscreteMouseWheelNotch(
         rawInt: Int,
         rawPrecise: Double,
@@ -1090,7 +1051,7 @@ internal object DesktopSmoothWheelEngine {
     ): Boolean {
         if (trackpadActive || rawInt == 0) return false
         return if (isMacOs) {
-            abs(rawPrecise - rawInt * 0.1) < 1e-3 && dtMs >= 14L
+            abs(rawPrecise - rawInt * 0.1) < 1e-3
         } else {
             abs(rawPrecise - rawInt.toDouble()) < 1e-3 && dtMs >= 10L
         }
@@ -1153,7 +1114,8 @@ internal object DesktopSmoothWheelEngine {
             return false
         }
 
-        val nowMs = System.currentTimeMillis()
+        // Use event creation time, not the time an overloaded EDT finally handles it.
+        val nowMs = event.`when`.takeIf { it > 0L } ?: System.currentTimeMillis()
         val dtMs = if (lastRawEventMs == 0L) Long.MAX_VALUE else (nowMs - lastRawEventMs).coerceAtLeast(0L)
         lastRawEventMs = nowMs
 
@@ -1181,7 +1143,6 @@ internal object DesktopSmoothWheelEngine {
             if (remainingUnitsY != 0.0 || remainingUnitsX != 0.0) {
                 remainingUnitsY = 0.0
                 remainingUnitsX = 0.0
-                vsyncDemandTick = 0
             }
             return false
         }
@@ -1227,8 +1188,8 @@ internal object DesktopSmoothWheelEngine {
             remainingUnitsY = (remainingUnitsY + deltaUnits).coerceIn(-140.0, 140.0)
         }
 
-        activeTargetHz = resolveTargetRefreshHz(targetWindow)
-        vsyncDemandTick = if (vsyncDemandTick >= 1_000_000) 1 else vsyncDemandTick + 1
+        if (lastFrameNano == 0L) activeTargetHz = resolveTargetRefreshHz(targetWindow)
+        frameRequests.trySend(Unit)
         return true
     }
 
@@ -1238,7 +1199,6 @@ internal object DesktopSmoothWheelEngine {
             remainingUnitsY = 0.0
             remainingUnitsX = 0.0
             lastFrameNano = 0L
-            vsyncDemandTick = 0
             return false
         }
 
@@ -1281,7 +1241,6 @@ internal object DesktopSmoothWheelEngine {
 
         if (!active) {
             lastFrameNano = 0L
-            vsyncDemandTick = 0
         }
         return active
     }
@@ -1482,10 +1441,35 @@ internal object DesktopTrayController {
     }
 
     internal fun buildMultiResTrayImage(unreadCount: Int): Image {
+        if (DesktopOsKind.current == DesktopOsKind.MACOS) {
+            return BaseMultiResolutionImage(*intArrayOf(22, 44, 66).map { renderMacTrayCanvas(it, unreadCount) }.toTypedArray())
+        }
         val variants = TRAY_VARIANT_SIZES.map { sizePx ->
             renderTrayCanvas(sizePx = sizePx, scale = sizePx / 22f, unreadCount = unreadCount)
         }.toTypedArray()
         return BaseMultiResolutionImage(*variants)
+    }
+
+    private val macTemplate by lazy {
+        DesktopTrayController::class.java.getResourceAsStream("/tray_mascot_template.png")!!.use { ImageIO.read(it) }
+    }
+    internal fun renderMacTrayCanvas(sizePx: Int, unreadCount: Int): BufferedImage {
+        val image = BufferedImage(sizePx, sizePx, BufferedImage.TYPE_INT_ARGB)
+        image.createGraphics().apply {
+            setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+            drawImage(macTemplate, 0, 0, sizePx, sizePx, null)
+            if (unreadCount > 0) {
+                scale(sizePx / 22.0, sizePx / 22.0)
+                composite = java.awt.AlphaComposite.Clear
+                fill(java.awt.geom.Ellipse2D.Double(16.0, 0.5, 5.0, 5.0))
+                composite = java.awt.AlphaComposite.SrcOver
+                color = Color.BLACK
+                fill(java.awt.geom.Ellipse2D.Double(17.0, 1.5, 3.0, 3.0))
+            }
+            dispose()
+        }
+        return image
     }
 
     internal fun renderWindowsTaskbarBadgeImage(unreadCount: Int): Image? {
@@ -1691,6 +1675,7 @@ fun main(args: Array<String> = emptyArray()) {
         System.setProperty("skiko.gpu.resourceCacheLimit", "268435456")
     }
 
+    MacKeyboardState.warmUp()
     val initialDeepLink = extractDeepLinkArg(args)
     var reopenMainWindowAction: (() -> Unit)? = null
     var quitApplicationAction: (() -> Unit)? = null
@@ -1764,6 +1749,7 @@ fun main(args: Array<String> = emptyArray()) {
     when (DesktopOsKind.current) {
         DesktopOsKind.MACOS -> {
             System.setProperty("apple.awt.application.name", LinDoCommonCopy.APP_NAME.text)
+            System.setProperty("apple.awt.enableTemplateImages", "true")
         }
         DesktopOsKind.WINDOWS -> {
             Thread(::ensureWindowsProtocolHandlersRegistered, "lindo-win-protocol-reg").apply {
@@ -1775,6 +1761,13 @@ fun main(args: Array<String> = emptyArray()) {
     }
 
     DesktopStateStore.initAndWire()
+    if (IS_MAC_OS) {
+        MacDesktopSettings.install(DesktopStateStore.load()) { change -> DesktopStateStore.update(mutator = change) }
+        MacBrowserTransport.install(DesktopStateStore.load().getProperty("mac_browser_session") == "true", { enabled ->
+            DesktopStateStore.update { setProperty("mac_browser_session", enabled.toString()) }
+        }, { currentMainWindow?.apply { isVisible = true; toFront(); requestFocus() } })
+    }
+    Runtime.getRuntime().addShutdownHook(Thread({ runCatching { DesktopStateStore.flush() } }, "lindo-preferences-flush"))
     stateInitLatch.countDown()
     if (initialDeepLink != null) {
         UserApiKeyAuthManager.handleAuthRedirectUri(initialDeepLink)
@@ -1971,6 +1964,7 @@ fun main(args: Array<String> = emptyArray()) {
                         activeWindowRef = null
                     }
                     if (currentMainWindow === window) {
+                        DesktopSmoothWheelEngine.attachToWindow(null)
                         currentMainWindow = null
                     }
                 }

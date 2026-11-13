@@ -10,6 +10,26 @@ plugins {
     alias(libs.plugins.composeCompiler)
 }
 
+// Keep dependency metadata intact and select the same patched artifact for
+// Kotlin's JAR artifact views, tests and the native packager. Android never opts in.
+if (org.gradle.internal.os.OperatingSystem.current().isMacOsX) {
+    val macInputPatched = Attribute.of("lindo.macInputPatched", Boolean::class.javaObjectType)
+    dependencies.attributesSchema.attribute(macInputPatched)
+    dependencies.artifactTypes.getByName("jar").attributes.attribute(macInputPatched, false)
+    dependencies.registerTransform(do_.linux.lindo.buildlogic.MacComposeInputPatch::class) {
+        from.attribute(macInputPatched, false)
+        to.attribute(macInputPatched, true)
+    }
+    // Opt in once Kotlin has created the JVM compilation configurations.
+    afterEvaluate {
+        configurations.matching {
+            it.name.startsWith("desktop") && it.name.endsWith("Classpath")
+        }.configureEach {
+            attributes.attribute(macInputPatched, true)
+        }
+    }
+}
+
 kotlin {
     androidTarget {
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
@@ -69,6 +89,7 @@ kotlin {
         desktopMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutines.swing)
+            implementation("net.java.dev.jna:jna:5.17.0")
         }
 
         desktopTest.dependencies {
@@ -120,6 +141,11 @@ dependencies {
 compose.desktop {
     application {
         mainClass = "do_.linux.lindo.MainKt"
+        // Native JNA entry points and the versioned Compose input bridge must retain their names.
+        // The packaged release uses the same verified bytecode as desktop tests.
+        if (org.gradle.internal.os.OperatingSystem.current().isMacOsX) {
+            buildTypes.release.proguard.isEnabled.set(false)
+        }
         jvmArgs += buildList {
             add("-XX:+IgnoreUnrecognizedVMOptions")
             add("-XX:+UseZGC")
@@ -132,10 +158,12 @@ compose.desktop {
             if (org.gradle.internal.os.OperatingSystem.current().isMacOsX) {
                 add("-Dsun.java2d.metal=true")
                 add("-Dapple.awt.application.name=Lindo")
+                add("-Dapple.awt.enableTemplateImages=true")
             }
         }
 
         nativeDistributions {
+            modules("java.net.http", "jdk.crypto.ec")
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
             packageVersion = "1.0.32"
@@ -143,6 +171,7 @@ compose.desktop {
             vendor = "Lindo Community"
 
             macOS {
+                packageBuildVersion = "1.0.33"
                 bundleID = "do.linux.lindo"
                 iconFile.set(project.file("src/desktopMain/resources/icon.icns"))
                 infoPlist {
