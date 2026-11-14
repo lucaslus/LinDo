@@ -841,6 +841,10 @@ class PreLaunchFullAppUiE2ETest {
         onNodeWithContentDescription("展开搜索").edtClick()
         onNodeWithText("我的").edtClick()
         waitForText("外观")
+        onEdt { onNodeWithText("深色").assertDoesNotExist() }
+        // The section label and setting share this title; the clickable row is unique.
+        onNode(hasText("外观") and hasClickAction()).edtScrollToVisible()
+        onNode(hasText("外观") and hasClickAction()).edtClick()
         onNodeWithText("深色").edtScrollToVisible()
         onNodeWithText("深色").edtClick()
         waitUntil { AppAppearance.dark }
@@ -855,19 +859,22 @@ class PreLaunchFullAppUiE2ETest {
         onNodeWithText("浅色").edtClick()
         waitUntil { !AppAppearance.dark }
         savePreviewSnapshotIfConfigured(snapshot)
-        onNodeWithText("图标底色").edtScrollToVisible()
+        pickSetting("图标底色")
         pickSetting("黑底")
         waitUntil { AppAppearance.iconAppearance == "dark" }
+        pickSetting("首页列表视图")
         pickSetting("紧凑")
         onEdt { onNodeWithText("紧凑").assertIsSelected() }
         val persistedSearchDefaults = mutableListOf<Boolean>()
         UserApiKeyAuthManager.onPersistHomeSearchExpanded = { persistedSearchDefaults.add(it) }
+        pickSetting("首页搜索框")
         pickSetting("收起")
         assertFalse(UserApiKeyAuthManager.uiHomeSearchExpanded)
         onEdt { onNodeWithText("收起").assertIsSelected() }
         pickSetting("展开")
         assertTrue(UserApiKeyAuthManager.uiHomeSearchExpanded)
         assertEquals(listOf(false, true), persistedSearchDefaults)
+        pickSetting("阅读字号")
         pickSetting("大")
         onEdt { onNodeWithText("大").assertIsSelected() }
         pickSetting("标准")

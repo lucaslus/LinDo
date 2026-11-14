@@ -1,5 +1,7 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.animation.*
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -8,7 +10,7 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
@@ -18,27 +20,59 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** A shared, inline setting block. Width constraints, never the OS, determine its layout. */
+/** Inline choices start collapsed; presentation and motion are shared by every platform. */
 @Composable
-internal fun StackedSetting(
+internal fun ExpandableSetting(
     icon: ImageVector,
     title: String,
+    value: String,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val palette = LocalPalette.current
-    Column(Modifier.fillMaxWidth().padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 14.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    val animations = LocalLinDoAnimations.current
+    var expanded by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = LinDoTokens.SettingRowHeight)
+                .semantics { stateDescription = if (expanded) "已展开" else "已收起" }
+                .pointerHoverIcon(PointerIcon.Hand)
+                .clickable(role = Role.Button, onClickLabel = if (expanded) "收起" else "展开") { expanded = !expanded }
+                .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Icon(icon, null, Modifier.size(20.dp), tint = palette.inkSecondary)
             Spacer(Modifier.width(14.dp))
-            Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+            Text(title, modifier = Modifier.weight(1f), fontSize = 15.sp,
+                fontWeight = FontWeight.Medium, color = palette.inkPrimary)
+            if (!expanded) {
+                Spacer(Modifier.width(12.dp))
+                Text(value, modifier = Modifier.widthIn(max = 120.dp), fontSize = 13.sp,
+                    color = palette.inkTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.width(8.dp))
+            Icon(if (expanded) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
+                null, Modifier.size(14.dp), tint = palette.inkTertiary)
         }
-        Spacer(Modifier.height(10.dp))
-        Column(Modifier.widthIn(max = 600.dp).fillMaxWidth(), content = content)
+        AnimatedVisibility(
+            visible = expanded,
+            enter = if (animations) expandVertically(expandFrom = Alignment.Top) + fadeIn() else EnterTransition.None,
+            exit = if (animations) shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut() else ExitTransition.None
+        ) {
+            Column(Modifier.padding(horizontal = LinDoTokens.PageHorizontalPadding)
+                .padding(bottom = 14.dp).widthIn(max = 600.dp).fillMaxWidth(), content = content)
+        }
+        HorizontalDivider(Modifier.padding(start = 50.dp, end = LinDoTokens.PageHorizontalPadding),
+            thickness = 0.5.dp, color = palette.hairline)
     }
 }
 

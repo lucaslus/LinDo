@@ -11917,46 +11917,42 @@ internal fun CommunityProfileScreen(
                 val fontScalePreset = ReaderFontScalePreset.fromScale(fontScale)
                 Column(Modifier.fillMaxWidth().background(palette.cardSurface)) {
                     LinDoGroupHeader(text = LinDoMessagesCopy.SECTION_APPEARANCE.text)
-                    StackedSetting(LinDoIcons.Sun, "外观") {
+                    ExpandableSetting(LinDoIcons.Sun, "外观", appearanceLabel(AppAppearance.appearance)) {
                         AppearanceChoices(AppAppearance.appearance, AppAppearance::selectAppearance)
                     }
-                    StackedSetting(LinDoIcons.AppsGrid, "图标底色") {
+                    ExpandableSetting(LinDoIcons.AppsGrid, "图标底色", appearanceLabel(AppAppearance.iconAppearance, icon = true)) {
                         AppearanceChoices(AppAppearance.iconAppearance, AppAppearance::selectIconAppearance, icon = true)
                         if (AppAppearance.iconChangeFailed) Text("图标未能更新，请稍后重试",
                             color = palette.inkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
                     }
-                    StackedSetting(LinDoIcons.Palette, LinDoMessagesCopy.ROW_THEME_COLOR.text) {
+                    ExpandableSetting(LinDoIcons.Palette, LinDoMessagesCopy.ROW_THEME_COLOR.text, themeOption.label) {
                         SettingsThemeChoices(themeOption, onSelectThemeOption)
                     }
                     if (onOpenAppIcon != null) {
                         val icon = LocalLinDoAppIcon.current ?: LinDoAppIcon.Classic
-                        StackedSetting(LinDoIcons.AppsGrid, LinDoMessagesCopy.ROW_APP_ICON.text) {
-                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                                .clip(RoundedCornerShape(8.dp)).clickable(onClick = onOpenAppIcon)
-                                .padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                LinDoLauncherIconTile(icon, Modifier.size(36.dp))
-                                Spacer(Modifier.width(12.dp))
-                                Text(icon.artwork.label, fontSize = 14.sp, color = palette.inkSecondary, modifier = Modifier.weight(1f))
-                                Text("更换", fontSize = 13.sp, color = palette.inkTertiary)
-                                Spacer(Modifier.width(6.dp))
-                                Icon(LinDoIcons.ChevronRight, null, Modifier.size(14.dp), tint = palette.inkTertiary)
-                            }
-                        }
+                        LinDoSettingRow(
+                            icon = LinDoIcons.AppsGrid,
+                            title = LinDoMessagesCopy.ROW_APP_ICON.text,
+                            value = icon.artwork.label,
+                            showDivider = false,
+                            onClick = onOpenAppIcon
+                        )
                     }
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     LinDoGroupHeader(text = "阅读")
-                    StackedSetting(
+                    ExpandableSetting(
                         if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
-                        LinDoMessagesCopy.ROW_HOME_FEED_VIEW.text
+                        LinDoMessagesCopy.ROW_HOME_FEED_VIEW.text,
+                        FeedDensityMode.entries.first { it.isCompact == isCompactFeed }.labelCopy.text
                     ) {
                         SettingsChoices(FeedDensityMode.entries, FeedDensityMode.entries.first { it.isCompact == isCompactFeed },
                             label = { it.labelCopy.text }, onSelect = { if (it.isCompact != isCompactFeed) onToggleCompactFeed() })
                     }
-                    StackedSetting(LinDoIcons.Search, "首页搜索框") {
+                    ExpandableSetting(LinDoIcons.Search, "首页搜索框", if (defaultSearchExpanded) "展开" else "收起") {
                         SettingsChoices(listOf(true, false), defaultSearchExpanded,
                             label = { if (it) "展开" else "收起" }, onSelect = onDefaultSearchExpandedChange)
                     }
-                    StackedSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text) {
+                    ExpandableSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text, fontScalePreset.labelCopy.text) {
                         SettingsChoices(ReaderFontScalePreset.entries, fontScalePreset,
                             label = { it.labelCopy.text }, onSelect = { onChangeFontScale(it.scale) })
                         Text("预览：恰好的字号，让阅读更舒服。", fontSize = 16.sp, lineHeight = 24.sp,
@@ -18961,14 +18957,16 @@ fun LinDoReadRegressionPreview(scene: String, cooked: String = "", onClose: () -
     }
 }
 
+private fun appearanceLabel(value: String, icon: Boolean = false): String = when (value) {
+    "light" -> if (icon) "白底" else "浅色"
+    "dark" -> if (icon) "黑底" else "深色"
+    else -> "跟随系统"
+}
+
 @Composable
 private fun AppearanceChoices(selected: String, onSelect: (String) -> Unit, icon: Boolean = false) {
     SettingsChoices(listOf("system", "light", "dark"), selected,
-        label = { when (it) {
-            "light" -> if (icon) "白底" else "浅色"
-            "dark" -> if (icon) "黑底" else "深色"
-            else -> "跟随系统"
-        } }, onSelect = onSelect)
+        label = { appearanceLabel(it, icon) }, onSelect = onSelect)
 }
 
 @Composable

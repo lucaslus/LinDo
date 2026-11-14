@@ -41,8 +41,8 @@ class ThemeControlsRegressionTest {
             CompositionLocalProvider(LocalPalette provides palette, LocalDensity provides Density(1f, systemScale * preset.scale)) {
                 MaterialTheme(colorScheme = buildMaterialSchemeFromPalette(palette)) {
                     Column(Modifier.fillMaxSize().background(palette.canvas).verticalScroll(rememberScrollState())) {
-                        StackedSetting(LinDoIcons.Palette, "主题色") { SettingsThemeChoices(selected) { selected = it } }
-                        StackedSetting(LinDoIcons.Sliders, "阅读字号") {
+                        ExpandableSetting(LinDoIcons.Palette, "主题色", selected.label) { SettingsThemeChoices(selected) { selected = it } }
+                        ExpandableSetting(LinDoIcons.Sliders, "阅读字号", preset.labelCopy.text) {
                             SettingsChoices(ReaderFontScalePreset.entries, preset, { it.labelCopy.text }) { preset = it }
                             Text("预览：恰好的字号，让阅读更舒服。", color = palette.inkSecondary)
                         }
@@ -50,12 +50,21 @@ class ThemeControlsRegressionTest {
                 }
             }
         }
+        edt {
+            onNodeWithText("蓝").assertExists()
+            onNodeWithText("标准").assertExists()
+            onNodeWithText("紫").assertDoesNotExist()
+            onNodeWithText("最大").assertDoesNotExist()
+        }
+        save(if (dark) "settings-collapsed-dark.png" else "settings-collapsed-large-light.png")
+        edt { onNodeWithText("主题色").performClick() }
         for (theme in BrandThemeOption.displayOrder) {
             edt { onNodeWithText(theme.label).performScrollTo().performClick() }
             waitForIdle()
             assertEquals(theme, selected)
             edt { onNodeWithText(theme.label).assertIsSelected() }
         }
+        edt { onNodeWithText("阅读字号").performScrollTo().performClick() }
         for (size in ReaderFontScalePreset.entries) {
             edt { onNodeWithText(size.labelCopy.text).performScrollTo().performClick() }
             waitForIdle()
@@ -68,6 +77,20 @@ class ThemeControlsRegressionTest {
         }
         edt { onNodeWithText("金").performScrollTo().performClick() }
         save(if (dark) "settings-five-sizes-dark.png" else "settings-five-sizes-large-light.png")
+        edt {
+            onNodeWithText("主题色").performScrollTo().performClick()
+            onNodeWithText("阅读字号").performScrollTo().performClick()
+        }
+        waitForIdle()
+        edt {
+            onNodeWithText("紫").assertDoesNotExist()
+            onNodeWithText("标准").assertDoesNotExist()
+            onNodeWithText("金").assertExists()
+            onNodeWithText("最大").assertExists()
+            onNodeWithText("阅读字号").performClick()
+        }
+        waitForIdle()
+        edt { onNodeWithText("最大").assertIsSelected() }
     }
     @Test fun blueLoginUsesSameThemeAndBothLoginActions() = runDesktopComposeUiTest(width = 390, height = 840) {
         var primary = 0; var browser = 0; var guests = 0
