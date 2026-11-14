@@ -41,9 +41,12 @@ class ThemeControlsRegressionTest {
             CompositionLocalProvider(LocalPalette provides palette, LocalDensity provides Density(1f, systemScale * preset.scale)) {
                 MaterialTheme(colorScheme = buildMaterialSchemeFromPalette(palette)) {
                     Column(Modifier.fillMaxSize().background(palette.canvas).verticalScroll(rememberScrollState())) {
-                        ExpandableSetting(LinDoIcons.Palette, "主题色", selected.label) { SettingsThemeChoices(selected) { selected = it } }
-                        ExpandableSetting(LinDoIcons.Sliders, "阅读字号", preset.labelCopy.text) {
-                            SettingsChoices(ReaderFontScalePreset.entries, preset, { it.labelCopy.text }) { preset = it }
+                        ExpandableSetting(LinDoIcons.Palette, "主题色", selected.label,
+                            valueVisual = { SettingsThemeSwatch(selected) }) { SettingsThemeChoices(selected) { selected = it } }
+                        ExpandableSetting(LinDoIcons.Sliders, "阅读字号", preset.labelCopy.text,
+                            valueVisual = { SettingsFontPreview(preset.scale, palette.inkSecondary) }) {
+                            SettingsChoices(ReaderFontScalePreset.entries, preset, { it.labelCopy.text },
+                                optionVisual = { size, tint -> SettingsFontPreview(size.scale, tint) }) { preset = it }
                             Text("预览：恰好的字号，让阅读更舒服。", color = palette.inkSecondary)
                         }
                     }

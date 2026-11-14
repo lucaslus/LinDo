@@ -1,6 +1,7 @@
 package do_.linux.lindo.ui
 
 import androidx.compose.animation.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,6 +23,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.style.TextOverflow
@@ -36,6 +38,7 @@ internal fun ExpandableSetting(
     icon: ImageVector,
     title: String,
     value: String,
+    valueVisual: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val palette = LocalPalette.current
@@ -56,6 +59,10 @@ internal fun ExpandableSetting(
                 fontWeight = FontWeight.Medium, color = palette.inkPrimary)
             if (!expanded) {
                 Spacer(Modifier.width(12.dp))
+                if (valueVisual != null) {
+                    valueVisual()
+                    Spacer(Modifier.width(7.dp))
+                }
                 Text(value, modifier = Modifier.widthIn(max = 120.dp), fontSize = 13.sp,
                     color = palette.inkTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -81,6 +88,7 @@ internal fun <T> SettingsChoices(
     options: List<T>,
     selected: T,
     label: (T) -> String,
+    optionVisual: (@Composable (T, Color) -> Unit)? = null,
     onSelect: (T) -> Unit
 ) {
     val palette = LocalPalette.current
@@ -99,10 +107,14 @@ internal fun <T> SettingsChoices(
                             .background(if (active) palette.activeChipBg else Color.Transparent)
                             .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })
                             .padding(horizontal = 4.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
-                            Text(label(option), fontSize = 14.sp, lineHeight = 20.sp,
-                                fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
-                                color = if (active) palette.activeChipText else palette.inkSecondary,
-                                textAlign = TextAlign.Center)
+                            val tint = if (active) palette.activeChipText else palette.inkSecondary
+                            Column(horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                optionVisual?.invoke(option, tint)
+                                Text(label(option), fontSize = 14.sp, lineHeight = 20.sp,
+                                    fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+                                    color = tint, textAlign = TextAlign.Center)
+                            }
                         }
                     }
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
@@ -135,5 +147,36 @@ internal fun SettingsThemeChoices(selected: BrandThemeOption, onSelect: (BrandTh
                 repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
             }
         }
+    }
+}
+
+/** Small previews describe the choice rather than repeating the setting's leading icon. */
+@Composable
+internal fun SettingsAppearanceVisual(value: String, tint: Color, background: Boolean = false) {
+    if (!background && value != "system") {
+        Icon(if (value == "light") LinDoIcons.Sun else LinDoIcons.Moon, null,
+            Modifier.size(18.dp), tint = tint)
+    } else {
+        val shape = if (background) RoundedCornerShape(4.dp) else CircleShape
+        Canvas(Modifier.size(18.dp).clip(shape).border(0.8.dp, tint.copy(alpha = 0.6f), shape)) {
+            drawRect(if (value == "dark") Color(0xFF17191E) else Color(0xFFF5F5F5))
+            if (value == "system") drawRect(Color(0xFF17191E),
+                topLeft = androidx.compose.ui.geometry.Offset(size.width / 2, 0f),
+                size = androidx.compose.ui.geometry.Size(size.width / 2, size.height))
+        }
+    }
+}
+
+@Composable
+internal fun SettingsThemeSwatch(theme: BrandThemeOption) {
+    Box(Modifier.size(18.dp).background(theme.swatchColor, CircleShape)
+        .border(0.5.dp, LocalPalette.current.hairline, CircleShape))
+}
+
+@Composable
+internal fun SettingsFontPreview(scale: Float, tint: Color) {
+    Box(Modifier.widthIn(min = 24.dp).heightIn(min = 20.dp), contentAlignment = Alignment.Center) {
+        Text("Aa", fontSize = (14 * scale).sp, lineHeight = 20.sp, color = tint,
+            maxLines = 1, modifier = Modifier.clearAndSetSemantics {})
     }
 }

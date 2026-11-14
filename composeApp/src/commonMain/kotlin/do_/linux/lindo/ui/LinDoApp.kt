@@ -11917,15 +11917,18 @@ internal fun CommunityProfileScreen(
                 val fontScalePreset = ReaderFontScalePreset.fromScale(fontScale)
                 Column(Modifier.fillMaxWidth().background(palette.cardSurface)) {
                     LinDoGroupHeader(text = LinDoMessagesCopy.SECTION_APPEARANCE.text)
-                    ExpandableSetting(LinDoIcons.Sun, "外观", appearanceLabel(AppAppearance.appearance)) {
+                    ExpandableSetting(LinDoIcons.Sun, "外观", appearanceLabel(AppAppearance.appearance),
+                        valueVisual = { SettingsAppearanceVisual(AppAppearance.appearance, palette.inkSecondary) }) {
                         AppearanceChoices(AppAppearance.appearance, AppAppearance::selectAppearance)
                     }
-                    ExpandableSetting(LinDoIcons.AppsGrid, "图标底色", appearanceLabel(AppAppearance.iconAppearance, icon = true)) {
+                    ExpandableSetting(LinDoIcons.AppsGrid, "图标底色", appearanceLabel(AppAppearance.iconAppearance, icon = true),
+                        valueVisual = { SettingsAppearanceVisual(AppAppearance.iconAppearance, palette.inkSecondary, background = true) }) {
                         AppearanceChoices(AppAppearance.iconAppearance, AppAppearance::selectIconAppearance, icon = true)
                         if (AppAppearance.iconChangeFailed) Text("图标未能更新，请稍后重试",
                             color = palette.inkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
                     }
-                    ExpandableSetting(LinDoIcons.Palette, LinDoMessagesCopy.ROW_THEME_COLOR.text, themeOption.label) {
+                    ExpandableSetting(LinDoIcons.Palette, LinDoMessagesCopy.ROW_THEME_COLOR.text, themeOption.label,
+                        valueVisual = { SettingsThemeSwatch(themeOption) }) {
                         SettingsThemeChoices(themeOption, onSelectThemeOption)
                     }
                     if (onOpenAppIcon != null) {
@@ -11933,9 +11936,15 @@ internal fun CommunityProfileScreen(
                         LinDoSettingRow(
                             icon = LinDoIcons.AppsGrid,
                             title = LinDoMessagesCopy.ROW_APP_ICON.text,
-                            value = icon.artwork.label,
                             showDivider = false,
-                            onClick = onOpenAppIcon
+                            onClick = onOpenAppIcon,
+                            trailing = {
+                                LinDoLauncherIconTile(icon, Modifier.size(28.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(icon.artwork.label, fontSize = 13.sp, color = palette.inkTertiary)
+                                Spacer(Modifier.width(8.dp))
+                                Icon(LinDoIcons.ChevronRight, null, Modifier.size(14.dp), tint = palette.inkTertiary)
+                            }
                         )
                     }
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -11943,18 +11952,29 @@ internal fun CommunityProfileScreen(
                     ExpandableSetting(
                         if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
                         LinDoMessagesCopy.ROW_HOME_FEED_VIEW.text,
-                        FeedDensityMode.entries.first { it.isCompact == isCompactFeed }.labelCopy.text
+                        FeedDensityMode.entries.first { it.isCompact == isCompactFeed }.labelCopy.text,
+                        valueVisual = { Icon(if (isCompactFeed) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
+                            null, Modifier.size(18.dp), tint = palette.inkSecondary) }
                     ) {
                         SettingsChoices(FeedDensityMode.entries, FeedDensityMode.entries.first { it.isCompact == isCompactFeed },
-                            label = { it.labelCopy.text }, onSelect = { if (it.isCompact != isCompactFeed) onToggleCompactFeed() })
+                            label = { it.labelCopy.text },
+                            optionVisual = { mode, tint -> Icon(if (mode.isCompact) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
+                                null, Modifier.size(18.dp), tint = tint) },
+                            onSelect = { if (it.isCompact != isCompactFeed) onToggleCompactFeed() })
                     }
-                    ExpandableSetting(LinDoIcons.Search, "首页搜索框", if (defaultSearchExpanded) "展开" else "收起") {
+                    ExpandableSetting(LinDoIcons.Search, "首页搜索框", if (defaultSearchExpanded) "展开" else "收起",
+                        valueVisual = { Icon(if (defaultSearchExpanded) LinDoIcons.Eye else LinDoIcons.EyeOff,
+                            null, Modifier.size(18.dp), tint = palette.inkSecondary) }) {
                         SettingsChoices(listOf(true, false), defaultSearchExpanded,
-                            label = { if (it) "展开" else "收起" }, onSelect = onDefaultSearchExpandedChange)
+                            label = { if (it) "展开" else "收起" },
+                            optionVisual = { shown, tint -> Icon(if (shown) LinDoIcons.Eye else LinDoIcons.EyeOff,
+                                null, Modifier.size(18.dp), tint = tint) }, onSelect = onDefaultSearchExpandedChange)
                     }
-                    ExpandableSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text, fontScalePreset.labelCopy.text) {
+                    ExpandableSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text, fontScalePreset.labelCopy.text,
+                        valueVisual = { SettingsFontPreview(fontScalePreset.scale, palette.inkSecondary) }) {
                         SettingsChoices(ReaderFontScalePreset.entries, fontScalePreset,
-                            label = { it.labelCopy.text }, onSelect = { onChangeFontScale(it.scale) })
+                            label = { it.labelCopy.text }, optionVisual = { preset, tint -> SettingsFontPreview(preset.scale, tint) },
+                            onSelect = { onChangeFontScale(it.scale) })
                         Text("预览：恰好的字号，让阅读更舒服。", fontSize = 16.sp, lineHeight = 24.sp,
                             color = palette.inkSecondary, modifier = Modifier.padding(top = 12.dp))
                     }
@@ -18966,7 +18986,8 @@ private fun appearanceLabel(value: String, icon: Boolean = false): String = when
 @Composable
 private fun AppearanceChoices(selected: String, onSelect: (String) -> Unit, icon: Boolean = false) {
     SettingsChoices(listOf("system", "light", "dark"), selected,
-        label = { appearanceLabel(it, icon) }, onSelect = onSelect)
+        label = { appearanceLabel(it, icon) },
+        optionVisual = { value, tint -> SettingsAppearanceVisual(value, tint, background = icon) }, onSelect = onSelect)
 }
 
 @Composable
