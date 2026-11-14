@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
@@ -25,6 +26,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -34,6 +36,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import do_.linux.lindo.core.copy.ReaderFontScalePreset
+import kotlin.math.roundToInt
 
 /** Inline choices start collapsed; presentation and motion are shared by every platform. */
 @Composable
@@ -183,5 +187,75 @@ internal fun SettingsFontPreview(scale: Float, tint: Color) {
     Box(Modifier.widthIn(min = 24.dp).heightIn(min = 20.dp), contentAlignment = Alignment.Center) {
         Text("Aa", fontSize = (14 * scale).sp, lineHeight = 20.sp, color = tint,
             maxLines = 1, modifier = Modifier.clearAndSetSemantics {})
+    }
+}
+
+
+@Composable
+internal fun SettingsToggleRow(icon: ImageVector, title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    val palette = LocalPalette.current
+    Row(Modifier.fillMaxWidth().heightIn(min = LinDoTokens.SettingRowHeight)
+        .pointerHoverIcon(PointerIcon.Hand)
+        .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
+        .padding(horizontal = LinDoTokens.PageHorizontalPadding),
+        verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, Modifier.size(20.dp), tint = palette.inkSecondary)
+        Spacer(Modifier.width(14.dp))
+        Text(title, Modifier.weight(1f), fontSize = 15.sp, color = palette.inkPrimary)
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = null,
+            colors = SwitchDefaults.colors(checkedThumbColor = palette.onAccent, checkedTrackColor = palette.brandGold))
+    }
+    HorizontalDivider(Modifier.padding(start = 50.dp, end = LinDoTokens.PageHorizontalPadding),
+        thickness = 0.5.dp, color = palette.hairline)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun SettingsFontSlider(selected: ReaderFontScalePreset, onSelect: (ReaderFontScalePreset) -> Unit) {
+    val palette = LocalPalette.current
+    var position by remember(selected) { mutableFloatStateOf(selected.ordinal.toFloat()) }
+    val preview = ReaderFontScalePreset.entries[position.roundToInt().coerceIn(ReaderFontScalePreset.entries.indices)]
+    val sliderColors = SliderDefaults.colors(thumbColor = palette.brandGold, activeTrackColor = palette.brandGold,
+        inactiveTrackColor = palette.hairline)
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("最小", fontSize = 12.sp, color = palette.inkSecondary)
+            Spacer(Modifier.weight(1f))
+            Text(preview.labelCopy.text, fontSize = 13.sp, color = palette.activeChipText)
+            Spacer(Modifier.weight(1f))
+            Text("最大", fontSize = 12.sp, color = palette.inkSecondary)
+        }
+        Slider(
+            value = position,
+            onValueChange = { position = it },
+            onValueChangeFinished = {
+                val chosen = ReaderFontScalePreset.entries[position.roundToInt().coerceIn(ReaderFontScalePreset.entries.indices)]
+                if (chosen != selected) onSelect(chosen)
+            },
+            valueRange = 0f..ReaderFontScalePreset.entries.lastIndex.toFloat(),
+            steps = ReaderFontScalePreset.entries.size - 2,
+            modifier = Modifier.fillMaxWidth().semantics {
+                contentDescription = "阅读字号滑块"
+                stateDescription = preview.labelCopy.text
+                // Accessibility changes are complete actions, with no pointer-release event.
+                setProgress { requested ->
+                    if (!requested.isFinite()) false else {
+                        val chosen = ReaderFontScalePreset.entries[requested.roundToInt().coerceIn(ReaderFontScalePreset.entries.indices)]
+                        position = chosen.ordinal.toFloat()
+                        if (chosen != selected) onSelect(chosen)
+                        true
+                    }
+                }
+            },
+            colors = sliderColors,
+            thumb = { Box(Modifier.size(18.dp).background(palette.brandGold, CircleShape)) },
+            track = { state -> SliderDefaults.Track(sliderState = state, modifier = Modifier.height(4.dp),
+                colors = sliderColors, thumbTrackGapSize = 0.dp, drawStopIndicator = null) }
+        )
+        // Preview locally while dragging; apply the global scale only when interaction finishes.
+        // The surrounding density already includes the selected app scale.
+        Text("恰好的字号，让阅读更舒服。", fontSize = (16 * preview.scale / selected.scale).sp,
+            lineHeight = (24 * preview.scale / selected.scale).sp, color = palette.inkSecondary)
     }
 }

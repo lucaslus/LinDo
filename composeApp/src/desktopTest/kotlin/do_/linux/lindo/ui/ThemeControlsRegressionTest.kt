@@ -45,8 +45,7 @@ class ThemeControlsRegressionTest {
                             valueVisual = { SettingsThemeSwatch(selected) }) { SettingsThemeChoices(selected) { selected = it } }
                         ExpandableSetting(LinDoIcons.Sliders, "阅读字号", preset.labelCopy.text,
                             valueVisual = { SettingsFontPreview(preset.scale, palette.inkSecondary) }) {
-                            SettingsChoices(ReaderFontScalePreset.entries, preset, { it.labelCopy.text }) { preset = it }
-                            Text("预览：恰好的字号，让阅读更舒服。", color = palette.inkSecondary)
+                            SettingsFontSlider(preset) { preset = it }
                         }
                     }
                 }
@@ -67,13 +66,26 @@ class ThemeControlsRegressionTest {
             edt { onNodeWithContentDescription(theme.label).assertIsSelected() }
         }
         edt { onNodeWithText("阅读字号").performScrollTo().performClick() }
+        edt {
+            onNodeWithContentDescription("阅读字号滑块").performScrollTo().performTouchInput {
+                down(center)
+                moveTo(androidx.compose.ui.geometry.Offset(width - 1f, center.y))
+            }
+        }
+        waitForIdle()
+        assertEquals(ReaderFontScalePreset.STANDARD, preset, "Dragging must not resize the entire app")
+        edt { onNodeWithContentDescription("阅读字号滑块").performTouchInput { up() } }
+        waitForIdle()
+        assertEquals(ReaderFontScalePreset.MAXIMUM, preset)
         for (size in ReaderFontScalePreset.entries) {
-            edt { onNodeWithText(size.labelCopy.text).performScrollTo().performClick() }
+            edt {
+                onNodeWithContentDescription("阅读字号滑块").performScrollTo()
+                    .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.SetProgress) { it(size.ordinal.toFloat()) }
+            }
             waitForIdle()
             assertEquals(size, preset)
             edt {
-                onNodeWithText(size.labelCopy.text).assertIsSelected()
-                val bounds = onNodeWithText(size.labelCopy.text).fetchSemanticsNode().boundsInRoot
+                val bounds = onNodeWithContentDescription("阅读字号滑块").fetchSemanticsNode().boundsInRoot
                 assertTrue(bounds.left >= 0 && bounds.right <= onRoot().fetchSemanticsNode().boundsInRoot.right)
             }
         }
@@ -92,7 +104,8 @@ class ThemeControlsRegressionTest {
             onNodeWithText("阅读字号").performClick()
         }
         waitForIdle()
-        edt { onNodeWithText("最大").assertIsSelected() }
+        edt { onNodeWithContentDescription("阅读字号滑块").assertRangeInfoEquals(
+            androidx.compose.ui.semantics.ProgressBarRangeInfo(4f, 0f..4f, 3)) }
     }
     @Test fun blueLoginUsesSameThemeAndBothLoginActions() = runDesktopComposeUiTest(width = 390, height = 840) {
         var primary = 0; var browser = 0; var guests = 0

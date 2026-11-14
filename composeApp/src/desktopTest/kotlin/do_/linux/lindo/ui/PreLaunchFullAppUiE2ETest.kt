@@ -868,17 +868,22 @@ class PreLaunchFullAppUiE2ETest {
         val persistedSearchDefaults = mutableListOf<Boolean>()
         UserApiKeyAuthManager.onPersistHomeSearchExpanded = { persistedSearchDefaults.add(it) }
         pickSetting("首页搜索框")
-        pickSetting("收起")
         assertFalse(UserApiKeyAuthManager.uiHomeSearchExpanded)
-        onEdt { onNodeWithText("收起").assertIsSelected() }
-        pickSetting("展开")
+        onEdt { onNodeWithText("首页搜索框").assertIsOff() }
+        pickSetting("首页搜索框")
+        onEdt { onNodeWithText("首页搜索框").assertIsOn() }
         assertTrue(UserApiKeyAuthManager.uiHomeSearchExpanded)
         assertEquals(listOf(false, true), persistedSearchDefaults)
         pickSetting("阅读字号")
-        pickSetting("大")
-        onEdt { onNodeWithText("大").assertIsSelected() }
-        pickSetting("标准")
-        onEdt { onNodeWithText("标准").assertIsSelected() }
+        for (step in listOf(3f, 2f)) {
+            onEdt {
+                onNodeWithContentDescription("阅读字号滑块").performScrollTo()
+                    .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.SetProgress) { it(step) }
+            }
+            waitForIdle()
+            assertEquals(do_.linux.lindo.core.copy.ReaderFontScalePreset.entries[step.toInt()].scale,
+                UserApiKeyAuthManager.uiFontScale)
+        }
         savePreviewSnapshotIfConfigured(snapshot.replace(".png", "_reading.png"))
         onNodeWithText("关于 Lindo").edtScrollToVisible()
         assertEquals(0, onAllNodesWithText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY).edtCount())

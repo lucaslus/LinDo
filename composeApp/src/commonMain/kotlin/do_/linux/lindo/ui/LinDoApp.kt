@@ -11962,41 +11962,17 @@ internal fun CommunityProfileScreen(
                                 null, Modifier.size(16.dp), tint = tint) },
                             onSelect = { if (it.isCompact != isCompactFeed) onToggleCompactFeed() })
                     }
-                    ExpandableSetting(LinDoIcons.Search, "首页搜索框", if (defaultSearchExpanded) "展开" else "收起",
-                        valueVisual = { Icon(if (defaultSearchExpanded) LinDoIcons.Eye else LinDoIcons.EyeOff,
-                            null, Modifier.size(18.dp), tint = palette.inkSecondary) }) {
-                        SettingsChoices(listOf(true, false), defaultSearchExpanded,
-                            label = { if (it) "展开" else "收起" },
-                            optionVisual = { shown, tint -> Icon(if (shown) LinDoIcons.Eye else LinDoIcons.EyeOff,
-                                null, Modifier.size(16.dp), tint = tint) }, onSelect = onDefaultSearchExpandedChange)
-                    }
+                    SettingsToggleRow(LinDoIcons.Search, "首页搜索框", defaultSearchExpanded, onDefaultSearchExpandedChange)
                     ExpandableSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text, fontScalePreset.labelCopy.text,
                         valueVisual = { SettingsFontPreview(fontScalePreset.scale, palette.inkSecondary) }) {
-                        SettingsChoices(ReaderFontScalePreset.entries, fontScalePreset,
-                            label = { it.labelCopy.text },
-                            onSelect = { onChangeFontScale(it.scale) })
-                        Text("预览：恰好的字号，让阅读更舒服。", fontSize = 16.sp, lineHeight = 24.sp,
-                            color = palette.inkSecondary, modifier = Modifier.padding(top = 4.dp))
+                        SettingsFontSlider(fontScalePreset) { onChangeFontScale(it.scale) }
                     }
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     LinDoGroupHeader(text = "通用")
 
-                    // 3.4 界面与头像动效
-                    LinDoSettingRow(
-                        icon = LinDoIcons.Sparkles,
-                        title = LinDoMessagesCopy.ROW_ANIMATIONS.text,
-                        onClick = onToggleAnimations,
-                        trailing = {
-                            Switch(
-                                checked = enableAnimations,
-                                onCheckedChange = { if (it != enableAnimations) onToggleAnimations() },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = palette.onAccent,
-                                    checkedTrackColor = palette.brandGold
-                                )
-                            )
-                        }
-                    )
+                    SettingsToggleRow(LinDoIcons.Sparkles, LinDoMessagesCopy.ROW_ANIMATIONS.text, enableAnimations) {
+                        if (it != enableAnimations) onToggleAnimations()
+                    }
 
                     // 3.5 清理本地缓存（支持仅清缓存或一并清理诊断日志）
                     var showClearCacheDialog by remember { mutableStateOf(false) }
