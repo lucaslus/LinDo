@@ -2,6 +2,8 @@ package do_.linux.lindo.ui
 
 import androidx.compose.animation.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -23,6 +25,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
@@ -76,7 +79,7 @@ internal fun ExpandableSetting(
             exit = if (animations) shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut() else ExitTransition.None
         ) {
             Column(Modifier.padding(horizontal = LinDoTokens.PageHorizontalPadding)
-                .padding(bottom = 14.dp).widthIn(max = 600.dp).fillMaxWidth(), content = content)
+                .padding(bottom = 8.dp).widthIn(max = 600.dp).fillMaxWidth(), content = content)
         }
         HorizontalDivider(Modifier.padding(start = 50.dp, end = LinDoTokens.PageHorizontalPadding),
             thickness = 0.5.dp, color = palette.hairline)
@@ -92,26 +95,30 @@ internal fun <T> SettingsChoices(
     onSelect: (T) -> Unit
 ) {
     val palette = LocalPalette.current
-    BoxWithConstraints(Modifier.fillMaxWidth().selectableGroup()) {
+    BoxWithConstraints(Modifier.widthIn(max = (options.size * 112 * LocalDensity.current.fontScale).dp)
+        .fillMaxWidth().selectableGroup()) {
         // Keep five text sizes on one line when they fit; retain usable targets at larger system text sizes.
         val columns = if (options.size > 3 && maxWidth / options.size < (48 * LocalDensity.current.fontScale).dp) 3 else options.size
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             options.chunked(columns).forEach { row ->
-                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)
-                    .clip(RoundedCornerShape(10.dp)).background(palette.subtleSurface.copy(alpha = 0.65f))
-                    .padding(3.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
                     row.forEach { option ->
                         val active = option == selected
+                        // Keep a 48 dp hit target while the visible segment stays compact.
                         Box(Modifier.weight(1f).fillMaxHeight().heightIn(min = 48.dp)
-                            .clip(RoundedCornerShape(7.dp))
-                            .background(if (active) palette.activeChipBg else Color.Transparent)
                             .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })
-                            .padding(horizontal = 4.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
+                            .padding(horizontal = 2.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
                             val tint = if (active) palette.activeChipText else palette.inkSecondary
-                            Column(horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                optionVisual?.invoke(option, tint)
-                                Text(label(option), fontSize = 14.sp, lineHeight = 20.sp,
+                            Row(Modifier.fillMaxSize().clip(RoundedCornerShape(7.dp))
+                                .background(if (active) palette.activeChipBg else palette.subtleSurface.copy(alpha = 0.65f))
+                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center) {
+                                if (optionVisual != null) {
+                                    optionVisual(option, tint)
+                                    Spacer(Modifier.width(5.dp))
+                                }
+                                Text(label(option), fontSize = 13.sp, lineHeight = 18.sp,
                                     fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
                                     color = tint, textAlign = TextAlign.Center)
                             }
@@ -127,24 +134,22 @@ internal fun <T> SettingsChoices(
 @Composable
 internal fun SettingsThemeChoices(selected: BrandThemeOption, onSelect: (BrandThemeOption) -> Unit) {
     val palette = LocalPalette.current
-    Column(Modifier.fillMaxWidth().selectableGroup(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        BrandThemeOption.displayOrder.chunked(4).forEach { row ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                row.forEach { option ->
-                    val active = selected == option
-                    Column(Modifier.weight(1f).heightIn(min = 68.dp).clip(RoundedCornerShape(8.dp))
-                        .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })
-                        .padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                        Box(Modifier.size(30.dp).background(option.swatchColor, CircleShape), contentAlignment = Alignment.Center) {
-                            if (active) Icon(LinDoIcons.Check, null, Modifier.size(18.dp),
-                                tint = if (option.swatchColor.luminance() > 0.4f) Color(0xFF101217) else Color.White)
-                        }
-                        Text(option.label, fontSize = 12.sp, lineHeight = 16.sp, textAlign = TextAlign.Center,
-                            color = if (active) palette.activeChipText else palette.inkSecondary)
+    Row(Modifier.widthIn(max = 392.dp).fillMaxWidth()
+        .horizontalScroll(rememberScrollState()).selectableGroup()) {
+        BrandThemeOption.displayOrder.forEach { option ->
+            val active = selected == option
+            Box(Modifier.size(48.dp).clip(CircleShape)
+                .semantics { contentDescription = option.label }
+                .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) }),
+                contentAlignment = Alignment.Center) {
+                Box(Modifier.size(30.dp).border(if (active) 1.dp else 0.dp,
+                    if (active) palette.activeChipText else Color.Transparent, CircleShape),
+                    contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(22.dp).background(option.swatchColor, CircleShape), contentAlignment = Alignment.Center) {
+                        if (active) Icon(LinDoIcons.Check, null, Modifier.size(13.dp),
+                            tint = if (option.swatchColor.luminance() > 0.4f) Color(0xFF101217) else Color.White)
                     }
                 }
-                repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }
@@ -155,10 +160,10 @@ internal fun SettingsThemeChoices(selected: BrandThemeOption, onSelect: (BrandTh
 internal fun SettingsAppearanceVisual(value: String, tint: Color, background: Boolean = false) {
     if (!background && value != "system") {
         Icon(if (value == "light") LinDoIcons.Sun else LinDoIcons.Moon, null,
-            Modifier.size(18.dp), tint = tint)
+            Modifier.size(16.dp), tint = tint)
     } else {
         val shape = if (background) RoundedCornerShape(4.dp) else CircleShape
-        Canvas(Modifier.size(18.dp).clip(shape).border(0.8.dp, tint.copy(alpha = 0.6f), shape)) {
+        Canvas(Modifier.size(16.dp).clip(shape).border(0.8.dp, tint.copy(alpha = 0.6f), shape)) {
             drawRect(if (value == "dark") Color(0xFF17191E) else Color(0xFFF5F5F5))
             if (value == "system") drawRect(Color(0xFF17191E),
                 topLeft = androidx.compose.ui.geometry.Offset(size.width / 2, 0f),

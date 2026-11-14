@@ -109,7 +109,7 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 44
+        versionCode = 45
         versionName = "0.2.32"
     }
 
@@ -171,7 +171,7 @@ compose.desktop {
             vendor = "Lindo Community"
 
             macOS {
-                packageBuildVersion = "1.0.44"
+                packageBuildVersion = "1.0.45"
                 bundleID = "do.linux.lindo"
                 iconFile.set(project.file("src/desktopMain/resources/icon.icns"))
                 infoPlist {

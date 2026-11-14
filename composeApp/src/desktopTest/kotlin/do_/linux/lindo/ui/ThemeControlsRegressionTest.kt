@@ -45,8 +45,7 @@ class ThemeControlsRegressionTest {
                             valueVisual = { SettingsThemeSwatch(selected) }) { SettingsThemeChoices(selected) { selected = it } }
                         ExpandableSetting(LinDoIcons.Sliders, "阅读字号", preset.labelCopy.text,
                             valueVisual = { SettingsFontPreview(preset.scale, palette.inkSecondary) }) {
-                            SettingsChoices(ReaderFontScalePreset.entries, preset, { it.labelCopy.text },
-                                optionVisual = { size, tint -> SettingsFontPreview(size.scale, tint) }) { preset = it }
+                            SettingsChoices(ReaderFontScalePreset.entries, preset, { it.labelCopy.text }) { preset = it }
                             Text("预览：恰好的字号，让阅读更舒服。", color = palette.inkSecondary)
                         }
                     }
@@ -62,10 +61,10 @@ class ThemeControlsRegressionTest {
         save(if (dark) "settings-collapsed-dark.png" else "settings-collapsed-large-light.png")
         edt { onNodeWithText("主题色").performClick() }
         for (theme in BrandThemeOption.displayOrder) {
-            edt { onNodeWithText(theme.label).performScrollTo().performClick() }
+            edt { onNodeWithContentDescription(theme.label).performScrollTo().performClick() }
             waitForIdle()
             assertEquals(theme, selected)
-            edt { onNodeWithText(theme.label).assertIsSelected() }
+            edt { onNodeWithContentDescription(theme.label).assertIsSelected() }
         }
         edt { onNodeWithText("阅读字号").performScrollTo().performClick() }
         for (size in ReaderFontScalePreset.entries) {
@@ -78,7 +77,7 @@ class ThemeControlsRegressionTest {
                 assertTrue(bounds.left >= 0 && bounds.right <= onRoot().fetchSemanticsNode().boundsInRoot.right)
             }
         }
-        edt { onNodeWithText("金").performScrollTo().performClick() }
+        edt { onNodeWithContentDescription("金").performScrollTo().performClick() }
         save(if (dark) "settings-five-sizes-dark.png" else "settings-five-sizes-large-light.png")
         edt {
             onNodeWithText("主题色").performScrollTo().performClick()
