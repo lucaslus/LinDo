@@ -577,6 +577,9 @@ class MainActivity : ComponentActivity() {
                     .apply()
             }
         }
+        UserApiKeyAuthManager.onPersistHomeSearchExpanded = { expanded ->
+            prefs.edit().putBoolean("ui_home_search_expanded", expanded).apply()
+        }
         UserApiKeyAuthManager.onPersistThemeAndDensity = { themeAccent, compactFeed ->
             runCatching {
                 prefs.edit()
@@ -2176,6 +2179,7 @@ class MainActivity : ComponentActivity() {
             UserApiKeyAuthManager.uiEnableAnimations = prefs.getBoolean("ui_enable_animations", true)
             UserApiKeyAuthManager.uiThemeAccent = prefs.getString("ui_theme_accent", "OFFICIAL_GOLD") ?: "OFFICIAL_GOLD"
             UserApiKeyAuthManager.uiCompactFeed = prefs.getBoolean("ui_compact_feed", false)
+            UserApiKeyAuthManager.uiHomeSearchExpanded = prefs.getBoolean("ui_home_search_expanded", true)
             UserApiKeyAuthManager.uiSplitFraction = prefs.getFloat("ui_split_fraction", 0.42f).coerceIn(0.28f, 0.62f)
             LinuxDoRepository.restoreReadTopics(prefs.getString("read_topic_posts", null))
 
@@ -2501,6 +2505,7 @@ class MainActivity : ComponentActivity() {
             UserApiKeyAuthManager.onPersistReadTopics = null
             UserApiKeyAuthManager.onPersistUiPrefs = null
             UserApiKeyAuthManager.onPersistThemeAndDensity = null
+            UserApiKeyAuthManager.onPersistHomeSearchExpanded = null
             UserApiKeyAuthManager.onPersistSplitFraction = null
             UserApiKeyAuthManager.onPrepareManualRecovery = null
             UserApiKeyAuthManager.onSyncCookieToPlatform = null

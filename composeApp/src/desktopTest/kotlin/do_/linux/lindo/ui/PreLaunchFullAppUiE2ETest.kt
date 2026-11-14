@@ -102,6 +102,8 @@ class PreLaunchFullAppUiE2ETest {
         UserApiKeyAuthManager.onPersistPendingKey = null
         UserApiKeyAuthManager.onPersistUiPrefs = null
         UserApiKeyAuthManager.onPersistThemeAndDensity = null
+        UserApiKeyAuthManager.onPersistHomeSearchExpanded = null
+        UserApiKeyAuthManager.uiHomeSearchExpanded = true
         UserApiKeyAuthManager.onPersistSplitFraction = null
         UserApiKeyAuthManager.onPersistReadTopics = null
         UserApiKeyAuthManager.onSyncCookieToPlatform = null
@@ -750,6 +752,25 @@ class PreLaunchFullAppUiE2ETest {
         verifySharedAppearance("shared_compact_settings.png")
     }
 
+    @Test fun homeSearchRespectsSavedDefaultAfterRecreation() = runDesktopComposeUiTest(width = 390, height = 840) {
+        UserApiKeyAuthManager.uiHomeSearchExpanded = false
+        val generation = androidx.compose.runtime.mutableIntStateOf(0)
+        setContent {
+            androidx.compose.runtime.key(generation.intValue) { LinDoApp(systemAnimationsEnabled = false) }
+        }
+        waitForText("以游客模式浏览")
+        onNodeWithText("以游客模式浏览").edtClick()
+        waitForContentDescription("展开搜索")
+        onNodeWithContentDescription("展开搜索").edtClick()
+        waitForContentDescription("收起搜索")
+        assertFalse(UserApiKeyAuthManager.uiHomeSearchExpanded)
+        onEdt { generation.intValue++ }
+        waitForText("以游客模式浏览")
+        onNodeWithText("以游客模式浏览").edtClick()
+        waitForContentDescription("展开搜索")
+        assertEquals(0, onAllNodesWithContentDescription("收起搜索").edtCount())
+    }
+
     @Test fun sharedAppearanceWideViewport() = runDesktopComposeUiTest(width = 1280, height = 900) {
         verifySharedAppearance("shared_wide_settings.png")
     }
@@ -777,6 +798,11 @@ class PreLaunchFullAppUiE2ETest {
         waitForText("以游客模式浏览")
         onNodeWithText("以游客模式浏览").edtClick()
         waitForText("我的")
+        waitForContentDescription("收起搜索")
+        onNodeWithContentDescription("收起搜索").edtClick()
+        waitForContentDescription("展开搜索")
+        assertTrue(UserApiKeyAuthManager.uiHomeSearchExpanded)
+        onNodeWithContentDescription("展开搜索").edtClick()
         onNodeWithText("我的").edtClick()
         waitForText("外观")
         onNodeWithText("深色").edtScrollToVisible()
@@ -798,6 +824,14 @@ class PreLaunchFullAppUiE2ETest {
         waitUntil { AppAppearance.iconAppearance == "dark" }
         pickSetting("紧凑")
         onEdt { onNodeWithText("紧凑").assertIsSelected() }
+        val persistedSearchDefaults = mutableListOf<Boolean>()
+        UserApiKeyAuthManager.onPersistHomeSearchExpanded = { persistedSearchDefaults.add(it) }
+        pickSetting("默认收起")
+        assertFalse(UserApiKeyAuthManager.uiHomeSearchExpanded)
+        onEdt { onNodeWithText("默认收起").assertIsSelected() }
+        pickSetting("默认展开")
+        assertTrue(UserApiKeyAuthManager.uiHomeSearchExpanded)
+        assertEquals(listOf(false, true), persistedSearchDefaults)
         pickSetting("大字号")
         onEdt { onNodeWithText("大字号").assertIsSelected() }
         pickSetting("标准")

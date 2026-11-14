@@ -430,10 +430,10 @@ class PreLaunchFullApiAuditTest {
     }
 
     // -------------------------------------------------------------------------
-    // 3. Feed, Categories, Search, Discover, Leaderboard & About
+    // 3. Feed, Categories, Search, Discover & About
     // -------------------------------------------------------------------------
     @Test
-    fun feedCategoriesSearchDiscoverLeaderboardAndAboutContracts() = runTest {
+    fun feedCategoriesSearchDiscoverAndAboutContracts() = runTest {
         authenticateTestUser(username = "lucas", userId = 42)
         val requestedUrls = CopyOnWriteArrayList<String>()
 
@@ -594,23 +594,6 @@ class PreLaunchFullApiAuditTest {
                               "grouped_search_result":{"more_full_page_results":true}
                             }
                         """.trimIndent()
-                    url == "https://linux.do/directory_items.json?period=weekly&order=likes_received&page=0" ->
-                        200 to """
-                            {
-                              "directory_items":[
-                                {
-                                  "id":1,
-                                  "likes_received":88,
-                                  "likes_given":42,
-                                  "post_count":65,
-                                  "topic_count":6,
-                                  "days_visited":7,
-                                  "cheers":620,
-                                  "user":{"id":9,"username":"top_coder","name":"Top Coder","title":"MVP","avatar_template":"/user_avatar/linux.do/top_coder/{size}/1.png"}
-                                }
-                              ]
-                            }
-                        """.trimIndent()
                     url == "https://linux.do/about.json" ->
                         200 to """
                             {
@@ -669,13 +652,6 @@ class PreLaunchFullApiAuditTest {
             // Discover hot topics: daily excludes pinned 2000 -> [2001, 2002], merges weekly [2002..2005] deduplicating 2002 -> 5 items
             val discoverHot = LinuxDoRepository.fetchDiscoverHotTopics(limit = 5)
             assertEquals(listOf(2001, 2002, 2003, 2004, 2005), discoverHot.map { it.id })
-
-            // Leaderboard
-            val leaderboard = LinuxDoRepository.fetchCommunityLeaderboard("weekly", page = 0)
-            assertEquals(1, leaderboard.size)
-            assertEquals(1, leaderboard[0].rank)
-            assertEquals("top_coder", leaderboard[0].username)
-            assertEquals(620, leaderboard[0].score)
 
             // Community About
             val about = LinuxDoRepository.fetchCommunityAboutInfo()

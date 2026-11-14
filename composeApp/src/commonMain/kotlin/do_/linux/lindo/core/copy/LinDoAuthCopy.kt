@@ -24,7 +24,7 @@ enum class LinDoAuthCopy(override val text: String) : LinDoCopyEntry {
     OTP_CALLBACK_BLOCKED_MANUAL_HINT("已收到授权回调，但自动建立会话被站点拦截。请在下方粘贴浏览器 Cookie 或 cURL 完成登录"),
 
     // 账号会话与手动凭证导入页
-    ACCOUNT_SESSION_TITLE("账号与会话管理"),
+    ACCOUNT_SESSION_TITLE("账号管理"),
     LOGIN_PAGE_TITLE("登录 LINUX DO"),
     SESSION_CARD_LOGGED_IN("Linux.do 账号会话"),
     SESSION_CARD_WELCOME("欢迎来到 LINUX DO"),

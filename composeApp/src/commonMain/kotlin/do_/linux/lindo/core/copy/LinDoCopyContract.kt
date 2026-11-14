@@ -617,13 +617,6 @@ enum class FollowNetworkTab(val labelCopy: LinDoMessagesCopy) {
     FEED(LinDoMessagesCopy.FOLLOW_TAB_FEED)
 }
 
-enum class LeaderboardPeriod(val wirePeriod: String, val labelCopy: LinDoMessagesCopy) {
-    DAILY("daily", LinDoMessagesCopy.LEADERBOARD_DAILY),
-    WEEKLY("weekly", LinDoMessagesCopy.LEADERBOARD_WEEKLY),
-    MONTHLY("monthly", LinDoMessagesCopy.LEADERBOARD_MONTHLY),
-    ALL("all", LinDoMessagesCopy.LEADERBOARD_ALL)
-}
-
 enum class AboutTeamTab {
     ADMINS,
     MODERATORS

@@ -446,6 +446,9 @@ object UserApiKeyAuthManager {
     var uiCompactFeed: Boolean = false
 
     @Volatile
+    var uiHomeSearchExpanded: Boolean = true
+
+    @Volatile
     var uiSplitFraction: Float = 0.42f
 
     var onAuthStateChanged: (() -> Unit)? = null
@@ -457,10 +460,16 @@ object UserApiKeyAuthManager {
     var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
     var onPersistPendingKey: ((String?, String?) -> Unit)? = null
     var onPersistUiPrefs: ((Float, Boolean, Boolean) -> Unit)? = null
+    var onPersistHomeSearchExpanded: ((Boolean) -> Unit)? = null
     var onPersistThemeAndDensity: ((String, Boolean) -> Unit)? = null
     var onPersistSplitFraction: ((Float) -> Unit)? = null
     var onPersistReadTopics: ((String) -> Unit)? = null
     var onSyncCookieToPlatform: ((String) -> Unit)? = null
+
+    fun updateHomeSearchExpanded(expanded: Boolean) {
+        uiHomeSearchExpanded = expanded
+        onPersistHomeSearchExpanded?.invoke(expanded)
+    }
 
     fun updateUiPrefs(fontScale: Float, darkTheme: Boolean, enableAnimations: Boolean) {
         uiFontScale = fontScale
@@ -7407,7 +7416,7 @@ object LinuxDoRepository {
             addAll(groupTitles)
             if (currentTitle.isNotEmpty()) add(currentTitle)
         }.distinct()
-        val userAuthTokens = (u["user_auth_tokens"] as? JsonArray)?.size ?: 0
+        val userAuthTokens = (u["user_auth_tokens"] as? JsonArray)?.size
         val associatedAccounts = (u["associated_accounts"] as? JsonArray).orEmpty().mapNotNull { elem ->
             val obj = elem as? JsonObject ?: return@mapNotNull null
             val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -7425,10 +7434,10 @@ object LinuxDoRepository {
             website = u["website"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             trustLevel = u["trust_level"]?.jsonPrimitive?.intOrNull ?: 1,
             createdAtText = u["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty().take(10),
-            twoFactorEnabled = u["second_factor_enabled"]?.jsonPrimitive?.booleanOrNull == true,
+            twoFactorEnabled = u["second_factor_enabled"]?.jsonPrimitive?.booleanOrNull,
             hideProfileAndPresence = uOpt?.get("hide_profile_and_presence")?.jsonPrimitive?.booleanOrNull == true,
             allowPrivateMessages = uOpt?.get("allow_private_messages")?.jsonPrimitive?.booleanOrNull != false,
-            activeDeviceCount = userAuthTokens.coerceAtLeast(1),
+            activeDeviceCount = userAuthTokens,
             associatedAccounts = associatedAccounts,
             availableTitles = mergedTitles
         )
@@ -7650,60 +7659,6 @@ object LinuxDoRepository {
     }
 
     /**
-     * 获取社区积分与活跃排行榜 (`GET /directory_items.json?period={period}&order=likes_received&page={page}`)
-     */
-    suspend fun fetchCommunityLeaderboard(period: String = "weekly", page: Int = 0): List<LeaderboardUserEntry> = withContext(Dispatchers.IO) {
-        val cleanPage = page.coerceAtLeast(0)
-        val res = executeHttp(
-            url = "https://linux.do/directory_items.json?period=${encodeUrlSegment(period)}&order=likes_received&page=$cleanPage",
-            method = "GET",
-            preserveFailure = true
-        ) ?: throw ApiReadException(ApiFailureKind.Connection)
-        val root = readApiObject(res)
-        val arr = root["directory_items"] as? JsonArray ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
-        arr.mapIndexedNotNull { idx, elem ->
-            val obj = elem as? JsonObject ?: return@mapIndexedNotNull null
-            val u = obj["user"] as? JsonObject ?: return@mapIndexedNotNull null
-            val uname = u["username"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
-            val uid = u["id"]?.jsonPrimitive?.intOrNull ?: obj["id"]?.jsonPrimitive?.intOrNull ?: idx
-            val dname = u["name"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { uname } ?: uname
-            val tpl = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            val avatarUrl = if (tpl.isNotBlank()) {
-                LinuxDoSiteRules.resolveStaticAvatarUrl(tpl, 120)
-            } else ""
-            cacheUserVisualMeta(
-                username = uname,
-                avatarTemplate = tpl,
-                animatedAvatar = u["animated_avatar"]?.jsonPrimitive?.contentOrNull,
-                primaryGroupName = u["primary_group_name"]?.jsonPrimitive?.contentOrNull,
-                flair = parseFlair(u)
-            )
-            val likesReceived = obj["likes_received"]?.jsonPrimitive?.intOrNull ?: 0
-            val likesGiven = obj["likes_given"]?.jsonPrimitive?.intOrNull ?: 0
-            val postCount = obj["post_count"]?.jsonPrimitive?.intOrNull ?: 0
-            val topicCount = obj["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
-            val daysVisited = obj["days_visited"]?.jsonPrimitive?.intOrNull ?: 0
-            val cheers = obj["cheers"]?.jsonPrimitive?.intOrNull
-                ?: obj["gamification_score"]?.jsonPrimitive?.intOrNull
-                ?: (likesReceived * 5 + postCount * 2 + topicCount * 5)
-            LeaderboardUserEntry(
-                rank = cleanPage * 50 + idx + 1,
-                id = uid,
-                username = uname,
-                displayName = dname,
-                avatarUrl = avatarUrl,
-                title = u["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                likesReceived = likesReceived,
-                likesGiven = likesGiven,
-                postCount = postCount,
-                topicCount = topicCount,
-                daysVisited = daysVisited,
-                score = cheers
-            )
-        }
-    }
-
-    /**
      * 获取关于社区及管理团队信息 (`GET /about.json`)
      */
     suspend fun fetchCommunityAboutInfo(): CommunityAboutData? = withContext(Dispatchers.IO) {
@@ -7794,10 +7749,10 @@ data class UserAccountPreferencesSnapshot(
     val website: String,
     val trustLevel: Int,
     val createdAtText: String,
-    val twoFactorEnabled: Boolean,
+    val twoFactorEnabled: Boolean?,
     val hideProfileAndPresence: Boolean,
     val allowPrivateMessages: Boolean,
-    val activeDeviceCount: Int = 1,
+    val activeDeviceCount: Int? = null,
     val associatedAccounts: List<String> = emptyList(),
     val availableTitles: List<String> = emptyList()
 )
@@ -7811,21 +7766,6 @@ data class FollowUserEntry(
     val title: String = "",
     val trustLevel: Int = 1,
     val isFollowing: Boolean = false
-)
-
-data class LeaderboardUserEntry(
-    val rank: Int,
-    val id: Int,
-    val username: String,
-    val displayName: String,
-    val avatarUrl: String,
-    val title: String = "",
-    val likesReceived: Int = 0,
-    val likesGiven: Int = 0,
-    val postCount: Int = 0,
-    val topicCount: Int = 0,
-    val daysVisited: Int = 0,
-    val score: Int = 0
 )
 
 data class CommunityAboutData(

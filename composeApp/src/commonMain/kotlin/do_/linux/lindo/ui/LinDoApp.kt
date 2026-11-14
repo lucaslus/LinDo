@@ -206,7 +206,6 @@ import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CloudDraftItem
 import do_.linux.lindo.core.network.FollowUserEntry
-import do_.linux.lindo.core.network.LeaderboardUserEntry
 import do_.linux.lindo.core.network.LinuxDoCategoryMeta
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.MentionCandidate
@@ -1673,6 +1672,7 @@ internal fun LinDoApp(
     var enableAnimations by remember { mutableStateOf(UserApiKeyAuthManager.uiEnableAnimations) }
     var themeOption by remember { mutableStateOf(BrandThemeOption.fromKey(UserApiKeyAuthManager.uiThemeAccent)) }
     var isCompactFeed by remember { mutableStateOf(UserApiKeyAuthManager.uiCompactFeed) }
+    var defaultSearchExpanded by remember { mutableStateOf(UserApiKeyAuthManager.uiHomeSearchExpanded) }
     val palette = remember(isDarkTheme, themeOption) {
         buildLinDoPalette(isDark = isDarkTheme, option = themeOption)
     }
@@ -1792,7 +1792,6 @@ internal fun LinDoApp(
     var pmInitialDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
     var showEditProfileSheet by remember { mutableStateOf(false) }
     var showFollowSheet by remember { mutableStateOf(false) }
-    var showLeaderboardSheet by remember { mutableStateOf(false) }
     var showAccountPreferencesSheet by remember { mutableStateOf(false) }
     var showAboutSheet by remember { mutableStateOf(false) }
     var showDebugDiagnosticsSheet by remember { mutableStateOf(false) }
@@ -1920,7 +1919,6 @@ internal fun LinDoApp(
         showReadHistorySheet = false
         showCloudDraftsSheet = false
         showFollowSheet = false
-        showLeaderboardSheet = false
         showAboutSheet = false
         showDebugDiagnosticsSheet = false
         showConnectSheet = false
@@ -2779,10 +2777,6 @@ internal fun LinDoApp(
             showAboutSheet = true
             return
         }
-        if (Regex("""^https?://(?:www\.)?linux\.do/(?:leaderboard|u\?period=.*)(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            showLeaderboardSheet = true
-            return
-        }
         if (Regex("""^https?://(?:www\.)?linux\.do/u/[^/?#]+/follow(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
             if (isAuthorized) showFollowSheet = true else requestGuestLogin(GuestGateScenario.FOLLOW_LIST)
             return
@@ -2936,7 +2930,6 @@ internal fun LinDoApp(
             showPrivateMessagesSheet ||
             showEditProfileSheet ||
             showFollowSheet ||
-            showLeaderboardSheet ||
             showAccountPreferencesSheet ||
             showDebugDiagnosticsSheet ||
             showAboutSheet ||
@@ -3023,10 +3016,6 @@ internal fun LinDoApp(
                 }
                 showFollowSheet -> {
                     showFollowSheet = false
-                    true
-                }
-                showLeaderboardSheet -> {
-                    showLeaderboardSheet = false
                     true
                 }
                 showAccountPreferencesSheet -> {
@@ -3264,6 +3253,7 @@ internal fun LinDoApp(
                                                     enableAnimations = enableAnimations,
                                                     fontScale = fontScale,
                                                     isCompactFeed = isCompactFeed,
+                                                    defaultSearchExpanded = defaultSearchExpanded,
                                                     isAuthorized = isAuthorized,
                                                     currentUser = currentUser,
                                                     unreadNotificationCount = effectiveUnreadCount,
@@ -3437,6 +3427,7 @@ internal fun LinDoApp(
                                         enableAnimations = enableAnimations,
                                         themeOption = themeOption,
                                         isCompactFeed = isCompactFeed,
+                                        defaultSearchExpanded = defaultSearchExpanded,
                                         isAuthorized = isAuthorized,
                                         currentUser = currentUser,
                                         fullProfile = fullUserProfile,
@@ -3448,6 +3439,10 @@ internal fun LinDoApp(
                                         onSelectThemeOption = { updateBrandThemeOption(it) },
                                         onOpenAppIcon = openAppIconPage,
                                         onToggleCompactFeed = { updateCompactFeedMode(!isCompactFeed) },
+                                        onDefaultSearchExpandedChange = {
+                                            defaultSearchExpanded = it
+                                            UserApiKeyAuthManager.updateHomeSearchExpanded(it)
+                                        },
                                         onOpenNotifications = { currentTab = MainTab.MESSAGES },
                                         onOpenActivities = { showActivitiesSheet = true },
                                         onOpenBookmarks = { showBookmarksSheet = true },
@@ -3460,7 +3455,6 @@ internal fun LinDoApp(
                                         },
                                         onOpenEditProfile = ::openOfficialProfileEditor,
                                         onOpenFollowSheet = { showFollowSheet = true },
-                                        onOpenLeaderboardSheet = { showLeaderboardSheet = true },
                                         onOpenAccountPreferences = { showAccountPreferencesSheet = true },
                                         onOpenAboutSheet = { showAboutSheet = true },
                                         onOpenDebugDiagnostics = { showDebugDiagnosticsSheet = true },
@@ -3553,6 +3547,7 @@ internal fun LinDoApp(
                                                 enableAnimations = enableAnimations,
                                                 fontScale = fontScale,
                                                 isCompactFeed = isCompactFeed,
+                                                defaultSearchExpanded = defaultSearchExpanded,
                                                 isAuthorized = isAuthorized,
                                                 currentUser = currentUser,
                                                 unreadNotificationCount = effectiveUnreadCount,
@@ -3651,6 +3646,7 @@ internal fun LinDoApp(
                                                 enableAnimations = enableAnimations,
                                                 themeOption = themeOption,
                                                 isCompactFeed = isCompactFeed,
+                                                defaultSearchExpanded = defaultSearchExpanded,
                                                 isAuthorized = isAuthorized,
                                                 currentUser = currentUser,
                                                 fullProfile = fullUserProfile,
@@ -3662,6 +3658,10 @@ internal fun LinDoApp(
                                                 onSelectThemeOption = { updateBrandThemeOption(it) },
                                                 onOpenAppIcon = openAppIconPage,
                                                 onToggleCompactFeed = { updateCompactFeedMode(!isCompactFeed) },
+                                                onDefaultSearchExpandedChange = {
+                                                    defaultSearchExpanded = it
+                                                    UserApiKeyAuthManager.updateHomeSearchExpanded(it)
+                                                },
                                                 onOpenNotifications = { currentTab = MainTab.MESSAGES },
                                                 onOpenActivities = { showActivitiesSheet = true },
                                                 onOpenBookmarks = { showBookmarksSheet = true },
@@ -3674,7 +3674,6 @@ internal fun LinDoApp(
                                                 },
                                                 onOpenEditProfile = ::openOfficialProfileEditor,
                                                 onOpenFollowSheet = { showFollowSheet = true },
-                                                onOpenLeaderboardSheet = { showLeaderboardSheet = true },
                                                 onOpenAccountPreferences = { showAccountPreferencesSheet = true },
                                                 onOpenAboutSheet = { showAboutSheet = true },
                                                 onOpenDebugDiagnostics = { showDebugDiagnosticsSheet = true },
@@ -3885,12 +3884,6 @@ internal fun LinDoApp(
                     )
                 }
 
-                if (showLeaderboardSheet) {
-                    CommunityLeaderboardSheet(
-                        onDismiss = { showLeaderboardSheet = false },
-                        onInspectUser = { targetUser -> inspectedUsername = targetUser }
-                    )
-                }
 
                 if (showAccountPreferencesSheet) {
                     val uname = fullUserProfile?.username ?: currentUser?.username.orEmpty()
@@ -3901,7 +3894,8 @@ internal fun LinDoApp(
                             showAccountPreferencesSheet = false
                             showEditProfileSheet = true
                         },
-                        onUpdated = { syncUserProfile(force = true) }
+                        onUpdated = { syncUserProfile(force = true) },
+                        onOpenWeb = ::openWebPage
                     )
                 }
 
@@ -4944,6 +4938,7 @@ internal fun CommunityHomeFeedPane(
     enableAnimations: Boolean,
     fontScale: Float = 0.92f,
     isCompactFeed: Boolean = false,
+    defaultSearchExpanded: Boolean = true,
     isAuthorized: Boolean,
     currentUser: AuthenticatedUserProfile?,
     unreadNotificationCount: Int = 0,
@@ -5081,7 +5076,7 @@ internal fun CommunityHomeFeedPane(
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            var isSearchExpanded by rememberSaveable { mutableStateOf(searchQuery.isNotEmpty()) }
+            var isSearchExpanded by rememberSaveable(defaultSearchExpanded) { mutableStateOf(defaultSearchExpanded || searchQuery.isNotEmpty()) }
             LaunchedEffect(searchQuery) {
                 if (searchQuery.isNotEmpty()) isSearchExpanded = true
             }
@@ -10311,7 +10306,6 @@ internal fun CommunityDiscoverScreen(
     val ecoPortalRows = remember {
         listOf(
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_CONNECT_TITLE.text, LinDoFeedCopy.PORTAL_CONNECT_SUB.text, LinDoIcons.ShieldCheck, Color(0xFF3B82F6), "https://connect.linux.do/", requiresAuth = true),
-            DiscoverBoardEntry(LinDoFeedCopy.PORTAL_LEADERBOARD_TITLE.text, LinDoFeedCopy.PORTAL_LEADERBOARD_SUB.text, LinDoIcons.Trophy, Color(0xFFF59E0B), "https://linux.do/leaderboard"),
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_BADGES_TITLE.text, LinDoFeedCopy.PORTAL_BADGES_SUB.text, LinDoIcons.AwardBadge, Color(0xFFEAB308), "https://linux.do/badges"),
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_CREDIT_TITLE.text, LinDoFeedCopy.PORTAL_CREDIT_SUB.text, LinDoIcons.Coins, Color(0xFFF59E0B), "https://credit.linux.do/", requiresAuth = true),
             DiscoverBoardEntry(LinDoFeedCopy.PORTAL_CDK_TITLE.text, LinDoFeedCopy.PORTAL_CDK_SUB.text, LinDoIcons.Gift, Color(0xFFEC4899), "https://cdk.linux.do/", requiresAuth = true),
@@ -11405,6 +11399,7 @@ internal fun CommunityProfileScreen(
     isDarkTheme: Boolean,
     themeOption: BrandThemeOption = BrandThemeOption.OFFICIAL_GOLD,
     isCompactFeed: Boolean = false,
+    defaultSearchExpanded: Boolean = true,
     fontScale: Float,
     enableAnimations: Boolean,
     isAuthorized: Boolean,
@@ -11415,6 +11410,7 @@ internal fun CommunityProfileScreen(
     onSelectThemeOption: (BrandThemeOption) -> Unit = {},
     onOpenAppIcon: (() -> Unit)? = null,
     onToggleCompactFeed: () -> Unit = {},
+    onDefaultSearchExpandedChange: (Boolean) -> Unit = {},
     onToggleDark: () -> Unit,
     onChangeFontScale: (Float) -> Unit,
     onToggleAnimations: () -> Unit,
@@ -11426,7 +11422,6 @@ internal fun CommunityProfileScreen(
     onOpenPrivateMessages: () -> Unit,
     onOpenEditProfile: () -> Unit,
     onOpenFollowSheet: () -> Unit = {},
-    onOpenLeaderboardSheet: () -> Unit = {},
     onOpenAccountPreferences: () -> Unit = {},
     onOpenAboutSheet: () -> Unit = {},
     onOpenDebugDiagnostics: () -> Unit = {},
@@ -11793,11 +11788,6 @@ internal fun CommunityProfileScreen(
                         }
                     )
                     LinDoSettingRow(
-                        icon = LinDoIcons.Coins,
-                        title = LinDoMessagesCopy.ROW_LEADERBOARD.text,
-                        onClick = onOpenLeaderboardSheet
-                    )
-                    LinDoSettingRow(
                         icon = LinDoIcons.Sparkles,
                         title = LinDoMessagesCopy.ROW_CONNECT_GROWTH.text,
                         onClick = {
@@ -11818,7 +11808,7 @@ internal fun CommunityProfileScreen(
                         LinDoSettingRow(
                             icon = LinDoIcons.Globe,
                             title = LinDoAuthCopy.ACCOUNT_SESSION_TITLE.text,
-                            value = LinDoAuthCopy.SWITCH_ACCOUNT.text,
+                            value = currentUser?.username?.let { "@$it" }.orEmpty(),
                             showDivider = false,
                             onClick = onOpenAuthSheet
                         )
@@ -11867,6 +11857,10 @@ internal fun CommunityProfileScreen(
                     ) {
                         SettingsChoices(FeedDensityMode.entries, FeedDensityMode.entries.first { it.isCompact == isCompactFeed },
                             label = { it.labelCopy.text }, onSelect = { if (it.isCompact != isCompactFeed) onToggleCompactFeed() })
+                    }
+                    StackedSetting(LinDoIcons.Search, "首页搜索框") {
+                        SettingsChoices(listOf(true, false), defaultSearchExpanded,
+                            label = { if (it) "默认展开" else "默认收起" }, onSelect = onDefaultSearchExpandedChange)
                     }
                     StackedSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text) {
                         SettingsChoices(ReaderFontScalePreset.entries, fontScalePreset,
@@ -12833,138 +12827,14 @@ private fun UserApiKeyAuthSheet(
     onLogout: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val palette = LocalPalette.current
-    val scope = rememberCoroutineScope()
-    LinDoFullScreenPage(
-        onBack = onDismiss,
-        containerColor = palette.cardSurface
-    ) {
+    LinDoFullScreenPage(onBack = onDismiss, containerColor = LocalPalette.current.cardSurface) {
         LinDoPageTopBar(
             title = if (isAuthorized) LinDoAuthCopy.ACCOUNT_SESSION_TITLE.text else LinDoAuthCopy.LOGIN_PAGE_TITLE.text,
             onBack = onDismiss
         )
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.TopCenter
-        ) {
-            Column(
-                modifier = Modifier
-                    .widthIn(max = 520.dp)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 24.dp, vertical = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                LinDoGlassAppIcon(tileSize = 56.dp)
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                Text(
-                    text = if (isAuthorized) LinDoAuthCopy.SESSION_CARD_LOGGED_IN.text else LinDoAuthCopy.SESSION_CARD_WELCOME.text,
-                    fontSize = 19.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = (-0.3).sp,
-                    color = palette.inkPrimary,
-                    maxLines = 1
-                )
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                Text(
-                    text = if (isAuthorized && currentUser != null) {
-                        LinDoAuthCopy.SESSION_ACTIVE_SYNC_SUBTITLE.format(currentUser.username, currentUser.trustLevel)
-                    } else {
-                        LinDoAuthCopy.SESSION_GUEST_SYNC_SUBTITLE.text
-                    },
-                    fontSize = 12.5.sp,
-                    color = palette.inkSecondary,
-                    maxLines = 2,
-                    textAlign = TextAlign.Center,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                if (!authStatusHint.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(palette.subtleSurface)
-                            .border(0.5.dp, palette.brandGold.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.InfoCircle,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = palette.brandGold
-                        )
-                        Text(
-                            text = authStatusHint,
-                            fontSize = 12.5.sp,
-                            lineHeight = 18.sp,
-                            color = palette.inkPrimary,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(22.dp))
-
-                    LinDoPrimaryButton(
-                        label = if (isAuthorized) LinDoAuthCopy.REVERIFY_OR_SWITCH_ACCOUNT.text else LinDoAuthCopy.ONE_CLICK_ACCOUNT_LOGIN.text,
-                        onClick = onPrimaryWebLogin
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(46.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(palette.subtleSurface)
-                            .clickable(onClick = onBrowserOneClickAuth)
-                            .padding(horizontal = 20.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = LinDoIcons.Globe,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                            tint = palette.inkPrimary
-                        )
-                        Spacer(modifier = Modifier.width(7.dp))
-                        Text(
-                            text = LinDoAuthCopy.SYSTEM_BROWSER_PASSWORDLESS_AUTH.text,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.inkPrimary,
-                            maxLines = 1
-                        )
-                    }
-                Spacer(modifier = Modifier.height(14.dp))
-
-                if (isAuthorized) {
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = LinDoAuthCopy.LOGOUT_CURRENT_ACCOUNT.text,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.inkTertiary,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable(onClick = onLogout)
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(20.dp))
-            }
-        }
+        HorizontalDivider(thickness = 0.5.dp, color = LocalPalette.current.hairline)
+        AccountSessionContent(if (isAuthorized) currentUser else null, authStatusHint,
+            onPrimaryWebLogin, onBrowserOneClickAuth, onLogout)
     }
 }
 
@@ -18815,277 +18685,6 @@ private fun UserFollowNetworkSheet(
 }
 
 /**
- * 官方功能 14：原生社区积分与活跃排行榜 (`GET /directory_items.json?period={period}&order=likes_received`)
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun CommunityLeaderboardSheet(
-    onDismiss: () -> Unit,
-    onInspectUser: (String) -> Unit
-) {
-    val palette = LocalPalette.current
-    val scope = rememberCoroutineScope()
-    val netRestoreVer = LocalLinDoNetworkRestoreVersion.current
-    var lastHandledNetRestoreVer by remember { mutableIntStateOf(netRestoreVer) }
-    val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
-    var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
-    var selectedPeriod by remember { mutableStateOf(LeaderboardPeriod.WEEKLY) }
-    var entries by remember { mutableStateOf<List<LeaderboardUserEntry>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var isLoadingMore by remember { mutableStateOf(false) }
-    var loadMoreError by remember { mutableStateOf(false) }
-    var hasMore by remember { mutableStateOf(false) }
-    var currentPage by remember { mutableIntStateOf(0) }
-    var reloadToken by remember { mutableIntStateOf(0) }
-    var manualRecoveryRequested by remember { mutableStateOf(false) }
-    var loadMoreJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-
-    LaunchedEffect(selectedPeriod, reloadToken) {
-        loadMoreJob?.cancel()
-        isLoadingMore = false
-        val shouldPrepareRecovery = manualRecoveryRequested || loadError != null
-        manualRecoveryRequested = false
-        isLoading = true
-        loadError = null
-        loadMoreError = false
-        currentPage = 0
-        try {
-            if (shouldPrepareRecovery) {
-                LinuxDoRepository.prepareForManualRecovery()
-            }
-            val firstPage = LinuxDoRepository.fetchCommunityLeaderboard(period = selectedPeriod.wirePeriod, page = 0)
-            entries = firstPage
-            hasMore = firstPage.size >= 40
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            loadError = error.message ?: LinDoMessagesCopy.LEADERBOARD_LOAD_FAILED.text
-        } finally {
-            isLoading = false
-        }
-    }
-
-    fun loadMoreLeaderboard() {
-        if (isLoadingMore || !hasMore || isLoading) return
-        val retryingAfterError = loadMoreError
-        val nextPage = currentPage + 1
-        val periodKey = selectedPeriod.wirePeriod
-        isLoadingMore = true
-        loadMoreError = false
-        loadMoreJob?.cancel()
-        loadMoreJob = scope.launch {
-            try {
-                if (retryingAfterError) {
-                    LinuxDoRepository.prepareForManualRecovery()
-                }
-                val more = LinuxDoRepository.fetchCommunityLeaderboard(period = periodKey, page = nextPage)
-                if (more.isEmpty()) {
-                    hasMore = false
-                } else {
-                    val existingUsers = entries.map { it.username }.toHashSet()
-                    val deduped = more.filter { it.username !in existingUsers }
-                    if (deduped.isEmpty()) {
-                        hasMore = false
-                    } else {
-                        val baseSize = entries.size
-                        val reRanked = deduped.mapIndexed { idx, item -> item.copy(rank = baseSize + idx + 1) }
-                        entries = entries + reRanked
-                        currentPage = nextPage
-                        hasMore = more.size >= 40
-                    }
-                }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                loadMoreError = true
-            } finally {
-                isLoadingMore = false
-            }
-        }
-    }
-
-    LaunchedEffect(netRestoreVer, siteVerifyVer) {
-        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
-        val passiveRestore = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
-        if (activeVerify || passiveRestore) {
-            lastHandledSiteVerifyVer = siteVerifyVer
-            lastHandledNetRestoreVer = netRestoreVer
-            if (!isLoading && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
-                manualRecoveryRequested = true
-                reloadToken++
-            } else if (loadMoreError && !isLoading && !isLoadingMore) {
-                loadMoreLeaderboard()
-            }
-        }
-    }
-
-    LinDoFullScreenPage(
-        onBack = onDismiss,
-        containerColor = palette.cardSurface
-    ) {
-        LinDoPageTopBar(
-            title = LinDoMessagesCopy.LEADERBOARD_SHEET_TITLE.text,
-            onBack = onDismiss,
-            trailingContent = {
-                IconButton(onClick = {
-                    manualRecoveryRequested = true
-                    reloadToken++
-                }) {
-                    Icon(LinDoIcons.Refresh, LinDoCommonCopy.REFRESH.text, Modifier.size(19.dp), tint = palette.inkSecondary)
-                }
-            }
-        )
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.cardSurface)
-                .padding(horizontal = 16.dp)
-        ) {
-            LinDoSectionTabs(
-                labels = LeaderboardPeriod.entries.map { it.labelCopy.text },
-                selectedIndex = selectedPeriod.ordinal,
-                fontSize = 14.sp
-            ) { idx ->
-                LeaderboardPeriod.entries.getOrNull(idx)?.let { selectedPeriod = it }
-            }
-        }
-        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-
-        if (isLoading) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                LinDoLoadingIndicator(label = LinDoMessagesCopy.LOADING_LEADERBOARD.text)
-            }
-        } else if (loadError != null && entries.isEmpty()) {
-            val errText = loadError!!
-            val guestNeedsLogin = isGuestLoginRequiredError(UserApiKeyAuthManager.isAuthorized(), errText)
-            val requestLogin = LocalRequestGuestLogin.current
-            Box(
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                LinDoStatePanel(
-                    state = LinDoMascotState.NetworkError,
-                    detail = errText,
-                    iconOverride = if (guestNeedsLogin) LinDoIcons.FaLock else null,
-                    actionLabel = if (guestNeedsLogin && requestLogin != null) {
-                        LinDoCommonCopy.GO_LOGIN.text
-                    } else {
-                        LinDoCommonCopy.RETRY.text
-                    },
-                    showActionIcon = !guestNeedsLogin,
-                    emphasizeAction = guestNeedsLogin,
-                    onRetry = {
-                        if (guestNeedsLogin && requestLogin != null) {
-                            requestLogin(
-                                GuestGateScenario.LEADERBOARD.titleCopy.text,
-                                GuestGateScenario.LEADERBOARD.subtitleCopy.text
-                            )
-                        } else {
-                            manualRecoveryRequested = true
-                            reloadToken++
-                        }
-                    }
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
-            ) {
-                if (entries.isEmpty()) {
-                    item {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            LinDoEmptyState(message = LinDoMessagesCopy.EMPTY_LEADERBOARD.text)
-                        }
-                    }
-                } else {
-                    itemsIndexed(entries, key = { _, e -> "${e.username}_${e.rank}" }) { _, entry ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onInspectUser(entry.username) }
-                                .padding(vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "${entry.rank}",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (entry.rank <= 3) palette.brandGold else palette.inkTertiary,
-                                modifier = Modifier.width(28.dp)
-                            )
-                            GoogleAccountRingAvatar(
-                                letter = entry.displayName,
-                                username = entry.username,
-                                avatarUrl = entry.avatarUrl,
-                                avatarSize = 40.dp
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = entry.displayName,
-                                        fontSize = 14.8.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = palette.inkPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (entry.title.isNotBlank()) {
-                                        UserTitleTag(title = entry.title)
-                                    }
-                                }
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = LinDoMessagesCopy.LEADERBOARD_ENTRY_META.format(
-                                        formatCompactNumber(entry.likesReceived),
-                                        formatCompactNumber(entry.postCount),
-                                        entry.topicCount
-                                    ),
-                                    fontSize = 11.8.sp,
-                                    color = palette.inkSecondary,
-                                    maxLines = 1
-                                )
-                            }
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text(
-                                    text = formatCompactNumber(entry.score),
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = palette.brandGold
-                                )
-                                Text(
-                                    text = LinDoMessagesCopy.CHEERS_SCORE_LABEL.text,
-                                    fontSize = 10.5.sp,
-                                    color = palette.inkTertiary
-                                )
-                            }
-                        }
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                    }
-                    item {
-                        LinearPulseLoadingFooter(
-                            isLoadingMore = isLoadingMore,
-                            hasMore = hasMore,
-                            loadedCount = entries.size,
-                            isError = loadMoreError,
-                            onLoadMore = { loadMoreLeaderboard() }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
  * 官方功能 15：原生账号与偏好设置页面 (`GET /u/{username}.json` + `PUT /u/{username}.json`)
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -19094,7 +18693,8 @@ private fun UserAccountPreferencesSheet(
     username: String,
     onDismiss: () -> Unit,
     onOpenEditProfile: () -> Unit,
-    onUpdated: () -> Unit
+    onUpdated: () -> Unit,
+    onOpenWeb: (String) -> Unit
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -19144,7 +18744,7 @@ private fun UserAccountPreferencesSheet(
             if (activeVerify && toggleError.isSiteVerificationError()) {
                 toggleError = null
             }
-            if (!isLoading && snapshot == null && loadError != null && (activeVerify || isTransientRecoverableLoadError(loadError))) {
+            if (!isLoading && (activeVerify || (snapshot == null && loadError != null && isTransientRecoverableLoadError(loadError)))) {
                 manualRecoveryRequested = true
                 reloadToken++
             }
@@ -19183,12 +18783,7 @@ private fun UserAccountPreferencesSheet(
     ) {
         LinDoPageTopBar(
             title = LinDoMessagesCopy.ROW_ACCOUNT_PREFERENCES.text,
-            onBack = onDismiss,
-            trailingContent = {
-                TextButton(onClick = onOpenEditProfile) {
-                    Text(LinDoMessagesCopy.EDIT_PROFILE_SHORT.text, color = palette.brandGold, fontWeight = FontWeight.SemiBold)
-                }
-            }
+            onBack = onDismiss
         )
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
         toggleError?.let { msg ->
@@ -19214,181 +18809,9 @@ private fun UserAccountPreferencesSheet(
                 )
             }
         } else {
-            val s = snapshot
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                item(key = "section_account") {
-                    Text(
-                        text = LinDoMessagesCopy.SECTION_ACCOUNT_INFO.text,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.inkSecondary,
-                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-                    )
-                }
-                item(key = "row_username") {
-                    PreferenceInfoRow(
-                        LinDoMessagesCopy.PREF_USERNAME.text,
-                        LinDoCommonCopy.AT_USERNAME.format(s?.username ?: username)
-                    )
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                }
-                item(key = "row_display_name") {
-                    PreferenceInfoRow(
-                        LinDoMessagesCopy.FIELD_DISPLAY_NAME.text,
-                        s?.displayName?.ifBlank { LinDoCommonCopy.NOT_SET.text } ?: LinDoCommonCopy.NOT_SET.text,
-                        onClick = onOpenEditProfile
-                    )
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                }
-                if (!s?.email.isNullOrBlank()) {
-                    item(key = "row_email") {
-                        PreferenceInfoRow(LinDoMessagesCopy.PREF_BOUND_EMAIL.text, s?.email.orEmpty())
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                    }
-                }
-                item(key = "row_title") {
-                    PreferenceInfoRow(
-                        LinDoMessagesCopy.FIELD_USER_TITLE.text,
-                        s?.title?.ifBlank { LinDoMessagesCopy.PREF_NO_TITLE.text } ?: LinDoMessagesCopy.PREF_NO_TITLE.text,
-                        onClick = onOpenEditProfile
-                    )
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                }
-                item(key = "row_2fa") {
-                    PreferenceInfoRow(
-                        LinDoMessagesCopy.PREF_TWO_FACTOR.text,
-                        if (s?.twoFactorEnabled == true) {
-                            LinDoMessagesCopy.PREF_2FA_ENABLED.text
-                        } else {
-                            LinDoMessagesCopy.PREF_2FA_STANDARD.text
-                        }
-                    )
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                }
-                item(key = "row_devices") {
-                    PreferenceInfoRow(
-                        LinDoMessagesCopy.PREF_ACTIVE_DEVICES.text,
-                        LinDoMessagesCopy.PREF_ACTIVE_DEVICES_COUNT.format(s?.activeDeviceCount ?: 1)
-                    )
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                }
-
-                if (!s?.associatedAccounts.isNullOrEmpty()) {
-                    item(key = "section_assoc") {
-                        Text(
-                            text = LinDoMessagesCopy.PREF_ASSOCIATED_ACCOUNTS.text,
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.inkSecondary,
-                            modifier = Modifier.padding(top = 18.dp, bottom = 4.dp)
-                        )
-                    }
-                    itemsIndexed(s?.associatedAccounts.orEmpty(), key = { idx, acc -> "assoc_$idx$acc" }) { _, acc ->
-                        PreferenceInfoRow(LinDoMessagesCopy.PREF_OAUTH_CONNECTED.text, acc)
-                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                    }
-                }
-
-                item(key = "section_privacy") {
-                    Text(
-                        text = LinDoMessagesCopy.SECTION_PRIVACY_PREFS.text,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.inkSecondary,
-                        modifier = Modifier.padding(top = 18.dp, bottom = 4.dp)
-                    )
-                }
-                item(key = "toggle_presence") {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = !isSavingToggle && s != null) {
-                                persistPrivacyPrefs(!hidePresence, allowPm)
-                            }
-                            .padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                LinDoMessagesCopy.PREF_HIDE_PROFILE_TITLE.text,
-                                fontSize = 14.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = palette.inkPrimary
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                LinDoMessagesCopy.PREF_HIDE_PROFILE_SUB.text,
-                                fontSize = 12.sp,
-                                color = palette.inkSecondary
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Switch(
-                            checked = hidePresence,
-                            enabled = !isSavingToggle && s != null,
-                            onCheckedChange = { persistPrivacyPrefs(it, allowPm) }
-                        )
-                    }
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                }
-                item(key = "toggle_pm") {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = !isSavingToggle && s != null) {
-                                persistPrivacyPrefs(hidePresence, !allowPm)
-                            }
-                            .padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                LinDoMessagesCopy.PREF_ALLOW_PM_TITLE.text,
-                                fontSize = 14.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = palette.inkPrimary
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                LinDoMessagesCopy.PREF_ALLOW_PM_SUB.text,
-                                fontSize = 12.sp,
-                                color = palette.inkSecondary
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Switch(
-                            checked = allowPm,
-                            enabled = !isSavingToggle && s != null,
-                            onCheckedChange = { persistPrivacyPrefs(hidePresence, it) }
-                        )
-                    }
-                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PreferenceInfoRow(label: String, value: String, onClick: (() -> Unit)? = null) {
-    val palette = LocalPalette.current
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
-            .padding(vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(label, fontSize = 14.sp, color = palette.inkSecondary)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(value, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.inkPrimary)
-            if (onClick != null) {
-                Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = palette.inkTertiary)
+            snapshot?.let { loaded ->
+                AccountPreferencesContent(loaded, hidePresence, allowPm, isSavingToggle,
+                    ::persistPrivacyPrefs, onOpenEditProfile, onOpenWeb)
             }
         }
     }

@@ -571,6 +571,7 @@ private object DesktopStateStore {
         UserApiKeyAuthManager.uiEnableAnimations = props.getProperty("ui_enable_animations")?.toBooleanStrictOrNull() ?: true
         UserApiKeyAuthManager.uiThemeAccent = props.getProperty("ui_theme_accent")?.takeIf { it.isNotBlank() } ?: "OFFICIAL_GOLD"
         UserApiKeyAuthManager.uiCompactFeed = props.getProperty("ui_compact_feed")?.toBooleanStrictOrNull() ?: false
+        UserApiKeyAuthManager.uiHomeSearchExpanded = props.getProperty("ui_home_search_expanded")?.toBooleanStrictOrNull() ?: true
         UserApiKeyAuthManager.uiSplitFraction =
             (props.getProperty("ui_split_fraction")?.toFloatOrNull() ?: 0.42f).coerceIn(0.28f, 0.62f)
         LinuxDoRepository.restoreReadTopics(props.getProperty("read_topic_posts"))
@@ -709,6 +710,9 @@ private object DesktopStateStore {
                 setProperty("ui_dark_theme", darkTheme.toString())
                 setProperty("ui_enable_animations", enableAnimations.toString())
             }
+        }
+        UserApiKeyAuthManager.onPersistHomeSearchExpanded = { expanded ->
+            update { setProperty("ui_home_search_expanded", expanded.toString()) }
         }
         UserApiKeyAuthManager.onPersistThemeAndDensity = { themeAccent, compactFeed ->
             update {

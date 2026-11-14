@@ -972,6 +972,8 @@ class Round3BugFixesRegressionTest {
             }
         }) {
             val prefs = assertNotNull(LinuxDoRepository.fetchUserAccountPreferences("alice"))
+            assertEquals(null, prefs.twoFactorEnabled)
+            assertEquals(null, prefs.activeDeviceCount)
             assertEquals(listOf("百日筑基", "认证商家", "破界者"), prefs.availableTitles)
             assertEquals("", prefs.bioRaw, "Missing bio_raw must not be overwritten with truncated bio_excerpt")
 
