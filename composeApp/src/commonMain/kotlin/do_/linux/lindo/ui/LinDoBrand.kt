@@ -34,9 +34,6 @@ import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_mascot_welcome
 import org.jetbrains.compose.resources.painterResource
 
-private val BrandGold = Color(0xFFF6B73C)
-private val BrandInk = Color(0xFF342820)
-private fun brandCanvas(dark: Boolean) = if (dark) Color(0xFF0A0B0E) else Color(0xFFFFFFFF)
 private fun brandText(dark: Boolean) = if (dark) Color(0xFFF3F4F6) else Color(0xFF1A1B1E)
 private fun brandSecondary(dark: Boolean) = if (dark) Color(0xFF9CA3AF) else Color(0xFF5C626E)
 private fun brandBorder(dark: Boolean) = if (dark) Color(0xFF262A33) else Color(0xFFE3E6ED)
@@ -53,7 +50,7 @@ internal fun LinDoGlassAppIcon(tileSize: Dp = 84.dp, isCircle: Boolean = false, 
 }
 
 /**
- * Lindo 经典 Linux.do 双色品牌字标 (`Lin` + `do`)，字距舒展、`do` 随全局主题色实时联动
+ * Lindo 经典 Linux.do 双色品牌字标 (`Lin` + `do`)，字距舒展、`do` 保留品牌金色，功能控件使用用户主题
  */
 @Composable
 fun LindoColorWordmarkText(
@@ -153,20 +150,23 @@ internal fun LinDoWelcomeScreen(
     onOpenAppIcon: (() -> Unit)? = null,
     onGuestBrowse: (() -> Unit)? = null,
     secondaryActionLabel: String = LinDoAuthCopy.SYSTEM_BROWSER_AUTH.text,
-    secondaryActionIcon: ImageVector = LinDoIcons.Globe
+    secondaryActionIcon: ImageVector = LinDoIcons.Globe,
+    showHeader: Boolean = true,
+    statusMessage: String? = null
 ) {
-    BoxWithConstraints(Modifier.fillMaxSize().background(brandCanvas(isDark))
-        .windowInsetsPadding(WindowInsets.statusBars).windowInsetsPadding(WindowInsets.navigationBars)) {
+    val palette = LocalPalette.current.let { if (it.isDark == isDark) it else buildLinDoPalette(isDark, it.themeOption) }
+    BoxWithConstraints(Modifier.fillMaxSize().background(palette.canvas)
+        .then(if (showHeader) Modifier.windowInsetsPadding(WindowInsets.statusBars).windowInsetsPadding(WindowInsets.navigationBars) else Modifier)) {
         val artwork = LocalLinDoAppIcon.current?.artwork
         val heroSize = if (artwork == null) {
-            if (maxHeight < 680.dp) 172.dp else 220.dp
+            if (maxHeight < 680.dp) 128.dp else 160.dp
         } else {
-            if (maxHeight < 680.dp) 148.dp else 188.dp
+            if (maxHeight < 680.dp) 112.dp else 140.dp
         }
         val actionShape = RoundedCornerShape(16.dp)
         Column(Modifier.align(Alignment.Center).widthIn(max = 440.dp).fillMaxSize()
             .padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 16.dp)) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (showHeader) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
                 LinDoBrandWordmark(isDark = isDark, modifier = Modifier.weight(1f))
                 if (onOpenAppIcon != null) {
                     IconButton(onClick = onOpenAppIcon, modifier = Modifier.size(48.dp)) {
@@ -194,11 +194,11 @@ internal fun LinDoWelcomeScreen(
                             Modifier.size(heroSize), contentScale = ContentScale.Fit)
                     }
                     Spacer(Modifier.height(18.dp))
-                    Text(LinDoAuthCopy.WELCOME_GREETING.text, fontSize = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp,
+                    Text(LinDoAuthCopy.WELCOME_GREETING.text, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.3).sp,
                         color = brandText(isDark), textAlign = TextAlign.Center, lineHeight = 36.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Text(LinDoAuthCopy.WELCOME_SUBTITLE.text, fontSize = 14.sp, lineHeight = 22.sp,
-                        color = brandSecondary(isDark), textAlign = TextAlign.Center)
+                    if (!statusMessage.isNullOrBlank()) Text(statusMessage, color = palette.inkSecondary,
+                        fontSize = 13.sp, lineHeight = 20.sp, textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(top = 12.dp))
                 }
             }
             Column(
@@ -208,7 +208,7 @@ internal fun LinDoWelcomeScreen(
                 Button(
                     onClick = onPrimaryWebLogin,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = BrandGold, contentColor = BrandInk),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.publishBtnBg, contentColor = palette.publishBtnContent),
                     shape = actionShape,
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)
                 ) {
@@ -238,29 +238,12 @@ internal fun LinDoWelcomeScreen(
                 }
                 if (onOpenSavedAccounts != null) {
                     TextButton(onClick = onOpenSavedAccounts, modifier = Modifier.fillMaxWidth()) {
-                        Text("切换已登录账号", color = brandSecondary(isDark), fontSize = 14.sp)
+                        Text("切换账号", color = brandSecondary(isDark), fontSize = 14.sp)
                     }
                 }
                 if (onGuestBrowse != null) {
-                    OutlinedButton(
-                        onClick = onGuestBrowse,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                        shape = actionShape,
-                        border = BorderStroke(1.dp, brandBorder(isDark)),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = Color.Transparent,
-                            contentColor = brandText(isDark)
-                        ),
-                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
-                    ) {
-                        Icon(
-                            LinDoIcons.Eye,
-                            contentDescription = null,
-                            tint = brandSecondary(isDark),
-                            modifier = Modifier.size(17.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(LinDoAuthCopy.BROWSE_AS_GUEST.text, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                    TextButton(onClick = onGuestBrowse, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Text(LinDoAuthCopy.BROWSE_AS_GUEST.text, color = palette.inkSecondary, fontSize = 14.sp)
                     }
                 }
             }
@@ -281,8 +264,9 @@ fun LinDoMascotLoginTransitionView(
     modifier: Modifier = Modifier,
     onRetry: (() -> Unit)? = null
 ) {
+    val palette = LocalPalette.current.let { if (it.isDark == isDark) it else buildLinDoPalette(isDark, it.themeOption) }
     CompositionLocalProvider(LocalLinDoDarkTheme provides isDark) {
-        Column(modifier.fillMaxSize().background(brandCanvas(isDark))
+        Column(modifier.fillMaxSize().background(palette.canvas)
             .windowInsetsPadding(WindowInsets.statusBars).windowInsetsPadding(WindowInsets.navigationBars)
             .padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 20.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -325,7 +309,7 @@ fun LinDoMascotLoginTransitionView(
                             Spacer(Modifier.height(22.dp))
                             // Actual WebView progress only. Session verification has no measured percentage.
                             LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) },
-                                color = BrandGold, trackColor = if (isDark) Color(0xFF39332A) else Color(0xFFEDE6DC),
+                                color = palette.brandGold, trackColor = palette.activeChipBg,
                                 modifier = Modifier.width(144.dp).height(3.dp))
                         }
                     }

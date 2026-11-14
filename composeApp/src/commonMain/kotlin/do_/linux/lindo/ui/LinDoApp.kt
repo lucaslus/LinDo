@@ -283,7 +283,7 @@ enum class BrandThemeOption(
         logoDoColor = Color(0xFFE03E3E),
         tabIndicatorColor = Color(0xFFE03E3E),
         lightChipBg = Color(0xFFFDF2F2),
-        lightChipText = Color(0xFFE03E3E),
+        lightChipText = Color(0xFFB91C1C),
         darkChipBg = Color(0xFF3F1515),
         darkChipText = Color(0xFFF87171),
         publishBtnBg = Color(0xFFE03E3E),
@@ -314,9 +314,22 @@ enum class BrandThemeOption(
         darkChipText = Color(0xFF34D399),
         publishBtnBg = Color(0xFF059669),
         publishBtnContent = Color(0xFFFFFFFF)
-    );
+    ),
+    SOFT_PURPLE("SOFT_PURPLE", LinDoFeedCopy.THEME_SOFT_PURPLE.text,
+        Color(0xFF8B5CF6), Color(0xFF8B5CF6), Color(0xFF8B5CF6),
+        Color(0xFFF3E8FF), Color(0xFF6D28D9), Color(0xFF30204B), Color(0xFFC4B5FD),
+        Color(0xFF6D28D9), Color.White),
+    CLEAR_TEAL("CLEAR_TEAL", LinDoFeedCopy.THEME_CLEAR_TEAL.text,
+        Color(0xFF0891B2), Color(0xFF0891B2), Color(0xFF0891B2),
+        Color(0xFFCFFAFE), Color(0xFF0E7490), Color(0xFF153C46), Color(0xFF67E8F9),
+        Color(0xFF0E7490), Color.White),
+    WARM_ORANGE("WARM_ORANGE", LinDoFeedCopy.THEME_WARM_ORANGE.text,
+        Color(0xFFF97316), Color(0xFFF97316), Color(0xFFF97316),
+        Color(0xFFFFEDD5), Color(0xFF9A3412), Color(0xFF482913), Color(0xFFFDBA74),
+        Color(0xFF9A3412), Color.White);
 
     companion object {
+        val displayOrder = listOf(OFFICIAL_GOLD, GEEK_BLUE, BAMBOO_GREEN, IDEAL_RED, SOFT_PURPLE, CLEAR_TEAL, WARM_ORANGE)
         fun fromKey(key: String?): BrandThemeOption {
             return entries.firstOrNull { it.key == key } ?: OFFICIAL_GOLD
         }
@@ -350,7 +363,10 @@ data class LinDoThemePalette(
     val publishBtnContent: Color,
     val successContainer: Color,
     val onSuccessContainer: Color
-)
+) {
+    /** Foreground for selected controls filled with the accessible accent tone. */
+    val onAccent: Color get() = if (isDark) canvas else Color.White
+}
 
 internal fun buildLinDoPalette(
     isDark: Boolean,
@@ -371,16 +387,16 @@ internal fun buildLinDoPalette(
             inkSecondary = Color(0xFF525866),
             inkTertiary = Color(0xFF6B7280),
             hairline = Color(0xFFEBEEF2),
-            accent = if (option == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF18181B) else option.logoDoColor,
+            accent = option.lightChipText,
             brandGold = if (option == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF936000) else option.lightChipText,
-            logoDoColor = option.logoDoColor,
-            tabIndicatorColor = option.tabIndicatorColor,
+            logoDoColor = Color(0xFFF59E0B),
+            tabIndicatorColor = option.lightChipText,
             activeChipBg = option.lightChipBg,
             activeChipText = option.lightChipText,
-            publishBtnBg = option.publishBtnBg,
-            publishBtnContent = option.publishBtnContent,
-            successContainer = Color(0xFFFDF6E9),
-            onSuccessContainer = Color(0xFFB7791F)
+            publishBtnBg = if (option == BrandThemeOption.OFFICIAL_GOLD) option.swatchColor else option.lightChipText,
+            publishBtnContent = if (option == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
+            successContainer = Color(0xFFDCFCE7),
+            onSuccessContainer = Color(0xFF166534)
         )
     } else {
         LinDoThemePalette(
@@ -397,16 +413,16 @@ internal fun buildLinDoPalette(
             inkSecondary = Color(0xFFA1A8B5),
             inkTertiary = Color(0xFF7D8594),
             hairline = Color(0xFF1E222B),
-            accent = option.logoDoColor,
+            accent = option.darkChipText,
             brandGold = option.darkChipText,
-            logoDoColor = option.logoDoColor,
-            tabIndicatorColor = option.tabIndicatorColor,
+            logoDoColor = Color(0xFFF59E0B),
+            tabIndicatorColor = option.darkChipText,
             activeChipBg = option.darkChipBg,
             activeChipText = option.darkChipText,
-            publishBtnBg = if (option == BrandThemeOption.OFFICIAL_GOLD) Color(0xFFF59E0B) else option.publishBtnBg,
-            publishBtnContent = if (option == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color(0xFFFFFFFF),
-            successContainer = Color(0xFF3F2E05),
-            onSuccessContainer = Color(0xFFFCD34D)
+            publishBtnBg = option.darkChipText,
+            publishBtnContent = Color(0xFF111827),
+            successContainer = Color(0xFF143327),
+            onSuccessContainer = Color(0xFF86EFAC)
         )
     }
 }
@@ -444,8 +460,18 @@ internal fun buildMaterialSchemeFromPalette(palette: LinDoThemePalette) = if (pa
     darkColorScheme(
         primary = palette.brandGold,
         onPrimary = Color(0xFF101217),
-        primaryContainer = palette.tonalPill,
-        onPrimaryContainer = palette.onTonalPill,
+        primaryContainer = palette.activeChipBg,
+        onPrimaryContainer = palette.activeChipText,
+        secondary = palette.brandGold,
+        onSecondary = palette.onAccent,
+        secondaryContainer = palette.activeChipBg,
+        onSecondaryContainer = palette.activeChipText,
+        tertiary = palette.brandGold,
+        onTertiary = palette.onAccent,
+        tertiaryContainer = palette.activeChipBg,
+        onTertiaryContainer = palette.activeChipText,
+        surfaceTint = palette.brandGold,
+        inversePrimary = if (palette.isDark) palette.themeOption.lightChipText else palette.themeOption.darkChipText,
         background = palette.canvas,
         onBackground = palette.inkPrimary,
         surface = palette.cardSurface,
@@ -458,8 +484,18 @@ internal fun buildMaterialSchemeFromPalette(palette: LinDoThemePalette) = if (pa
     lightColorScheme(
         primary = palette.brandGold,
         onPrimary = Color.White,
-        primaryContainer = palette.tonalPill,
-        onPrimaryContainer = palette.onTonalPill,
+        primaryContainer = palette.activeChipBg,
+        onPrimaryContainer = palette.activeChipText,
+        secondary = palette.brandGold,
+        onSecondary = palette.onAccent,
+        secondaryContainer = palette.activeChipBg,
+        onSecondaryContainer = palette.activeChipText,
+        tertiary = palette.brandGold,
+        onTertiary = palette.onAccent,
+        tertiaryContainer = palette.activeChipBg,
+        onTertiaryContainer = palette.activeChipText,
+        surfaceTint = palette.brandGold,
+        inversePrimary = if (palette.isDark) palette.themeOption.lightChipText else palette.themeOption.darkChipText,
         background = palette.canvas,
         onBackground = palette.inkPrimary,
         surface = palette.cardSurface,
@@ -4298,7 +4334,7 @@ internal fun LinDoApp(
                         .pointerInput(Unit) {
                             awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
                         }, contentAlignment = Alignment.Center) {
-                        LinDoLoadingIndicator(label = if (SavedAccounts.busy) "正在切换账号…" else "正在完成登录…")
+                        LinDoLoadingIndicator(label = if (SavedAccounts.busy) "切换中" else "登录中")
                     }
                 }
             }
@@ -4545,7 +4581,7 @@ private fun DesktopSideRail(
                                         }
                                     )
                                     .clip(CircleShape)
-                                    .background(palette.logoDoColor)
+                                    .background(palette.brandGold)
                                     .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
                                 contentAlignment = Alignment.Center
                             ) {
@@ -4554,7 +4590,7 @@ private fun DesktopSideRail(
                                     fontSize = 9.sp,
                                     lineHeight = 9.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (palette.themeOption == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
+                                    color = palette.onAccent,
                                     maxLines = 1,
                                     softWrap = false
                                 )
@@ -4566,7 +4602,7 @@ private fun DesktopSideRail(
                         text = tab.title,
                         fontSize = 11.sp,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        color = if (selected) palette.inkPrimary else palette.inkSecondary,
+                        color = if (selected) palette.brandGold else palette.inkSecondary,
                         maxLines = 1
                     )
                 }
@@ -4607,7 +4643,7 @@ private fun DesktopSideRail(
                                 imageVector = LinDoIcons.Plus,
                                 contentDescription = LinDoFeedCopy.PUBLISH_NEW_TOPIC_DESC.text,
                                 modifier = Modifier.size(21.dp),
-                                tint = palette.logoDoColor
+                                tint = palette.brandGold
                             )
                         }
                         Spacer(modifier = Modifier.height(3.dp))
@@ -4615,7 +4651,7 @@ private fun DesktopSideRail(
                             text = LinDoCommonCopy.PUBLISH.text,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = palette.logoDoColor,
+                            color = palette.brandGold,
                             maxLines = 1
                         )
                     }
@@ -4775,13 +4811,13 @@ internal fun GoogleM3NavigationBar(
                             brush = Brush.verticalGradient(
                                 colors = if (palette.isDark) {
                                     listOf(
-                                        Color.White.copy(alpha = 0.10f),
-                                        Color.White.copy(alpha = 0.045f)
+                                        palette.brandGold.copy(alpha = 0.10f),
+                                        palette.brandGold.copy(alpha = 0.045f)
                                     )
                                 } else {
                                     listOf(
-                                        Color.White.copy(alpha = 0.96f),
-                                        Color(0xFFF6F8FC).copy(alpha = 0.86f)
+                                        palette.activeChipBg.copy(alpha = 0.85f),
+                                        palette.activeChipBg.copy(alpha = 0.50f)
                                     )
                                 }
                             )
@@ -4843,7 +4879,7 @@ internal fun GoogleM3NavigationBar(
                                     imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
                                     contentDescription = tab.title,
                                     modifier = Modifier.size(20.dp),
-                                    tint = if (selected) palette.inkPrimary else palette.inkSecondary
+                                    tint = if (selected) palette.brandGold else palette.inkSecondary
                                 )
                             }
                         }
@@ -4853,7 +4889,7 @@ internal fun GoogleM3NavigationBar(
                             fontSize = 10.5.sp,
                             lineHeight = 12.sp,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                            color = if (selected) palette.inkPrimary else palette.inkSecondary,
+                            color = if (selected) palette.brandGold else palette.inkSecondary,
                             maxLines = 1
                         )
                     }
@@ -4916,7 +4952,7 @@ internal fun GoogleM3NavigationBar(
                                 imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
                                 contentDescription = tab.title,
                                 modifier = Modifier.size(20.dp),
-                                tint = if (selected) palette.inkPrimary else palette.inkSecondary
+                                tint = if (selected) palette.brandGold else palette.inkSecondary
                             )
                             if (tab == MainTab.MESSAGES && unreadCount > 0) {
                                 val badgeText = if (unreadCount > 99) LinDoCommonCopy.BADGE_OVERFLOW_99.text else unreadCount.toString()
@@ -4935,7 +4971,7 @@ internal fun GoogleM3NavigationBar(
                                             }
                                         )
                                         .clip(CircleShape)
-                                        .background(palette.logoDoColor)
+                                        .background(palette.brandGold)
                                         .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
@@ -4944,7 +4980,7 @@ internal fun GoogleM3NavigationBar(
                                         fontSize = 9.sp,
                                         lineHeight = 9.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (palette.themeOption == BrandThemeOption.OFFICIAL_GOLD) Color(0xFF111827) else Color.White,
+                                        color = palette.onAccent,
                                         maxLines = 1,
                                         softWrap = false
                                     )
@@ -4957,7 +4993,7 @@ internal fun GoogleM3NavigationBar(
                             fontSize = 10.5.sp,
                             lineHeight = 12.sp,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                            color = if (selected) palette.inkPrimary else palette.inkSecondary,
+                            color = if (selected) palette.brandGold else palette.inkSecondary,
                             maxLines = 1
                         )
                     }
@@ -5954,7 +5990,7 @@ internal fun CommunityHomeFeedPane(
                                                             scaleY = s
                                                         }
                                                         .clip(CircleShape)
-                                                        .background(if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC))
+                                                        .background(palette.brandGold)
                                                 )
                                             }
                                             Spacer(modifier = Modifier.width(6.dp))
@@ -6541,7 +6577,7 @@ private fun CommunityTopicItem(
             showUnreadDotSlot = false
         }
     }
-    val unreadDotColor = if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
+    val unreadDotColor = palette.brandGold
     val titleAnnotated = remember(topic.title, showUnreadDotSlot) {
         buildAnnotatedString {
             append(topic.title)
@@ -9065,7 +9101,7 @@ internal fun CommunityPostFloor(
                                 }
                                 .clip(CircleShape)
                                 .background(
-                                    if (palette.isDark) Color(0xFF38BDF8) else Color(0xFF0088CC)
+                                    palette.brandGold
                                 )
                         )
                     }
@@ -11202,7 +11238,7 @@ private fun CommunityMessagesScreen(
                                     .padding(vertical = 48.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                LinDoEmptyState(message = LinDoMessagesCopy.EMPTY_PRIVATE_MESSAGES.text)
+                                LinDoEmptyState(message = LinDoMessagesCopy.EMPTY_PRIVATE_MESSAGES.text, showMascot = true)
                             }
                         }
                     } else if (privateMessages.isNotEmpty()) {
@@ -11309,7 +11345,7 @@ private fun CommunityMessagesScreen(
                                         .padding(vertical = 56.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    LinDoEmptyState(message = LinDoMessagesCopy.EMPTY_NOTIFICATIONS.text)
+                                    LinDoEmptyState(message = LinDoMessagesCopy.EMPTY_NOTIFICATIONS.text, showMascot = true)
                                 }
                             }
                         }
@@ -11918,12 +11954,12 @@ internal fun CommunityProfileScreen(
                     }
                     StackedSetting(LinDoIcons.Search, "首页搜索框") {
                         SettingsChoices(listOf(true, false), defaultSearchExpanded,
-                            label = { if (it) "默认展开" else "默认收起" }, onSelect = onDefaultSearchExpandedChange)
+                            label = { if (it) "展开" else "收起" }, onSelect = onDefaultSearchExpandedChange)
                     }
                     StackedSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text) {
                         SettingsChoices(ReaderFontScalePreset.entries, fontScalePreset,
                             label = { it.labelCopy.text }, onSelect = { onChangeFontScale(it.scale) })
-                        Text("恰好的字号，让阅读更舒服。", fontSize = 16.sp, lineHeight = 24.sp,
+                        Text("预览：恰好的字号，让阅读更舒服。", fontSize = 16.sp, lineHeight = 24.sp,
                             color = palette.inkSecondary, modifier = Modifier.padding(top = 12.dp))
                     }
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -11939,7 +11975,7 @@ internal fun CommunityProfileScreen(
                                 checked = enableAnimations,
                                 onCheckedChange = { if (it != enableAnimations) onToggleAnimations() },
                                 colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
+                                    checkedThumbColor = palette.onAccent,
                                     checkedTrackColor = palette.brandGold
                                 )
                             )
@@ -12887,16 +12923,31 @@ private fun UserApiKeyAuthSheet(
     onLogout: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    LinDoFullScreenPage(onBack = onDismiss, containerColor = LocalPalette.current.cardSurface) {
+    var managing by remember { mutableStateOf(false) }
+    var adding by remember { mutableStateOf(false) }
+    val accounts = SavedAccounts.accounts
+    val back = { if (adding) adding = false else if (managing) managing = false else onDismiss() }
+    LinDoFullScreenPage(onBack = back, containerColor = LocalPalette.current.cardSurface) {
         LinDoPageTopBar(
-            title = if (isAuthorized) LinDoAuthCopy.ACCOUNT_SESSION_TITLE.text else LinDoAuthCopy.LOGIN_PAGE_TITLE.text,
-            onBack = onDismiss
+            title = if (adding) "添加账号" else LinDoAuthCopy.ACCOUNT_SESSION_TITLE.text,
+            onBack = back,
+            trailingContent = {
+                if (!adding && accounts.isNotEmpty()) TextButton(onClick = { managing = !managing }) {
+                    Text(if (managing) "完成" else "管理", color = LocalPalette.current.inkSecondary)
+                }
+            }
         )
         HorizontalDivider(thickness = 0.5.dp, color = LocalPalette.current.hairline)
-        AccountSessionContent(if (isAuthorized) currentUser else null, authStatusHint,
-            onPrimaryWebLogin, onBrowserOneClickAuth, onLogout,
-            accounts = SavedAccounts.accounts, onAddAccount = onAddAccount, onSelectAccount = onSelectAccount,
-            onRemoveAccount = SavedAccounts::forget)
+        if (adding || (accounts.isEmpty() && !isAuthorized)) {
+            LinDoWelcomeScreen(isDark = LocalPalette.current.isDark,
+                onPrimaryWebLogin = if (adding) onAddAccount else onPrimaryWebLogin,
+                onBrowserOneClickAuth = onBrowserOneClickAuth, onToggleDark = {}, showHeader = false, statusMessage = authStatusHint)
+        } else {
+            AccountSessionContent(if (isAuthorized) currentUser else null, authStatusHint,
+                onPrimaryWebLogin, onBrowserOneClickAuth, onLogout,
+                accounts = accounts, managing = managing, onAddAccount = { managing = false; adding = true },
+                onSelectAccount = onSelectAccount, onRemoveAccount = SavedAccounts::forget)
+        }
     }
 }
 
@@ -16438,7 +16489,7 @@ private fun UserBookmarksSheet(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            LinDoEmptyState(message = LinDoMessagesCopy.EMPTY_BOOKMARKS.text)
+                            LinDoEmptyState(message = LinDoMessagesCopy.EMPTY_BOOKMARKS.text, showMascot = true)
                         }
                     }
                 } else {

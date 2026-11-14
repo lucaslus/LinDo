@@ -52,7 +52,7 @@ data class DiagnosticLogEntry(
  */
 object LinDoDiagnosticLogger {
     const val APP_VERSION_NAME: String = "0.2.32"
-    const val APP_BUILD: Int = 41
+    const val APP_BUILD: Int = 42
     const val APP_VERSION_DISPLAY: String = "Lindo v$APP_VERSION_NAME · build $APP_BUILD"
 
     private const val MAX_MEMORY_ENTRIES = 320

@@ -11,6 +11,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.graphics.luminance
+import do_.linux.lindo.ui.components.LinDoIcons
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -47,26 +50,29 @@ internal fun <T> SettingsChoices(
     onSelect: (T) -> Unit
 ) {
     val palette = LocalPalette.current
-    Row(
-        Modifier.fillMaxWidth().height(IntrinsicSize.Min)
-            .clip(RoundedCornerShape(10.dp)).background(palette.subtleSurface.copy(alpha = 0.65f))
-            .padding(3.dp).selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(3.dp)
-    ) {
-        options.forEach { option ->
-            val active = option == selected
-            Box(
-                Modifier.weight(1f).fillMaxHeight().heightIn(min = 48.dp)
-                    .clip(RoundedCornerShape(7.dp))
-                    .background(if (active) palette.brandGold.copy(alpha = 0.08f) else Color.Transparent)
-                    .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })
-                    .padding(horizontal = 6.dp, vertical = 10.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(label(option), fontSize = 14.sp, lineHeight = 20.sp,
-                    fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
-                    color = if (active) palette.activeChipText else palette.inkSecondary,
-                    textAlign = TextAlign.Center)
+    BoxWithConstraints(Modifier.fillMaxWidth().selectableGroup()) {
+        // Keep five text sizes on one line when they fit; retain usable targets at larger system text sizes.
+        val columns = if (options.size > 3 && maxWidth / options.size < (48 * LocalDensity.current.fontScale).dp) 3 else options.size
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            options.chunked(columns).forEach { row ->
+                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)
+                    .clip(RoundedCornerShape(10.dp)).background(palette.subtleSurface.copy(alpha = 0.65f))
+                    .padding(3.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    row.forEach { option ->
+                        val active = option == selected
+                        Box(Modifier.weight(1f).fillMaxHeight().heightIn(min = 48.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(if (active) palette.activeChipBg else Color.Transparent)
+                            .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })
+                            .padding(horizontal = 4.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
+                            Text(label(option), fontSize = 14.sp, lineHeight = 20.sp,
+                                fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+                                color = if (active) palette.activeChipText else palette.inkSecondary,
+                                textAlign = TextAlign.Center)
+                        }
+                    }
+                    repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+                }
             }
         }
     }
@@ -75,21 +81,24 @@ internal fun <T> SettingsChoices(
 @Composable
 internal fun SettingsThemeChoices(selected: BrandThemeOption, onSelect: (BrandThemeOption) -> Unit) {
     val palette = LocalPalette.current
-    Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        BrandThemeOption.entries.forEach { option ->
-            val active = selected == option
-            Column(
-                Modifier.weight(1f).heightIn(min = 64.dp).clip(RoundedCornerShape(8.dp))
-                    .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })
-                    .padding(vertical = 6.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(Modifier.size(28.dp)
-                    .border(1.dp, if (active) palette.inkSecondary else Color.Transparent, CircleShape)
-                    .padding(4.dp).background(option.swatchColor, CircleShape))
-                Text(option.label, fontSize = 12.sp, lineHeight = 16.sp, textAlign = TextAlign.Center,
-                    color = if (active) palette.activeChipText else palette.inkSecondary)
+    Column(Modifier.fillMaxWidth().selectableGroup(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        BrandThemeOption.displayOrder.chunked(4).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                row.forEach { option ->
+                    val active = selected == option
+                    Column(Modifier.weight(1f).heightIn(min = 68.dp).clip(RoundedCornerShape(8.dp))
+                        .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })
+                        .padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Box(Modifier.size(30.dp).background(option.swatchColor, CircleShape), contentAlignment = Alignment.Center) {
+                            if (active) Icon(LinDoIcons.Check, null, Modifier.size(18.dp),
+                                tint = if (option.swatchColor.luminance() > 0.4f) Color(0xFF101217) else Color.White)
+                        }
+                        Text(option.label, fontSize = 12.sp, lineHeight = 16.sp, textAlign = TextAlign.Center,
+                            color = if (active) palette.activeChipText else palette.inkSecondary)
+                    }
+                }
+                repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }

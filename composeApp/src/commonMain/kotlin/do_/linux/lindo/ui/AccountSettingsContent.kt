@@ -4,6 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -54,7 +56,7 @@ internal fun AccountDetailRow(
             if (!detail.isNullOrBlank()) Text(detail, fontSize = 13.sp, lineHeight = 19.sp,
                 color = p.inkSecondary, modifier = Modifier.padding(top = 4.dp))
         }
-        if (onClick != null) {
+        if (onClick != null && !destructive) {
             Spacer(Modifier.width(12.dp))
             if (web) {
                 Text("网页", fontSize = 11.sp, color = p.inkTertiary)
@@ -95,7 +97,7 @@ private fun AccountPrivacySwitch(title: String, detail: String, checked: Boolean
         }
         Spacer(Modifier.width(16.dp))
         Switch(checked = checked, enabled = enabled, onCheckedChange = null,
-            colors = SwitchDefaults.colors(checkedTrackColor = p.brandGold, checkedThumbColor = Color.White))
+            colors = SwitchDefaults.colors(checkedTrackColor = p.brandGold, checkedThumbColor = p.onAccent))
     }
     HorizontalDivider(thickness = 0.5.dp, color = p.hairline)
 }
@@ -171,6 +173,7 @@ internal fun AccountSessionContent(
     onBrowserAuth: () -> Unit,
     onLogout: () -> Unit,
     accounts: List<SavedAccountSummary> = emptyList(),
+    managing: Boolean = false,
     onAddAccount: () -> Unit = onLogin,
     onSelectAccount: (String) -> Unit = {},
     onRemoveAccount: (String) -> Unit = {}
@@ -185,37 +188,38 @@ internal fun AccountSessionContent(
     }
     AccountSettingsColumn {
         if (accounts.isNotEmpty()) {
-            AccountSection("已登录账号")
-            accounts.forEach { account ->
+            Column(Modifier.selectableGroup()) { accounts.forEach { account ->
                 val current = user?.username.equals(account.profile.username, true)
                 Row(Modifier.fillMaxWidth().heightIn(min = 76.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Row(Modifier.weight(1f).clickable(enabled = !current) { onSelectAccount(account.profile.username) }
+                    Row(Modifier.weight(1f).selectable(selected = current, role = Role.RadioButton) { if (!current) onSelectAccount(account.profile.username) }
                         .padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                         SmartAvatar(username = account.profile.username, avatarTemplate = account.profile.avatarTemplate,
                             animatedAvatar = account.profile.animatedAvatar, size = 40.dp, enableAnimations = false)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(account.profile.displayName.ifBlank { account.profile.username }, fontSize = 16.sp,
-                                fontWeight = FontWeight.SemiBold, color = LocalPalette.current.inkPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium, color = if (current) LocalPalette.current.brandGold else LocalPalette.current.inkPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text("@${account.profile.username}", fontSize = 12.sp, color = LocalPalette.current.inkSecondary)
-                            if (account.needsLogin) Text("登录已失效，点击重新登录", fontSize = 12.sp, color = LocalPalette.current.inkSecondary)
+                            if (account.needsLogin) Text("需登录", fontSize = 12.sp, color = LocalPalette.current.inkSecondary)
                         }
                     }
-                    if (current) Text("当前使用", fontSize = 12.sp, color = LocalPalette.current.brandGold)
-                    else TextButton(onClick = { removing = account.profile.username }) { Text("移除", color = LocalPalette.current.inkTertiary, fontSize = 12.sp) }
+                    if (current) Icon(LinDoIcons.Check, "当前账号", Modifier.size(20.dp), tint = LocalPalette.current.brandGold)
+                    else if (managing) TextButton(onClick = { removing = account.profile.username }) { Text("移除", color = LocalPalette.current.inkTertiary, fontSize = 12.sp) }
                 }
                 HorizontalDivider(thickness = 0.5.dp, color = LocalPalette.current.hairline)
-            }
+            } }
         } else if (user != null) AccountIdentity(user)
         if (!status.isNullOrBlank()) Text(status, color = LocalPalette.current.inkSecondary,
             fontSize = 13.sp, lineHeight = 20.sp, modifier = Modifier.padding(vertical = 16.dp))
-        AccountSection(if (user != null) "登录管理" else "登录方式")
-        if (accounts.isNotEmpty()) AccountDetailRow("添加其他账号", "登录后会保存在此列表中", onClick = onAddAccount)
-        else AccountDetailRow(if (user != null) "重新登录" else "使用 LINUX DO 登录", "在应用内打开登录网页", onClick = onLogin)
-        AccountDetailRow("系统浏览器授权", "添加浏览器中已登录的账号", onClick = onBrowserAuth)
+        if (accounts.isNotEmpty()) {
+            AccountDetailRow("添加账号", onClick = onAddAccount)
+        } else {
+            AccountDetailRow(if (user != null) "重新登录" else "使用 LINUX DO 登录", onClick = onLogin)
+            AccountDetailRow("浏览器授权", onClick = onBrowserAuth)
+        }
         if (user != null) {
-            AccountSection("退出")
-            AccountDetailRow("退出当前账号", "退出后可以登录其他账号", destructive = true, onClick = onLogout)
+            Spacer(Modifier.height(24.dp))
+            AccountDetailRow("退出登录", destructive = true, onClick = onLogout)
         }
         Spacer(Modifier.height(24.dp))
     }

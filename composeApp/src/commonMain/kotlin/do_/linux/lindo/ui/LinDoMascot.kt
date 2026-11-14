@@ -439,9 +439,19 @@ fun LinDoEmptyState(
     modifier: Modifier = Modifier,
     icon: ImageVector = LinDoIcons.Inbox,
     actionLabel: String? = null,
-    onAction: (() -> Unit)? = null
+    onAction: (() -> Unit)? = null,
+    showMascot: Boolean = false
 ) {
     val isRestricted = message.isAuthOrPermissionError()
+    if (showMascot && !isRestricted) {
+        Column(modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            LinDoMascot(state = LinDoMascotState.Empty, size = 48.dp, animate = false)
+            Spacer(Modifier.height(12.dp))
+            Text(message, fontSize = 14.sp, color = LocalPalette.current.inkSecondary, textAlign = TextAlign.Center)
+            if (actionLabel != null && onAction != null) TextButton(onClick = onAction) { Text(actionLabel) }
+        }
+        return
+    }
     val resolvedIcon = if (isRestricted && icon == LinDoIcons.Inbox) LinDoIcons.FaLock else icon
     LinDoStatusNotice(
         message = message,

@@ -6,12 +6,12 @@ package do_.linux.lindo.core.copy
 enum class LinDoAuthCopy(override val text: String) : LinDoCopyEntry {
     // 欢迎首屏与品牌登录过渡
     WELCOME_WAVE_DESC("零度娘向你挥手"),
-    WELCOME_GREETING("你好，佬友。"),
+    WELCOME_GREETING("登录 Lindo"),
     WELCOME_SUBTITLE("欢迎来到 Lindo · 连接 LINUX DO，发现有趣的讨论。"),
     LOGIN_WITH_LINUX_DO("使用 LINUX DO 登录"),
-    BROWSE_AS_GUEST("以游客模式浏览"),
+    BROWSE_AS_GUEST("先逛逛"),
     CONTINUE_AS_GUEST("继续以游客浏览"),
-    SYSTEM_BROWSER_AUTH("系统浏览器授权"),
+    SYSTEM_BROWSER_AUTH("浏览器授权"),
     SYSTEM_BROWSER_PASSWORDLESS_AUTH("通过系统浏览器免密授权"),
     PASTE_COOKIE_OR_CALLBACK_LOGIN("粘贴 Cookie / 回调链接登录"),
     CLOSE_WEB_PAGE("关闭网页"),

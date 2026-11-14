@@ -496,22 +496,17 @@ enum class PrivateMessagesViewMode(val tabLabel: LinDoMessagesCopy? = null) {
 }
 
 enum class ReaderFontScalePreset(val scale: Float, val labelCopy: LinDoMessagesCopy) {
+    MINIMUM(0.90f, LinDoMessagesCopy.FONT_SCALE_MINIMUM),
     SMALL(0.95f, LinDoMessagesCopy.FONT_SCALE_SMALL),
     STANDARD(1.0f, LinDoMessagesCopy.FONT_SCALE_STANDARD),
-    LARGE(1.12f, LinDoMessagesCopy.FONT_SCALE_LARGE);
+    LARGE(1.12f, LinDoMessagesCopy.FONT_SCALE_LARGE),
+    MAXIMUM(1.24f, LinDoMessagesCopy.FONT_SCALE_MAXIMUM);
 
-    fun nextCycle(): ReaderFontScalePreset = when (this) {
-        SMALL -> STANDARD
-        STANDARD -> LARGE
-        LARGE -> SMALL
-    }
+    fun nextCycle(): ReaderFontScalePreset = entries[(ordinal + 1) % entries.size]
 
     companion object {
-        fun fromScale(fontScale: Float): ReaderFontScalePreset = when {
-            fontScale < 0.975f -> SMALL
-            fontScale < 1.06f -> STANDARD
-            else -> LARGE
-        }
+        fun fromScale(fontScale: Float): ReaderFontScalePreset =
+            if (!fontScale.isFinite()) STANDARD else entries.minBy { kotlin.math.abs(it.scale - fontScale) }
     }
 }
 

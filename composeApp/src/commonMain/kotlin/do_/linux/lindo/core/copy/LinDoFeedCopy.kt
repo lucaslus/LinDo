@@ -5,10 +5,13 @@ package do_.linux.lindo.core.copy
  */
 enum class LinDoFeedCopy(override val text: String) : LinDoCopyEntry {
     // 主题配色与主导航枚举文案
-    THEME_OFFICIAL_GOLD("官方黑白黄"),
-    THEME_IDEAL_RED("理想绯红"),
-    THEME_GEEK_BLUE("极客海蓝"),
-    THEME_BAMBOO_GREEN("竹林青绿"),
+    THEME_OFFICIAL_GOLD("金"),
+    THEME_IDEAL_RED("红"),
+    THEME_GEEK_BLUE("蓝"),
+    THEME_BAMBOO_GREEN("绿"),
+    THEME_SOFT_PURPLE("紫"),
+    THEME_CLEAR_TEAL("青"),
+    THEME_WARM_ORANGE("橙"),
 
     TAB_HOME("首页"),
     TAB_DISCOVER("发现"),

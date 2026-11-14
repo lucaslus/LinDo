@@ -288,7 +288,7 @@ class DiagnosticsAndDesktopPolishTest {
         assertEquals("Lv.3 活跃会员", DiscourseTrustLevel.displayLabel(3))
         assertEquals("已关闭此话题", SmallActionKind.localize("closed.enabled"))
         assertTrue(SpecialUserGroup.fromGroupName("g-merchant2").usesMerchantBadgeStyle)
-        assertEquals(ReaderFontScalePreset.SMALL, ReaderFontScalePreset.fromScale(0.85f))
+        assertEquals(ReaderFontScalePreset.MINIMUM, ReaderFontScalePreset.fromScale(0.85f))
         assertEquals(DebugPreviewScene.NOTIFICATIONS, DebugPreviewScene.fromKey("notifications"))
     }
 

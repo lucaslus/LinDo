@@ -250,14 +250,14 @@ class PreLaunchFullAppUiE2ETest {
         waitForText("测试取消网页")
         assertEquals(listOf("https://linux.do/login"), opened.toList())
         assertEquals(0, onAllNodesWithText("继续登录").edtCount())
-        assertEquals(0, onAllNodesWithText("登录 Lindo").edtCount())
+        assertEquals(0, onAllNodesWithText("在网页中登录，完成后自动返回").edtCount())
         onNodeWithText("测试取消网页").edtClick()
         waitForTextGone("测试取消网页")
         onNodeWithText("使用 LINUX DO 登录").edtClick()
         waitForText("测试完成网页登录")
         onNodeWithText("测试完成网页登录").edtClick()
         waitForTextGone("测试完成网页登录")
-        waitForTextGone("你好，佬友。")
+        waitForTextGone("登录 Lindo")
         assertTrue(UserApiKeyAuthManager.isAuthorized())
         assertEquals(2, opened.size)
     }
@@ -281,8 +281,10 @@ class PreLaunchFullAppUiE2ETest {
         onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(1)
         waitForText("账号管理")
         onNodeWithText("账号管理").edtScrollClick()
-        waitForText("已登录账号")
-        onNodeWithText("添加其他账号").edtClick()
+        waitForContentDescription("当前账号")
+        onNodeWithText("添加账号").edtClick()
+        waitForText("使用 LINUX DO 登录")
+        onNodeWithText("使用 LINUX DO 登录").edtClick()
         waitForText("测试取消添加账号")
         assertFalse(UserApiKeyAuthManager.isAuthorized())
         onNodeWithText("测试取消添加账号").edtClick()
@@ -315,9 +317,9 @@ class PreLaunchFullAppUiE2ETest {
         onNodeWithText("使用 LINUX DO 登录").edtClick()
         assertEquals(1, opened.get())
         assertEquals(0, onAllNodesWithText("继续登录").edtCount())
-        assertEquals(0, onAllNodesWithText("登录 Lindo").edtCount())
+        assertEquals(0, onAllNodesWithText("在网页中登录，完成后自动返回").edtCount())
         finish.complete(Unit)
-        waitForTextGone("你好，佬友。")
+        waitForTextGone("登录 Lindo")
         assertTrue(UserApiKeyAuthManager.isAuthorized())
     }
 
@@ -339,20 +341,20 @@ class PreLaunchFullAppUiE2ETest {
         }
         setContent { LinDoApp(systemAnimationsEnabled = false) }
         waitForText("使用 LINUX DO 登录")
-        onNodeWithText("系统浏览器授权").edtClick()
+        onNodeWithText("浏览器授权").edtClick()
         waitUntil { openedExternalUrls.size == 1 }
-        assertEquals(0, onAllNodesWithText("登录 Lindo").edtCount())
+        assertEquals(0, onAllNodesWithText("在网页中登录，完成后自动返回").edtCount())
         onEdt {
             UserApiKeyAuthManager.pendingOtpToken = "test_callback_otp"
             UserApiKeyAuthManager.onAuthStateChanged?.invoke()
         }
         waitUntil { onEdt { onAllNodesWithTag("auth_completion_loading").fetchSemanticsNodes().isNotEmpty() } }
-        assertEquals(0, onAllNodesWithText("登录 Lindo").edtCount())
+        assertEquals(0, onAllNodesWithText("在网页中登录，完成后自动返回").edtCount())
         assertEquals(0, onAllNodesWithText("Linux.do 账号会话").edtCount())
         allowExchange.complete(Unit)
         waitUntil(timeoutMillis = 8_000L) { completed.get() && UserApiKeyAuthManager.currentUser?.username == "lucas" }
         waitForTextGone("登录 Lindo")
-        waitForTextGone("你好，佬友。")
+        waitForTextGone("登录 Lindo")
         assertEquals(1, exchanges.get())
         waitUntil { onEdt { onAllNodesWithTag("auth_completion_loading").fetchSemanticsNodes().isEmpty() } }
     }
@@ -374,11 +376,11 @@ class PreLaunchFullAppUiE2ETest {
         // =========================================================================
         // Step 1 — Pre-Consent Welcome Screen
         // =========================================================================
-        onNodeWithText("你好，佬友。").edtAssertDisplayed()
+        onNodeWithText("登录 Lindo").edtAssertDisplayed()
         onNodeWithText("使用 LINUX DO 登录").edtAssertDisplayed()
-        onNodeWithText("系统浏览器授权").edtAssertDisplayed()
+        onNodeWithText("浏览器授权").edtAssertDisplayed()
         onAllNodesWithText("粘贴 Cookie / 回调链接登录").assertCountEquals(0)
-        onNodeWithText("以游客模式浏览").edtAssertDisplayed()
+        onNodeWithText("先逛逛").edtAssertDisplayed()
         assertEquals(0, backend.feedRequestCount.get(), "Zero feed requests must fire before user consent")
 
         savePreviewSnapshotIfConfigured("e2e_1_welcome.png")
@@ -394,7 +396,7 @@ class PreLaunchFullAppUiE2ETest {
         // =========================================================================
         // Step 2 — Guest Mode, Feed Sort, Category Filter, Refresh & Guest Gates
         // =========================================================================
-        onNodeWithText("以游客模式浏览").edtClick()
+        onNodeWithText("先逛逛").edtClick()
         waitForText("Lindo 预发版全功能自动化巡检主贴")
         waitForText("欢迎参与 Lindo v0.2.31 桌面双栏全链路自动化巡检", substring = true)
         assertTrue(backend.feedRequestCount.get() >= 1, "Entering guest mode must load initial feed")
@@ -665,7 +667,7 @@ class PreLaunchFullAppUiE2ETest {
         onNodeWithText("退出").edtClick()
 
         waitUntil(timeoutMillis = 5_000L) { !UserApiKeyAuthManager.isAuthorized() }
-        waitForText("你好，佬友。")
+        waitForText("登录 Lindo")
     }
 
     @Test
@@ -682,8 +684,8 @@ class PreLaunchFullAppUiE2ETest {
         waitForIdle()
 
         // Enter Guest Mode on compact 430x820 phone-width viewport
-        waitForText("你好，佬友。")
-        onNodeWithText("以游客模式浏览").edtClick()
+        waitForText("登录 Lindo")
+        onNodeWithText("先逛逛").edtClick()
         waitForText("Lindo 预发版全功能自动化巡检主贴")
         waitForText("预发版归档历史公告锁定贴")
 
@@ -792,15 +794,15 @@ class PreLaunchFullAppUiE2ETest {
         setContent {
             androidx.compose.runtime.key(generation.intValue) { LinDoApp(systemAnimationsEnabled = false) }
         }
-        waitForText("以游客模式浏览")
-        onNodeWithText("以游客模式浏览").edtClick()
+        waitForText("先逛逛")
+        onNodeWithText("先逛逛").edtClick()
         waitForContentDescription("展开搜索")
         onNodeWithContentDescription("展开搜索").edtClick()
         waitForContentDescription("收起搜索")
         assertFalse(UserApiKeyAuthManager.uiHomeSearchExpanded)
         onEdt { generation.intValue++ }
-        waitForText("以游客模式浏览")
-        onNodeWithText("以游客模式浏览").edtClick()
+        waitForText("先逛逛")
+        onNodeWithText("先逛逛").edtClick()
         waitForContentDescription("展开搜索")
         assertEquals(0, onAllNodesWithContentDescription("收起搜索").edtCount())
     }
@@ -829,8 +831,8 @@ class PreLaunchFullAppUiE2ETest {
             waitForIdle()
         }
         setContent { LinDoApp(systemAnimationsEnabled = false, appIcon = LinDoAppIcon.Default, onApplyAppIcon = { true }) }
-        waitForText("以游客模式浏览")
-        onNodeWithText("以游客模式浏览").edtClick()
+        waitForText("先逛逛")
+        onNodeWithText("先逛逛").edtClick()
         waitForText("我的")
         waitForContentDescription("收起搜索")
         onNodeWithContentDescription("收起搜索").edtClick()
@@ -860,14 +862,14 @@ class PreLaunchFullAppUiE2ETest {
         onEdt { onNodeWithText("紧凑").assertIsSelected() }
         val persistedSearchDefaults = mutableListOf<Boolean>()
         UserApiKeyAuthManager.onPersistHomeSearchExpanded = { persistedSearchDefaults.add(it) }
-        pickSetting("默认收起")
+        pickSetting("收起")
         assertFalse(UserApiKeyAuthManager.uiHomeSearchExpanded)
-        onEdt { onNodeWithText("默认收起").assertIsSelected() }
-        pickSetting("默认展开")
+        onEdt { onNodeWithText("收起").assertIsSelected() }
+        pickSetting("展开")
         assertTrue(UserApiKeyAuthManager.uiHomeSearchExpanded)
         assertEquals(listOf(false, true), persistedSearchDefaults)
-        pickSetting("大字号")
-        onEdt { onNodeWithText("大字号").assertIsSelected() }
+        pickSetting("大")
+        onEdt { onNodeWithText("大").assertIsSelected() }
         pickSetting("标准")
         onEdt { onNodeWithText("标准").assertIsSelected() }
         savePreviewSnapshotIfConfigured(snapshot.replace(".png", "_reading.png"))
