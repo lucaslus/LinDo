@@ -41,26 +41,66 @@ internal object MacBrowserTransport {
     )
     fun install(wasEnabled: Boolean, persistEnabled: (Boolean) -> Unit, ready: () -> Unit) {
         persist = persistEnabled; onReady = ready
+        SavedAccounts.refreshBrowserCookies = { syncCookies() }
+        SavedAccounts.replaceBrowserCookies = { raw -> replaceAccountCookies(raw) }
         PlatformSessionRecovery.verifySession = { verify(login = false) }
         PlatformSessionRecovery.loginSession = { verify(login = true) }
         if (wasEnabled) bind()
+        scope.launch { SavedAccounts.recoverPendingSwitch() }
         val previousLogout = UserApiKeyAuthManager.onLogoutPlatformClear
         UserApiKeyAuthManager.onLogoutPlatformClear = {
             previousLogout?.invoke()
             seedDone = false
             // Clear only Lindo's own browser profile, never the default browser's cookies.
-            scope.launch { runCatching { attach(false)?.call("Network.clearBrowserCookies") } }
+            val generation = UserApiKeyAuthManager.sessionGeneration
+            scope.launch { AccountSessionGate.replace {
+                if (generation == UserApiKeyAuthManager.sessionGeneration) runCatching { attach(false)?.call("Network.clearBrowserCookies") }
+            } }
         }
     }
     private fun bind() {
         UserApiKeyAuthManager.requireBrowserTransportOnly = true
         UserApiKeyAuthManager.webViewHttpExecutor = { url, method, form, headers ->
-            val result = request(url, method, form, headers)
+            val result = AccountSessionGate.read { request(url, method, form, headers) }
             if (url.contains("/session/otp/") && result?.first in 200..399) runCatching { syncCookies() }
             result
         }
-        UserApiKeyAuthManager.webViewBinaryFetcher = { url -> binary(url) }
-        PlatformMediaPicker.webViewBinaryUploadExecutor = { name, mime, bytes -> upload(name, mime, bytes) }
+        UserApiKeyAuthManager.webViewBinaryFetcher = { url -> AccountSessionGate.read { binary(url) } }
+        PlatformMediaPicker.webViewBinaryUploadExecutor = { name, mime, bytes -> AccountSessionGate.read { upload(name, mime, bytes) } }
+    }
+    private suspend fun replaceAccountCookies(raw: String) = withContext(Dispatchers.IO) {
+        seedDone = false
+        val cdp = attach(false) ?: if (UserApiKeyAuthManager.requireBrowserTransportOnly) attach(true) else null
+        if (cdp != null) {
+            // Discard the previous document and its CSRF/preloaded user before installing another session.
+            cdp.call("Page.navigate", buildJsonObject { put("url", "about:blank") })
+            withTimeout(10_000L) {
+                while ((cdp.evaluate("location.href === 'about:blank'") as? JsonPrimitive)?.booleanOrNull != true) delay(50)
+            }
+            val stored = cdp.call("Network.getAllCookies")["cookies"]?.jsonArray.orEmpty()
+            for (item in stored) {
+                val c = item.jsonObject
+                val domain = c["domain"]?.jsonPrimitive?.content.orEmpty()
+                val name = c["name"]?.jsonPrimitive?.content.orEmpty()
+                if ((domain.trimStart('.') == "linux.do" || domain.endsWith(".linux.do")) && name !in CookieSentinel.cfTrustCookieNames) {
+                    cdp.call("Network.deleteCookies", buildJsonObject {
+                        put("name", name); put("domain", domain); put("path", c["path"]?.jsonPrimitive?.content ?: "/")
+                    })
+                }
+            }
+            val cookies = buildJsonArray {
+                raw.split(';').map { it.trim() }.filter { it.substringBefore('=') in setOf("_t", "_forum_session") }.forEach {
+                    add(buildJsonObject { put("name", it.substringBefore('=')); put("value", it.substringAfter('='));
+                        put("url", "https://linux.do/"); put("secure", true); put("httpOnly", true); put("sameSite", "Lax") })
+                }
+            }
+            if (cookies.isNotEmpty()) cdp.call("Network.setCookies", buildJsonObject { put("cookies", cookies) })
+            cdp.call("Page.navigate", buildJsonObject { put("url", "https://linux.do/") })
+            seedDone = true
+            withTimeout(15_000L) {
+                while ((cdp.evaluate("location.origin === 'https://linux.do' && document.readyState === 'complete'") as? JsonPrimitive)?.booleanOrNull != true) delay(150)
+            }
+        }
     }
     private fun allowed(url: String): Boolean = runCatching {
         val uri = URI(url); uri.scheme == "https" && uri.host == "linux.do" && uri.port in listOf(-1,443) && uri.userInfo == null
@@ -145,7 +185,8 @@ internal object MacBrowserTransport {
                 val ready = probe?.get("site")?.jsonPrimitive?.booleanOrNull == true && probe["complete"]?.jsonPrimitive?.booleanOrNull == true && probe["challenge"]?.jsonPrimitive?.booleanOrNull != true
                 verificationDiagnostic = if (ready) "checking-session" else "waiting-for-site-$probe"
                 if (!ready) continue
-                val response = request("https://linux.do/session/current.json", "GET", null, emptyMap(), cdp) ?: continue
+                val response = AccountSessionGate.read { request("https://linux.do/session/current.json", "GET", null, emptyMap(), cdp) } ?: continue
+                if (generation != UserApiKeyAuthManager.sessionGeneration) return@withContext false
                 verificationDiagnostic = "session-status-${response.first}-challenge-${looksLikeCloudflareChallenge(response.second)}"
                 if (looksLikeCloudflareChallenge(response.second)) {
                     val challenged = lastChallengeUrl ?: "https://linux.do/session/current.json"

@@ -146,6 +146,7 @@ fun LinDoBrandWordmark(
 @Composable
 internal fun LinDoWelcomeScreen(
     isDark: Boolean,
+    onOpenSavedAccounts: (() -> Unit)? = null,
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
     onToggleDark: () -> Unit,
@@ -234,6 +235,11 @@ internal fun LinDoWelcomeScreen(
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(secondaryActionLabel, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                }
+                if (onOpenSavedAccounts != null) {
+                    TextButton(onClick = onOpenSavedAccounts, modifier = Modifier.fillMaxWidth()) {
+                        Text("切换已登录账号", color = brandSecondary(isDark), fontSize = 14.sp)
+                    }
                 }
                 if (onGuestBrowse != null) {
                     OutlinedButton(

@@ -387,6 +387,7 @@ internal fun ingestSetCookieHeader(rawSetCookie: String, domain: String = "linux
 /**
  * 已登录的 Linux.do 账号资料快照
  */
+@kotlinx.serialization.Serializable
 data class AuthenticatedUserProfile(
     val userId: Int = 0,
     val username: String,
@@ -554,6 +555,7 @@ object UserApiKeyAuthManager {
     fun setApiKey(apiKey: String?) {
         activeUserApiKey = apiKey?.trim()?.takeIf { it.isNotEmpty() }
         onPersistSession?.invoke(currentUser, activeUserApiKey)
+        SavedAccounts.captureCurrent()
         onAuthStateChanged?.invoke()
     }
 
@@ -570,6 +572,7 @@ object UserApiKeyAuthManager {
 
     internal fun persistSessionQuietly() {
         onPersistSession?.invoke(currentUser, activeUserApiKey)
+        SavedAccounts.captureCurrent()
     }
 
     fun getApiKey(): String? = activeUserApiKey
@@ -584,6 +587,7 @@ object UserApiKeyAuthManager {
     internal fun onBrowserAuthCookieEvicted() {
         if (!activeUserApiKey.isNullOrBlank()) return
         if (currentUser == null && fullProfileCache == null && cachedUnreadNotificationCount == 0) return
+        SavedAccounts.markExpired(currentUser)
         sessionGeneration++
         currentUser = null
         fullProfileCache = null
@@ -607,10 +611,11 @@ object UserApiKeyAuthManager {
     }
 
     fun handleServerAuthInvalidated() {
-        if (!isAuthorized()) return
+        if (SavedAccounts.busy || !isAuthorized()) return
         if (!invalidatingServerAuth.compareAndSet(false, true)) return
         try {
-            logout()
+            SavedAccounts.markExpired(currentUser)
+            logout(removeSavedAccount = false)
         } finally {
             invalidatingServerAuth.set(false)
         }
@@ -641,6 +646,7 @@ object UserApiKeyAuthManager {
         }
         currentUser = profile
         onPersistSession?.invoke(profile, activeUserApiKey)
+        SavedAccounts.captureCurrent()
         onAuthStateChanged?.invoke()
     }
 
@@ -677,6 +683,7 @@ object UserApiKeyAuthManager {
         )
         currentUser = updated
         onPersistSession?.invoke(updated, activeUserApiKey)
+        SavedAccounts.captureCurrent()
         if (accountChanged) {
             authStateNotifyEpoch++
             onAuthStateChanged?.invoke()
@@ -698,6 +705,32 @@ object UserApiKeyAuthManager {
         onAuthStateChanged?.invoke()
     }
 
+    internal fun replaceActiveSession(profile: AuthenticatedUserProfile?, apiKey: String?, cookies: String?, reads: String?, drafts: String?) {
+        sessionGeneration++
+        activeUserApiKey = null
+        currentUser = null
+        fullProfileCache = null
+        cachedUnreadNotificationCount = 0
+        pendingOtpToken = null
+        pendingPrivateKey = null
+        pendingNonce = null
+        pendingAuthCreatedAt = 0L
+        onPersistPendingKey?.invoke(null, null)
+        LinuxDoRepository.clearUserSessionCaches()
+        do_.linux.lindo.core.compose.LocalComposerDrafts.clearAll()
+        CookieSentinel.clearAuthCookiesOnly()
+        if (!cookies.isNullOrBlank()) CookieSentinel.ingestRawCookieString(cookies, domain = "linux.do", hostOnly = true)
+        activeUserApiKey = apiKey
+        currentUser = profile
+        LinuxDoRepository.restoreReadTopics(reads)
+        onPersistReadTopics?.invoke(reads.orEmpty())
+        do_.linux.lindo.core.compose.LocalComposerDrafts.restore(drafts)
+        do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist?.invoke(drafts)
+        onPersistSession?.invoke(profile, activeUserApiKey)
+        onUnreadCountChanged?.invoke(0)
+        onAuthStateChanged?.invoke()
+    }
+
     fun isAuthorized(): Boolean {
         val realUser = currentUser?.takeIf { it.username != "linuxdo_user" }
         return realUser != null ||
@@ -705,7 +738,8 @@ object UserApiKeyAuthManager {
             !activeUserApiKey.isNullOrBlank()
     }
 
-    fun logout() {
+    fun logout(removeSavedAccount: Boolean = true) {
+        if (removeSavedAccount) currentUser?.let { SavedAccounts.forget(it.username) }
         sessionGeneration++
         activeUserApiKey = null
         currentUser = null
@@ -835,6 +869,7 @@ object UserApiKeyAuthManager {
             }
             if (!otp.isNullOrBlank()) pendingOtpToken = otp
             onPersistSession?.invoke(currentUser, activeUserApiKey)
+            SavedAccounts.captureCurrent()
             LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "BrowserAuth", "Callback accepted; OTP present=${!otp.isNullOrBlank()}")
             onAuthStateChanged?.invoke()
             true
@@ -1566,7 +1601,7 @@ object LinuxDoRepository {
         return ingestedAny
     }
 
-    private fun exportReadTopics(): String = synchronized(readTopicsStateLock) {
+    internal fun exportReadTopics(): String = synchronized(readTopicsStateLock) {
         val orderedIds = LinkedHashSet<Int>()
         for (id in readTopicOrder) {
             if (serverConfirmedReadFloor.containsKey(id)) {
@@ -2411,13 +2446,13 @@ object LinuxDoRepository {
         url: String, method: String = "GET", formParams: Map<String, String>? = null,
         extraHeaders: Map<String, String> = emptyMap(), preserveFailure: Boolean = false,
         clientOverride: HttpClient = sharedClient
-    ): Pair<Int, String>? {
+    ): Pair<Int, String>? = AccountSessionGate.read {
         if (!NetworkRecoveryPolicy.enabled || method.uppercase() !in setOf("GET", "HEAD")) {
-            return executeHttpUncoalesced(url, method, formParams, extraHeaders, preserveFailure, clientOverride)
+            return@read executeHttpUncoalesced(url, method, formParams, extraHeaders, preserveFailure, clientOverride)
         }
         val key = "${UserApiKeyAuthManager.sessionGeneration}|$method|$url|${extraHeaders.toSortedMap()}|${System.identityHashCode(clientOverride)}"
         val generation = UserApiKeyAuthManager.sessionGeneration
-        return NetworkRecoveryPolicy.shareRead(key) {
+        NetworkRecoveryPolicy.shareRead(key) {
             readRateLimitRecovery.read(foreground = extraHeaders["Discourse-Background"] != "true") {
                 if (generation != UserApiKeyAuthManager.sessionGeneration) throw CancellationException("Session changed while waiting")
                 executeHttpUncoalesced(url, method, formParams, extraHeaders, true, clientOverride)

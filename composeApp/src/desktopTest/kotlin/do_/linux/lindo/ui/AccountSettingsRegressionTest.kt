@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
+import do_.linux.lindo.core.network.SavedAccountSummary
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.UserAccountPreferencesSnapshot
 import java.io.File
@@ -115,4 +116,38 @@ class AccountSettingsRegressionTest {
         }
         assertEquals(1, logins); assertEquals(1, browsers); assertEquals(1, logouts)
     }
+    @Test fun savedAccountsSelectAddAndConfirmRemoval() = runDesktopComposeUiTest(width = 390, height = 820) {
+        val first = AuthenticatedUserProfile(username = "reader", displayName = "社区读者")
+        val second = AuthenticatedUserProfile(username = "weekend", displayName = "周末读书")
+        val expired = AuthenticatedUserProfile(username = "old_reader", displayName = "另一个账号")
+        var selected: String? = null
+        var removed: String? = null
+        var additions = 0
+        setContent {
+            Host(true) {
+                AccountSessionContent(first, null, {}, {}, {},
+                    accounts = listOf(SavedAccountSummary(first, false), SavedAccountSummary(second, false), SavedAccountSummary(expired, true)),
+                    onAddAccount = { additions++ }, onSelectAccount = { selected = it }, onRemoveAccount = { removed = it })
+            }
+        }
+        waitForIdle()
+        save("saved-accounts-dark.png")
+        edt {
+            onNodeWithText("当前使用").assertIsDisplayed()
+            onNodeWithText("@weekend").performClick()
+            assertEquals("weekend", selected)
+            onNodeWithText("登录已失效，点击重新登录").assertIsDisplayed()
+            onNodeWithText("添加其他账号").performScrollTo().performClick()
+            assertEquals(1, additions)
+            onAllNodesWithText("移除")[0].performScrollTo().performClick()
+            onNodeWithText("移除 @weekend？").assertIsDisplayed()
+            onNodeWithText("取消").performClick()
+            assertNull(removed)
+            onAllNodesWithText("移除")[0].performClick()
+            onAllNodesWithText("移除").onLast().performClick()
+            assertEquals("weekend", removed)
+            assertEquals("weekend", selected)
+        }
+    }
+
 }

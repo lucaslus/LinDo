@@ -81,6 +81,7 @@ object LocalComposerDrafts {
             drafts[id(it.owner, it.key)] = it
         }
     }
+    internal fun exportForAccount(owner: String): String = json.encodeToString(all(owner))
     fun get(owner: String, key: String): ComposerDraft? = drafts[id(owner, key)]
     fun all(owner: String): List<ComposerDraft> = drafts.values.filter { it.owner.equals(owner, true) }.sortedByDescending { it.updatedAt }
     fun save(draft: ComposerDraft) {

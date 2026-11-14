@@ -84,6 +84,7 @@ class PreLaunchFullAppUiE2ETest {
     }
 
     private fun resetGlobalSingletons() {
+        do_.linux.lindo.core.network.SavedAccounts.resetForTest()
         PlatformWebLoginHost.webLoginRenderer = null
         PlatformMediaPicker.launchPicker = null
         PlatformMediaPicker.webViewBinaryUploadExecutor = null
@@ -259,6 +260,39 @@ class PreLaunchFullAppUiE2ETest {
         waitForTextGone("你好，佬友。")
         assertTrue(UserApiKeyAuthManager.isAuthorized())
         assertEquals(2, opened.size)
+    }
+
+    @Test
+    fun savedAccountAdditionCancelReturnsToOriginalHome() = runDesktopComposeUiTest(width = 390, height = 840) {
+        val accounts = do_.linux.lindo.core.network.SavedAccounts
+        accounts.configure(null) {}
+        accounts.replaceBrowserCookies = { kotlinx.coroutines.delay(80) }
+        UserApiKeyAuthManager.onSessionAuthenticated(
+            do_.linux.lindo.core.network.AuthenticatedUserProfile(userId = 1, username = "lucas", displayName = "Lucas", trustLevel = 3),
+            rawCookies = "_t=e2e_valid_session_token"
+        )
+        PlatformWebLoginHost.webLoginRenderer = { _, dismiss, _ ->
+            androidx.compose.material3.TextButton(onClick = dismiss) { androidx.compose.material3.Text("测试取消添加账号") }
+        }
+        setContent { LinDoApp(systemAnimationsEnabled = false) }
+        waitForText("Lindo 预发版全功能自动化巡检主贴")
+        onNodeWithText("我的").edtClick()
+        waitForText("@lucas")
+        onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(1)
+        waitForText("账号管理")
+        onNodeWithText("账号管理").edtScrollClick()
+        waitForText("已登录账号")
+        onNodeWithText("添加其他账号").edtClick()
+        waitForText("测试取消添加账号")
+        assertFalse(UserApiKeyAuthManager.isAuthorized())
+        onNodeWithText("测试取消添加账号").edtClick()
+        waitForTextGone("测试取消添加账号")
+        waitUntil { UserApiKeyAuthManager.currentUser?.username == "lucas" && !accounts.busy }
+        waitForText("我的")
+        onNodeWithText("首页").edtClick()
+        waitForText("Lindo 预发版全功能自动化巡检主贴")
+        assertEquals(1, accounts.accounts.size)
+        assertFalse(accounts.adding)
     }
 
     @Test
@@ -622,7 +656,7 @@ class PreLaunchFullAppUiE2ETest {
 
         // Scroll back to Account & Session Management ("切换账号") -> Logout
         onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(1)
-        waitForText("账号与会话管理")
+        waitForText("账号管理")
         onNodeWithText("切换账号").edtScrollClick()
 
         waitForText("Linux.do 账号会话")

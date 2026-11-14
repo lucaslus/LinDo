@@ -6,7 +6,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import do_.linux.lindo.core.network.SavedAccountSummary
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -168,15 +169,50 @@ internal fun AccountSessionContent(
     status: String?,
     onLogin: () -> Unit,
     onBrowserAuth: () -> Unit,
-    onLogout: () -> Unit
+    onLogout: () -> Unit,
+    accounts: List<SavedAccountSummary> = emptyList(),
+    onAddAccount: () -> Unit = onLogin,
+    onSelectAccount: (String) -> Unit = {},
+    onRemoveAccount: (String) -> Unit = {}
 ) {
+    var removing by remember { mutableStateOf<String?>(null) }
+    removing?.let { username ->
+        AlertDialog(onDismissRequest = { removing = null },
+            title = { Text("移除 @$username？") },
+            text = { Text("仅移除此设备保存的登录状态，不会删除社区账号。") },
+            confirmButton = { TextButton(onClick = { onRemoveAccount(username); removing = null }) { Text("移除") } },
+            dismissButton = { TextButton(onClick = { removing = null }) { Text("取消") } })
+    }
     AccountSettingsColumn {
-        if (user != null) AccountIdentity(user)
+        if (accounts.isNotEmpty()) {
+            AccountSection("已登录账号")
+            accounts.forEach { account ->
+                val current = user?.username.equals(account.profile.username, true)
+                Row(Modifier.fillMaxWidth().heightIn(min = 76.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.weight(1f).clickable(enabled = !current) { onSelectAccount(account.profile.username) }
+                        .padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        SmartAvatar(username = account.profile.username, avatarTemplate = account.profile.avatarTemplate,
+                            animatedAvatar = account.profile.animatedAvatar, size = 40.dp, enableAnimations = false)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(account.profile.displayName.ifBlank { account.profile.username }, fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold, color = LocalPalette.current.inkPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("@${account.profile.username}", fontSize = 12.sp, color = LocalPalette.current.inkSecondary)
+                            if (account.needsLogin) Text("登录已失效，点击重新登录", fontSize = 12.sp, color = LocalPalette.current.inkSecondary)
+                        }
+                    }
+                    if (current) Text("当前使用", fontSize = 12.sp, color = LocalPalette.current.brandGold)
+                    else TextButton(onClick = { removing = account.profile.username }) { Text("移除", color = LocalPalette.current.inkTertiary, fontSize = 12.sp) }
+                }
+                HorizontalDivider(thickness = 0.5.dp, color = LocalPalette.current.hairline)
+            }
+        } else if (user != null) AccountIdentity(user)
         if (!status.isNullOrBlank()) Text(status, color = LocalPalette.current.inkSecondary,
             fontSize = 13.sp, lineHeight = 20.sp, modifier = Modifier.padding(vertical = 16.dp))
         AccountSection(if (user != null) "登录管理" else "登录方式")
-        AccountDetailRow(if (user != null) "重新登录" else "使用 LINUX DO 登录", "在应用内打开登录网页", onClick = onLogin)
-        AccountDetailRow("系统浏览器授权", "使用浏览器中的账号完成授权", onClick = onBrowserAuth)
+        if (accounts.isNotEmpty()) AccountDetailRow("添加其他账号", "登录后会保存在此列表中", onClick = onAddAccount)
+        else AccountDetailRow(if (user != null) "重新登录" else "使用 LINUX DO 登录", "在应用内打开登录网页", onClick = onLogin)
+        AccountDetailRow("系统浏览器授权", "添加浏览器中已登录的账号", onClick = onBrowserAuth)
         if (user != null) {
             AccountSection("退出")
             AccountDetailRow("退出当前账号", "退出后可以登录其他账号", destructive = true, onClick = onLogout)

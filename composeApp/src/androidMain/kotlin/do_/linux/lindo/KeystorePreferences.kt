@@ -21,7 +21,7 @@ internal class KeystorePreferences(context: Context) : SharedPreferences by cont
         private const val KEY_ALIAS = "lindo.session.v1"
     }
     private val backing = context.getSharedPreferences("lindo_auth_session", Context.MODE_PRIVATE)
-    private val secrets = setOf("raw_cookies", "api_key", "pending_rsa_priv_b64", "pending_rsa_nonce", "composer_drafts")
+    private val secrets = setOf("saved_accounts", "raw_cookies", "api_key", "pending_rsa_priv_b64", "pending_rsa_nonce", "composer_drafts")
     private val prefix = "keystore:v1:"
     private val keyLock = Any()
     private fun key(recreate: Boolean = false): SecretKey = synchronized(keyLock) {

@@ -1,6 +1,8 @@
 package do_.linux.lindo
 
 import coil3.disk.directory
+import do_.linux.lindo.core.network.SavedAccounts
+import do_.linux.lindo.core.network.AccountSessionGate
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -681,13 +683,13 @@ class MainActivity : ComponentActivity() {
 
         // 6. 注册异步 Promise 级 WebView HTTP 执行器与 JSON 兜底器 + 媒体文件选择器与 Multipart 上传器
         UserApiKeyAuthManager.webViewHttpExecutor = { url, method, formParams, headers ->
-            executeHttpViaWebViewBridge(url, method, formParams, headers)
+            AccountSessionGate.read { executeHttpViaWebViewBridge(url, method, formParams, headers) }
         }
         UserApiKeyAuthManager.webViewJsonFetcher = { targetUrl ->
-            executeHttpViaWebViewBridge(targetUrl, "GET", null, emptyMap())?.second
+            AccountSessionGate.read { executeHttpViaWebViewBridge(targetUrl, "GET", null, emptyMap())?.second }
         }
         UserApiKeyAuthManager.webViewBinaryFetcher = { targetUrl ->
-            fetchBinaryViaWebViewBridge(targetUrl)
+            AccountSessionGate.read { fetchBinaryViaWebViewBridge(targetUrl) }
         }
         PlatformMediaPicker.launchPicker = { mimeType, onPicked ->
             pendingMediaPickCallback = onPicked
@@ -696,11 +698,24 @@ class MainActivity : ComponentActivity() {
             }
         }
         PlatformMediaPicker.webViewBinaryUploadExecutor = { fileName, mimeType, rawBytes ->
-            executeMultipartUploadViaWebViewBridge(fileName, mimeType, rawBytes)
+            AccountSessionGate.read { executeMultipartUploadViaWebViewBridge(fileName, mimeType, rawBytes) }
         }
         PlatformMediaPicker.webViewUploadExecutor = { fileName, mimeType, base64Bytes ->
-            executeMultipartUploadViaWebViewBridge(fileName, mimeType, base64Bytes)
+            AccountSessionGate.read { executeMultipartUploadViaWebViewBridge(fileName, mimeType, base64Bytes) }
         }
+
+        SavedAccounts.refreshBrowserCookies = {
+            withContext(Dispatchers.Main) {
+                val cm = CookieManager.getInstance(); cm.flush()
+                CookieSentinel.syncFromAuthoritativeBrowserCookieString(cm.getCookie("https://linux.do").orEmpty())
+            }
+        }
+        SavedAccounts.replaceBrowserCookies = { cookies -> replaceAccountCookies(cookies) }
+        SavedAccounts.configure(prefs.getString("saved_accounts", null)) { encoded ->
+            check(prefs.edit().putString("saved_accounts", encoded).commit()) { "Could not save account list" }
+        }
+
+        activityScope.launch { SavedAccounts.recoverPendingSwitch() }
 
         // 7. 检查冷启动是否由 discourse://auth_redirect 唤起
         handleIncomingAuthIntent(intent)
@@ -2151,6 +2166,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private suspend fun replaceAccountCookies(raw: String) = withContext(Dispatchers.Main) {
+        val cm = CookieManager.getInstance()
+        suspend fun set(origin: String, value: String) = suspendCancellableCoroutine<Unit> { continuation ->
+            cm.setCookie(origin, value) { if (continuation.isActive) continuation.resume(Unit) }
+        }
+        for (host in listOf("linux.do", "connect.linux.do", "credit.linux.do", "cdk.linux.do", "hub.linux.do", "lottery.linux.do")) {
+            val origin = "https://$host"
+            val names = cm.getCookie(origin).orEmpty().split(';').map { it.trim().substringBefore('=') }.toSet() + setOf("_t", "_forum_session")
+            for (name in names.filter { it.isNotBlank() && it !in CookieSentinel.cfTrustCookieNames }) {
+                set(origin, "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
+                set(origin, "$name=; Max-Age=0; Domain=$host; Path=/; Secure; HttpOnly")
+            }
+        }
+        raw.split(';').map { it.trim() }.filter { it.substringBefore('=') in setOf("_t", "_forum_session") }.forEach {
+            set("https://linux.do", "$it; Path=/; Secure; HttpOnly; SameSite=Lax")
+        }
+        cm.flush()
+        val expected = getCookieValue(raw, "_t").orEmpty()
+        check(getCookieValue(cm.getCookie("https://linux.do"), "_t").orEmpty() == expected) { "Account cookie replacement failed" }
+        check(rebuildApiWebView(reason = "account_changed", force = true)) { "Account transport did not become ready" }
+    }
+
     private fun restoreSessionFromDisk() {
         runCatching {
             // 始终使用与系统 WebView 100% 原生一致的 User-Agent（不删改 "; wv"），
@@ -2496,6 +2533,8 @@ class MainActivity : ComponentActivity() {
         pendingBinaryCallbacks.clear()
         if (activeInstance === this) {
             activeInstance = null
+            SavedAccounts.refreshBrowserCookies = null
+            SavedAccounts.replaceBrowserCookies = null
             AppAppearance.onPersist = null
             AppAppearance.onApplyIconAppearance = null
             do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist = null

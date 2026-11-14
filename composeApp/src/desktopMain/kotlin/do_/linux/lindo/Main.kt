@@ -783,6 +783,9 @@ private object DesktopStateStore {
                 putOrRemove("raw_cookies", remaining.takeIf { it.isNotBlank() })
             }
         }
+        do_.linux.lindo.core.network.SavedAccounts.configure(props.getProperty("saved_accounts")) { encoded ->
+            update(immediate = true) { setProperty("saved_accounts", encoded) }
+        }
     }
 }
 
@@ -1791,6 +1794,8 @@ fun main(args: Array<String> = emptyArray()) {
         MacBrowserTransport.install(DesktopStateStore.load().getProperty("mac_browser_session") == "true", { enabled ->
             DesktopStateStore.update { setProperty("mac_browser_session", enabled.toString()) }
         }, { currentMainWindow?.apply { isVisible = true; toFront(); requestFocus() } })
+    } else {
+        kotlinx.coroutines.runBlocking { do_.linux.lindo.core.network.SavedAccounts.recoverPendingSwitch() }
     }
     Runtime.getRuntime().addShutdownHook(Thread({ runCatching { DesktopStateStore.flush() } }, "lindo-preferences-flush"))
     stateInitLatch.countDown()

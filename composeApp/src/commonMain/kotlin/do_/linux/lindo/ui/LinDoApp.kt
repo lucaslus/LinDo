@@ -212,6 +212,7 @@ import do_.linux.lindo.core.network.MentionCandidate
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UploadedMediaResult
 import do_.linux.lindo.core.network.UserAccountPreferencesSnapshot
+import do_.linux.lindo.core.network.SavedAccounts
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.compose.*
 import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
@@ -1893,6 +1894,7 @@ internal fun LinDoApp(
                             siteVerificationRestoreVersion++
                             networkRestoreVersion++
                         } else {
+                            if (SavedAccounts.adding) SavedAccounts.cancelAdd()
                             authStatusHint = PlatformSessionRecovery.verificationMessage
                                 ?: "登录尚未完成，请重试。"
                             showAuthSheet = true
@@ -1900,6 +1902,7 @@ internal fun LinDoApp(
                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
                         throw cancelled
                     } catch (_: Exception) {
+                        if (SavedAccounts.adding) runCatching { SavedAccounts.cancelAdd() }
                         authStatusHint = "暂时无法打开登录，请重试或使用系统浏览器授权。"
                         showAuthSheet = true
                     } finally {
@@ -1908,6 +1911,30 @@ internal fun LinDoApp(
                 }
             }
             else -> triggerBrowserOneClickLogin()
+        }
+    }
+
+    fun addAccount(browser: Boolean = false) {
+        scope.launch {
+            try {
+                if (!SavedAccounts.adding) SavedAccounts.beginAdd()
+                if (browser) triggerBrowserOneClickLogin() else triggerPrimaryLogin()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { authStatusHint = "暂时无法添加账号，请重试"; showAuthSheet = true }
+        }
+    }
+
+    fun selectSavedAccount(username: String) {
+        scope.launch {
+            try {
+                if (SavedAccounts.switchTo(username)) {
+                    showAuthSheet = false
+                    authVersion++
+                } else {
+                    addAccount()
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { authStatusHint = "切换未完成，账号仍保存在列表中，请重试"; showAuthSheet = true }
         }
     }
 
@@ -1985,6 +2012,10 @@ internal fun LinDoApp(
     var lastUnreadSyncedAtMs by remember { mutableStateOf(0L) }
 
     fun resetSessionUiState() {
+        selectedCategoryId = null
+        selectedTag = null
+        currentSort = FeedSortFilter.LATEST
+        searchQuery = ""
         loadTopicsJob?.cancel()
         loadMoreJob?.cancel()
         detailLoadJob?.cancel()
@@ -2421,7 +2452,22 @@ internal fun LinDoApp(
         }
     }
 
-    LaunchedEffect(authVersion) {
+    LaunchedEffect(SavedAccounts.busy) {
+        if (SavedAccounts.busy) {
+            resetSessionUiState()
+            wasAuthorized = false
+            lastAuthenticatedUsername = null
+            topics = emptyList()
+            discoverHotTopics = emptyList()
+            activeTopicDetail = null
+            activeTopicSummary = null
+            activeTargetPostNumber = null
+            mobileShowingDetail = false
+        }
+    }
+
+    LaunchedEffect(authVersion, SavedAccounts.busy) {
+        if (SavedAccounts.busy) return@LaunchedEffect
         var preFetchedProfile: UserFullProfileSummary? = null
         if (UserApiKeyAuthManager.isAuthorized() &&
             UserApiKeyAuthManager.currentUser?.username?.takeIf { it.isNotBlank() && it != "linuxdo_user" } == null
@@ -2539,6 +2585,15 @@ internal fun LinDoApp(
             closedUrl.startsWith("https://linux.do") || closedUrl.contains(".linux.do")
         )
         activeWebLoginUrl = null
+        if (SavedAccounts.adding) {
+            scope.launch {
+                runCatching { SavedAccounts.cancelAdd() }.onFailure {
+                    authStatusHint = "暂时无法返回原账号，可从已登录账号列表重试"
+                    showAuthSheet = true
+                }
+            }
+            return
+        }
         if (wasEditingProfile) syncUserProfile()
         if (wasLinuxDoPage) {
             scope.launch {
@@ -3155,6 +3210,7 @@ internal fun LinDoApp(
                         ) {
                             GoogleWelcomeLoginScreen(
                                 onOpenAppIcon = openAppIconPage,
+                                onOpenSavedAccounts = if (SavedAccounts.accounts.isNotEmpty()) ({ showAuthSheet = true }) else null,
                                 onPrimaryWebLogin = ::triggerPrimaryLogin,
                                 onBrowserOneClickAuth = {
                                     triggerBrowserOneClickLogin()
@@ -4118,7 +4174,7 @@ internal fun LinDoApp(
                     )
                 }
 
-                if (showAuthSheet && !authCompleting) {
+                if (showAuthSheet && !authCompleting && !SavedAccounts.busy) {
                     UserApiKeyAuthSheet(
                         isAuthorized = isAuthorized,
                         currentUser = currentUser,
@@ -4126,7 +4182,9 @@ internal fun LinDoApp(
                         onPrimaryWebLogin = {
                             triggerPrimaryLogin()
                         },
-                        onBrowserOneClickAuth = ::triggerBrowserOneClickLogin,
+                        onBrowserOneClickAuth = { addAccount(browser = true) },
+                        onAddAccount = { addAccount() },
+                        onSelectAccount = ::selectSavedAccount,
                         onLogout = {
                             showLogoutConfirm = true
                             showAuthSheet = false
@@ -4234,13 +4292,13 @@ internal fun LinDoApp(
                         )
                     }
                 }
-                if (authCompleting) {
+                if (authCompleting || SavedAccounts.busy) {
                     Box(Modifier.fillMaxSize().background(palette.canvas)
                         .testTag("auth_completion_loading")
                         .pointerInput(Unit) {
                             awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
                         }, contentAlignment = Alignment.Center) {
-                        LinDoLoadingIndicator(label = "正在完成登录…")
+                        LinDoLoadingIndicator(label = if (SavedAccounts.busy) "正在切换账号…" else "正在完成登录…")
                     }
                 }
             }
@@ -12824,6 +12882,8 @@ private fun UserApiKeyAuthSheet(
     authStatusHint: String? = null,
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
+    onAddAccount: () -> Unit,
+    onSelectAccount: (String) -> Unit,
     onLogout: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -12834,7 +12894,9 @@ private fun UserApiKeyAuthSheet(
         )
         HorizontalDivider(thickness = 0.5.dp, color = LocalPalette.current.hairline)
         AccountSessionContent(if (isAuthorized) currentUser else null, authStatusHint,
-            onPrimaryWebLogin, onBrowserOneClickAuth, onLogout)
+            onPrimaryWebLogin, onBrowserOneClickAuth, onLogout,
+            accounts = SavedAccounts.accounts, onAddAccount = onAddAccount, onSelectAccount = onSelectAccount,
+            onRemoveAccount = SavedAccounts::forget)
     }
 }
 
@@ -12965,6 +13027,7 @@ private fun GuestLoginGuideSheet(
 
 @Composable
 private fun GoogleWelcomeLoginScreen(
+    onOpenSavedAccounts: (() -> Unit)? = null,
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
     secondaryActionLabel: String = LinDoAuthCopy.SYSTEM_BROWSER_AUTH.text,
@@ -12975,6 +13038,7 @@ private fun GoogleWelcomeLoginScreen(
 ) {
     LinDoWelcomeScreen(
         isDark = LocalPalette.current.isDark,
+        onOpenSavedAccounts = onOpenSavedAccounts,
         onPrimaryWebLogin = onPrimaryWebLogin,
         onBrowserOneClickAuth = onBrowserOneClickAuth,
         onToggleDark = onToggleDark,
