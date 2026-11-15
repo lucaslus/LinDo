@@ -3323,7 +3323,7 @@ object LinuxDoRepository {
         if (looksLikeCloudflareChallenge(rawBody)) return false
         val trimmed = rawBody.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart()
         // Discourse SessionController.current returns an EMPTY 404 for guests.
-        // The caller still confirms twice; HTML gateway errors remain excluded.
+        // This is only a candidate: the caller also checks an independent forum document before logout.
         if (status == 404 && trimmed.isBlank()) return true
         if (!trimmed.startsWith("{")) return false
         val root = runCatching { json.parseToJsonElement(trimmed) as? JsonObject }.getOrNull() ?: return false
@@ -3375,55 +3375,62 @@ object LinuxDoRepository {
             return@withContext UserApiKeyAuthManager.fullProfileCache
         }
         val generation = UserApiKeyAuthManager.sessionGeneration
-        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
+        val initialToken = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
+        val initialApiKey = UserApiKeyAuthManager.getApiKey()
+        fun sameSession() = generation == UserApiKeyAuthManager.sessionGeneration &&
+            initialToken == CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value &&
+            initialApiKey == UserApiKeyAuthManager.getApiKey()
+        val headers = (if (background) mapOf("Discourse-Background" to "true") else emptyMap()) +
+            mapOf("Cache-Control" to "no-cache")
         val cachedAccount = UserApiKeyAuthManager.currentUser
 
         // 1. 探测 /session/current.json 获取最权威的当前登录态：
         //    - 遇到网关 HTML 错误、Cloudflare 页面、429 限流或瞬时网络失败时保留现有登录态，绝不误踢用户；
-        //    - 若返回 Discourse 结构化未登录 JSON，先将内存哨兵 `_t` 回填至平台 CookieJar 并二次确认一次，
-        //      仅当连续两次均由服务端明确返回未登录 JSON 时才清除失效会话（且不回退匿名 /u/{username}.json）。
+        //    - 未登录响应先等待平台恢复，再确认；仅在独立论坛页面也明确为游客时才清除会话。
+        //      失败期间凭证轮换或重新登录，旧请求不得清除新会话。
         var sessionRes = executeHttp(
             url = "https://linux.do/session/current.json",
             extraHeaders = headers,
             preserveFailure = true
         ) ?: return@withContext UserApiKeyAuthManager.fullProfileCache
 
-        val isPoisonedApiKey403 = sessionRes.first == 403 &&
-            !UserApiKeyAuthManager.hasValidWebSessionCookie() &&
-            !UserApiKeyAuthManager.getApiKey().isNullOrBlank() &&
-            !looksLikeCloudflareChallenge(sessionRes.second) &&
-            sessionRes.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart().let { trimmed ->
-                trimmed.startsWith("{") && runCatching {
-                    val errObj = json.parseToJsonElement(trimmed) as? JsonObject
-                    errObj != null && (errObj.containsKey("errors") || errObj.containsKey("error_type"))
-                }.getOrDefault(false)
-            }
-        if (isPoisonedApiKey403) {
-            if (generation == UserApiKeyAuthManager.sessionGeneration) {
-                UserApiKeyAuthManager.handleServerAuthInvalidated()
-            }
-            return@withContext null
-        }
-
         if (isConfirmedDiscourseUnauthenticatedSessionResponse(sessionRes.first, sessionRes.second)) {
-            val savedT = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
-                ?.takeIf { it.isNotBlank() && it != "demo_session_token" }
-            if (savedT != null) {
-                UserApiKeyAuthManager.onSyncCookieToPlatform?.invoke("_t=$savedT; Path=/; Secure; HttpOnly; SameSite=Lax")
-            }
-            kotlinx.coroutines.delay(150L)
+            if (!sameSession()) return@withContext UserApiKeyAuthManager.fullProfileCache
+            // A platform restore must finish before a second probe. A timed sleep is not a cookie-write barrier.
+            try {
+                UserApiKeyAuthManager.onPrepareManualRecovery?.invoke()
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { return@withContext UserApiKeyAuthManager.fullProfileCache }
+            if (!sameSession()) return@withContext UserApiKeyAuthManager.fullProfileCache
+            kotlinx.coroutines.delay(1_000L)
             val confirmRes = executeHttp(
                 url = "https://linux.do/session/current.json",
                 extraHeaders = headers,
                 preserveFailure = true
             ) ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+            if (!sameSession()) return@withContext UserApiKeyAuthManager.fullProfileCache
             if (isConfirmedDiscourseUnauthenticatedSessionResponse(confirmRes.first, confirmRes.second)) {
-                if (generation == UserApiKeyAuthManager.sessionGeneration) {
-                    UserApiKeyAuthManager.handleServerAuthInvalidated()
+                // An endpoint 404/403 can be a gateway or route restriction, not an expired account.
+                // Confirm with a real forum document; never use a public /u/{name} profile as auth evidence.
+                val page = executeHttp("https://linux.do/", extraHeaders = headers + mapOf(
+                    "Accept" to "text/html", "Cache-Control" to "no-cache"), preserveFailure = true)
+                    ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+                if (!sameSession()) return@withContext UserApiKeyAuthManager.fullProfileCache
+                when (val identity = readDiscourseSessionPage(page.first, page.second)) {
+                    is DiscourseSessionPage.Authenticated -> sessionRes = 200 to buildJsonObject {
+                        put("current_user", identity.user)
+                    }.toString()
+                    DiscourseSessionPage.Guest -> {
+                        // A forum HTML guest page cannot disprove an API-key-only session.
+                        if (initialToken.isNullOrBlank() && !initialApiKey.isNullOrBlank()) {
+                            return@withContext UserApiKeyAuthManager.fullProfileCache
+                        }
+                        UserApiKeyAuthManager.handleServerAuthInvalidated()
+                        return@withContext null
+                    }
+                    DiscourseSessionPage.Unknown -> return@withContext UserApiKeyAuthManager.fullProfileCache
                 }
-                return@withContext null
-            }
-            sessionRes = confirmRes
+            } else sessionRes = confirmRes
         }
 
         val sessionStatus = sessionRes.first

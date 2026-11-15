@@ -65,15 +65,19 @@ class OtpSessionExchangeRegressionTest {
         } finally { client.close() }
     }
 
-    @Test fun twoEmptySession404sClearStaleLocalLogin() = runTest {
+    @Test fun twoEmptySession404sAndGuestDocumentClearStaleLocalLogin() = runTest {
         UserApiKeyAuthManager.restorePersistedSession(
             AuthenticatedUserProfile(username="old_user", displayName="Old", trustLevel=1), null, "_t=expired")
         var probes = 0
         UserApiKeyAuthManager.requireBrowserTransportOnly = true
         UserApiKeyAuthManager.webViewHttpExecutor = { url, _, _, _ ->
-            assertTrue(url.endsWith("/session/current.json"))
-            probes++
-            404 to ""
+            if (url == "https://linux.do/") {
+                200 to """<meta name="csrf-token" content="csrf"><script id="data-preloaded" type="application/json">{"site":{}}</script>"""
+            } else {
+                assertTrue(url.endsWith("/session/current.json"))
+                probes++
+                404 to ""
+            }
         }
         assertNull(LinuxDoRepository.fetchCurrentUserProfile())
         assertEquals(2, probes)

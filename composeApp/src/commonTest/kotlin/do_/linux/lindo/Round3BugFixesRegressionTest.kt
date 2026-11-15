@@ -102,6 +102,9 @@ class Round3BugFixesRegressionTest {
 
     @AfterTest
     fun tearDown() {
+        // Let detached HTTP readers release their leases before the next runTest advances virtual time.
+        LinuxDoRepository.clearUserSessionCaches()
+        kotlinx.coroutines.runBlocking { do_.linux.lindo.core.network.AccountSessionGate.replace {} }
         UserApiKeyAuthManager.webViewHttpExecutor = savedHttpExecutor
         PlatformMediaPicker.webViewUploadExecutor = savedUploadExecutor
         UserApiKeyAuthManager.onAuthStateChanged = null
@@ -199,6 +202,7 @@ class Round3BugFixesRegressionTest {
                     sessionProbeCount++
                     404 to """{"errors":["not logged in"]}"""
                 }
+                url == "https://linux.do/" -> 200 to """<meta name="csrf-token" content="csrf"><script id="data-preloaded" type="application/json">{"site":{}}</script>"""
                 url.contains("/u/alice.json") -> {
                     publicUserCalled = true
                     200 to """{"user":{"id":7,"username":"alice","name":"Alice","trust_level":2}}"""

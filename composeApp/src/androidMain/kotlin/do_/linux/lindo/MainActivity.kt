@@ -600,6 +600,10 @@ class MainActivity : ComponentActivity() {
         registerNetworkRecoveryMonitor()
         UserApiKeyAuthManager.onPrepareManualRecovery = {
             ensureHealthyApiWebView(forceCheck = true)
+            withContext(Dispatchers.Main) {
+                val cm = CookieManager.getInstance()
+                ensureAuthCookiesInWebKit(cm)
+            }
         }
         UserApiKeyAuthManager.onPersistReadTopics = { encoded ->
             runCatching {
@@ -1293,10 +1297,8 @@ class MainActivity : ComponentActivity() {
             ""
         }
 
-        val preExecCookies = runCatching {
-            val cm = CookieManager.getInstance()
-            ensureAuthCookiesInWebKit(cm, cm.getCookie("https://linux.do").orEmpty())
-        }.getOrNull().orEmpty()
+        val sessionCookieManager = CookieManager.getInstance()
+        val preExecCookies = ensureAuthCookiesInWebKit(sessionCookieManager)
         val hasBrowserSessionCookie = hasCookieNamed(preExecCookies, "_t")
         val preferredReferer = headers.entries.firstOrNull {
             it.key.equals("Referer", ignoreCase = true)
@@ -1573,7 +1575,7 @@ class MainActivity : ComponentActivity() {
                     liveWv.resumeTimers()
                 }
                 val cm = CookieManager.getInstance()
-                val cookieStr = ensureAuthCookiesInWebKit(cm, cm.getCookie("https://linux.do").orEmpty())
+                val cookieStr = ensureAuthCookiesInWebKit(cm)
                 if (cookieStr.isNotBlank()) {
                     CookieSentinel.syncFromAuthoritativeBrowserCookieString(cookieStr)
                 }
@@ -1594,10 +1596,15 @@ class MainActivity : ComponentActivity() {
             if (latestCookies.isNotBlank()) {
                 CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies)
                 val now = System.currentTimeMillis()
-                if (!isRead || (latestCookies != lastObservedCookieSnapshot && now - lastCookieFlushEpochMs > 5_000L)) {
+                val sessionRotated = hasCookieNamed(latestCookies, "_t") &&
+                    getCookieValue(latestCookies, "_t") != getCookieValue(lastObservedCookieSnapshot, "_t")
+                if (sessionRotated || !isRead || (latestCookies != lastObservedCookieSnapshot && now - lastCookieFlushEpochMs > 5_000L)) {
                     lastObservedCookieSnapshot = latestCookies
                     lastCookieFlushEpochMs = now
                     runCatching { cm?.flush() }
+                }
+                if (sessionRotated && UserApiKeyAuthManager.currentUser != null) {
+                    UserApiKeyAuthManager.persistSessionQuietly()
                 }
             } else if (!isRead) {
                 runCatching { cm?.flush() }
@@ -1920,7 +1927,7 @@ class MainActivity : ComponentActivity() {
                     liveWv.resumeTimers()
                 }
                 val cm = CookieManager.getInstance()
-                val cookieStr = ensureAuthCookiesInWebKit(cm, cm.getCookie("https://linux.do").orEmpty())
+                val cookieStr = ensureAuthCookiesInWebKit(cm)
                 if (cookieStr.isNotBlank()) {
                     CookieSentinel.syncFromAuthoritativeBrowserCookieString(cookieStr)
                 }
@@ -2250,24 +2257,9 @@ class MainActivity : ComponentActivity() {
             // 仅当存在已保存有效 `_t` 会话且 WebKit 意外丢失 `_t` 时才回填 host-only 会话 Cookie。
             val webKitCookies = cookieManager.getCookie("https://linux.do").orEmpty()
             val savedCookies = prefs.getString("raw_cookies", "").orEmpty()
-            val hasLiveWebKitSession = hasCookieNamed(webKitCookies, "_t")
-            if (!hasLiveWebKitSession && savedCookies.contains("_t=") && hasCookieNamed(savedCookies, "_t")) {
-                val discourseHostOnlyNames = setOf("_t", "_forum_session")
-                savedCookies.split(";").forEach { segment ->
-                    val pair = segment.trim()
-                    if (pair.contains("=") && !pair.startsWith("_t=demo_session_token")) {
-                        val name = pair.substringBefore("=").trim()
-                        val value = pair.substringAfter("=").trim()
-                        if (name in discourseHostOnlyNames && value.isNotEmpty()) {
-                            cookieManager.setCookie("https://linux.do", "$name=$value; Path=/; Secure; HttpOnly; SameSite=Lax")
-                        }
-                    }
-                }
-                cookieManager.flush()
-            }
-            val authoritativeCookies = cookieManager.getCookie("https://linux.do").orEmpty().ifBlank {
-                if (hasCookieNamed(savedCookies, "_t")) savedCookies else ""
-            }
+            // Seed the account in memory even when Chromium currently returns only analytics/CF cookies.
+            // The request bridge awaits CookieManager.setCookie before sending the first request.
+            val authoritativeCookies = do_.linux.lindo.core.network.sessionCookiesForRestore(webKitCookies, savedCookies)
 
             UserApiKeyAuthManager.restorePersistedSession(
                 profile = userProfile,
@@ -2282,28 +2274,40 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun ensureAuthCookiesInWebKit(cookieManager: CookieManager, currentWebKitCookies: String): String {
-        if (hasCookieNamed(currentWebKitCookies, "_t")) return currentWebKitCookies
-        val hasAuthorizedUser = UserApiKeyAuthManager.currentUser?.takeIf { it.username != "linuxdo_user" } != null
-        val winning = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
-        val savedT = winning["_t"]?.value?.takeIf { it.isNotBlank() && it != "demo_session_token" } ?: return currentWebKitCookies
-        if (!hasAuthorizedUser && !UserApiKeyAuthManager.isAuthorized()) return currentWebKitCookies
-        cookieManager.setCookie("https://linux.do", "_t=$savedT; Path=/; Secure; HttpOnly; SameSite=Lax")
-        winning["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
-            cookieManager.setCookie("https://linux.do", "_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
+    private suspend fun ensureAuthCookiesInWebKit(cookieManager: CookieManager): String =
+        withContext(Dispatchers.Main) {
+            val latestCookies = cookieManager.getCookie("https://linux.do").orEmpty()
+            if (hasCookieNamed(latestCookies, "_t")) return@withContext latestCookies
+            val winning = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+            val savedT = winning["_t"]?.value?.takeIf { it.isNotBlank() && it != "demo_session_token" }
+                ?: return@withContext latestCookies
+            if (!UserApiKeyAuthManager.isAuthorized()) return@withContext latestCookies
+            suspend fun setCookie(value: String) = kotlinx.coroutines.withTimeout(5_000L) {
+                suspendCancellableCoroutine<Unit> { continuation ->
+                    cookieManager.setCookie("https://linux.do", value) { accepted ->
+                        if (continuation.isActive) {
+                            if (accepted) continuation.resume(Unit)
+                            else continuation.resumeWith(Result.failure(IllegalStateException("Session cookie restore failed")))
+                        }
+                    }
+                }
+            }
+            setCookie("_t=$savedT; Path=/; Secure; HttpOnly; SameSite=Lax")
+            winning["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
+                setCookie("_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
+            }
+            cookieManager.flush()
+            val restored = cookieManager.getCookie("https://linux.do").orEmpty()
+            check(hasCookieNamed(restored, "_t")) { "Session cookie is not ready" }
+            restored
         }
-        cookieManager.flush()
-        return cookieManager.getCookie("https://linux.do").orEmpty()
-    }
 
     private fun persistSessionToDisk() {
         runCatching {
             val cookieManager = CookieManager.getInstance()
             cookieManager.flush()
-            val latestWebKitCookies = ensureAuthCookiesInWebKit(
-                cookieManager,
-                cookieManager.getCookie("https://linux.do").orEmpty()
-            )
+            // Persist the latest browser snapshot without rewriting persistent cookies as session-only cookies.
+            val latestWebKitCookies = cookieManager.getCookie("https://linux.do").orEmpty()
             if (latestWebKitCookies.isNotBlank()) {
                 CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestWebKitCookies)
             }
@@ -2347,7 +2351,7 @@ class MainActivity : ComponentActivity() {
                     editor.remove("unread_notifications")
                 }
             }
-            editor.apply()
+            check(editor.commit()) { "Could not persist account session" }
         }
     }
 

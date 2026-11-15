@@ -7090,6 +7090,7 @@ internal fun CommunityTopicReaderPane(
     val siteVerifyVer = LocalSiteVerificationRestoreVersion.current
     var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
+    var loadingEarlierPosts by remember(summary.id) { mutableStateOf(false) }
     var isLoadingGapPosts by remember(summary.id) { mutableStateOf(false) }
     var loadMorePostsError by remember(summary.id) { mutableStateOf(false) }
     var floorLoadError by remember(summary.id) { mutableStateOf<String?>(null) }
@@ -7260,8 +7261,10 @@ internal fun CommunityTopicReaderPane(
         val candidateIds = if (earlier) previousPostIds else afterTailPostIds
         if (changingReaderFilter || isLoadingMorePosts || isLoadingGapPosts || candidateIds.isEmpty()) return
         val retryingAfterFloorError = isManualRetry || loadMorePostsError || floorLoadError != null
+        // Claim the load synchronously so a double click cannot start two batches.
+        isLoadingMorePosts = true
+        loadingEarlierPosts = earlier
         scope.launch {
-            isLoadingMorePosts = true
             loadMorePostsError = false
             floorLoadError = null
             try {
@@ -7539,8 +7542,9 @@ internal fun CommunityTopicReaderPane(
             if (currentFloorErr != null && (activeVerify || isTransientRecoverableLoadError(currentFloorErr))) {
                 floorLoadError = null
                 loadMorePostsError = false
-                if (afterTailPostIds.isNotEmpty() && !isLoadingMorePosts && !isLoadingGapPosts && !changingReaderFilter) {
-                    loadMoreFloorBatch(20, isManualRetry = true)
+                val retryIds = if (loadingEarlierPosts) previousPostIds else afterTailPostIds
+                if (retryIds.isNotEmpty() && !isLoadingMorePosts && !isLoadingGapPosts && !changingReaderFilter) {
+                    loadMoreFloorBatch(20, earlier = loadingEarlierPosts, isManualRetry = true)
                 }
             }
             if (navigationError != null && (activeVerify || isTransientRecoverableLoadError(navigationError))) {
@@ -7821,11 +7825,6 @@ internal fun CommunityTopicReaderPane(
                         .background(palette.cardSurface)
                         .padding(horizontal = 16.dp, vertical = 14.dp)
                 ) {
-                    if (previousPostIds.isNotEmpty()) {
-                        TextButton(enabled = !isLoadingMorePosts, onClick = { loadMoreFloorBatch(20, earlier = true) }) {
-                            Text(LinDoReaderCopy.LOAD_EARLIER_FLOORS.text, color = palette.inkSecondary)
-                        }
-                    }
                     // 完整多行话题大标题（不截断，字号与行高贴合官方 Discourse 移动端阅读比例）
                     Text(
                         text = resolvedTitle,
@@ -7955,6 +7954,21 @@ internal fun CommunityTopicReaderPane(
                     }
                 }
                 HorizontalDivider(thickness = 0.6.dp, color = palette.hairline)
+                if (previousPostIds.isNotEmpty()) {
+                    EarlierRepliesControl(
+                        loading = isLoadingMorePosts && loadingEarlierPosts,
+                        enabled = !isLoadingMorePosts && !isLoadingGapPosts && !changingReaderFilter,
+                        error = loadingEarlierPosts && (loadMorePostsError || floorLoadError != null),
+                        needsVerification = loadingEarlierPosts && floorLoadError.isSiteVerificationError(),
+                        onClick = {
+                            if (loadingEarlierPosts && floorLoadError.isSiteVerificationError()) {
+                                onOpenWebUrl("https://linux.do/")
+                            } else {
+                                loadMoreFloorBatch(20, earlier = true, isManualRetry = floorLoadError != null)
+                            }
+                        }
+                    )
+                }
             }
 
             // 主帖之后直接进入回复区。
@@ -8140,10 +8154,10 @@ internal fun CommunityTopicReaderPane(
             if (posts.isNotEmpty()) {
                 item(key = "load_more_posts", contentType = "footer") {
                     LinearPulseLoadingFooter(
-                        isLoadingMore = isLoadingMorePosts,
+                        isLoadingMore = isLoadingMorePosts && !loadingEarlierPosts,
                         hasMore = afterTailPostIds.isNotEmpty(),
                         loadedCount = posts.size,
-                        isError = loadMorePostsError || floorLoadError != null,
+                        isError = !loadingEarlierPosts && (loadMorePostsError || floorLoadError != null),
                         autoLoadWhenVisible = false,
                         loadingText = LinDoReaderCopy.SYNCING_FOLLOWING_FLOORS.format(posts.size, totalFloorCount),
                         moreText = LinDoReaderCopy.LOAD_FOLLOWING_FLOORS.text,
