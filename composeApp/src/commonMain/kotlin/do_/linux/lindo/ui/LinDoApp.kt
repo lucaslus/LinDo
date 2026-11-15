@@ -8030,14 +8030,7 @@ internal fun CommunityTopicReaderPane(
 
                 val repliedPost = postsByNumber[post.replyToPostNumber]
                 val childReplies = repliesByParent[post.postNumber].orEmpty()
-                val confirmedReadVer = ScreenTrackEngine.serverConfirmedReadVersion
-                val repoReadVer = LinuxDoRepository.readTopicsVersion
-                val isFloorUnread = isAuthorized &&
-                    !post.isRead &&
-                    remember(summary.id, post.postNumber, confirmedReadVer, repoReadVer) {
-                        !ScreenTrackEngine.isPostConfirmedReadByServer(summary.id, post.postNumber) &&
-                            (LinuxDoRepository.getServerConfirmedReadFloor(summary.id) ?: 0) < post.postNumber
-                    }
+                val isFloorUnread = rememberFloorUnread(summary.id, post, isAuthorized)
                 CommunityPostFloor(
                     post = post,
                     repliedPost = repliedPost,
@@ -9093,6 +9086,7 @@ internal fun CommunityPostFloor(
                         Box(
                             modifier = Modifier
                                 .size(6.5.dp)
+                                .testTag("post_unread_${post.id}")
                                 .graphicsLayer {
                                     alpha = unreadDotAlpha
                                     val scale = 0.88f + 0.12f * unreadDotAlpha

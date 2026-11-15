@@ -189,6 +189,15 @@ object ScreenTrackEngine {
     private val currentTimingsMs = LinkedHashMap<Int, Int>()
     private val totalTimingsMs = LinkedHashMap<Int, Int>()
     private val readPostsSet = LinkedHashSet<Pair<Int, Int>>()
+    // Visual reading feedback is independent of network acknowledgement/retry bookkeeping.
+    private val locallyViewedPosts = LinkedHashSet<Pair<Int, Int>>()
+    var localReadVersion by mutableLongStateOf(0L)
+        private set
+
+    fun isPostViewedLocally(topicId: Int, postNumber: Int): Boolean = synchronized(lock) {
+        locallyViewedPosts.contains(topicId to postNumber)
+    }
+
     private var sessionReadingMilliseconds = 0L
     private val consolidatedQueue = ArrayList<ConsolidatedTimingBatch>()
     private val retryCounts = HashMap<Int, Int>()
@@ -321,9 +330,15 @@ object ScreenTrackEngine {
             }
         }
 
+        var newlyViewed = false
         for (postNumber in onscreenPosts) {
             currentTimingsMs[postNumber] = (currentTimingsMs[postNumber] ?: 0) + diffMs
+            val visibleTime = (totalTimingsMs[postNumber] ?: 0) + currentTimingsMs.getValue(postNumber)
+            if (visibleTime >= 1_000 && addBoundedReadPostLocked(locallyViewedPosts, topicId to postNumber)) {
+                newlyViewed = true
+            }
         }
+        if (newlyViewed) runUiSafeStateWrite { localReadVersion += 1L }
 
         // 检查是否有首次阅读的新楼层累积满 1 秒（rush 立即上报策略）
         val hasUnreadRush = currentTimingsMs.entries.any { (postNum, ms) ->
@@ -555,6 +570,8 @@ object ScreenTrackEngine {
         currentTimingsMs.clear()
         totalTimingsMs.clear()
         readPostsSet.clear()
+        val hadLocalReads = locallyViewedPosts.isNotEmpty()
+        locallyViewedPosts.clear()
         val hadConfirmed = serverConfirmedReadPosts.isNotEmpty()
         serverConfirmedReadPosts.clear()
         consolidatedQueue.clear()
@@ -564,6 +581,7 @@ object ScreenTrackEngine {
         consecutiveFailures = 0
         blockSendingUntilEpochMs = 0L
         runUiSafeStateWrite {
+            if (hadLocalReads) localReadVersion += 1L
             if (hadConfirmed) {
                 serverConfirmedReadVersion += 1L
             }
@@ -583,6 +601,7 @@ object ScreenTrackEngine {
         currentTimingsMs.clear()
         totalTimingsMs.clear()
         readPostsSet.clear()
+        locallyViewedPosts.clear()
         serverConfirmedReadPosts.clear()
         consolidatedQueue.clear()
         retryCounts.clear()
@@ -591,6 +610,7 @@ object ScreenTrackEngine {
         consecutiveFailures = 0
         blockSendingUntilEpochMs = 0L
         runUiSafeStateWrite {
+            localReadVersion = 0L
             serverConfirmedReadVersion = 0L
             sessionTopicsEntered = 0
             sessionPostsRead = 0
