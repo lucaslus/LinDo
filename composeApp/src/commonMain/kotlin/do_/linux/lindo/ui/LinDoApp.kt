@@ -2630,6 +2630,9 @@ internal fun LinDoApp(
             }
             return
         }
+        // Closing/cancelling a verification page is not proof that the challenge succeeded.
+        // Only the verified callback may clear the cooldown and resume blocked operations.
+        if (closedUrl == "https://linux.do/#lindo-verify") return
         if (wasEditingProfile) syncUserProfile()
         if (wasLinuxDoPage) {
             scope.launch {
@@ -3195,6 +3198,18 @@ internal fun LinDoApp(
         }
     }
 
+    val verificationActive = showSiteVerifySheet || activeWebLoginUrl == "https://linux.do/#lindo-verify"
+    SideEffect {
+        PlatformSessionRecovery.verifying = verificationActive
+        PlatformSessionRecovery.cancelVerification = {
+            showSiteVerifySheet = false
+            if (activeWebLoginUrl == "https://linux.do/#lindo-verify") closeWebPage()
+        }
+    }
+    DisposableEffect(Unit) { onDispose {
+        PlatformSessionRecovery.verifying = false
+        PlatformSessionRecovery.cancelVerification = null
+    } }
     CompositionLocalProvider(
         LocalPalette provides palette,
         LocalLinDoAnimations provides (enableAnimations && systemAnimationsEnabled),
@@ -4303,7 +4318,15 @@ internal fun LinDoApp(
                             ::closeWebPage,
                             {
                                 val wasAlreadyAuth = wasAuthorized
+                                val completingLogin = do_.linux.lindo.core.network.webPagePurpose(loginUrl) == do_.linux.lindo.core.network.WebPagePurpose.LOGIN
                                 activeWebLoginUrl = null
+                                if (completingLogin && UserApiKeyAuthManager.isAuthorized()) {
+                                    currentTab = MainTab.HOME
+                                    mobileShowingDetail = false
+                                    activeTopicSummary = null
+                                    activeTopicDetail = null
+                                    activeTargetPostNumber = null
+                                }
                                 if (UserApiKeyAuthManager.isAuthorized()) {
                                     showAuthSheet = false
                                     showSiteVerifySheet = false
@@ -9170,6 +9193,8 @@ internal fun CommunityPostFloor(
         CommunityPostContent(
             postId = post.id, cookedHtml = post.cookedHtml, originalUrl = originalUrl,
             targetReplyFloorNum = targetReplyFloorNum, targetReplyDisplayName = targetReplyDisplayName,
+            targetReplyUsername = targetReplyUsername, targetReplyAvatarTemplate = targetReplyAvatarTemplate,
+            targetReplyAnimatedAvatar = targetReplyAnimatedAvatar, enableAnimations = enableAnimations,
             repliedHtml = repliedPost?.cookedHtml, onJumpToFloorNumber = onJumpToFloorNumber,
             loadingReplyTarget = loadingReplyTarget,
             onSelectionChange = { selectedQuote = it },
@@ -9263,56 +9288,12 @@ internal fun CommunityPostFloor(
 
         Spacer(modifier = Modifier.height(3.dp))
 
-        // 2.5 点赞/表态/小火箭操作反馈提示条（避免静默失败回退）
-        AnimatedVisibility(visible = floorActionError != null) {
-            val errMsg = floorActionError.orEmpty()
-            val needsVerify = errMsg.isSiteVerificationError()
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFFEF4444).copy(alpha = if (palette.isDark) 0.18f else 0.10f))
-                    .border(0.6.dp, Color(0xFFEF4444).copy(alpha = 0.35f), RoundedCornerShape(10.dp))
-                    .clickable {
-                        if (needsVerify) onOpenWebUrl("https://linux.do/") else floorActionError = null
-                    }
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = errMsg,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = if (palette.isDark) Color(0xFFFCA5A5) else Color(0xFFDC2626),
-                    modifier = Modifier.weight(1f)
-                )
-                if (needsVerify) {
-                    Text(
-                        text = LinDoCommonCopy.GO_VERIFY.text,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.activeChipText,
-                        modifier = Modifier.padding(start = 8.dp)
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .padding(start = 6.dp)
-                        .size(22.dp)
-                        .clip(CircleShape)
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .clickable { floorActionError = null },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Close,
-                        contentDescription = LinDoCommonCopy.CLOSE_HINT.text,
-                        modifier = Modifier.size(13.dp),
-                        tint = palette.inkTertiary
-                    )
-                }
+        AnimatedVisibility(visible = floorActionError != null &&
+            !(showBoostComposer && floorActionError.isSiteVerificationError())) {
+            if (floorActionError.isSiteVerificationError()) {
+                VerificationInlineStatus(onVerify = { onOpenWebUrl("https://linux.do/") }, forSubmission = false)
+            } else {
+                LinDoFeedbackRow(floorActionError.orEmpty(), LinDoMascotState.NetworkError)
             }
         }
 
@@ -9418,7 +9399,7 @@ internal fun CommunityPostFloor(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 val counterOverLimit = boostStats.exceedsLength || boostStats.exceedsEmojiLimit
-                val canSendNow = boostStats.isValid && !isSubmittingBoost
+                val canSendNow = boostStats.isValid && !isSubmittingBoost && !floorActionError.isSiteVerificationError() && !PlatformSessionRecovery.verifying
                 if (counterOverLimit) Text(
                     if (boostStats.exceedsEmojiLimit) {
                         LinDoReaderCopy.BOOST_LIMIT_EMOJIS_TAG.format(BoostInputStats.MAX_BOOST_EMOJI_COUNT)
@@ -9429,17 +9410,13 @@ internal fun CommunityPostFloor(
                 )
 
                 // 一体化单行小火箭输入条（左侧纯矢量表情按钮 + 中部无框输入 + 右侧字数与发送/关闭图标）
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                    .background(palette.subtleSurface).border(0.6.dp,
+                        if (counterOverLimit) Color(0xFFEF4444) else palette.hairline, RoundedCornerShape(10.dp))) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(40.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(palette.subtleSurface)
-                        .border(
-                            width = 0.6.dp,
-                            color = if (counterOverLimit) Color(0xFFEF4444) else palette.hairline,
-                            shape = RoundedCornerShape(12.dp)
-                        )
                         .padding(horizontal = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -9532,6 +9509,12 @@ internal fun CommunityPostFloor(
                             tint = palette.inkTertiary
                         )
                     }
+                }
+
+                if (floorActionError.isSiteVerificationError()) {
+                    VerificationInlineStatus(onVerify = { onOpenWebUrl("https://linux.do/") },
+                        modifier = Modifier.padding(horizontal = 12.dp))
+                }
                 }
 
                 // 如果输入框中已包含 `:shortcode:`，实时预览渲染效果
@@ -10032,7 +10015,7 @@ internal fun CommunityPostFloor(
                                 animatedAvatar = child.animatedAvatar,
                                 primaryGroupName = child.primaryGroupName,
                                 flair = child.flair,
-                                size = 26.dp,
+                                size = 28.dp,
                                 enableAnimations = enableAnimations
                             )
                         }
@@ -10049,7 +10032,7 @@ internal fun CommunityPostFloor(
                                 ) {
                                     Text(
                                         text = child.displayName?.takeIf { it.isNotBlank() } ?: child.username,
-                                        fontSize = 13.2.sp,
+                                        fontSize = 13.sp,
                                         lineHeight = 16.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = palette.inkPrimary,
@@ -10077,7 +10060,7 @@ internal fun CommunityPostFloor(
                                     if (childFloorMeta.isNotEmpty()) {
                                         Text(
                                             text = childFloorMeta,
-                                            fontSize = 11.2.sp,
+                                            fontSize = 12.sp,
                                             lineHeight = 14.sp,
                                             color = palette.inkTertiary,
                                             maxLines = 1,
@@ -10096,10 +10079,10 @@ internal fun CommunityPostFloor(
                                 Spacer(modifier = Modifier.height(3.dp))
                                 Text(
                                     text = childCleanText,
-                                    fontSize = 13.8.sp,
-                                    lineHeight = 20.5.sp,
+                                    fontSize = 14.sp,
+                                    lineHeight = 21.sp,
                                     color = palette.inkPrimary.copy(alpha = 0.88f),
-                                    maxLines = 4,
+                                    maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
@@ -10218,6 +10201,10 @@ private fun CommunityPostContent(
     originalUrl: String?,
     targetReplyFloorNum: Int?,
     targetReplyDisplayName: String?,
+    targetReplyUsername: String?,
+    targetReplyAvatarTemplate: String,
+    targetReplyAnimatedAvatar: String?,
+    enableAnimations: Boolean,
     repliedHtml: String?,
     onJumpToFloorNumber: (Int) -> Unit,
     loadingReplyTarget: Boolean,
@@ -10235,45 +10222,41 @@ private fun CommunityPostContent(
             }
         }
         if (targetReplyFloorNum != null) {
-            val repliedSnippet = remember(repliedHtml, astNodes.firstOrNull()) {
-                if (astNodes.firstOrNull() is PostBlockNode.QuoteBlock) ""
-                else repliedHtml?.let(::postPreviewText)?.take(200).orEmpty()
-            }
-            val target = if (targetReplyDisplayName.isNullOrBlank()) {
-                LinDoReaderCopy.FLOOR_LABEL.format(targetReplyFloorNum)
-            } else {
-                LinDoReaderCopy.REPLY_TARGET_USER_FLOOR.format(targetReplyDisplayName, targetReplyFloorNum)
+            val repliedSnippet = remember(repliedHtml, astNodes.firstOrNull(), targetReplyFloorNum, originalUrl) {
+                val quote = astNodes.firstOrNull() as? PostBlockNode.QuoteBlock
+                val topicId = originalUrl?.let(::parseSmartTopicUrlTarget)?.first
+                val sameTarget = quote != null && quote.postNumber == targetReplyFloorNum &&
+                    (quote.topicId == null || (topicId != null && quote.topicId == topicId))
+                if (sameTarget) "" else repliedHtml?.let(::postPreviewText)?.take(200).orEmpty()
             }
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 6.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(palette.subtleSurface.copy(alpha = if (palette.isDark) 0.50f else 0.65f))
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                    .heightIn(min = 48.dp)
+                    .drawBehind { drawLine(palette.hairline, Offset(0f, 0f), Offset(0f, size.height), 2.dp.toPx()) }
                     .pointerHoverIcon(PointerIcon.Hand)
-                    .clickable(
-                        enabled = !loadingReplyTarget,
+                    .clickable(enabled = !loadingReplyTarget,
                         onClickLabel = LinDoReaderCopy.JUMP_TO_FLOOR_LABEL.format(targetReplyFloorNum),
-                        onClick = { onJumpToFloorNumber(targetReplyFloorNum) }
-                    )
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                        onClick = { onJumpToFloorNumber(targetReplyFloorNum) })
+                    .padding(start = 10.dp, top = 4.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(LinDoIcons.Reply, null, Modifier.size(14.dp), tint = palette.inkSecondary)
+                SmartAvatar(username = targetReplyUsername.orEmpty(), avatarTemplate = targetReplyAvatarTemplate,
+                    animatedAvatar = targetReplyAnimatedAvatar, size = 24.dp, enableAnimations = enableAnimations)
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        if (loadingReplyTarget) LinDoReaderCopy.LOADING_TARGET_FLOOR.format(targetReplyFloorNum) else target,
-                        fontSize = 12.sp, lineHeight = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkSecondary,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
-                    if (repliedSnippet.isNotBlank() && !loadingReplyTarget) {
-                        Spacer(modifier = Modifier.height(1.dp))
-                        Text(
-                            repliedSnippet, fontSize = 12.5.sp, lineHeight = 18.sp, color = palette.inkSecondary,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("回复", color = palette.inkSecondary, fontSize = 12.sp)
+                        Text(targetReplyDisplayName.orEmpty(), modifier = Modifier.weight(1f),
+                            fontSize = 12.sp, color = palette.inkPrimary, fontWeight = FontWeight.Medium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(LinDoReaderCopy.FLOOR_LABEL.format(targetReplyFloorNum),
+                            fontSize = 12.sp, color = palette.inkTertiary, maxLines = 1)
                     }
+                    if (loadingReplyTarget || repliedSnippet.isNotBlank()) Text(
+                        if (loadingReplyTarget) "加载中…" else repliedSnippet,
+                        fontSize = 13.sp, lineHeight = 18.sp, color = palette.inkSecondary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Icon(LinDoIcons.ChevronRight, null, Modifier.size(13.dp), tint = palette.inkTertiary)
             }
@@ -11966,26 +11949,18 @@ internal fun CommunityProfileScreen(
                     var showClearCacheDialog by remember { mutableStateOf(false) }
                     var cacheClearedStatus by remember { mutableStateOf<String?>(null) }
                     val context = coil3.compose.LocalPlatformContext.current
-                    val cacheScope = rememberCoroutineScope()
                     LaunchedEffect(cacheClearedStatus) {
                         if (cacheClearedStatus != null) {
                             delay(2800L)
                             cacheClearedStatus = null
                         }
                     }
-                    fun performLocalCacheClear(includeLogs: Boolean) {
+                    suspend fun performLocalCacheClear() {
+                        val imageLoader = coil3.SingletonImageLoader.get(context)
+                        withContext(Dispatchers.IO) { imageLoader.diskCache?.clear() }
+                        imageLoader.memoryCache?.clear()
                         LinuxDoRepository.clearAllLocalCaches()
-                        val imageLoader = runCatching { coil3.SingletonImageLoader.get(context) }.getOrNull()
-                        runCatching { imageLoader?.memoryCache?.clear() }
-                        cacheScope.launch(Dispatchers.IO) {
-                            runCatching { imageLoader?.diskCache?.clear() }
-                        }
-                        if (includeLogs) {
-                            LinDoDiagnosticLogger.clearAllLogs()
-                            cacheClearedStatus = LinDoMessagesCopy.CLEARED_CACHE_AND_LOGS.text
-                        } else {
-                            cacheClearedStatus = LinDoMessagesCopy.CLEARED_IMAGES_AND_PARSE_CACHE.text
-                        }
+                        cacheClearedStatus = "已清理"
                     }
                     LinDoSettingRow(
                         icon = LinDoIcons.Trash,
@@ -11996,8 +11971,7 @@ internal fun CommunityProfileScreen(
                     if (showClearCacheDialog) {
                         ClearCacheOptionsDialog(
                             onDismiss = { showClearCacheDialog = false },
-                            onClearCacheOnly = { performLocalCacheClear(includeLogs = false) },
-                            onClearCacheAndLogs = { performLocalCacheClear(includeLogs = true) }
+                            onClearCache = { performLocalCacheClear() }
                         )
                     }
 
@@ -12941,11 +12915,19 @@ private fun SiteVerificationSheet(
     onRetryVerified: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    SiteVerificationCard(
-        onVerified = onRetryVerified,
-        onDismiss = onDismiss,
-        onOpenWebPage = onOpenBrowserVerify
-    )
+    val verified by rememberUpdatedState(onRetryVerified)
+    val dismiss by rememberUpdatedState(onDismiss)
+    val openWeb by rememberUpdatedState(onOpenBrowserVerify)
+    LaunchedEffect(Unit) {
+        PlatformSessionRecovery.verificationMessage = null
+        try {
+            val handler = PlatformSessionRecovery.verifySession
+            if (handler == null) openWeb()
+            else if (handler()) verified()
+            else { PlatformSessionRecovery.verificationMessage = "连接未完成，请重试"; dismiss() }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) { PlatformSessionRecovery.verificationMessage = "连接未完成，请重试"; dismiss() }
+    }
 }
 
 /**
@@ -18952,46 +18934,4 @@ private fun AppearanceChoices(selected: String, onSelect: (String) -> Unit) {
     SettingsChoices(listOf("system", "light", "dark"), selected,
         label = { appearanceLabel(it) },
         optionVisual = { value, tint -> SettingsAppearanceVisual(value, tint) }, onSelect = onSelect)
-}
-
-@Composable
-private fun SiteVerificationCard(
-    onVerified: () -> Unit,
-    onDismiss: () -> Unit,
-    onOpenWebPage: () -> Unit
-) {
-    val p = LocalPalette.current
-    val scope = rememberCoroutineScope()
-    var busy by remember { mutableStateOf(false) }
-    var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    DisposableEffect(Unit) { onDispose { job?.cancel() } }
-    androidx.compose.ui.window.Dialog(onDismissRequest = { job?.cancel(); onDismiss() }) {
-        Column(Modifier.widthIn(max = 440.dp).clip(RoundedCornerShape(16.dp)).background(p.cardSurface)
-            .border(0.5.dp, p.hairline, RoundedCornerShape(16.dp)).padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                LinDoIconArtworkImage(LinDoIconArtwork.Wink, Modifier.size(38.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(if (busy) "正在等待网页确认" else "还差一次确认", color = p.inkPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                    Text("阅读位置已保留，完成后接着看", color = p.inkSecondary, fontSize = 12.5.sp)
-                }
-            }
-            Text(PlatformSessionRecovery.verificationMessage ?: "在打开的网页中完成站点确认，Lindo 会自动接续。", color = p.inkSecondary, fontSize = 13.sp, lineHeight = 19.sp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { job?.cancel(); onDismiss() }) { Text("稍后", color = p.inkSecondary) }
-                TextButton(enabled = !busy, onClick = {
-                    busy = true
-                    job = scope.launch {
-                        try {
-                            val handler = PlatformSessionRecovery.verifySession
-                            if (handler != null) {
-                                if (handler.invoke()) onVerified()
-                            } else {
-                                onOpenWebPage()
-                            }
-                        } finally { busy = false }
-                    }
-                }) { Text(if (busy) "等待确认…" else "继续验证", color = if (busy) p.inkSecondary else p.brandGold, fontWeight = FontWeight.SemiBold) }
-            }
-        }
-    }
 }

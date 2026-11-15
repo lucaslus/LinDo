@@ -664,7 +664,8 @@ internal fun ComposerSheet(
             tagChoices.requiredGroup == null &&
             tagChoices.forbiddenMessage == null
         )
-    val canSubmit = prepared && !busy && titleValidation == null && bodyValidation == null &&
+    val needsVerification = draftSyncBlockedByVerification || submitError.isSiteVerificationError()
+    val canSubmit = prepared && !busy && !needsVerification && !PlatformSessionRecovery.verifying && titleValidation == null && bodyValidation == null &&
         tagValidationOk &&
         (action != ComposerAction.EDIT || hasChanges)
 
@@ -1229,19 +1230,17 @@ internal fun ComposerSheet(
                         HorizontalDivider(color = palette.hairline, thickness = 0.5.dp)
                     }
 
-                    if (draftSyncFailed && submitError == null && !busy) {
-                        val syncMsg = draftSyncErrorMsg ?: LinDoComposerCopy.DRAFT_SAVED_LOCAL_CLOUD_FAILED.text
-                        val syncNeedsVerify = syncMsg.isSiteVerificationError() && openWebUrl != null
-                        LinDoLoadFailure(syncMsg) {
-                            if (syncNeedsVerify) {
-                                openWebUrl?.invoke("https://linux.do/")
-                            } else {
-                                draftSyncBlockedByVerification = false
-                                syncRetry++
-                            }
+                    if (needsVerification && openWebUrl != null) {
+                        VerificationInlineStatus(
+                            onVerify = { openWebUrl.invoke("https://linux.do/") },
+                            modifier = Modifier.padding(horizontal = 14.dp)
+                        )
+                    } else if (draftSyncFailed && submitError == null && !busy) {
+                        LinDoLoadFailure(draftSyncErrorMsg ?: LinDoComposerCopy.DRAFT_SAVED_LOCAL_CLOUD_FAILED.text) {
+                            syncRetry++
                         }
                     }
-                    if (submitError != null) {
+                    if (submitError != null && !submitError.isSiteVerificationError()) {
                         Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
                             LinDoFeedbackRow(submitError!!, LinDoMascotState.NetworkError)
                         }

@@ -118,6 +118,8 @@ class PreLaunchFullAppUiE2ETest {
         PlatformSessionRecovery.loginSession = null
         PlatformSessionRecovery.verifySession = null
         PlatformSessionRecovery.verificationMessage = null
+        PlatformSessionRecovery.verifying = false
+        PlatformSessionRecovery.cancelVerification = null
         UserApiKeyAuthManager.uiFontScale = 1f
         UserApiKeyAuthManager.uiDarkTheme = false
         UserApiKeyAuthManager.uiEnableAnimations = false
@@ -260,6 +262,8 @@ class PreLaunchFullAppUiE2ETest {
         waitForTextGone("登录 Lindo")
         assertTrue(UserApiKeyAuthManager.isAuthorized())
         assertEquals(2, opened.size)
+        waitForText("Lindo 预发版全功能自动化巡检主贴")
+        onNodeWithText("首页").edtAssertDisplayed()
     }
 
     @Test
@@ -644,15 +648,15 @@ class PreLaunchFullAppUiE2ETest {
         // Scroll Profile LazyColumn down to Settings / Cache Clear / Version v0.2.32
         onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(3)
         onNodeWithText("关于 Lindo").edtScrollClick()
-        waitForText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY)
-        onNodeWithText("Linux DO 社区客户端").edtAssertDisplayed()
+        waitForText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY.removePrefix("Lindo "))
+        assertEquals(0, onAllNodesWithText("Linux DO 社区客户端").edtCount())
         runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
-        waitForTextGone("Linux DO 社区客户端")
+        waitForTextGone("项目主页")
 
         onNodeWithText("清理本地缓存").edtScrollClick()
-        waitForText("仅清理图片与数据缓存")
-        onNodeWithText("仅清理图片与数据缓存").edtClick()
-        waitForText("已清理图片与解析缓存")
+        waitForText("清理缓存？")
+        onNodeWithText("清理").edtClick()
+        waitForText("已清理")
 
         savePreviewSnapshotIfConfigured("e2e_4_profile_v0_2_31.png")
 
@@ -769,16 +773,21 @@ class PreLaunchFullAppUiE2ETest {
         waitForText("站点验证", substring = true)
         waitForText("去验证")
 
-        onNodeWithText("去验证").edtClick()
-        waitForText("还差一次确认")
-        assertEquals(0, onAllNodes(hasSetTextAction()).edtCount(), "Recovery must not ask users to paste cookies")
-        savePreviewSnapshotIfConfigured("shared_compact_verification.png")
+        val verificationCalls = AtomicInteger(0)
+        val verificationDone = kotlinx.coroutines.CompletableDeferred<Unit>()
         PlatformSessionRecovery.verifySession = {
+            verificationCalls.incrementAndGet()
+            verificationDone.await()
             CookieSentinel.ingestRawCookieString("cf_clearance=e2e_cf_verified", domain = "linux.do")
             true
         }
-        onNodeWithText("继续验证").edtClick()
-        waitForTextGone("还差一次确认")
+        onNodeWithText("去验证").edtClick()
+        waitUntil { verificationCalls.get() == 1 && PlatformSessionRecovery.verifying }
+        assertEquals(0, onAllNodesWithText("还差一次确认").edtCount())
+        assertEquals(0, onAllNodesWithText("继续验证").edtCount())
+        assertEquals(0, onAllNodes(hasSetTextAction()).edtCount(), "Recovery must not ask users to paste cookies")
+        verificationDone.complete(Unit)
+        waitUntil { !PlatformSessionRecovery.verifying }
         waitForTextGone("去验证")
         waitForText("Cloudflare 验证恢复后实时同步测试贴")
 
@@ -886,8 +895,8 @@ class PreLaunchFullAppUiE2ETest {
         onNodeWithText("关于 Lindo").edtScrollToVisible()
         assertEquals(0, onAllNodesWithText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY).edtCount())
         pickSetting("关于 Lindo")
-        waitForText("Linux DO 社区客户端")
-        onNodeWithText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY).edtAssertDisplayed()
+        waitForText("项目主页")
+        onNodeWithText(do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger.APP_VERSION_DISPLAY.removePrefix("Lindo ")).edtAssertDisplayed()
         assertEquals(0, backend.aboutRequestCount.get(), "About Lindo must not fetch community information")
         savePreviewSnapshotIfConfigured(snapshot.replace(".png", "_about.png"))
         onNodeWithText("项目主页").edtClick()
@@ -897,9 +906,9 @@ class PreLaunchFullAppUiE2ETest {
         onNodeWithText("开源许可").edtClick()
         waitForText("Compose Multiplatform")
         runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
-        waitForText("Linux DO 社区客户端")
+        waitForText("项目主页")
         runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
-        waitForTextGone("Linux DO 社区客户端")
+        waitForTextGone("项目主页")
     }
 
     private fun SemanticsNodeInteraction.edtScrollToVisible() { onEdt { performScrollTo() } }

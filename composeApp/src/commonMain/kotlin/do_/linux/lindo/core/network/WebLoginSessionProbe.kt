@@ -11,10 +11,12 @@ internal fun webLoginSessionProbeScript(sessionOwner: String): String = """
     var path = location.pathname || '';
     if (/^\/(login|user-api-key|session\/otp|session\/sso|auth)(\/|$)/.test(path))
         return JSON.stringify({state:'login'});
+    // An embedded/invisible Turnstile widget can remain on a normal forum page.
+    // Only an actual interstitial should prevent reading the authenticated preload.
     if (/Just a moment|请稍候|Attention Required/i.test(document.title || '') ||
-        document.querySelector('#challenge-running, #challenge-stage, .cf-turnstile, iframe[src*="challenges.cloudflare.com"]'))
+        document.querySelector('#challenge-running, #challenge-stage, #challenge-form'))
         return JSON.stringify({state:'challenge'});
-    if (document.readyState !== 'complete') return JSON.stringify({state:'idle'});
+    if (document.readyState === 'loading') return JSON.stringify({state:'idle'});
     var owner = ${JsonPrimitive(sessionOwner)};
     var csrfMeta = document.querySelector('meta[name="csrf-token"]');
     var csrf = csrfMeta ? csrfMeta.content : '';
@@ -23,7 +25,8 @@ internal fun webLoginSessionProbeScript(sessionOwner: String): String = """
     // Each source is isolated: an unavailable legacy container must not prevent fallback.
     try {
         var el = document.getElementById('data-preloaded');
-        var preload = el && el.dataset && JSON.parse(el.dataset.preloaded || '{}');
+        var serialized = el && ((el.textContent || '').trim() || (el.dataset && el.dataset.preloaded));
+        var preload = serialized && JSON.parse(serialized);
         var user = preload && preload.currentUser;
         if (typeof user === 'string') user = JSON.parse(user);
         if (valid(user)) return ready(user);
@@ -62,7 +65,7 @@ internal fun webLoginSessionProbeScript(sessionOwner: String): String = """
                 probe.state=probe.attempts < 2 && wait <= 10000 ? 'waiting' : 'error';
                 return;
             }
-            if (response.status === 401) { probe.state='guest'; return; }
+            if (response.status === 401 || response.status === 404) { probe.state='guest'; return; }
             if (!response.ok) throw new Error('session HTTP failure');
             var data=await response.json();
             if (valid(data.current_user)) { probe.user=data.current_user; probe.state='ready'; }

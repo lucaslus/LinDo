@@ -30,4 +30,6 @@ object PlatformSessionRecovery {
     var loginSession: (suspend () -> Boolean)? = null
     var verifySession: (suspend () -> Boolean)? = null
     var verificationMessage by mutableStateOf<String?>(null)
+    var verifying by mutableStateOf(false)
+    var cancelVerification: (() -> Unit)? = null
 }

@@ -1459,8 +1459,7 @@ object LinuxDoRepository {
             cachedUserBadgesByUsername = emptyMap()
         }
         cachedCategoryTemplates = null
-        clearTransientRateLimit()
-        clearChallengeCooldown()
+        // Cache maintenance must not reopen a rate-limited or challenged connection.
     }
 
     private fun syncCookieHeaderPairsToPlatform(cookieHeader: String) {

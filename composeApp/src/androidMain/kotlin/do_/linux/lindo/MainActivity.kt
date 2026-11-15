@@ -2667,27 +2667,6 @@ private val AUTO_SUBMIT_OTP_FORM_JS = """
     })();
 """.trimIndent()
 
-private enum class WebModalTitleKind(val titleCopy: LinDoAuthCopy?) {
-    LOGIN_AND_VERIFY(LinDoAuthCopy.WEB_MODAL_LOGIN_AND_VERIFY_TITLE),
-    VERIFY_RETURN(LinDoAuthCopy.WEB_MODAL_VERIFY_RETURN_TITLE),
-    CONNECT(LinDoAuthCopy.WEB_MODAL_CONNECT_TITLE),
-    CREDIT(LinDoAuthCopy.WEB_MODAL_CREDIT_TITLE),
-    HOST_OR_DEFAULT(null);
-
-    fun resolveTitle(host: String): String =
-        titleCopy?.text ?: host.ifBlank { LinDoCommonCopy.LINUX_DO.text }
-
-    companion object {
-        fun resolve(isLoginFlow: Boolean, host: String, path: String): WebModalTitleKind = when {
-            isLoginFlow -> LOGIN_AND_VERIFY
-            host.equals("linux.do", ignoreCase = true) && (path.isEmpty() || path == "/") -> VERIFY_RETURN
-            host.equals("connect.linux.do", ignoreCase = true) -> CONNECT
-            host.equals("credit.linux.do", ignoreCase = true) -> CREDIT
-            else -> HOST_OR_DEFAULT
-        }
-    }
-}
-
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun AndroidWebLoginModal(
@@ -2696,15 +2675,12 @@ private fun AndroidWebLoginModal(
     onLoginSuccess: () -> Unit,
     onLaunchFileChooser: ((ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Boolean)? = null
 ) {
-    val isVerificationFlow = remember(initialUrl) { initialUrl == "https://linux.do/#lindo-verify" }
-    val isLoginFlow = remember(initialUrl) {
-        initialUrl.contains("/login") ||
-            initialUrl.contains("/session/otp/") ||
-            initialUrl.contains("/user-api-key/")
-    }
+    val purpose = remember(initialUrl) { do_.linux.lindo.core.network.webPagePurpose(initialUrl) }
+    val isVerificationFlow = purpose == do_.linux.lindo.core.network.WebPagePurpose.VERIFICATION
+    val isLoginFlow = purpose == do_.linux.lindo.core.network.WebPagePurpose.LOGIN
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var completed by remember { mutableStateOf(false) }
+    var completed by remember(initialUrl) { mutableStateOf(false) }
     var verificationRateRetries by remember { mutableStateOf(0) }
     var verificationProbeRunning by remember { mutableStateOf(false) }
     var verificationNavigated by remember { mutableStateOf(false) }
@@ -2726,6 +2702,7 @@ private fun AndroidWebLoginModal(
         pageLoadError = null
         rendererGone = false
         verificationRateRetries = 0
+        verificationNavigated = false
         confirmingLogin = false
         loginRateLimitEvent = null
         if (view?.url == url) view.reload() else view?.loadUrl(url)
@@ -2790,6 +2767,7 @@ private fun AndroidWebLoginModal(
         // 同步最新 Cookie（如 cf_clearance），不自动关闭窗口
         if (isVerificationFlow && pageLoadError == null && !verificationProbeRunning && !LinuxDoRepository.isRateLimitedNow()) {
             verificationProbeRunning = true
+            val probeEpoch = loginNavigationEpoch
             webView.evaluateJavascript("""
                 (function() {
                     if (location.origin !== 'https://linux.do' || document.readyState !== 'complete' ||
@@ -2805,20 +2783,25 @@ private fun AndroidWebLoginModal(
                     if (!document.querySelector('meta[name="csrf-token"]') || window.__lindoRecoveryProbeSent) return '';
                     window.__lindoRecoveryProbeSent = true;
                     (async function() {
+                        const controller = new AbortController();
+                        const timer = setTimeout(function() { controller.abort(); }, 12000);
                         try {
-                            const r = await fetch('/latest.json', {credentials:'include',signal:AbortSignal.timeout(12000)});
+                            const r = await fetch('/latest.json', {credentials:'include',signal:controller.signal});
                             if (r.headers.get('cf-mitigated') === 'challenge') { window.__lindoRecoveryResult={challenge:true}; return; }
                             if (r.status === 429) { window.__lindoRecoveryResult={status:429,retryAfter:r.headers.get('Retry-After')||''}; return; }
-                            if (!r.ok) return;
-                            const data = await r.json(); window.__lindoRecoveryResult={ok:!!data.topic_list};
-                        } catch (_) {}
+                            if (!r.ok) { window.__lindoRecoveryResult={error:true}; return; }
+                            const data = await r.json(); window.__lindoRecoveryResult=data.topic_list ? {ok:true} : {error:true};
+                        } catch (_) { window.__lindoRecoveryResult={error:true}; }
+                        finally { clearTimeout(timer); }
                     })();
                     return '';
                 })();
             """.trimIndent()) { raw ->
+                if (probeEpoch != loginNavigationEpoch || webView !== webViewRef) return@evaluateJavascript
                 verificationProbeRunning = false
                 if (!completed) {
                     val result = decodeJsStringResult(raw)?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    if (result?.optBoolean("error") == true) pageLoadError = "连接未完成，请重试"
                     if (result?.optInt("status") == 429) {
                         val retryAfter = result.optString("retryAfter")
                         LinuxDoRepository.noteRetryAfter(retryAfter)
@@ -2867,7 +2850,7 @@ private fun AndroidWebLoginModal(
 
         // An unchanged _t is normal when the browser already has a valid session.
         // Confirm the real user instead of requiring cookie rotation or trusting _t alone.
-        if (loginProbeRunning || !loginDocumentReady) return
+        if (pageLoadError != null || loginProbeRunning || (!loginDocumentReady && webView.progress < 100)) return
         val probeEpoch = loginNavigationEpoch
         loginProbeRunning = true
         val owner = getCookieValue(rawCookies, "_t").orEmpty().let { "${it.hashCode()}_${it.length}" }
@@ -2948,12 +2931,9 @@ private fun AndroidWebLoginModal(
     val barFg = if (isDark) androidx.compose.ui.graphics.Color(0xFFF3F4F6) else androidx.compose.ui.graphics.Color(0xFF111827)
     val barSubFg = if (isDark) androidx.compose.ui.graphics.Color(0xFFA1A8B5) else androidx.compose.ui.graphics.Color(0xFF525866)
     val barBorder = if (isDark) androidx.compose.ui.graphics.Color(0xFF232833) else androidx.compose.ui.graphics.Color(0xFFEDEFF3)
-    val currentPageTitle = remember(initialUrl, isLoginFlow) {
-        val parsed = runCatching { Uri.parse(initialUrl) }.getOrNull()
-        val host = parsed?.host.orEmpty()
-        val path = parsed?.path.orEmpty()
-        WebModalTitleKind.resolve(isLoginFlow = isLoginFlow, host = host, path = path).resolveTitle(host)
-    }
+    val currentPageTitle = do_.linux.lindo.core.network.webPageToolbarLabel(
+        initialUrl, pendingUrl ?: initialUrl
+    )
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -2982,9 +2962,9 @@ private fun AndroidWebLoginModal(
                 }
                 Text(
                     text = currentPageTitle,
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = barFg,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Normal,
+                    color = barSubFg,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -3131,6 +3111,7 @@ private fun AndroidWebLoginModal(
                                         loginDocumentReady = false
                                         loginNavigationEpoch++
                                         loginProbeRunning = false
+                                        verificationProbeRunning = false
                                         confirmingLogin = false
                                         if (url != null &&
                                             (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))
@@ -3139,6 +3120,11 @@ private fun AndroidWebLoginModal(
                                         }
                                         pageLoadError = null
                                     }
+                                }
+
+                                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                                    super.onPageCommitVisible(view, url)
+                                    if (view === webViewRef) loginDocumentReady = true
                                     tryExtractSessionAndComplete(view)
                                 }
 

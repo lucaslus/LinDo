@@ -180,11 +180,9 @@ internal fun AccountSessionContent(
 ) {
     var removing by remember { mutableStateOf<String?>(null) }
     removing?.let { username ->
-        AlertDialog(onDismissRequest = { removing = null },
-            title = { Text("移除 @$username？") },
-            text = { Text("仅移除此设备保存的登录状态，不会删除社区账号。") },
-            confirmButton = { TextButton(onClick = { onRemoveAccount(username); removing = null }) { Text("移除") } },
-            dismissButton = { TextButton(onClick = { removing = null }) { Text("取消") } })
+        LinDoConfirmDialog(title = "移除 @$username？", confirmLabel = "移除",
+            detail = "仅移除此设备保存的账号，不会删除社区账号。", destructive = true,
+            onDismiss = { removing = null }, onConfirm = { onRemoveAccount(username); removing = null })
     }
     AccountSettingsColumn {
         if (accounts.isNotEmpty()) {

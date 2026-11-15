@@ -42,10 +42,8 @@ internal fun LindoAboutPage(
                         Image(painterResource(Res.drawable.lindo_brand_mark), "Lindo 零度娘 LOGO", Modifier.size(80.dp))
                         Spacer(Modifier.height(16.dp))
                         Text("Lindo", fontSize = 26.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
-                        Spacer(Modifier.height(6.dp))
-                        Text("Linux DO 社区客户端", fontSize = 14.sp, color = palette.inkSecondary)
-                        Spacer(Modifier.height(18.dp))
-                        Text(LinDoDiagnosticLogger.APP_VERSION_DISPLAY, fontSize = 12.sp, color = palette.inkTertiary,
+                        Spacer(Modifier.height(4.dp))
+                        Text(LinDoDiagnosticLogger.APP_VERSION_DISPLAY.removePrefix("Lindo "), fontSize = 12.sp, color = palette.inkTertiary,
                             modifier = Modifier.testTag("about_version_debug_trigger")
                                 .clickable(onClick = onVersionTap).padding(horizontal = 12.dp, vertical = 12.dp))
                         if (debugHint != null) Text(debugHint, fontSize = 12.sp, color = palette.activeChipText)

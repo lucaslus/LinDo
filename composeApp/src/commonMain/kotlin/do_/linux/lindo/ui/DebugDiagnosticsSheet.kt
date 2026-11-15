@@ -35,6 +35,7 @@ import do_.linux.lindo.core.diagnostics.DiagnosticLevel
 import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
 import do_.linux.lindo.ui.components.LinDoIcons
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun rememberDebugUnlockTapState(
@@ -79,104 +80,25 @@ internal fun rememberDebugUnlockTapState(
 }
 
 @Composable
-internal fun ClearCacheOptionsDialog(
-    onDismiss: () -> Unit,
-    onClearCacheOnly: () -> Unit,
-    onClearCacheAndLogs: () -> Unit
-) {
-    val palette = LocalPalette.current
-    val logVer = LinDoDiagnosticLogger.logVersion
-    val logCount = remember(logVer) { LinDoDiagnosticLogger.entryCount() }
-    val logBytes = remember(logVer) { LinDoDiagnosticLogger.persistedFileSizeBytes() }
-    val sizeSummary = remember(logCount, logBytes) {
-        if (logCount == 0 && logBytes == 0L) {
-            LinDoMessagesCopy.NO_DIAGNOSTIC_LOGS.text
-        } else {
-            val kb = (logBytes / 1024.0).coerceAtLeast(0.1)
-            LinDoMessagesCopy.RECORDED_DIAGNOSTIC_LOGS_SUMMARY.format(
-                logCount,
-                String.format(java.util.Locale.US, "%.1f", kb)
-            )
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = palette.cardSurface,
-        titleContentColor = palette.inkPrimary,
-        textContentColor = palette.inkSecondary,
-        title = {
-            Text(LinDoMessagesCopy.ROW_CLEAR_LOCAL_CACHE.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = LinDoMessagesCopy.CLEAR_CACHE_DIALOG_DESC.text,
-                    fontSize = 13.5.sp,
-                    lineHeight = 20.sp,
-                    color = palette.inkSecondary
-                )
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(palette.subtleSurface)
-                        .border(0.6.dp, palette.hairline, RoundedCornerShape(10.dp))
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .clickable {
-                            onClearCacheOnly()
-                            onDismiss()
-                        }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Text(
-                        text = LinDoMessagesCopy.CLEAR_ONLY_CACHE_OPTION.text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.inkPrimary
-                    )
-                    Text(
-                        text = LinDoMessagesCopy.CLEAR_ONLY_CACHE_SUB.text,
-                        fontSize = 12.sp,
-                        color = palette.inkTertiary
-                    )
-                }
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("clear_cache_and_logs_option")
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFFEF4444).copy(alpha = if (palette.isDark) 0.14f else 0.08f))
-                        .border(0.6.dp, Color(0xFFEF4444).copy(alpha = 0.30f), RoundedCornerShape(10.dp))
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .clickable {
-                            onClearCacheAndLogs()
-                            onDismiss()
-                        }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Text(
-                        text = LinDoMessagesCopy.CLEAR_CACHE_AND_LOGS_OPTION.text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (palette.isDark) Color(0xFFFCA5A5) else Color(0xFFDC2626)
-                    )
-                    Text(
-                        text = sizeSummary,
-                        fontSize = 12.sp,
-                        color = palette.inkTertiary
-                    )
+internal fun ClearCacheOptionsDialog(onDismiss: () -> Unit, onClearCache: suspend () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LinDoConfirmDialog(title = "清理缓存？", confirmLabel = "清理",
+        detail = "图片与临时数据将重新加载。\n账号和草稿会保留。",
+        busy = busy, error = error, onDismiss = onDismiss,
+        onConfirm = {
+            if (!busy) {
+                busy = true
+                error = null
+                scope.launch {
+                    try { onClearCache(); onDismiss() }
+                    catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (_: Exception) { error = "清理未完成，请重试" }
+                    finally { busy = false }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(LinDoCommonCopy.CANCEL.text, color = palette.inkSecondary)
-            }
-        }
-    )
+        })
 }
 
 @Composable

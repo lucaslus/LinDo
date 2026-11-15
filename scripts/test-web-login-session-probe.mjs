@@ -6,11 +6,11 @@ const kotlin=readFileSync(new URL('../composeApp/src/commonMain/kotlin/do_/linux
 const body=kotlin.split('= """')[1].split('""".trimIndent()')[0];
 const user={id:42,username:'reader',name:'Reader'};
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
-function page({path='/',challenge=false,preload=null,response,legacyThrows=false}={}) {
+function page({path='/',challenge=false,preload=null,response,legacyThrows=false,scriptPreload=false,readyState='complete',embeddedWidget=false}={}) {
  let now=0,calls=0;
  const context=vm.createContext({location:{origin:'https://linux.do',pathname:path},
-  document:{readyState:'complete',title:'LINUX DO',querySelector:s=>s.includes('csrf-token')?{content:'csrf'}:challenge?{}:null,
-   getElementById:()=>preload?{dataset:{preloaded:JSON.stringify({currentUser:preload})}}:null},
+  document:{readyState,title:'LINUX DO',querySelector:s=>s.includes('csrf-token')?{content:'csrf'}:challenge || (embeddedWidget && s.includes('.cf-turnstile'))?{}:null,
+   getElementById:()=>preload?{textContent:scriptPreload?JSON.stringify({currentUser:preload}):'',dataset:scriptPreload?{}:{preloaded:JSON.stringify({currentUser:preload})}}:null},
   Date:{now:()=>now,parse:Date.parse},AbortController,setTimeout:()=>1,clearTimeout:()=>{},
   fetch:async()=>{calls++;return response?response(calls):{ok:true,status:200,headers:{get:()=>null},json:async()=>({current_user:user})};}});
  context.window=context;
@@ -20,6 +20,17 @@ function page({path='/',challenge=false,preload=null,response,legacyThrows=false
 }
 test('string and object preloads both complete immediately without requests',()=>{
  for(const preload of [user,JSON.stringify(user)]) {const p=page({preload});assert.equal(p.poll().user.username,'reader');assert.equal(p.calls,0);}
+});
+test('modern Discourse JSON script completes on the authenticated homepage without an extra network request',()=>{
+ for(const preload of [user,JSON.stringify(user)]) {
+  const p=page({preload,scriptPreload:true,legacyThrows:true,readyState:'interactive',embeddedWidget:true});
+  assert.equal(p.poll().state,'ready');assert.equal(p.poll().user.username,'reader');assert.equal(p.calls,0);
+ }
+});
+test('a document still parsing and real interstitial never complete from a stale preload',()=>{
+ for(const options of [{readyState:'loading'},{challenge:true}]) {
+  const p=page({preload:user,scriptPreload:true,...options});assert.notEqual(p.poll().state,'ready');assert.equal(p.calls,0);
+ }
 });
 test('unchanged session cookie and missing/throwing legacy API still complete',async()=>{
  const p=page({legacyThrows:true});assert.equal(p.poll().state,'waiting');await flush();assert.equal(p.poll().state,'ready');assert.equal(p.calls,1);
