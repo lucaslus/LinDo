@@ -563,7 +563,8 @@ private object DesktopStateStore {
             props.getProperty("pending_rsa_created_at")?.toLongOrNull() ?: 0L
         )
 
-        UserApiKeyAuthManager.uiFontScale = do_.linux.lindo.ui.AppAppearance.migrateFontScale(
+        UserApiKeyAuthManager.uiFontScale = do_.linux.lindo.ui.AppAppearance.restoreFontScale(
+            props.getProperty("ui_font_scale_v4")?.toFloatOrNull(),
             (props.getProperty("ui_font_scale_v3") ?: props.getProperty("ui_font_scale_mac_v3"))?.toFloatOrNull(),
             props.getProperty("ui_font_scale_v2")?.toFloatOrNull() ?: 0.92f
         )
@@ -706,7 +707,7 @@ private object DesktopStateStore {
         }
         UserApiKeyAuthManager.onPersistUiPrefs = { fontScale, darkTheme, enableAnimations ->
             update {
-                setProperty("ui_font_scale_v3", fontScale.toString())
+                setProperty("ui_font_scale_v4", fontScale.toString())
                 setProperty("ui_dark_theme", darkTheme.toString())
                 setProperty("ui_enable_animations", enableAnimations.toString())
             }

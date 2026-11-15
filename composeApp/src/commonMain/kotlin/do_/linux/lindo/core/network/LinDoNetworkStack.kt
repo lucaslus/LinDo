@@ -2366,7 +2366,7 @@ object LinuxDoRepository {
     private val readRateLimitRecovery = ReadRateLimitRecovery(
         remainingMillis = { (rateLimitedUntilMs.get() - System.currentTimeMillis()).coerceAtLeast(0L) },
         interruptedResponse = {
-            if (DesktopNetworkPolicy.enabled && (isChallengeCooldownActive() || DesktopNetworkPolicy.verifying))
+            if (NetworkRecoveryPolicy.enabled && (isChallengeCooldownActive() || NetworkRecoveryPolicy.verifying))
                 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>需要完成站点验证</html>"
             else null
         }
@@ -2390,6 +2390,14 @@ object LinuxDoRepository {
     internal fun isRateLimitedNow(): Boolean =
         System.currentTimeMillis() < rateLimitedUntilMs.get()
 
+    internal fun shouldPauseForSiteVerification(url: String): Boolean {
+        if (!NetworkRecoveryPolicy.enabled) return false
+        // The desktop native adapter uses this endpoint for its one explicit recovery probe.
+        val desktopProbe = DesktopNetworkPolicy.enabled && DesktopNetworkPolicy.verifying &&
+            runCatching { java.net.URI(url).path == "/session/current.json" }.getOrDefault(false)
+        return !desktopProbe && (NetworkRecoveryPolicy.verifying || isChallengeCooldownActive())
+    }
+
     internal fun isChallengeCooldownActive(): Boolean =
         System.currentTimeMillis() < challengeBlockedUntilMs.get()
 
@@ -2410,7 +2418,7 @@ object LinuxDoRepository {
      */
     suspend fun prepareForManualRecovery() {
         if (!NetworkRecoveryPolicy.enabled) clearTransientRateLimit()
-        if (!DesktopNetworkPolicy.enabled) {
+        if (!NetworkRecoveryPolicy.enabled) {
             clearChallengeCooldown()
             evictHttpConnectionPools()
         }
@@ -2467,11 +2475,8 @@ object LinuxDoRepository {
         preserveFailure: Boolean = false,
         clientOverride: HttpClient = sharedClient
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
-        if (DesktopNetworkPolicy.enabled) {
-            val verificationProbe = DesktopNetworkPolicy.verifying && java.net.URI(url).path == "/session/current.json"
-            if (isChallengeCooldownActive() && !verificationProbe) {
-                return@withContext if (preserveFailure) 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>cf-browser-verification</html>" else null
-            }
+        if (shouldPauseForSiteVerification(url)) {
+            return@withContext if (preserveFailure) 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>cf-browser-verification</html>" else null
         }
         if (NetworkRecoveryPolicy.enabled && isRateLimitedNow()) return@withContext if (preserveFailure) 429 to "{\"errors\":[\"请求较频繁，请稍后再试\"]}" else null
         val isReadMethod = method.equals("GET", true) || method.equals("HEAD", true)
@@ -3371,7 +3376,7 @@ object LinuxDoRepository {
     suspend fun fetchCurrentUserProfile(background: Boolean = false): UserFullProfileSummary? = withContext(Dispatchers.IO) {
         // The dedicated browser owns session recovery until it finishes. An old
         // transport's background 404 must not log out and cancel that recovery.
-        if (DesktopNetworkPolicy.enabled && DesktopNetworkPolicy.verifying) {
+        if (NetworkRecoveryPolicy.enabled && NetworkRecoveryPolicy.verifying) {
             return@withContext UserApiKeyAuthManager.fullProfileCache
         }
         val generation = UserApiKeyAuthManager.sessionGeneration
@@ -6183,12 +6188,12 @@ object LinuxDoRepository {
             try {
                 avatarResolveSemaphore.withPermit {
                     getCachedUserAvatar(clean)?.let { return@withPermit it }
-                    if (isChallengeCooldownActive()) return@withPermit null
+                    if (isChallengeCooldownActive() || NetworkRecoveryPolicy.verifying) return@withPermit null
                     val cooldownRemain = (rateLimitedUntilMs.get() - System.currentTimeMillis()).coerceAtMost(3_000L)
                     if (cooldownRemain > 0L) {
                         kotlinx.coroutines.delay(cooldownRemain)
                     }
-                    if (isChallengeCooldownActive()) return@withPermit null
+                    if (isChallengeCooldownActive() || NetworkRecoveryPolicy.verifying) return@withPermit null
                     val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
                     val bgHeaders = mapOf("Discourse-Background" to "true")
                     val cardRes = executeHttp(
@@ -6277,12 +6282,12 @@ object LinuxDoRepository {
                     if (item.topicId > 0 && (isFirstPostKind || item.postNumber <= 1)) {
                         topicOpCache[item.topicId]?.let { return@withPermit it }
                     }
-                    if (isChallengeCooldownActive()) return@withPermit null
+                    if (isChallengeCooldownActive() || NetworkRecoveryPolicy.verifying) return@withPermit null
                     val cooldownRemain = (rateLimitedUntilMs.get() - System.currentTimeMillis()).coerceAtMost(3_000L)
                     if (cooldownRemain > 0L) {
                         kotlinx.coroutines.delay(cooldownRemain)
                     }
-                    if (isChallengeCooldownActive()) return@withPermit null
+                    if (isChallengeCooldownActive() || NetworkRecoveryPolicy.verifying) return@withPermit null
                     val bgHeaders = mapOf("Discourse-Background" to "true")
 
                     if (item.originalPostId > 0) {

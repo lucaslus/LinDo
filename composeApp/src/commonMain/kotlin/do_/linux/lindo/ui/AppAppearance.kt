@@ -21,6 +21,14 @@ object AppAppearance {
         iconChangeFailed = onApplyIconAppearance?.invoke(value) == false
         if (!iconChangeFailed) { iconAppearance = value; onPersist?.invoke() }
     }
+    /** Preserve the selected size name while moving from uneven v3 steps to even v4 steps. */
+    fun restoreFontScale(v4: Float?, v3: Float?, legacy: Float): Float {
+        if (v4 != null && v4.isFinite() && v4 > 0f) return ReaderFontScalePreset.fromScale(v4).scale
+        val old = migrateFontScale(v3, legacy)
+        val oldSteps = listOf(.90f, .95f, 1f, 1.12f, 1.24f)
+        val index = oldSteps.indices.minBy { kotlin.math.abs(oldSteps[it] - old) }
+        return ReaderFontScalePreset.entries[index].scale
+    }
     fun migrateFontScale(current: Float?, legacy: Float): Float = current?.takeIf { it.isFinite() && it > 0f }
         ?: when { legacy < .885f -> .95f; legacy < .96f -> 1f; else -> 1.12f }
 }

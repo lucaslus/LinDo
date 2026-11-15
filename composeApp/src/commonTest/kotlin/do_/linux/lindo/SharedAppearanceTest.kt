@@ -19,6 +19,14 @@ class SharedAppearanceTest {
         assertEquals(1f, AppAppearance.migrateFontScale(1f, 1f))
         ReaderFontScalePreset.entries.forEach { assertEquals(it, ReaderFontScalePreset.fromScale(it.scale)) }
     }
+    @Test fun evenStepsPreserveExistingSizeSelectionAcrossUpgrade() {
+        val old = listOf(.90f, .95f, 1f, 1.12f, 1.24f)
+        val steps = ReaderFontScalePreset.entries.map { it.scale }
+        old.forEachIndexed { i, value -> assertEquals(steps[i], AppAppearance.restoreFontScale(null, value, .92f)) }
+        steps.forEach { assertEquals(it, AppAppearance.restoreFontScale(it, .90f, .85f)) }
+        steps.zipWithNext().forEach { (a, b) -> assertEquals(.1f, b-a, .0001f) }
+        assertEquals(.9f, AppAppearance.restoreFontScale(null, .95f, .92f))
+    }
     @Test fun systemModeTracksSystemWhileExplicitChoiceStaysFixed() {
         for (system in listOf(false, true)) {
             assertEquals(system, AppAppearance.resolveDark("system", system))

@@ -11,6 +11,8 @@ import kotlinx.coroutines.ensureActive
 /** Shared read recovery; Android keeps its own WebView verification lifecycle. */
 object NetworkRecoveryPolicy {
     @Volatile var androidEnabled = false
+    @Volatile var androidVerifying = false
+    val verifying: Boolean get() = androidVerifying || DesktopNetworkPolicy.verifying
     val enabled: Boolean get() = androidEnabled || DesktopNetworkPolicy.enabled
     internal val reads = ConcurrentHashMap<String, CompletableDeferred<Pair<Int, String>?>>()
     internal suspend fun shareRead(key: String, send: suspend () -> Pair<Int, String>?): Pair<Int, String>? {

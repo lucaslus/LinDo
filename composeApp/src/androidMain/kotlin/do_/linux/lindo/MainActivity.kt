@@ -573,7 +573,7 @@ class MainActivity : ComponentActivity() {
         UserApiKeyAuthManager.onPersistUiPrefs = { fontScale, darkTheme, enableAnimations ->
             runCatching {
                 prefs.edit()
-                    .putFloat("ui_font_scale_v3", fontScale)
+                    .putFloat("ui_font_scale_v4", fontScale)
                     .putBoolean("ui_dark_theme", darkTheme)
                     .putBoolean("ui_enable_animations", enableAnimations)
                     .apply()
@@ -1110,7 +1110,7 @@ class MainActivity : ComponentActivity() {
         runCatching {
             val wv = WebView(this)
             // 严禁手动删改 "; wv" 或覆盖 userAgentString：
-            // 保持所有 WebView 实例的 User-Agent 与底层 Sec-CH-UA Client Hints 100% 原生一致，确保 cf_clearance 签名永不因 UA 差异失效
+            // 所有 WebView 保持原生 User-Agent，避免应用自行制造 UA / Client Hints 差异；是否放行仍由站点决定
             val nativeUa = wv.settings.userAgentString
             UserApiKeyAuthManager.customUserAgent = nativeUa
             wv.settings.apply {
@@ -1563,6 +1563,7 @@ class MainActivity : ComponentActivity() {
                     return null
                 }
             }
+            if (LinuxDoRepository.shouldPauseForSiteVerification(url)) return 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>需要完成站点验证</html>"
             if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
             pendingHttpCallbacks[reqId] = deferred
             val launched = withContext(Dispatchers.Main) {
@@ -2215,7 +2216,8 @@ class MainActivity : ComponentActivity() {
             UserApiKeyAuthManager.restorePendingPrivateKeyBase64(savedPendingPrivKey, savedPendingNonce, prefs.getLong("pending_rsa_created_at", 0L))
 
             // 恢复用户的阅读密度/字号、深色模式、动效与主题色偏好（默认官方黑白黄，标准字号默认 0.92f）
-            UserApiKeyAuthManager.uiFontScale = AppAppearance.migrateFontScale(
+            UserApiKeyAuthManager.uiFontScale = AppAppearance.restoreFontScale(
+                if (prefs.contains("ui_font_scale_v4")) prefs.getFloat("ui_font_scale_v4", 1f) else null,
                 if (prefs.contains("ui_font_scale_v3")) prefs.getFloat("ui_font_scale_v3", 1f) else null,
                 prefs.getFloat("ui_font_scale_v2", 0.92f)
             )
@@ -2687,7 +2689,6 @@ private fun AndroidWebLoginModal(
     var completed by remember(initialUrl) { mutableStateOf(false) }
     var verificationRateRetries by remember { mutableStateOf(0) }
     var verificationProbeRunning by remember { mutableStateOf(false) }
-    var verificationNavigated by remember { mutableStateOf(false) }
     var csrfSyncedInModal by remember(initialUrl) { mutableStateOf(false) }
     var loginDocumentReady by remember(initialUrl) { mutableStateOf(false) }
     var loginNavigationEpoch by remember(initialUrl) { mutableStateOf(0) }
@@ -2706,7 +2707,6 @@ private fun AndroidWebLoginModal(
         pageLoadError = null
         rendererGone = false
         verificationRateRetries = 0
-        verificationNavigated = false
         confirmingLogin = false
         loginRateLimitEvent = null
         if (view?.url == url) view.reload() else view?.loadUrl(url)
@@ -2767,40 +2767,11 @@ private fun AndroidWebLoginModal(
             }
         }
 
-        // 非登录流（如应用广场、官网验证、Connect/Credit 等内置容器模式）：
-        // 同步最新 Cookie（如 cf_clearance），不自动关闭窗口
+        // 验证流观察站点实际放行结果；普通内置网页仅同步 Cookie，不自动关闭。
         if (isVerificationFlow && pageLoadError == null && !verificationProbeRunning && !LinuxDoRepository.isRateLimitedNow()) {
             verificationProbeRunning = true
             val probeEpoch = loginNavigationEpoch
-            webView.evaluateJavascript("""
-                (function() {
-                    if (location.origin !== 'https://linux.do' || document.readyState !== 'complete' ||
-                        document.querySelector('#challenge-running,#challenge-stage,#challenge-form')) return '';
-                    if (window.__lindoRecoveryResult) {
-                        const value = window.__lindoRecoveryResult; delete window.__lindoRecoveryResult;
-                        return JSON.stringify(value);
-                    }
-                    try {
-                        const visible = JSON.parse(document.body.innerText);
-                        if (visible.topic_list) return JSON.stringify({ok:true});
-                    } catch (_) {}
-                    if (!document.querySelector('meta[name="csrf-token"]') || window.__lindoRecoveryProbeSent) return '';
-                    window.__lindoRecoveryProbeSent = true;
-                    (async function() {
-                        const controller = new AbortController();
-                        const timer = setTimeout(function() { controller.abort(); }, 12000);
-                        try {
-                            const r = await fetch('/latest.json', {credentials:'include',signal:controller.signal});
-                            if (r.headers.get('cf-mitigated') === 'challenge') { window.__lindoRecoveryResult={challenge:true}; return; }
-                            if (r.status === 429) { window.__lindoRecoveryResult={status:429,retryAfter:r.headers.get('Retry-After')||''}; return; }
-                            if (!r.ok) { window.__lindoRecoveryResult={error:true}; return; }
-                            const data = await r.json(); window.__lindoRecoveryResult=data.topic_list ? {ok:true} : {error:true};
-                        } catch (_) { window.__lindoRecoveryResult={error:true}; }
-                        finally { clearTimeout(timer); }
-                    })();
-                    return '';
-                })();
-            """.trimIndent()) { raw ->
+            webView.evaluateJavascript(do_.linux.lindo.core.network.webVerificationProbeScript()) { raw ->
                 if (probeEpoch != loginNavigationEpoch || webView !== webViewRef) return@evaluateJavascript
                 verificationProbeRunning = false
                 if (!completed) {
@@ -2810,21 +2781,21 @@ private fun AndroidWebLoginModal(
                         val retryAfter = result.optString("retryAfter")
                         LinuxDoRepository.noteRetryAfter(retryAfter)
                         if (verificationRateRetries++ == 0 && NetworkRecoveryPolicy.retryAfterMillis(retryAfter) <= 10_000L) {
-                            webView.evaluateJavascript("window.__lindoRecoveryProbeSent = false;", null)
+                            webView.evaluateJavascript("delete window.__lindoRecoveryResult; window.__lindoRecoveryProbeSent = false;", null)
                         } else {
                             pageLoadError = "站点请求较频繁，请稍后重试。"
                         }
                     }
                     if (result?.optBoolean("ok") == true) {
                         completed = true
+                        NetworkRecoveryPolicy.androidVerifying = false
                         CookieManager.getInstance().flush()
                         CookieSentinel.syncFromAuthoritativeBrowserCookieString(CookieManager.getInstance().getCookie("https://linux.do").orEmpty())
                         LinuxDoRepository.clearChallengeCooldown()
                         UserApiKeyAuthManager.persistSessionQuietly()
                         onLoginSuccess()
-                    } else if (result?.optBoolean("challenge") == true && !verificationNavigated) {
-                        verificationNavigated = true
-                        webView.loadUrl("https://linux.do/latest.json")
+                    } else if (result?.optBoolean("blocked") == true) {
+                        pageLoadError = "网站仍要求验证，请刷新后重试"
                     }
                 }
             }
@@ -2912,6 +2883,11 @@ private fun AndroidWebLoginModal(
             delay(2000L)
             tryExtractSessionAndComplete(webViewRef)
         }
+    }
+
+    DisposableEffect(isVerificationFlow) {
+        if (isVerificationFlow) NetworkRecoveryPolicy.androidVerifying = true
+        onDispose { if (isVerificationFlow) NetworkRecoveryPolicy.androidVerifying = false }
     }
 
     DisposableEffect(Unit) {

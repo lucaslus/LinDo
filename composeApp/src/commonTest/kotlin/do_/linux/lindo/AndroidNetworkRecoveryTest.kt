@@ -16,6 +16,7 @@ class AndroidNetworkRecoveryTest {
     }
 
     @AfterTest fun cleanup() {
+        NetworkRecoveryPolicy.androidVerifying = false
         NetworkRecoveryPolicy.androidEnabled = false
         UserApiKeyAuthManager.requireBrowserTransportOnly = false
         UserApiKeyAuthManager.webViewHttpExecutor = null
@@ -63,6 +64,34 @@ class AndroidNetworkRecoveryTest {
         }
         LinuxDoRepository.fetchCurrentUserProfile()
         assertEquals(1, calls.get())
+    }
+
+    @Test fun androidChallengePausesLaterRequestsAndManualRefreshCannotReopenThem() = runBlocking {
+        val calls = AtomicInteger()
+        UserApiKeyAuthManager.webViewHttpExecutor = { _, _, _, _ ->
+            calls.incrementAndGet(); 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>challenge</html>"
+        }
+        LinuxDoRepository.fetchCurrentUserProfile()
+        repeat(5) { LinuxDoRepository.fetchCurrentUserProfile() }
+        LinuxDoRepository.prepareForManualRecovery()
+        LinuxDoRepository.fetchCurrentUserProfile()
+        assertEquals(1, calls.get())
+        assertTrue(LinuxDoRepository.isChallengeCooldownActive())
+        LinuxDoRepository.clearChallengeCooldown()
+        LinuxDoRepository.fetchCurrentUserProfile()
+        assertEquals(2, calls.get())
+    }
+
+    @Test fun openVerificationPausesEvenAfterTheTimedCooldownExpires() = runBlocking {
+        val calls = AtomicInteger()
+        UserApiKeyAuthManager.webViewHttpExecutor = { _, _, _, _ -> calls.incrementAndGet(); 503 to "" }
+        NetworkRecoveryPolicy.androidVerifying = true
+        LinuxDoRepository.clearChallengeCooldown()
+        repeat(5) { LinuxDoRepository.fetchCurrentUserProfile() }
+        assertEquals(0, calls.get())
+        assertTrue(LinuxDoRepository.shouldPauseForSiteVerification("https://linux.do/latest.json"))
+        NetworkRecoveryPolicy.androidVerifying = false
+        assertFalse(LinuxDoRepository.shouldPauseForSiteVerification("https://linux.do/latest.json"))
     }
 
     @Test fun androidInFlightSuccessCannotClearAnotherRequestsCooldown() = runBlocking {
