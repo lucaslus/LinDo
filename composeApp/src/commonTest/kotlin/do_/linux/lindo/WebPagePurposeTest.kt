@@ -16,6 +16,6 @@ class WebPagePurposeTest {
         assertEquals("connect.linux.do", webPageToolbarLabel("https://connect.linux.do/", "https://connect.linux.do/"))
         assertEquals("accounts.google.com", webPageToolbarLabel("https://linux.do/login", "https://accounts.google.com/"))
         assertEquals(WebPagePurpose.VERIFICATION, webPagePurpose("https://linux.do/#lindo-verify"))
-        assertEquals("验证", webPageToolbarLabel("https://linux.do/#lindo-verify", "https://linux.do/latest.json"))
+        assertEquals("linux.do", webPageToolbarLabel("https://linux.do/#lindo-verify", "https://linux.do/latest.json"))
     }
 }

@@ -22,7 +22,7 @@ internal fun webPageToolbarLabel(initialUrl: String, currentUrl: String): String
     if (!host.equals("linux.do", true)) return host
     return when (webPagePurpose(initialUrl)) {
         WebPagePurpose.LOGIN -> "登录"
-        WebPagePurpose.VERIFICATION -> "验证"
+        WebPagePurpose.VERIFICATION -> host
         WebPagePurpose.BROWSE -> host
     }
 }

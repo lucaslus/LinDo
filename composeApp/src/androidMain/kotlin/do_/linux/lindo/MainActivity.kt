@@ -2685,6 +2685,8 @@ private fun AndroidWebLoginModal(
     val isVerificationFlow = purpose == do_.linux.lindo.core.network.WebPagePurpose.VERIFICATION
     val isLoginFlow = purpose == do_.linux.lindo.core.network.WebPagePurpose.LOGIN
 
+    var verificationExpanded by remember(initialUrl) { mutableStateOf(false) }
+    var pageProgress by remember(initialUrl) { mutableStateOf(0) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember(initialUrl) { mutableStateOf(false) }
     var verificationRateRetries by remember { mutableStateOf(0) }
@@ -2915,14 +2917,12 @@ private fun AndroidWebLoginModal(
         initialUrl, pendingUrl ?: initialUrl
     )
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(barBg)
-                .windowInsetsPadding(WindowInsets.statusBars)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-        ) {
+    do_.linux.lindo.ui.VerificationPageSurface(
+        verification = isVerificationFlow,
+        expanded = verificationExpanded,
+        onDismiss = onDismiss
+    ) {
+        Column(Modifier.fillMaxSize().background(barBg)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2949,6 +2949,16 @@ private fun AndroidWebLoginModal(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
+                if (isVerificationFlow) androidx.compose.material3.IconButton(
+                    onClick = { verificationExpanded = !verificationExpanded }
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector = if (verificationExpanded) do_.linux.lindo.ui.components.LinDoIcons.ChevronDown
+                            else do_.linux.lindo.ui.components.LinDoIcons.ChevronUp,
+                        contentDescription = if (verificationExpanded) "收起验证页面" else "展开验证页面",
+                        modifier = Modifier.size(18.dp), tint = barSubFg
+                    )
+                }
                 androidx.compose.material3.IconButton(onClick = ::retryPage) {
                     androidx.compose.material3.Icon(
                         imageVector = do_.linux.lindo.ui.components.LinDoIcons.Refresh,
@@ -2965,6 +2975,16 @@ private fun AndroidWebLoginModal(
                     .zIndex(1f)
                     .background(barBorder)
             )
+
+            Box(Modifier.fillMaxWidth().height(2.dp)) {
+                if (pageProgress in 0..99 && pageLoadError == null) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { pageProgress / 100f }, modifier = Modifier.fillMaxSize(),
+                        color = do_.linux.lindo.ui.LocalPalette.current.accent,
+                        trackColor = androidx.compose.ui.graphics.Color.Transparent
+                    )
+                }
+            }
 
             Box(Modifier.weight(1f).fillMaxWidth().clipToBounds(), contentAlignment = Alignment.Center) {
                 if (!rendererGone) AndroidView(
@@ -2995,6 +3015,9 @@ private fun AndroidWebLoginModal(
                             cookieManager.flush()
 
                             webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                    if (view === webViewRef) pageProgress = newProgress
+                                }
                                 override fun onShowFileChooser(
                                     webView: WebView?,
                                     filePathCallback: ValueCallback<Array<Uri>>?,
@@ -3088,6 +3111,7 @@ private fun AndroidWebLoginModal(
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     super.onPageStarted(view, url, favicon)
                                     if (view === webViewRef) {
+                                        pageProgress = 0
                                         loginDocumentReady = false
                                         loginNavigationEpoch++
                                         loginProbeRunning = false

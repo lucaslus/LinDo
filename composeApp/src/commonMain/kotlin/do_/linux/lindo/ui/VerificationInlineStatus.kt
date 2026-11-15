@@ -23,7 +23,7 @@ internal fun VerificationInlineStatus(
             CircularProgressIndicator(Modifier.size(12.dp), color = p.inkSecondary, strokeWidth = 1.5.dp)
             Spacer(Modifier.width(6.dp))
         }
-        Text(if (busy) "连接中…" else if (PlatformSessionRecovery.verificationMessage == "连接未完成，请重试") "连接未完成"
+        Text(if (busy) "验证中…" else if (PlatformSessionRecovery.verificationMessage == "连接未完成，请重试") "验证未完成"
             else if (forSubmission) "需验证后发送" else "需要站点验证",
             Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
             color = p.inkSecondary, fontSize = 12.sp)
