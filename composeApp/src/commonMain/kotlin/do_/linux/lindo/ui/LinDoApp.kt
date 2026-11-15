@@ -3538,7 +3538,6 @@ internal fun LinDoApp(
                                         isAuthorized = isAuthorized,
                                         currentUser = currentUser,
                                         fullProfile = fullUserProfile,
-                                        onRefreshProfile = { syncUserProfile(force = true) },
                                         onAutoRefreshProfile = { syncUserProfile(background = true) },
                                         onToggleDark = { updateThemePref(!isDarkTheme) },
                                         onChangeFontScale = { updateFontScalePref(it) },
@@ -3757,7 +3756,6 @@ internal fun LinDoApp(
                                                 isAuthorized = isAuthorized,
                                                 currentUser = currentUser,
                                                 fullProfile = fullUserProfile,
-                                                onRefreshProfile = { syncUserProfile(force = true) },
                                                 onAutoRefreshProfile = { syncUserProfile(background = true) },
                                                 onToggleDark = { updateThemePref(!isDarkTheme) },
                                                 onChangeFontScale = { updateFontScalePref(it) },
@@ -11458,7 +11456,7 @@ private fun formatReadDuration(seconds: Int): String {
 
 /**
  * 理想型社区（Warm Minimalist Editorial）「我的」页（对齐参考图 4 + 主题色选择器）：
- * 1. 顶栏：「我的」大标题 + 右侧设置/刷新图标
+ * 1. 顶栏：「我的」大标题 + 右侧主题切换图标
  * 2. 紧凑个人身份卡片（无 Linux.do 外圈头像 + 真实等级 + `@username` + 编辑/切换/退出）
  * 3. 顶部 4 项线性图标快捷栏：`我的收藏` | `阅读历史` | `草稿箱` | `我的活动`
  * 4. 暖米金成长激励横幅卡：「每一次分享，都有回响 · 查看等级、徽章与成长记录」
@@ -11476,8 +11474,7 @@ internal fun CommunityProfileScreen(
     isAuthorized: Boolean,
     currentUser: AuthenticatedUserProfile?,
     fullProfile: UserFullProfileSummary?,
-    onRefreshProfile: () -> Unit,
-    onAutoRefreshProfile: () -> Unit = onRefreshProfile,
+    onAutoRefreshProfile: () -> Unit,
     onSelectThemeOption: (BrandThemeOption) -> Unit = {},
     onOpenAppIcon: (() -> Unit)? = null,
     onToggleCompactFeed: () -> Unit = {},
@@ -11536,25 +11533,8 @@ internal fun CommunityProfileScreen(
             .background(palette.canvas)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        // 顶栏：我的 + 右上角同步资料 + 昼夜主题切换（小太阳/月亮），圆形悬停热区对齐 34dp
+        // 顶栏：我的 + 昼夜主题切换（小太阳/月亮），圆形悬停热区对齐 34dp
         LinDoPageHeader(title = LinDoFeedCopy.TAB_PROFILE.text) {
-            if (isAuthorized) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .clickable(onClick = onRefreshProfile),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Refresh,
-                        contentDescription = LinDoMessagesCopy.SYNC_PROFILE_DESC.text,
-                        modifier = Modifier.size(LinDoTokens.IconL),
-                        tint = palette.inkSecondary
-                    )
-                }
-            }
             Box(
                 modifier = Modifier
                     .size(34.dp)

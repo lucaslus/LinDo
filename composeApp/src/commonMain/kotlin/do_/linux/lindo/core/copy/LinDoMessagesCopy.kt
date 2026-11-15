@@ -74,7 +74,6 @@ enum class LinDoMessagesCopy(override val text: String) : LinDoCopyEntry {
 
     // 个人中心页
     SYNCING_PROFILE("正在同步资料..."),
-    SYNC_PROFILE_DESC("同步资料"),
     SWITCH_LIGHT_SHORT_DESC("切换浅色模式"),
     SWITCH_DARK_SHORT_DESC("切换深色模式"),
     GUEST_DISPLAY_NAME("未登录游客"),
