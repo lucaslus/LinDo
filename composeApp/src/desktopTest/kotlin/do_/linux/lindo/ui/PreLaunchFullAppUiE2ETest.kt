@@ -859,9 +859,7 @@ class PreLaunchFullAppUiE2ETest {
         onNodeWithText("浅色").edtClick()
         waitUntil { !AppAppearance.dark }
         savePreviewSnapshotIfConfigured(snapshot)
-        pickSetting("图标底色")
-        pickSetting("黑底")
-        waitUntil { AppAppearance.iconAppearance == "dark" }
+        onEdt { onNodeWithText("图标底色").assertDoesNotExist() }
         pickSetting("首页列表视图")
         pickSetting("紧凑")
         onEdt { onNodeWithText("紧凑").assertIsSelected() }

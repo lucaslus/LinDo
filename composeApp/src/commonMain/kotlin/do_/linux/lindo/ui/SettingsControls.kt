@@ -161,12 +161,12 @@ internal fun SettingsThemeChoices(selected: BrandThemeOption, onSelect: (BrandTh
 
 /** Small previews describe the choice rather than repeating the setting's leading icon. */
 @Composable
-internal fun SettingsAppearanceVisual(value: String, tint: Color, background: Boolean = false) {
-    if (!background && value != "system") {
+internal fun SettingsAppearanceVisual(value: String, tint: Color) {
+    if (value != "system") {
         Icon(if (value == "light") LinDoIcons.Sun else LinDoIcons.Moon, null,
             Modifier.size(16.dp), tint = tint)
     } else {
-        val shape = if (background) RoundedCornerShape(4.dp) else CircleShape
+        val shape = CircleShape
         Canvas(Modifier.size(16.dp).clip(shape).border(0.8.dp, tint.copy(alpha = 0.6f), shape)) {
             drawRect(if (value == "dark") Color(0xFF17191E) else Color(0xFFF5F5F5))
             if (value == "system") drawRect(Color(0xFF17191E),

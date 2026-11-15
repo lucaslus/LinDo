@@ -11921,12 +11921,6 @@ internal fun CommunityProfileScreen(
                         valueVisual = { SettingsAppearanceVisual(AppAppearance.appearance, palette.inkSecondary) }) {
                         AppearanceChoices(AppAppearance.appearance, AppAppearance::selectAppearance)
                     }
-                    ExpandableSetting(LinDoIcons.AppsGrid, "图标底色", appearanceLabel(AppAppearance.iconAppearance, icon = true),
-                        valueVisual = { SettingsAppearanceVisual(AppAppearance.iconAppearance, palette.inkSecondary, background = true) }) {
-                        AppearanceChoices(AppAppearance.iconAppearance, AppAppearance::selectIconAppearance, icon = true)
-                        if (AppAppearance.iconChangeFailed) Text("图标未能更新，请稍后重试",
-                            color = palette.inkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
-                    }
                     ExpandableSetting(LinDoIcons.Palette, LinDoMessagesCopy.ROW_THEME_COLOR.text, themeOption.label,
                         valueVisual = { SettingsThemeSwatch(themeOption) }) {
                         SettingsThemeChoices(themeOption, onSelectThemeOption)
@@ -18953,17 +18947,17 @@ fun LinDoReadRegressionPreview(scene: String, cooked: String = "", onClose: () -
     }
 }
 
-private fun appearanceLabel(value: String, icon: Boolean = false): String = when (value) {
-    "light" -> if (icon) "白底" else "浅色"
-    "dark" -> if (icon) "黑底" else "深色"
+private fun appearanceLabel(value: String): String = when (value) {
+    "light" -> "浅色"
+    "dark" -> "深色"
     else -> "跟随系统"
 }
 
 @Composable
-private fun AppearanceChoices(selected: String, onSelect: (String) -> Unit, icon: Boolean = false) {
+private fun AppearanceChoices(selected: String, onSelect: (String) -> Unit) {
     SettingsChoices(listOf("system", "light", "dark"), selected,
-        label = { appearanceLabel(it, icon) },
-        optionVisual = { value, tint -> SettingsAppearanceVisual(value, tint, background = icon) }, onSelect = onSelect)
+        label = { appearanceLabel(it) },
+        optionVisual = { value, tint -> SettingsAppearanceVisual(value, tint) }, onSelect = onSelect)
 }
 
 @Composable
