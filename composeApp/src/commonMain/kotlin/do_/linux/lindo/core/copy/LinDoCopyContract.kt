@@ -27,6 +27,17 @@ enum class UiErrorKind {
             ) {
                 return SITE_VERIFICATION
             }
+            val explicitLoginRequired = clean.contains(LinDoNetworkCopy.AUTH_EXPIRED_SHORT.text) ||
+                clean.contains(LinDoNetworkCopy.GUEST_TOPIC_LOGIN_REQUIRED.text) ||
+                clean.contains("需要登录") ||
+                clean.contains("请先登录") ||
+                clean.contains("重新登录") ||
+                clean.contains("登录已过期") ||
+                clean.contains("登录状态已过期") ||
+                clean.contains("not_logged_in", ignoreCase = true)
+            if (explicitLoginRequired) {
+                return GUEST_LOGIN_REQUIRED
+            }
             val authOrPerm = clean.contains("403") ||
                 clean.contains("登录") ||
                 clean.contains("权限") ||

@@ -128,11 +128,6 @@ fun SmartAvatar(
     // 统一收敛至 Discourse 官方预生成尺寸档位（常规 <=60dp 统一使用 144px，超大图使用 288px），
     // 确保首页、帖子正文、个人主页、用户名片、小火箭与通知中心 100% 共享同一 CDN URL 与内存/磁盘缓存，零 302 重定向！
     val thumbnailSize = if (size <= 60.dp) 144 else 288
-    val isListScrolling = LocalLinDoListScrolling.current
-    val motionEnabled = enableAnimations &&
-        LocalLinDoAnimations.current &&
-        LocalWindowInfo.current.isWindowFocused &&
-        !isListScrolling
     val networkRestoreVersion = LocalLinDoNetworkRestoreVersion.current
     val siteVerificationRestoreVersion = LocalSiteVerificationRestoreVersion.current
 
@@ -167,9 +162,10 @@ fun SmartAvatar(
     val staticUrl = remember(effectiveTemplate, thumbnailSize) {
         LinuxDoSiteRules.resolveStaticAvatarUrl(effectiveTemplate, sizePx = thumbnailSize)
     }
-    val animatedUrl = remember(effectiveAnimatedRaw, motionEnabled) {
-        if (motionEnabled) LinuxDoSiteRules.resolveAnimatedAvatarUrl(effectiveAnimatedRaw) else null
+    val animatedUrl = remember(effectiveAnimatedRaw) {
+        LinuxDoSiteRules.resolveAnimatedAvatarUrl(effectiveAnimatedRaw)
     }
+    val hasAnimated = !animatedUrl.isNullOrBlank()
     val isSquare = remember(username, staticUrl) {
         LinuxDoSiteRules.isSquareAvatar(username, staticUrl)
     }
@@ -177,6 +173,15 @@ fun SmartAvatar(
         LinuxDoSiteRules.matchAvatarGlowColor(username, effectivePrimaryGroup, staticUrl)
     }
     val glowPreset = remember(glowColor) { AvatarGlowPreset.fromColor(glowColor) }
+    val baseMotionAllowed = enableAnimations &&
+        LocalLinDoAnimations.current &&
+        LocalWindowInfo.current.isWindowFocused
+    // 仅在头像存在动态光晕或动态帧时才订阅滚动状态，避免列表起停瞬间触发全屏静态头像同步重组
+    val motionEnabled = if (baseMotionAllowed && (glowPreset != null || hasAnimated)) {
+        !LocalLinDoListScrolling.current
+    } else {
+        false
+    }
     // 对齐官方 common_theme_138 `@keyframes pulse`：冰蓝 3s 往返 (单程 1500ms)、鎏金 5s 往返 (单程 2500ms)，列表滚动禁用动效时保留静态光晕
     val pulseProgress = if (glowPreset != null && motionEnabled) {
         val pulse = rememberInfiniteTransition(label = "official_avatar_glow")
@@ -193,11 +198,13 @@ fun SmartAvatar(
         rememberUpdatedState(0.72f)
     }
 
-    val hasAnimated = !animatedUrl.isNullOrBlank()
     val palette = LocalPalette.current
     val platformContext = LocalPlatformContext.current
-    androidx.compose.runtime.key(username, staticUrl, animatedUrl) {
-        var animatedReady by remember { mutableStateOf(false) }
+    // Scrolling pauses the animated layer, not the static image's lifetime.
+    // Keying this whole subtree by animatedUrl recreated the painter, request,
+    // retry state and graphics layers on every scroll start/stop.
+    androidx.compose.runtime.key(username, staticUrl) {
+        var animatedReady by remember(animatedUrl) { mutableStateOf(false) }
         var staticLoaded by remember {
             mutableStateOf(staticUrl.isNotEmpty() && isLoadedAvatarUrl(staticUrl))
         }
@@ -246,8 +253,13 @@ fun SmartAvatar(
             }
         }
 
-        val baseBorderColor = palette.hairline
-        val borderStrokeWidth = if (glowColor != null && size >= 24.dp) 1.dp else 0.65.dp
+        val borderStrokeWidth = if (glowColor != null && size >= 24.dp) 1.dp else 0.5.dp
+        val subtleBorderColor = if (palette.isDark) {
+            Color.White.copy(alpha = 0.10f)
+        } else {
+            Color.Black.copy(alpha = 0.07f)
+        }
+        val avatarShape = if (isSquare) RoundedCornerShape(percent = 10) else CircleShape
 
         Box(
             modifier = modifier.size(size).then(
@@ -285,53 +297,22 @@ fun SmartAvatar(
             ),
             contentAlignment = Alignment.Center
         ) {
-            // 采用 Offscreen 离屏混合 + EvenOdd 抗锯齿透明遮罩 + 顶层内缩抗锯齿描边：
-            // 彻底根治桌面端 Skia/Metal/Direct3D 模板裁剪 (sampleCount=1) 与底层 border 被图片像素覆盖导致的边缘毛刺问题
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .graphicsLayer {
-                        compositingStrategy = CompositingStrategy.Offscreen
-                    }
+                    .clip(avatarShape)
                     .drawWithCache {
                         val minDim = this.size.minDimension
                         val cornerPx = minDim * 0.10f
-                        val cutoutPath = Path().apply {
-                            fillType = PathFillType.EvenOdd
-                            addRect(Rect(-2f, -2f, this@drawWithCache.size.width + 2f, this@drawWithCache.size.height + 2f))
-                            if (isSquare) {
-                                addRoundRect(
-                                    RoundRect(
-                                        rect = Rect(0f, 0f, this@drawWithCache.size.width, this@drawWithCache.size.height),
-                                        cornerRadius = CornerRadius(cornerPx, cornerPx)
-                                    )
-                                )
-                            } else {
-                                val radius = minDim * 0.5f
-                                addOval(
-                                    Rect(
-                                        left = (this@drawWithCache.size.width - radius * 2f) * 0.5f,
-                                        top = (this@drawWithCache.size.height - radius * 2f) * 0.5f,
-                                        right = (this@drawWithCache.size.width + radius * 2f) * 0.5f,
-                                        bottom = (this@drawWithCache.size.height + radius * 2f) * 0.5f
-                                    )
-                                )
-                            }
-                        }
                         val strokePx = borderStrokeWidth.toPx()
                         val halfStroke = strokePx * 0.5f
                         onDrawWithContent {
                             drawContent()
-                            drawPath(
-                                path = cutoutPath,
-                                color = Color.Black,
-                                blendMode = BlendMode.Clear
-                            )
                             val strokeColor = if (glowColor != null) {
                                 val opacity = 0.5f + 0.5f * pulseProgress.value
                                 glowColor.copy(alpha = (0.58f * opacity).coerceIn(0.25f, 0.72f))
                             } else {
-                                baseBorderColor
+                                subtleBorderColor
                             }
                             if (isSquare) {
                                 val insetCorner = (cornerPx - halfStroke).coerceAtLeast(0f)
@@ -366,7 +347,7 @@ fun SmartAvatar(
                     )
                 }
 
-                if (!animatedReady && requestModel != null) {
+                if (requestModel != null) {
                     AsyncImage(
                         model = requestModel,
                         contentDescription = username,
@@ -389,11 +370,11 @@ fun SmartAvatar(
                         },
                         modifier = Modifier
                             .fillMaxSize()
-                            .alpha(if (staticLoaded) 1f else 0f)
+                            .alpha(if (staticLoaded && !(animatedReady && motionEnabled)) 1f else 0f)
                     )
                 }
 
-                if (hasAnimated && (staticLoaded || staticUrl.isEmpty())) {
+                if (hasAnimated && baseMotionAllowed && (staticLoaded || staticUrl.isEmpty())) {
                     AsyncImage(
                         model = animatedUrl,
                         contentDescription = LinDoComposerCopy.ANIMATED_AVATAR_DESC.format(username),
@@ -404,7 +385,7 @@ fun SmartAvatar(
                         onError = { animatedReady = false },
                         modifier = Modifier
                             .fillMaxSize()
-                            .alpha(if (animatedReady) 1f else 0f)
+                            .alpha(if (animatedReady && (motionEnabled || staticUrl.isEmpty())) 1f else 0f)
                     )
                 }
             }
@@ -486,43 +467,50 @@ fun UserTitleTag(
             LocalLinDoAnimations.current &&
             LocalWindowInfo.current.isWindowFocused &&
             !isListScrolling
-        val phase = if (animate) {
+        val phaseState = if (animate) {
             val transition = rememberInfiniteTransition(label = "official_title")
-            val progress by transition.animateFloat(
+            transition.animateFloat(
                 0f, 4f, infiniteRepeatable(tween(15000, easing = LinearEasing)),
                 label = "official_title_position"
             )
-            progress
-        } else 0f
-        val stop = phase.toInt().coerceAtMost(3)
-        val position = lerp(
-            officialTitlePositions[stop], officialTitlePositions[stop + 1],
-            officialTitleEasing.transform(phase - stop)
-        )
-        val gradient = remember(position) {
-            object : ShaderBrush() {
-                override fun createShader(size: Size): Shader {
-                    // The web theme paints a 135° gradient on a 400% × 400% background.
-                    val center = Offset(
-                        size.width * (2 - 3 * position.x),
-                        size.height * (2 - 3 * position.y)
-                    )
-                    val corner = size.width + size.height
-                    val diagonal = Offset(corner, corner)
-                    return LinearGradientShader(center - diagonal, center + diagonal, officialTitleColors)
-                }
-            }
+        } else {
+            rememberUpdatedState(0f)
         }
         Text(
             text = title,
-            style = TextStyle(
-                brush = gradient,
-                fontSize = 12.sp,
-                lineHeight = 14.sp
-            ),
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+            color = Color.White,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = modifier
+                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                .drawWithCache {
+                    val corner = size.width + size.height
+                    val diagonal = Offset(corner, corner)
+                    onDrawWithContent {
+                        drawContent()
+                        val phase = phaseState.value
+                        val stop = phase.toInt().coerceAtMost(3)
+                        val position = lerp(
+                            officialTitlePositions[stop],
+                            officialTitlePositions[stop + 1],
+                            officialTitleEasing.transform(phase - stop)
+                        )
+                        val center = Offset(
+                            size.width * (2 - 3 * position.x),
+                            size.height * (2 - 3 * position.y)
+                        )
+                        drawRect(
+                            brush = Brush.linearGradient(
+                                colors = officialTitleColors,
+                                start = center - diagonal,
+                                end = center + diagonal
+                            ),
+                            blendMode = BlendMode.SrcIn
+                        )
+                    }
+                }
         )
     } else {
         Text(

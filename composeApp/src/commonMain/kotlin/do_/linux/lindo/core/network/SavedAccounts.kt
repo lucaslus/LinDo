@@ -39,17 +39,24 @@ internal object AccountSessionGate {
                 result
             }
         } finally {
-            withContext(NonCancellable) { state.withLock { readers--; if (readers == 0) drained?.complete(Unit) } }
+            withContext(NonCancellable) { state.withLock { readers = (readers - 1).coerceAtLeast(0); if (readers <= 0) drained?.complete(Unit) } }
         }
     }
     suspend fun <T> replace(block: suspend () -> T): T = writers.withLock {
         val wait = state.withLock {
             barrier = CompletableDeferred()
-            drained = CompletableDeferred<Unit>().also { if (readers == 0) it.complete(Unit) }
+            drained = CompletableDeferred<Unit>().also { if (readers <= 0) it.complete(Unit) }
             drained!!
         }
         try { withTimeout(30_000L) { wait.await() }; withContext(NonCancellable + Lease()) { block() } }
         finally { withContext(NonCancellable) { state.withLock { barrier?.complete(Unit); barrier = null; drained = null } } }
+    }
+    fun resetForTest() {
+        drained?.complete(Unit)
+        barrier?.complete(Unit)
+        drained = null
+        barrier = null
+        readers = 0
     }
 }
 
@@ -192,6 +199,7 @@ internal object SavedAccounts {
         publish()
     }
     internal fun resetForTest() {
+        AccountSessionGate.resetForTest()
         sessions.clear(); persist = null; enabled = false; applying = false; adding = false; busy = false
         returnTo = null; blocked = false; pendingSwitch = false; pendingUsername = null; accounts = emptyList(); replaceBrowserCookies = null; refreshBrowserCookies = null
     }

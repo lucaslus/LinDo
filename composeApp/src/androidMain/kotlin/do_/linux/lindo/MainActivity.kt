@@ -105,6 +105,7 @@ import do_.linux.lindo.core.copy.LinDoMessagesCopy
 import do_.linux.lindo.core.copy.LinDoNetworkCopy
 import do_.linux.lindo.core.diagnostics.DiagnosticCategory
 import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
+import do_.linux.lindo.core.update.AppUpdateManager
 import do_.linux.lindo.ui.PlatformWebLoginHost
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -124,19 +125,24 @@ import org.json.JSONArray
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.cancel
 
-private fun getCookieValue(rawCookieHeader: String?, targetName: String): String? {
-    if (rawCookieHeader.isNullOrBlank()) return null
+private fun getAllCookieValues(rawCookieHeader: String?, targetName: String): List<String> {
+    if (rawCookieHeader.isNullOrBlank()) return emptyList()
+    val values = mutableListOf<String>()
     rawCookieHeader.split(';').forEach { segment ->
         val trimmed = segment.trim()
         val eq = trimmed.indexOf('=')
         if (eq > 0) {
             val name = trimmed.substring(0, eq).trim()
             if (name == targetName) {
-                return trimmed.substring(eq + 1).trim().takeIf { it.isNotEmpty() }
+                trimmed.substring(eq + 1).trim().takeIf { it.isNotEmpty() }?.let { values += it }
             }
         }
     }
-    return null
+    return values
+}
+
+private fun getCookieValue(rawCookieHeader: String?, targetName: String): String? {
+    return getAllCookieValues(rawCookieHeader, targetName).lastOrNull()
 }
 
 private fun hasCookieNamed(rawCookieHeader: String?, targetName: String): Boolean {
@@ -167,6 +173,8 @@ class MainActivity : ComponentActivity() {
         private const val REBUILD_ABORTED_STATUS = -2
         private const val REBUILD_ABORTED_BODY = "__REBUILD_ABORTED__"
         private const val BRIDGE_BOOTSTRAP_URL = "https://linux.do/"
+        private const val LINUX_DO_ACCEPT_CH =
+            "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA"
 
         @Volatile
         private var activeInstance: MainActivity? = null
@@ -510,6 +518,49 @@ class MainActivity : ComponentActivity() {
             platformInfo = "Android SDK ${android.os.Build.VERSION.SDK_INT} (${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL})"
         )
         LinDoDiagnosticLogger.installUncaughtExceptionHandler()
+        do_.linux.lindo.core.network.SmartDohDns.vpnOrProxyDetector = {
+            runCatching {
+                val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val activeNet = cm?.activeNetwork
+                val caps = activeNet?.let { cm.getNetworkCapabilities(it) }
+                caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+            }.getOrDefault(false)
+        }
+        AppUpdateManager.cacheDirProvider = { java.io.File(cacheDir, "updates") }
+        runCatching {
+            val savedTrustedHosts = prefs.getString("trusted_ext_hosts_v1", "")
+                ?.split(',')
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+                .orEmpty()
+            LinuxDoSiteRules.hydrateTrustedExternalHosts(savedTrustedHosts)
+        }
+        LinuxDoSiteRules.onPersistTrustedHosts = { hostSet ->
+            runCatching {
+                prefs.edit()
+                    .putString("trusted_ext_hosts_v1", hostSet.take(200).joinToString(","))
+                    .apply()
+            }
+        }
+        AppUpdateManager.apkInstaller = { apkFile ->
+            runCatching {
+                val apkUri = androidx.core.content.FileProvider.getUriForFile(
+                    applicationContext,
+                    "${applicationContext.packageName}.fileprovider",
+                    apkFile
+                )
+                val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(apkUri, "application/vnd.android.package-archive")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                val host = activeInstance
+                if (host != null && !host.isFinishing && !host.isDestroyed) {
+                    host.startActivity(installIntent)
+                } else {
+                    applicationContext.startActivity(installIntent)
+                }
+            }
+        }
         LinDoDiagnosticLogger.exportSaveHandler = { suggestedFileName, content, onResult ->
             runOnUiThread {
                 try {
@@ -605,6 +656,17 @@ class MainActivity : ComponentActivity() {
                 ensureAuthCookiesInWebKit(cm)
             }
         }
+        UserApiKeyAuthManager.onPrepareFreshAuthExchange = {
+            withContext(Dispatchers.Main) {
+                val cm = CookieManager.getInstance()
+                nukeAuthCookieVariantsInWebKit(cm)
+                CookieSentinel.clearAuthCookiesOnly()
+                apiWebView?.evaluateJavascript(
+                    "window.__lindoCsrf = null; window.__lindoCsrfPromise = null; window.__lindoCsrfCookieOwner = null; window.__lindoIgnoreDomCsrf = true;",
+                    null
+                )
+            }
+        }
         UserApiKeyAuthManager.onPersistReadTopics = { encoded ->
             runCatching {
                 prefs.edit().putString("read_topic_posts", encoded).apply()
@@ -619,17 +681,21 @@ class MainActivity : ComponentActivity() {
         }
         UserApiKeyAuthManager.onLogoutPlatformClear = {
             runCatching {
-                // 仅清除 Discourse 账号会话 Cookie (_t / _forum_session)，保留 Cloudflare 信任通行证 (cf_clearance / __cf_bm / _cfuvid)
+                // 仅清除 Discourse 账号会话 Cookie (_t / _forum_session / authentication_data)，保留 Cloudflare 信任通行证 (cf_clearance / __cf_bm / _cfuvid)
                 val cm = CookieManager.getInstance()
-                listOf("_t", "_forum_session").forEach { name ->
-                    cm.setCookie("https://linux.do", "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
-                    cm.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly")
-                    cm.setCookie("https://linux.do", "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
+                for (origin in listOf("https://linux.do", "https://www.linux.do")) {
+                    for (name in listOf("_t", "_forum_session", "authentication_data")) {
+                        cm.setCookie(origin, "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
+                        cm.setCookie(origin, "$name=; Max-Age=0; Path=/; Secure")
+                        cm.setCookie(origin, "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly")
+                        cm.setCookie(origin, "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure")
+                        cm.setCookie(origin, "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
+                    }
                 }
                 cm.flush()
                 runOnUiThread {
                     apiWebView?.evaluateJavascript(
-                        "window.__lindoCsrf = null; window.__lindoCsrfPromise = null; window.__lindoCsrfCookieOwner = null;",
+                        "window.__lindoCsrf = null; window.__lindoCsrfPromise = null; window.__lindoCsrfCookieOwner = null; window.__lindoIgnoreDomCsrf = true;",
                         null
                     )
                 }
@@ -657,6 +723,11 @@ class MainActivity : ComponentActivity() {
 
         // 5. 注册内置 WebView 登录器
         PlatformWebLoginHost.webLoginRenderer = { initialUrl, onDismiss, onLoginSuccess ->
+            val openedClearance = remember(initialUrl) {
+                runCatching {
+                    getCookieValue(CookieManager.getInstance().getCookie("https://linux.do"), "cf_clearance")
+                }.getOrNull()
+            }
             AndroidWebLoginModal(
                 initialUrl = initialUrl,
                 onDismiss = {
@@ -668,15 +739,39 @@ class MainActivity : ComponentActivity() {
                         if (latestCookies.isNotBlank()) {
                             CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies)
                         }
+                        val latestClearance = getCookieValue(latestCookies, "cf_clearance")
+                        if (!latestClearance.isNullOrBlank() && latestClearance != openedClearance) {
+                            LinuxDoRepository.clearChallengeCooldown()
+                            val freshCsrf = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
+                            runOnUiThread {
+                                apiWebView?.evaluateJavascript(
+                                    "window.__lindoCsrf = $freshCsrf || null; window.__lindoCsrfPromise = null;",
+                                    null
+                                )
+                            }
+                        }
                         persistSessionToDisk()
                     }
                     onDismiss()
                 },
                 onLoginSuccess = {
-                    // 同步最新 Cookie 至内存守卫（严禁调用 apiWebView.reload() 整页导航，避免后台视口触发 Cloudflare 风控）
-                    val latestCookies = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
+                    val cm = CookieManager.getInstance()
+                    runCatching { cm.flush() }
+                    val latestCookies = cm.getCookie("https://linux.do").orEmpty()
                     if (latestCookies.isNotBlank()) {
                         CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies)
+                    }
+                    LinuxDoRepository.clearChallengeCooldown()
+                    val freshCsrf = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
+                    runOnUiThread {
+                        apiWebView?.evaluateJavascript(
+                            "window.__lindoCsrf = $freshCsrf || null; window.__lindoCsrfPromise = null; window.__lindoIgnoreDomCsrf = true;",
+                            null
+                        )
+                    }
+                    activityScope.launch {
+                        runCatching { ensureAuthCookiesInWebKit(cm) }
+                        persistSessionToDisk()
                     }
                     persistSessionToDisk()
                     onLoginSuccess()
@@ -1144,7 +1239,11 @@ class MainActivity : ComponentActivity() {
                             "UTF-8",
                             200,
                             "OK",
-                            mapOf("Cache-Control" to "no-store"),
+                            mapOf(
+                                "Cache-Control" to "no-store",
+                                "Accept-CH" to LINUX_DO_ACCEPT_CH,
+                                "Critical-CH" to LINUX_DO_ACCEPT_CH
+                            ),
                             "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>"
                                 .byteInputStream(Charsets.UTF_8)
                         )
@@ -1191,6 +1290,7 @@ class MainActivity : ComponentActivity() {
                         view?.evaluateJavascript(
                             """
                             (function() {
+                                window.__lindoIgnoreDomCsrf = false;
                                 var owner = ${JSONObject.quote(ownerTag)};
                                 var ownerChanged = false;
                                 if (window.__lindoCsrfCookieOwner !== owner) {
@@ -1202,29 +1302,6 @@ class MainActivity : ComponentActivity() {
                                 var seeded = ${JSONObject.quote(seeded)};
                                 if (seeded && !window.__lindoCsrf && !ownerChanged) {
                                     window.__lindoCsrf = seeded;
-                                }
-                                if (!window.__lindoCsrf && !window.__lindoCsrfPromise) {
-                                    var csrfInit = {
-                                        headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
-                                        credentials: 'include',
-                                        cache: 'no-cache',
-                                        referrerPolicy: 'strict-origin-when-cross-origin'
-                                    };
-                                    if (window.location.origin === 'https://linux.do') {
-                                        csrfInit.referrer = 'https://linux.do/';
-                                    }
-                                    window.__lindoCsrfPromise = fetch('https://linux.do/session/csrf.json', csrfInit).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
-                                        if (d && d.csrf) {
-                                            window.__lindoCsrf = d.csrf;
-                                            if (window.LinDoJsBridge && window.LinDoJsBridge.onCsrfTokenUpdated) {
-                                                window.LinDoJsBridge.onCsrfTokenUpdated(d.csrf);
-                                            }
-                                            return d.csrf;
-                                        }
-                                        return null;
-                                    }).catch(function() { return null; }).finally(function() {
-                                        window.__lindoCsrfPromise = null;
-                                    });
                                 }
                             })();
                             """.trimIndent(),
@@ -1421,7 +1498,7 @@ class MainActivity : ComponentActivity() {
                                             'X-Requested-With': 'XMLHttpRequest'
                                         },
                                         credentials: 'include',
-                                        cache: 'no-cache',
+                                        cache: 'no-store',
                                         referrerPolicy: 'strict-origin-when-cross-origin'
                                     };
                                     if (window.location.origin === 'https://linux.do') {
@@ -1460,10 +1537,13 @@ class MainActivity : ComponentActivity() {
                             window.__lindoCsrfPromise = null;
                         }
                     }
+                    const isOtpExchange = targetUrl.indexOf('/session/otp/') !== -1;
                     if (!isRead) {
                         const metaCsrf = document.querySelector('meta[name="csrf-token"]');
-                        const cachedCsrf = window.__lindoCsrf || (metaCsrf && metaCsrf.content);
-                        const token = cachedCsrf || (await refreshCsrfToken(false));
+                        const cachedCsrf = isOtpExchange
+                            ? null
+                            : (window.__lindoCsrf || (!window.__lindoIgnoreDomCsrf && metaCsrf && metaCsrf.content));
+                        const token = cachedCsrf || (await refreshCsrfToken(isOtpExchange));
                         if (!token) {
                             const body = csrfLastBody || JSON.stringify({errors: [${JSONObject.quote(LinDoNetworkCopy.JS_BRIDGE_VERIFY_SESSION_FAILED.text)}]});
                             reportHttp(csrfLastStatus || 0, body, csrfLastMitigated, csrfLastRetryAfter);
@@ -1502,8 +1582,9 @@ class MainActivity : ComponentActivity() {
                     let resp = out.resp;
                     let text = out.text;
                     let cfMitigated = (resp && resp.headers && resp.headers.get('cf-mitigated')) || '';
-                    if (!isRead && !cfMitigated && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token|bad csrf/i.test(text)) {
+                    if (!isRead && !isOtpExchange && !cfMitigated && (resp.status === 403 || resp.status === 422) && /csrf|invalid authenticity token|bad csrf/i.test(text)) {
                         window.__lindoCsrf = null;
+                        window.__lindoIgnoreDomCsrf = true;
                         if (window.LinDoJsBridge && window.LinDoJsBridge.onCsrfTokenUpdated) {
                             window.LinDoJsBridge.onCsrfTokenUpdated('');
                         }
@@ -1756,6 +1837,9 @@ class MainActivity : ComponentActivity() {
     private suspend fun fetchBinaryViaWebViewBridge(
         url: String
     ): UserApiKeyAuthManager.BinaryHttpPayload? {
+        if (LinuxDoRepository.shouldPauseForSiteVerification(url) || LinuxDoRepository.isRateLimitedNow()) {
+            return null
+        }
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
             rebuildApiWebView(reason = "pending_network_recycle", force = true)
         }
@@ -1869,6 +1953,9 @@ class MainActivity : ComponentActivity() {
         mimeType: String,
         rawBytes: ByteArray
     ): Pair<Int, String>? {
+        if (LinuxDoRepository.shouldPauseForSiteVerification("https://linux.do/uploads.json")) {
+            return 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>需要完成站点验证</html>"
+        }
         if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
         if (pendingTransportRecycleOnNextUse && !isFinishing && !isDestroyed) {
             rebuildApiWebView(reason = "pending_network_recycle", force = true)
@@ -2176,6 +2263,7 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun replaceAccountCookies(raw: String) = withContext(Dispatchers.Main) {
         val cm = CookieManager.getInstance()
+        nukeAuthCookieVariantsInWebKit(cm)
         suspend fun set(origin: String, value: String) = suspendCancellableCoroutine<Unit> { continuation ->
             cm.setCookie(origin, value) { if (continuation.isActive) continuation.resume(Unit) }
         }
@@ -2185,10 +2273,16 @@ class MainActivity : ComponentActivity() {
             for (name in names.filter { it.isNotBlank() && it !in CookieSentinel.cfTrustCookieNames }) {
                 set(origin, "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
                 set(origin, "$name=; Max-Age=0; Domain=$host; Path=/; Secure; HttpOnly")
+                set(origin, "$name=; Max-Age=0; Domain=.$host; Path=/; Secure; HttpOnly")
             }
         }
         raw.split(';').map { it.trim() }.filter { it.substringBefore('=') in setOf("_t", "_forum_session") }.forEach {
-            set("https://linux.do", "$it; Path=/; Secure; HttpOnly; SameSite=Lax")
+            val attr = if (it.startsWith("_t=")) {
+                "Path=/; Max-Age=5184000; Secure; HttpOnly; SameSite=Lax"
+            } else {
+                "Path=/; Secure; HttpOnly; SameSite=Lax"
+            }
+            set("https://linux.do", "$it; $attr")
         }
         cm.flush()
         val expected = getCookieValue(raw, "_t").orEmpty()
@@ -2276,15 +2370,71 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private suspend fun nukeAuthCookieVariantsInWebKit(cookieManager: CookieManager) =
+        withContext(Dispatchers.Main) {
+            suspend fun expire(origin: String, cookieStr: String) = withTimeoutOrNull(3_000L) {
+                suspendCancellableCoroutine<Unit> { cont ->
+                    cookieManager.setCookie(origin, cookieStr) {
+                        if (cont.isActive) cont.resume(Unit)
+                    }
+                }
+            }
+            val authNames = listOf("_t", "_forum_session", "authentication_data")
+            for (origin in listOf("https://linux.do", "https://www.linux.do")) {
+                for (name in authNames) {
+                    expire(origin, "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
+                    expire(origin, "$name=; Max-Age=0; Path=/; Secure")
+                    expire(origin, "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
+                    expire(origin, "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly")
+                    expire(origin, "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure")
+                }
+            }
+            cookieManager.flush()
+        }
+
+    private suspend fun sweepChallengedOrDuplicateCfClearanceInWebKit(
+        cookieManager: CookieManager,
+        verified: Boolean = false
+    ) = withContext(Dispatchers.Main) {
+        val snapshot = cookieManager.getCookie("https://linux.do").orEmpty()
+        if (snapshot.isBlank()) return@withContext
+        val cfValues = getAllCookieValues(snapshot, "cf_clearance")
+        if (cfValues.isEmpty()) return@withContext
+        val challengedVal = do_.linux.lindo.core.network.CfClearanceAuthority.challenged
+        val hasChallenged = !challengedVal.isNullOrBlank() && cfValues.any { it == challengedVal }
+        if (cfValues.size <= 1 && !hasChallenged) return@withContext
+
+        val winnerCf = do_.linux.lindo.core.network.CfClearanceAuthority.selectWinner(
+            observedValues = cfValues,
+            verified = verified
+        )
+        suspend fun setSpec(origin: String, cookieStr: String) = withTimeoutOrNull(3_000L) {
+            suspendCancellableCoroutine<Unit> { cont ->
+                cookieManager.setCookie(origin, cookieStr) {
+                    if (cont.isActive) cont.resume(Unit)
+                }
+            }
+        }
+        for (origin in listOf("https://linux.do", "https://www.linux.do")) {
+            setSpec(origin, "cf_clearance=; Max-Age=0; Path=/; Secure; HttpOnly")
+            setSpec(origin, "cf_clearance=; Max-Age=0; Path=/; Secure")
+            setSpec(origin, "cf_clearance=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
+            setSpec(origin, "cf_clearance=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly")
+            setSpec(origin, "cf_clearance=; Max-Age=0; Domain=.linux.do; Path=/; Secure")
+        }
+        if (!winnerCf.isNullOrBlank()) {
+            setSpec(
+                "https://linux.do",
+                "cf_clearance=$winnerCf; Domain=.linux.do; Path=/; Max-Age=86400; Secure; HttpOnly; SameSite=None"
+            )
+        }
+        cookieManager.flush()
+    }
+
     private suspend fun ensureAuthCookiesInWebKit(cookieManager: CookieManager): String =
         withContext(Dispatchers.Main) {
-            val latestCookies = cookieManager.getCookie("https://linux.do").orEmpty()
-            if (hasCookieNamed(latestCookies, "_t")) return@withContext latestCookies
-            val winning = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
-            val savedT = winning["_t"]?.value?.takeIf { it.isNotBlank() && it != "demo_session_token" }
-                ?: return@withContext latestCookies
-            if (!UserApiKeyAuthManager.isAuthorized()) return@withContext latestCookies
-            suspend fun setCookie(value: String) = kotlinx.coroutines.withTimeout(5_000L) {
+            sweepChallengedOrDuplicateCfClearanceInWebKit(cookieManager, verified = false)
+            suspend fun setCanonicalHostCookie(value: String) = kotlinx.coroutines.withTimeout(5_000L) {
                 suspendCancellableCoroutine<Unit> { continuation ->
                     cookieManager.setCookie("https://linux.do", value) { accepted ->
                         if (continuation.isActive) {
@@ -2294,9 +2444,50 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-            setCookie("_t=$savedT; Path=/; Secure; HttpOnly; SameSite=Lax")
+            val latestCookies = cookieManager.getCookie("https://linux.do").orEmpty()
+            val tValues = getAllCookieValues(latestCookies, "_t").filter { it != "demo_session_token" }
+
+            // 1. 未登录 / 已过期状态下若 Chromium CookieManager 仍残留失效 _t，立即彻底清除，杜绝回流至 CookieSentinel 造成无限「登录已过期」
+            if (!UserApiKeyAuthManager.isAuthorized()) {
+                if (tValues.isNotEmpty()) {
+                    nukeAuthCookieVariantsInWebKit(cookieManager)
+                    return@withContext cookieManager.getCookie("https://linux.do").orEmpty()
+                }
+                return@withContext latestCookies
+            }
+
+            // 2. 正常单条 _t 快路径（零额外写开销）
+            if (tValues.size == 1) {
+                return@withContext latestCookies
+            }
+
+            // 3. 检测到多条重复 _t（如旧 Domain=.linux.do 与新 Host-Only linux.do 并存）：清除全部变体并仅重写入唯一胜出的 Host-Only _t！
+            if (tValues.size > 1) {
+                LinDoDiagnosticLogger.warn(
+                    DiagnosticCategory.AUTH,
+                    "CookieSweep",
+                    "Collapsed ${tValues.size} duplicate _t variants in Chromium CookieManager"
+                )
+                val winning = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+                val winnerT = winning["_t"]?.value?.takeIf { it in tValues } ?: tValues.last()
+                val fsValues = getAllCookieValues(latestCookies, "_forum_session")
+                val winnerFs = winning["_forum_session"]?.value?.takeIf { it in fsValues } ?: fsValues.lastOrNull()
+                nukeAuthCookieVariantsInWebKit(cookieManager)
+                setCanonicalHostCookie("_t=$winnerT; Path=/; Max-Age=5184000; Secure; HttpOnly; SameSite=Lax")
+                if (!winnerFs.isNullOrBlank()) {
+                    setCanonicalHostCookie("_forum_session=$winnerFs; Path=/; Secure; HttpOnly; SameSite=Lax")
+                }
+                cookieManager.flush()
+                return@withContext cookieManager.getCookie("https://linux.do").orEmpty()
+            }
+
+            // 4. 已登录但 WebKit 意外丢失 _t：从加密持久化快照恢复规范 Host-Only _t
+            val winning = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+            val savedT = winning["_t"]?.value?.takeIf { it.isNotBlank() && it != "demo_session_token" }
+                ?: return@withContext latestCookies
+            setCanonicalHostCookie("_t=$savedT; Path=/; Max-Age=5184000; Secure; HttpOnly; SameSite=Lax")
             winning["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
-                setCookie("_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
+                setCanonicalHostCookie("_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax")
             }
             cookieManager.flush()
             val restored = cookieManager.getCookie("https://linux.do").orEmpty()
@@ -2416,10 +2607,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun dispatchNetworkRestoreRecycle() {
-        pendingTransportRecycleOnNextUse = true
         val now = System.currentTimeMillis()
         val elapsed = now - lastNetworkRestoreNotifyAtMs
-        if (elapsed >= 1_200L) {
+        if (elapsed >= 2_500L) {
             trailingNetworkRestoreJob?.cancel()
             trailingNetworkRestoreJob = null
             lastNetworkRestoreNotifyAtMs = now
@@ -2430,12 +2620,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         } else {
-            val waitMs = (1_200L - elapsed).coerceAtLeast(350L)
+            val waitMs = (2_500L - elapsed).coerceAtLeast(600L)
             trailingNetworkRestoreJob?.cancel()
             trailingNetworkRestoreJob = activityScope.launch {
                 delay(waitMs)
                 lastNetworkRestoreNotifyAtMs = System.currentTimeMillis()
-                pendingTransportRecycleOnNextUse = true
                 ensureHealthyApiWebView(forceCheck = true)
                 withContext(Dispatchers.Main) {
                     UserApiKeyAuthManager.notifyNetworkRestored()
@@ -2553,6 +2742,7 @@ class MainActivity : ComponentActivity() {
             UserApiKeyAuthManager.onPersistHomeSearchExpanded = null
             UserApiKeyAuthManager.onPersistSplitFraction = null
             UserApiKeyAuthManager.onPrepareManualRecovery = null
+            UserApiKeyAuthManager.onPrepareFreshAuthExchange = null
             UserApiKeyAuthManager.onSyncCookieToPlatform = null
             UserApiKeyAuthManager.onLogoutPlatformClear = null
             UserApiKeyAuthManager.webViewHttpExecutor = null
@@ -2585,12 +2775,12 @@ class MainActivity : ComponentActivity() {
             apiWebView?.onResume()
             apiWebView?.resumeTimers()
         }
-        if (pausedAt > 0L && System.currentTimeMillis() - pausedAt >= 45_000L) {
+        if (pausedAt > 0L && System.currentTimeMillis() - pausedAt >= 60_000L) {
             activityScope.launch {
-                pendingTransportRecycleOnNextUse = true
+                // 仅检查 JS 引擎活性（不暴力销毁健康的常驻 WebView 与 TLS 连接池），防止切回前台时断流产生 IO_ERR 与重复请求风暴
                 ensureHealthyApiWebView(forceCheck = true)
                 withContext(Dispatchers.Main) {
-                    UserApiKeyAuthManager.notifyNetworkRestored()
+                    runCatching { ensureAuthCookiesInWebKit(CookieManager.getInstance()) }
                 }
             }
         }
@@ -2734,7 +2924,8 @@ private fun AndroidWebLoginModal(
         val cookieManager = CookieManager.getInstance()
         cookieManager.flush()
         val rawCookies = cookieManager.getCookie("https://linux.do").orEmpty()
-        println("LinDoAuth: Modal authenticated session confirmed")
+        CookieSentinel.syncFromAuthoritativeBrowserCookieString(rawCookies, verified = true)
+        LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "WebLogin", "Session authenticated via in-app WebView")
         UserApiKeyAuthManager.onSessionAuthenticated(
             profile = AuthenticatedUserProfile(
                 userId = userId,
@@ -2769,8 +2960,8 @@ private fun AndroidWebLoginModal(
             }
         }
 
-        // 验证流观察站点实际放行结果；普通内置网页仅同步 Cookie，不自动关闭。
-        if (isVerificationFlow && pageLoadError == null && !verificationProbeRunning && !LinuxDoRepository.isRateLimitedNow()) {
+        // 验证流被动观察真实 Discourse DOM 放行结果（零额外网络请求，杜绝验证刚过又被 /session/csrf.json 429 拦截导致的无限刷新）
+        if (isVerificationFlow && pageLoadError == null && !verificationProbeRunning) {
             verificationProbeRunning = true
             val probeEpoch = loginNavigationEpoch
             webView.evaluateJavascript(do_.linux.lindo.core.network.webVerificationProbeScript()) { raw ->
@@ -2778,26 +2969,38 @@ private fun AndroidWebLoginModal(
                 verificationProbeRunning = false
                 if (!completed) {
                     val result = decodeJsStringResult(raw)?.let { runCatching { JSONObject(it) }.getOrNull() }
-                    if (result?.optBoolean("error") == true) pageLoadError = "连接未完成，请重试"
-                    if (result?.optInt("status") == 429) {
-                        val retryAfter = result.optString("retryAfter")
-                        LinuxDoRepository.noteRetryAfter(retryAfter)
-                        if (verificationRateRetries++ == 0 && NetworkRecoveryPolicy.retryAfterMillis(retryAfter) <= 10_000L) {
-                            webView.evaluateJavascript("delete window.__lindoRecoveryResult; window.__lindoRecoveryProbeSent = false;", null)
-                        } else {
-                            pageLoadError = "站点请求较频繁，请稍后重试。"
-                        }
-                    }
                     if (result?.optBoolean("ok") == true) {
+                        result.optString("csrf").takeIf { it.isNotBlank() }?.let { freshCsrf ->
+                            csrfSyncedInModal = true
+                            LinuxDoRepository.updateCsrfToken(freshCsrf)
+                        }
                         completed = true
                         NetworkRecoveryPolicy.androidVerifying = false
                         CookieManager.getInstance().flush()
-                        CookieSentinel.syncFromAuthoritativeBrowserCookieString(CookieManager.getInstance().getCookie("https://linux.do").orEmpty())
+                        val latestAfterVerify = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
+                        CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestAfterVerify, verified = true)
+                        result.optJSONObject("user")?.let { u ->
+                            val uname = u.optString("username").trim()
+                            val uid = u.optInt("id", 0)
+                            val curAccount = UserApiKeyAuthManager.currentUser?.username
+                            if (uname.isNotBlank() && uname != "linuxdo_user" && uid > 0 &&
+                                (curAccount == null || curAccount.equals(uname, ignoreCase = true))
+                            ) {
+                                UserApiKeyAuthManager.recordWebSessionLogin(
+                                    username = uname,
+                                    displayName = u.optString("name").ifBlank { uname },
+                                    avatarUrl = LinuxDoSiteRules.resolveStaticAvatarUrl(u.optString("avatar_template"), 144),
+                                    trustLevel = u.optInt("trust_level", 1),
+                                    userId = uid,
+                                    animatedAvatar = LinuxDoSiteRules.resolveAnimatedAvatarUrl(u.optString("animated_avatar")),
+                                    userTitle = u.optString("title", "")
+                                )
+                            }
+                        }
                         LinuxDoRepository.clearChallengeCooldown()
                         UserApiKeyAuthManager.persistSessionQuietly()
+                        LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "SiteVerify", "Cloudflare verification completed")
                         onLoginSuccess()
-                    } else if (result?.optBoolean("blocked") == true) {
-                        pageLoadError = "网站仍要求验证，请刷新后重试"
                     }
                 }
             }
@@ -2858,31 +3061,91 @@ private fun AndroidWebLoginModal(
         }
     }
 
-    // 当 initialUrl 变化（例如外部浏览器回调后注入 /session/otp/$otp）时立即加载
-    LaunchedEffect(initialUrl) {
-        if (initialUrl.isNotBlank()) {
-            pendingUrl = initialUrl
-            pageLoadError = null
-            val wv = webViewRef
-            if (wv != null && wv.url != initialUrl) {
-                wv.loadUrl(initialUrl)
+    // 每个 initialUrl 仅分发一次导航（确保 Cloudflare Turnstile 提交重定向至 https://linux.do/ 后绝不因重组被二次 loadUrl 打断导致无限刷新）
+    var initialLoadDispatched by remember(initialUrl) { mutableStateOf(false) }
+    LaunchedEffect(webViewRef, initialUrl) {
+        val wv = webViewRef ?: return@LaunchedEffect
+        if (initialLoadDispatched || initialUrl.isBlank()) return@LaunchedEffect
+        initialLoadDispatched = true
+        pendingUrl = initialUrl
+        pageLoadError = null
+        if ((isLoginFlow && (!UserApiKeyAuthManager.isAuthorized() || SavedAccounts.adding)) ||
+            initialUrl.contains("/session/otp/", ignoreCase = true)
+        ) {
+            runCatching {
+                val cm = CookieManager.getInstance()
+                for (origin in listOf("https://linux.do", "https://www.linux.do")) {
+                    for (name in listOf("_t", "_forum_session", "authentication_data")) {
+                        for (spec in listOf(
+                            "$name=; Max-Age=0; Path=/; Secure; HttpOnly",
+                            "$name=; Max-Age=0; Path=/; Secure",
+                            "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly",
+                            "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly",
+                            "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure"
+                        )) {
+                            suspendCancellableCoroutine<Unit> { cont ->
+                                cm.setCookie(origin, spec) { if (cont.isActive) cont.resume(Unit) }
+                            }
+                        }
+                    }
+                }
+                cm.flush()
+                CookieSentinel.clearAuthCookiesOnly()
+            }
+        } else if (!SavedAccounts.adding && UserApiKeyAuthManager.isAuthorized()) {
+            runCatching {
+                val cm = CookieManager.getInstance()
+                val cur = cm.getCookie("https://linux.do").orEmpty()
+                val tList = getAllCookieValues(cur, "_t").filter { it != "demo_session_token" }
+                if (tList.size > 1) {
+                    val winning = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+                    val winnerT = winning["_t"]?.value?.takeIf { it in tList } ?: tList.last()
+                    for (origin in listOf("https://linux.do", "https://www.linux.do")) {
+                        for (spec in listOf(
+                            "_t=; Max-Age=0; Path=/; Secure; HttpOnly",
+                            "_t=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly",
+                            "_t=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly"
+                        )) {
+                            suspendCancellableCoroutine<Unit> { cont ->
+                                cm.setCookie(origin, spec) { if (cont.isActive) cont.resume(Unit) }
+                            }
+                        }
+                    }
+                    suspendCancellableCoroutine<Unit> { cont ->
+                        cm.setCookie("https://linux.do", "_t=$winnerT; Path=/; Max-Age=5184000; Secure; HttpOnly; SameSite=Lax") {
+                            if (cont.isActive) cont.resume(Unit)
+                        }
+                    }
+                    cm.flush()
+                } else if (tList.isEmpty()) {
+                    val winning = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")
+                    val savedT = winning["_t"]?.value?.takeIf { it.isNotBlank() && it != "demo_session_token" }
+                    if (savedT != null) {
+                        suspendCancellableCoroutine<Unit> { cont ->
+                            cm.setCookie("https://linux.do", "_t=$savedT; Path=/; Max-Age=5184000; Secure; HttpOnly; SameSite=Lax") {
+                                if (cont.isActive) cont.resume(Unit)
+                            }
+                        }
+                        winning["_forum_session"]?.value?.takeIf { it.isNotBlank() }?.let { fs ->
+                            suspendCancellableCoroutine<Unit> { cont ->
+                                cm.setCookie("https://linux.do", "_forum_session=$fs; Path=/; Secure; HttpOnly; SameSite=Lax") {
+                                    if (cont.isActive) cont.resume(Unit)
+                                }
+                            }
+                        }
+                        cm.flush()
+                    }
+                }
             }
         }
-    }
-
-    LaunchedEffect(webViewRef) {
-        val wv = webViewRef ?: return@LaunchedEffect
-        val target = (pendingUrl ?: initialUrl).takeIf { it.isNotBlank() } ?: return@LaunchedEffect
-        if (wv.url != target) {
-            wv.loadUrl(target)
-        }
+        wv.loadUrl(initialUrl)
     }
 
     // 仅在登录流开启时轮询探测登录完成状态（非登录容器页如 Connect / Credit 不轮询）
     LaunchedEffect(webViewRef, completed, isLoginFlow, isVerificationFlow) {
         if (!isLoginFlow && !isVerificationFlow) return@LaunchedEffect
         while (!completed && webViewRef != null) {
-            delay(2000L)
+            delay(750L)
             tryExtractSessionAndComplete(webViewRef)
         }
     }
@@ -3047,6 +3310,11 @@ private fun AndroidWebLoginModal(
                                 override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                                     super.onReceivedError(view, request, error)
                                     if (view === webViewRef && request?.isForMainFrame == true) {
+                                        val code = error?.errorCode ?: WebViewClient.ERROR_UNKNOWN
+                                        // 忽略 Cloudflare Turnstile 挑战表单提交重定向中断时偶发上报的 ERROR_UNKNOWN (-1)，防止误盖错误遮罩导致重复刷新
+                                        if (isVerificationFlow && code == WebViewClient.ERROR_UNKNOWN && request.isRedirect) {
+                                            return
+                                        }
                                         val failedUrl = request.url.toString()
                                         if (failedUrl == pendingUrl || failedUrl == view?.url || request.isRedirect) {
                                             pendingUrl = failedUrl

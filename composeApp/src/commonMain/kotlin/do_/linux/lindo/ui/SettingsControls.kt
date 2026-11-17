@@ -56,7 +56,7 @@ internal fun ExpandableSetting(
             Modifier.fillMaxWidth().heightIn(min = LinDoTokens.SettingRowHeight)
                 .semantics { stateDescription = if (expanded) "已展开" else "已收起" }
                 .pointerHoverIcon(PointerIcon.Hand)
-                .clickable(role = Role.Button, onClickLabel = if (expanded) "收起" else "展开") { expanded = !expanded }
+                .rowClickable(role = Role.Button, onClickLabel = if (expanded) "收起" else "展开") { expanded = !expanded }
                 .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -82,8 +82,13 @@ internal fun ExpandableSetting(
             enter = if (animations) expandVertically(expandFrom = Alignment.Top) + fadeIn() else EnterTransition.None,
             exit = if (animations) shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut() else ExitTransition.None
         ) {
-            Column(Modifier.padding(horizontal = LinDoTokens.PageHorizontalPadding)
-                .padding(bottom = 8.dp).widthIn(max = 600.dp).fillMaxWidth(), content = content)
+            Column(
+                Modifier.padding(horizontal = LinDoTokens.PageHorizontalPadding)
+                    .padding(top = 4.dp, bottom = 12.dp)
+                    .widthIn(max = 600.dp)
+                    .fillMaxWidth(),
+                content = content
+            )
         }
         HorizontalDivider(Modifier.padding(start = 50.dp, end = LinDoTokens.PageHorizontalPadding),
             thickness = 0.5.dp, color = palette.hairline)
@@ -109,12 +114,15 @@ internal fun <T> SettingsChoices(
                     row.forEach { option ->
                         val active = option == selected
                         // Keep a 48 dp hit target while the visible segment stays compact.
+                        val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
                         Box(Modifier.weight(1f).fillMaxHeight().heightIn(min = 48.dp)
-                            .selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })
+                            .selectable(selected = active, interactionSource = interaction, indication = null,
+                                role = Role.RadioButton, onClick = { onSelect(option) })
                             .padding(horizontal = 2.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
                             val tint = if (active) palette.activeChipText else palette.inkSecondary
                             Row(Modifier.fillMaxSize().clip(RoundedCornerShape(7.dp))
                                 .background(if (active) palette.activeChipBg else palette.subtleSurface.copy(alpha = 0.65f))
+                                .rowStateLayer(interaction, radius = 7.dp)
                                 .padding(horizontal = 6.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.Center) {
@@ -196,7 +204,7 @@ internal fun SettingsToggleRow(icon: ImageVector, title: String, checked: Boolea
     val palette = LocalPalette.current
     Row(Modifier.fillMaxWidth().heightIn(min = LinDoTokens.SettingRowHeight)
         .pointerHoverIcon(PointerIcon.Hand)
-        .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
+        .rowToggleable(value = checked, onValueChange = onChange)
         .padding(horizontal = LinDoTokens.PageHorizontalPadding),
         verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, null, Modifier.size(20.dp), tint = palette.inkSecondary)

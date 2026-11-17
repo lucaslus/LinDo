@@ -157,4 +157,23 @@ class AccountSettingsRegressionTest {
         }
     }
 
+    @Test fun accountHoverKeepsInnerGuttersAndFullRowSelection() = runDesktopComposeUiTest(width = 1100, height = 650) {
+        val account = AuthenticatedUserProfile(username = "reader", displayName = "社区读者")
+        setContent { Host(true) {
+            AccountSessionContent(account, null, {}, {}, {}, accounts = listOf(SavedAccountSummary(account, false)))
+        } }
+        waitForIdle()
+        edt {
+            val row = onNodeWithText("添加账号").fetchSemanticsNode().boundsInRoot
+            val text = onNodeWithText("添加账号", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            assertTrue(text.left - row.left >= 15f, "hover background must have an inner left gutter")
+            val selection = onNodeWithText("@reader").fetchSemanticsNode().boundsInRoot
+            val check = onNodeWithContentDescription("当前账号", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            assertTrue(check.right <= selection.right - 15f, "current check must be inside the padded selectable row")
+            onNodeWithText("添加账号").performMouseInput { enter(center) }
+        }
+        waitForIdle()
+        save("account-row-hover-wide.png")
+    }
+
 }

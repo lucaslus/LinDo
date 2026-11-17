@@ -1,0 +1,54 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Lindo",
+  "version": "1.0.45",
+  "identifier": "do.linux.lindo",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1429",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Lindo",
+        "width": 1240,
+        "height": 820,
+        "minWidth": 420,
+        "minHeight": 560,
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "visible": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "bundleVersion": "1045.0.0",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "wix": {
+        "upgradeCode": "9a4e7c31-62b8-4d95-b7f2-8c1e3409a520"
+      }
+    }
+  }
+}

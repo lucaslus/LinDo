@@ -1,0 +1,1270 @@
+pub mod bridge;
+pub mod crypto_rsa;
+pub mod legacy;
+#[cfg(not(target_os = "macos"))]
+pub mod win_webview_bridge;
+
+use bridge::{BridgeEngine, ForumMediaPayload, SiteHttpResponse};
+use futures_util::StreamExt;
+use legacy::{
+    load_or_migrate_state, save_state, LocalDraftRecord, PersistedState, UserPreferences,
+    UserProfile,
+};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+#[cfg(target_os = "macos")]
+use tauri::{RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, Theme};
+use tauri_plugin_opener::OpenerExt;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapPayload {
+    pub is_authorized: bool,
+    pub state: PersistedState,
+    pub platform: String,
+}
+
+#[tauri::command]
+async fn bootstrap_state(engine: State<'_, Arc<BridgeEngine>>) -> Result<BootstrapPayload, String> {
+    bridge::enable_high_refresh_and_smooth_wheel(true);
+    engine.spawn_warmup();
+    let snapshot = { engine.state.lock().unwrap().clone() };
+    let is_authorized = snapshot.current_user.is_some();
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+    .to_string();
+    Ok(BootstrapPayload {
+        is_authorized,
+        state: snapshot,
+        platform,
+    })
+}
+
+#[tauri::command]
+async fn site_request(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    url: String,
+    method: String,
+    form: Option<HashMap<String, String>>,
+    headers: Option<HashMap<String, String>>,
+) -> Result<SiteHttpResponse, String> {
+    engine.request(&app, &url, &method, form, headers).await
+}
+
+#[tauri::command]
+async fn site_upload(
+    engine: State<'_, Arc<BridgeEngine>>,
+    filename: String,
+    mime: String,
+    data_base64: String,
+) -> Result<SiteHttpResponse, String> {
+    engine.upload(&filename, &mime, &data_base64).await
+}
+
+#[tauri::command]
+async fn site_fetch_media(
+    engine: State<'_, Arc<BridgeEngine>>,
+    url: String,
+) -> Result<ForumMediaPayload, String> {
+    engine.fetch_media(&url).await
+}
+
+#[tauri::command]
+async fn site_verify(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    login: bool,
+    is_dark: bool,
+) -> Result<bool, String> {
+    engine.verify_or_login(&app, login, is_dark).await
+}
+
+#[tauri::command]
+async fn start_browser_auth(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+) -> Result<String, String> {
+    let url = engine.start_browser_one_click_auth().await?;
+    let _ = app.opener().open_url(&url, None::<&str>);
+    Ok(url)
+}
+
+#[tauri::command]
+async fn update_current_user(
+    engine: State<'_, Arc<BridgeEngine>>,
+    profile: UserProfile,
+) -> Result<(), String> {
+    {
+        let mut st = engine.state.lock().unwrap();
+        st.current_user = Some(profile.clone());
+        st.expired_username = None;
+        save_state(&st);
+    }
+    let _ = engine.sync_cookies_from_webkit(false).await;
+    // CRITICAL: Do NOT emit `lindo://state-updated` here! `update_current_user` is invoked by JS `refreshCurrentUserSession()`
+    // after React state is already updated; emitting `lindo://state-updated` here previously caused a recursive refresh loop!
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_expired_notice(engine: State<'_, Arc<BridgeEngine>>) -> Result<(), String> {
+    let mut st = engine.state.lock().unwrap();
+    st.expired_username = None;
+    save_state(&st);
+    Ok(())
+}
+
+#[tauri::command]
+async fn switch_account(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    username: String,
+) -> Result<bool, String> {
+    engine.switch_saved_account(&app, &username).await
+}
+
+#[tauri::command]
+async fn logout_account(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    remove_saved: bool,
+) -> Result<(), String> {
+    engine.logout(&app, remove_saved).await
+}
+
+#[tauri::command]
+async fn remove_saved_account(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    username: String,
+) -> Result<(), String> {
+    engine.remove_saved_account(&app, &username).await
+}
+
+#[tauri::command]
+async fn add_account_web_login(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    is_dark: bool,
+) -> Result<bool, String> {
+    engine.add_account_via_web(&app, is_dark).await
+}
+
+#[tauri::command]
+async fn import_manual_credential(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    raw_input: String,
+    is_dark: bool,
+) -> Result<bool, String> {
+    engine
+        .import_manual_credential(&app, &raw_input, is_dark)
+        .await
+}
+
+#[tauri::command]
+async fn open_in_app_forum_panel(
+    engine: State<'_, Arc<BridgeEngine>>,
+    url: String,
+    is_dark: bool,
+) -> Result<(), String> {
+    engine.open_forum_web_panel(&url, is_dark).await
+}
+
+#[tauri::command]
+async fn fetch_connect_page_html(engine: State<'_, Arc<BridgeEngine>>) -> Result<String, String> {
+    engine.fetch_connect_html().await
+}
+
+#[tauri::command]
+async fn save_preferences(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    preferences: UserPreferences,
+) -> Result<(), String> {
+    let appearance = preferences.appearance.clone();
+    {
+        let mut st = engine.state.lock().unwrap();
+        st.preferences = preferences;
+        save_state(&st);
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let theme_opt = match appearance.as_str() {
+            "dark" => Some(Theme::Dark),
+            "light" => Some(Theme::Light),
+            _ => None,
+        };
+        let _ = w.set_theme(theme_opt);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn record_read_floor(
+    engine: State<'_, Arc<BridgeEngine>>,
+    topic_id: i64,
+    floor: i32,
+) -> Result<(), String> {
+    let mut st = engine.state.lock().unwrap();
+    let key = topic_id.to_string();
+    let prev = st.read_floors.get(&key).copied().unwrap_or(0);
+    if floor > prev {
+        st.read_floors.insert(key, floor);
+        save_state(&st);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_read_history(engine: State<'_, Arc<BridgeEngine>>) -> Result<(), String> {
+    let mut st = engine.state.lock().unwrap();
+    st.read_floors.clear();
+    save_state(&st);
+    Ok(())
+}
+
+#[tauri::command]
+async fn save_local_draft(
+    engine: State<'_, Arc<BridgeEngine>>,
+    draft: LocalDraftRecord,
+) -> Result<(), String> {
+    let mut st = engine.state.lock().unwrap();
+    st.drafts.insert(draft.key.clone(), draft);
+    save_state(&st);
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_local_draft(
+    engine: State<'_, Arc<BridgeEngine>>,
+    key: String,
+) -> Result<(), String> {
+    let mut st = engine.state.lock().unwrap();
+    if st.drafts.remove(&key).is_some() {
+        save_state(&st);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_unread_badge(
+    engine: State<'_, Arc<BridgeEngine>>,
+    count: i32,
+) -> Result<(), String> {
+    {
+        let mut st = engine.state.lock().unwrap();
+        if st.unread_notifications != count {
+            st.unread_notifications = count;
+            save_state(&st);
+        }
+    }
+    engine.set_dock_badge(count).await;
+    Ok(())
+}
+
+const GITHUB_LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/lucaslus/LinDo/releases/latest";
+const GITHUB_RELEASES_PAGE: &str = "https://github.com/lucaslus/LinDo/releases";
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopUpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+    pub arch: String,
+    pub zip_url: String,
+    pub dmg_url: String,
+    pub sha256: String,
+    pub updated_at: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProgressEvent {
+    stage: String,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    percent: u8,
+    message: String,
+}
+
+fn parse_semver_tuple(v: &str) -> (u32, u32, u32) {
+    let clean = v.trim().trim_start_matches(['v', 'V']);
+    let mut parts = clean.split('.').map(|s| {
+        s.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .unwrap_or(0)
+    });
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+fn extract_release_notes_from_markdown(body: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+    for raw_line in body.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("```") {
+            continue;
+        }
+        let cleaned = trimmed
+            .trim_start_matches("- ")
+            .trim_start_matches("* ")
+            .trim_start_matches("• ")
+            .trim();
+        if !cleaned.is_empty() {
+            notes.push(cleaned.to_string());
+            if notes.len() >= 10 {
+                break;
+            }
+        }
+    }
+    notes
+}
+
+fn parse_github_release_for_desktop(
+    release: &serde_json::Value,
+    manifest_override: Option<&serde_json::Value>,
+    current_version: &str,
+    target_os: &str,
+    arch: &str,
+) -> DesktopUpdateInfo {
+    let tag_name = release
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(current_version)
+        .trim();
+    let published_at = release
+        .get("published_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let default_date = published_at.get(0..10).unwrap_or(published_at).to_string();
+    let body_md = release.get("body").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut latest_version = tag_name.trim_start_matches(['v', 'V']).to_string();
+    let mut zip_url = String::new();
+    let mut dmg_url = String::new();
+    let mut sha256 = String::new();
+    let mut fallback_sha256 = String::new();
+    let mut updated_at = default_date;
+    let mut notes = extract_release_notes_from_markdown(body_md);
+
+    let is_windows = target_os.eq_ignore_ascii_case("windows");
+
+    if let Some(assets) = release.get("assets").and_then(|v| v.as_array()) {
+        for asset in assets {
+            let name = asset
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let dl_url = asset
+                .get("browser_download_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if dl_url.is_empty() {
+                continue;
+            }
+            let digest = asset
+                .get("digest")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .strip_prefix("sha256:")
+                .unwrap_or("")
+                .to_string();
+
+            if is_windows {
+                let matches_win_arch = if arch == "arm64" {
+                    name.contains("arm64") || name.contains("aarch64")
+                } else {
+                    !name.contains("arm64") && !name.contains("aarch64")
+                };
+                if !matches_win_arch {
+                    continue;
+                }
+                if name.ends_with(".exe") && zip_url.is_empty() {
+                    zip_url = dl_url.to_string();
+                    if !digest.is_empty() {
+                        sha256 = digest;
+                    }
+                } else if name.ends_with(".msi") && dmg_url.is_empty() {
+                    dmg_url = dl_url.to_string();
+                    if !digest.is_empty() {
+                        fallback_sha256 = digest;
+                    }
+                }
+                continue;
+            }
+
+            // macOS asset matching (exclude Windows/Android assets)
+            if name.contains("windows")
+                || name.contains("win-")
+                || name.ends_with(".exe")
+                || name.ends_with(".msi")
+                || name.ends_with(".apk")
+            {
+                continue;
+            }
+            let matches_arch = if arch == "x64" {
+                name.contains("x64") || name.contains("x86_64") || name.contains("intel")
+            } else {
+                name.contains("arm64") || name.contains("aarch64")
+            };
+            if !matches_arch {
+                continue;
+            }
+            if name.ends_with(".zip") && zip_url.is_empty() {
+                zip_url = dl_url.to_string();
+                if !digest.is_empty() {
+                    sha256 = digest;
+                }
+            } else if name.ends_with(".dmg") && dmg_url.is_empty() {
+                dmg_url = dl_url.to_string();
+                if fallback_sha256.is_empty() && !digest.is_empty() {
+                    fallback_sha256 = digest;
+                }
+            }
+        }
+    }
+
+    if is_windows && zip_url.is_empty() && !dmg_url.is_empty() {
+        zip_url = dmg_url.clone();
+    }
+    if sha256.is_empty() && !fallback_sha256.is_empty() {
+        sha256 = fallback_sha256;
+    }
+
+    // Optional attached `latest.json` inside GitHub Release assets can refine desktop version, notes, or SHA-256
+    if let Some(desk) = manifest_override.and_then(|m| m.get("desktop")) {
+        if let Some(v) = desk.get("version").and_then(|x| x.as_str()) {
+            let trimmed = v.trim().trim_start_matches(['v', 'V']);
+            if !trimmed.is_empty() {
+                latest_version = trimmed.to_string();
+            }
+        }
+        let (zip_key, dmg_key, sha_key) = if is_windows {
+            ("winSetupUrl", "winMsiUrl", "winSetupSha256")
+        } else if arch == "x64" {
+            ("x64ZipUrl", "x64DmgUrl", "x64ZipSha256")
+        } else {
+            ("arm64ZipUrl", "arm64DmgUrl", "arm64ZipSha256")
+        };
+        if zip_url.is_empty() {
+            if let Some(u) = desk.get(zip_key).and_then(|x| x.as_str()) {
+                if u.starts_with("https://github.com/") {
+                    zip_url = u.to_string();
+                }
+            }
+        }
+        if dmg_url.is_empty() {
+            if let Some(u) = desk.get(dmg_key).and_then(|x| x.as_str()) {
+                if u.starts_with("https://github.com/") {
+                    dmg_url = u.to_string();
+                }
+            }
+        }
+        if let Some(s) = desk.get(sha_key).and_then(|x| x.as_str()) {
+            if !s.trim().is_empty() {
+                sha256 = s.trim().to_string();
+            }
+        }
+        if let Some(arr) = desk.get("notes").and_then(|x| x.as_array()) {
+            let parsed: Vec<String> = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !parsed.is_empty() {
+                notes = parsed;
+            }
+        }
+        if let Some(d) = manifest_override
+            .and_then(|m| m.get("updatedAt"))
+            .and_then(|x| x.as_str())
+        {
+            if !d.trim().is_empty() {
+                updated_at = d.trim().to_string();
+            }
+        }
+    }
+
+    let has_pkg = !zip_url.is_empty() || !dmg_url.is_empty();
+    let has_update =
+        has_pkg && parse_semver_tuple(&latest_version) > parse_semver_tuple(current_version);
+
+    if dmg_url.is_empty() {
+        dmg_url = if !zip_url.is_empty() {
+            zip_url.clone()
+        } else {
+            GITHUB_RELEASES_PAGE.to_string()
+        };
+    }
+
+    let arch_tag = if is_windows {
+        format!("windows-{arch}")
+    } else {
+        arch.to_string()
+    };
+
+    DesktopUpdateInfo {
+        current_version: current_version.to_string(),
+        latest_version,
+        has_update,
+        arch: arch_tag,
+        zip_url,
+        dmg_url,
+        sha256,
+        updated_at,
+        notes,
+    }
+}
+
+fn build_update_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(concat!("Lindo-Desktop/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| format!("初始化网络客户端失败: {e}"))
+}
+
+async fn stream_download_and_verify_sha256(
+    url: &str,
+    dest_path: &std::path::Path,
+    expected_sha256: &str,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<(u64, String), String> {
+    let client = build_update_http_client(600)?;
+    let resp = client
+        .get(url)
+        .header("Cache-Control", "no-cache")
+        .send()
+        .await
+        .map_err(|e| format!("无法连接安装包下载源: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("安装包下载失败 (HTTP {})", status.as_u16()));
+    }
+
+    let total_bytes = resp.content_length().unwrap_or(0);
+    on_progress(0, total_bytes);
+
+    let mut file = std::fs::File::create(dest_path)
+        .map_err(|e| format!("无法创建本地安装包文件: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    let mut stream = resp.bytes_stream();
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| format!("下载数据包中断: {e}"))?;
+        std::io::Write::write_all(&mut file, &chunk)
+            .map_err(|e| format!("写入本地安装包失败: {e}"))?;
+        hasher.update(&chunk);
+        downloaded += chunk.len() as u64;
+
+        if last_emit.elapsed() >= std::time::Duration::from_millis(80) {
+            on_progress(downloaded, total_bytes);
+            last_emit = std::time::Instant::now();
+        }
+    }
+    std::io::Write::flush(&mut file).map_err(|e| format!("刷新安装包缓存失败: {e}"))?;
+    drop(file);
+    on_progress(downloaded, total_bytes.max(downloaded));
+
+    let digest_bytes = hasher.finalize();
+    let actual_hex: String = digest_bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+    let expected_clean = expected_sha256.trim().to_ascii_lowercase();
+    if !expected_clean.is_empty() && actual_hex != expected_clean {
+        let _ = std::fs::remove_file(dest_path);
+        return Err("安装包 SHA-256 完整性校验不一致，已安全拦截安装".to_string());
+    }
+
+    Ok((downloaded, actual_hex))
+}
+
+#[tauri::command]
+async fn check_app_update() -> Result<DesktopUpdateInfo, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let target_os = if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "macos"
+    };
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else {
+        "arm64"
+    };
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let req_url = format!("{GITHUB_LATEST_RELEASE_API}?_t={ts}");
+
+    let client = build_update_http_client(12)?;
+    let resp = client
+        .get(&req_url)
+        .header("Accept", "application/vnd.github+json")
+        .header("Cache-Control", "no-cache")
+        .send()
+        .await
+        .map_err(|e| format!("连接 GitHub Release 失败，请检查网络后重试: {e}"))?;
+
+    let http_code = resp.status().as_u16();
+
+    // HTTP 404 on `/releases/latest` means the repository has not published any Release yet -> cleanly report up-to-date!
+    if http_code == 404 {
+        let arch_tag = if target_os == "windows" {
+            format!("windows-{arch}")
+        } else {
+            arch.to_string()
+        };
+        return Ok(DesktopUpdateInfo {
+            current_version: current_version.clone(),
+            latest_version: current_version,
+            has_update: false,
+            arch: arch_tag,
+            zip_url: String::new(),
+            dmg_url: GITHUB_RELEASES_PAGE.to_string(),
+            sha256: String::new(),
+            updated_at: String::new(),
+            notes: Vec::new(),
+        });
+    }
+
+    if !(200..300).contains(&http_code) {
+        return Err(format!(
+            "GitHub Release 接口响应异常 (HTTP {http_code})，请稍后再试"
+        ));
+    }
+
+    let release: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| "GitHub Release 数据解析失败".to_string())?;
+
+    // Check if an optional `latest.json` asset is attached to the GitHub Release
+    let mut manifest_json: Option<serde_json::Value> = None;
+    if let Some(assets) = release.get("assets").and_then(|v| v.as_array()) {
+        if let Some(manifest_asset) = assets.iter().find(|a| {
+            a.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n.eq_ignore_ascii_case("latest.json"))
+                .unwrap_or(false)
+        }) {
+            if let Some(dl_url) = manifest_asset
+                .get("browser_download_url")
+                .and_then(|u| u.as_str())
+            {
+                if let Ok(m_resp) = client
+                    .get(dl_url)
+                    .header("Cache-Control", "no-cache")
+                    .send()
+                    .await
+                {
+                    if m_resp.status().is_success() {
+                        manifest_json = m_resp.json::<serde_json::Value>().await.ok();
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(parse_github_release_for_desktop(
+        &release,
+        manifest_json.as_ref(),
+        &current_version,
+        target_os,
+        arch,
+    ))
+}
+
+#[tauri::command]
+async fn export_diagnostic_log(file_name: String, content: String) -> Result<String, String> {
+    let safe_name: String = file_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let final_name = if safe_name.ends_with(".log") || safe_name.ends_with(".txt") {
+        safe_name
+    } else {
+        format!("{safe_name}.log")
+    };
+    let downloads_dir = dirs::download_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+        .ok_or_else(|| "无法定位下载目录".to_string())?;
+    std::fs::create_dir_all(&downloads_dir).map_err(|e| format!("无法创建导出目录: {e}"))?;
+    let target_path = downloads_dir.join(&final_name);
+    std::fs::write(&target_path, content.as_bytes())
+        .map_err(|e| format!("写入诊断日志失败: {e}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = tokio::process::Command::new("/usr/bin/open")
+            .args(["-R", target_path.to_str().unwrap_or("")])
+            .status()
+            .await;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(p) = target_path.to_str() {
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{p}"))
+                .spawn();
+        }
+    }
+    Ok(target_path.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn find_running_macos_app_bundle() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    for anc in exe.ancestors() {
+        if anc.extension().and_then(|e| e.to_str()) == Some("app") {
+            return Some(anc.to_path_buf());
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+    app: AppHandle,
+    zip_url: String,
+    dmg_url: String,
+    expected_sha256: String,
+) -> Result<String, String> {
+    let target_url = if !zip_url.trim().is_empty() {
+        zip_url.trim().to_string()
+    } else if !dmg_url.trim().is_empty() {
+        dmg_url.trim().to_string()
+    } else {
+        return Err("缺少有效更新包下载地址".to_string());
+    };
+
+    let lower_url = target_url
+        .split('?')
+        .next()
+        .unwrap_or(&target_url)
+        .to_ascii_lowercase();
+    let pkg_filename = if lower_url.ends_with(".exe") {
+        "Lindo-update-setup.exe"
+    } else if lower_url.ends_with(".msi") {
+        "Lindo-update.msi"
+    } else if lower_url.ends_with(".zip") {
+        "Lindo-update.zip"
+    } else {
+        "Lindo-update.dmg"
+    };
+
+    let base_dir = dirs::home_dir()
+        .or_else(dirs::cache_dir)
+        .ok_or_else(|| "无法定位本地更新缓存目录".to_string())?
+        .join(".lindo")
+        .join("updates");
+    let _ = std::fs::remove_dir_all(&base_dir);
+    std::fs::create_dir_all(&base_dir).map_err(|e| format!("无法创建更新缓存目录: {e}"))?;
+
+    let pkg_path = base_dir.join(pkg_filename);
+
+    let app_progress = app.clone();
+    let (downloaded_bytes, _) = stream_download_and_verify_sha256(
+        &target_url,
+        &pkg_path,
+        &expected_sha256,
+        move |downloaded, total| {
+            let pct = if total > 0 {
+                ((downloaded.saturating_mul(94)) / total).clamp(1, 94) as u8
+            } else if downloaded > 0 {
+                55
+            } else {
+                2
+            };
+            let _ = app_progress.emit(
+                "lindo://update-progress",
+                UpdateProgressEvent {
+                    stage: "downloading".to_string(),
+                    downloaded_bytes: downloaded,
+                    total_bytes: total,
+                    percent: pct,
+                    message: "正在下载并校验新版本安装包...".to_string(),
+                },
+            );
+        },
+    )
+    .await?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app.emit(
+            "lindo://update-progress",
+            UpdateProgressEvent {
+                stage: "installing".to_string(),
+                downloaded_bytes,
+                total_bytes: downloaded_bytes,
+                percent: 100,
+                message: "完整性校验通过，正在启动安装向导...".to_string(),
+            },
+        );
+        if lower_url.ends_with(".msi") {
+            std::process::Command::new("msiexec")
+                .args(["/i", pkg_path.to_str().unwrap_or("")])
+                .spawn()
+                .map_err(|e| format!("启动 MSI 安装程序失败: {e}"))?;
+        } else {
+            std::process::Command::new(&pkg_path)
+                .spawn()
+                .map_err(|e| format!("启动 Windows 安装程序失败: {e}"))?;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(320)).await;
+        app.exit(0);
+        return Ok("launched_windows_installer".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if !lower_url.ends_with(".zip") {
+            let _ = tokio::process::Command::new("/usr/bin/open")
+                .arg(&pkg_path)
+                .status()
+                .await;
+            return Ok("opened_dmg".to_string());
+        }
+
+        let _ = app.emit(
+            "lindo://update-progress",
+            UpdateProgressEvent {
+                stage: "installing".to_string(),
+                downloaded_bytes,
+                total_bytes: downloaded_bytes,
+                percent: 98,
+                message: "正在解压并安装新版本...".to_string(),
+            },
+        );
+
+        let extract_dir = base_dir.join("extracted");
+        std::fs::create_dir_all(&extract_dir).map_err(|e| format!("无法创建解压目录: {e}"))?;
+        let ditto_status = tokio::process::Command::new("/usr/bin/ditto")
+            .args([
+                "-x",
+                "-k",
+                pkg_path.to_str().unwrap_or(""),
+                extract_dir.to_str().unwrap_or(""),
+            ])
+            .status()
+            .await
+            .map_err(|e| format!("解压安装包失败: {e}"))?;
+        if !ditto_status.success() {
+            return Err("解压 Lindo.app 失败".to_string());
+        }
+
+        let extracted_app = extract_dir.join("Lindo.app");
+        if !extracted_app.exists() {
+            return Err("更新包内未找到 Lindo.app".to_string());
+        }
+        let _ = tokio::process::Command::new("/usr/bin/xattr")
+            .args(["-cr", extracted_app.to_str().unwrap_or("")])
+            .status()
+            .await;
+
+        if let Some(target_app) = find_running_macos_app_bundle() {
+            let target_str = target_app.to_string_lossy().to_string();
+            let parent_writable = target_app
+                .parent()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| !m.permissions().readonly())
+                .unwrap_or(false);
+
+            if !target_str.starts_with("/Volumes/") && parent_writable {
+                let _ = app.emit(
+                    "lindo://update-progress",
+                    UpdateProgressEvent {
+                        stage: "restarting".to_string(),
+                        downloaded_bytes,
+                        total_bytes: downloaded_bytes,
+                        percent: 100,
+                        message: "更新完成，正在重启 Lindo...".to_string(),
+                    },
+                );
+                let script = r#"sleep 0.45; rm -rf "$1" && mv "$2" "$1" && /usr/bin/xattr -cr "$1" >/dev/null 2>&1 || true; /usr/bin/open -n "$1""#;
+                let _ = std::process::Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        script,
+                        "lindo-updater",
+                        &target_str,
+                        extracted_app.to_str().unwrap_or(""),
+                    ])
+                    .spawn();
+                tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+                std::process::exit(0);
+            }
+        }
+
+        let apps_target = std::path::PathBuf::from("/Applications/Lindo.app");
+        let dest_app = if std::fs::metadata("/Applications")
+            .map(|m| !m.permissions().readonly())
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_dir_all(&apps_target);
+            if std::fs::rename(&extracted_app, &apps_target).is_ok() {
+                apps_target
+            } else {
+                extracted_app
+            }
+        } else {
+            extracted_app
+        };
+        let _ = tokio::process::Command::new("/usr/bin/open")
+            .args(["-R", dest_app.to_str().unwrap_or("")])
+            .status()
+            .await;
+        let _ = app.emit(
+            "lindo://update-progress",
+            UpdateProgressEvent {
+                stage: "done".to_string(),
+                downloaded_bytes,
+                total_bytes: downloaded_bytes,
+                percent: 100,
+                message: "已下载并准备就绪".to_string(),
+            },
+        );
+        return Ok("revealed_in_finder".to_string());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = app.opener().open_url(&target_url, None::<&str>);
+        Ok("opened_browser".to_string())
+    }
+}
+
+fn focus_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+pub fn run() {
+    let initial_state = load_or_migrate_state();
+    let engine = BridgeEngine::new(initial_state);
+
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            focus_main_window(app);
+            for arg in argv {
+                if arg.starts_with("discourse://auth_redirect")
+                    || arg.starts_with("lindo://auth_redirect")
+                {
+                    let app_clone = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(eng) = app_clone.try_state::<Arc<BridgeEngine>>() {
+                            let _ = eng.handle_auth_redirect(&app_clone, &arg).await;
+                        }
+                    });
+                }
+            }
+        }))
+        .manage(engine)
+        .setup(|app| {
+            BridgeEngine::bind_app_handle(app.handle());
+            bridge::enable_high_refresh_and_smooth_wheel(false);
+            if let Some(main_win) = app.get_webview_window("main") {
+                let init_appearance = {
+                    app.try_state::<Arc<BridgeEngine>>()
+                        .map(|e| e.state.lock().unwrap().preferences.appearance.clone())
+                        .unwrap_or_else(|| "dark".to_string())
+                };
+                let theme_opt = match init_appearance.as_str() {
+                    "dark" => Some(Theme::Dark),
+                    "light" => Some(Theme::Light),
+                    _ => None,
+                };
+                let _ = main_win.set_theme(theme_opt);
+            }
+
+            // Tray menu setup
+            let open_item = MenuItem::with_id(app, "open_main", "打开 Lindo", true, None::<&str>)?;
+            let new_topic_item =
+                MenuItem::with_id(app, "new_topic", "发布新话题", true, None::<&str>)?;
+            let refresh_item =
+                MenuItem::with_id(app, "refresh_feed", "刷新动态", true, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit_item = MenuItem::with_id(app, "quit_app", "退出 Lindo", true, None::<&str>)?;
+            let tray_menu =
+                Menu::with_items(app, &[&open_item, &new_topic_item, &refresh_item, &sep, &quit_item])?;
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let _ = TrayIconBuilder::new()
+                    .icon(icon)
+                    .tooltip("Lindo — Linux.do 社区客户端")
+                    .menu(&tray_menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "open_main" => focus_main_window(app),
+                        "new_topic" => {
+                            focus_main_window(app);
+                            let _ = app.emit("lindo://tray-command", "new_topic");
+                        }
+                        "refresh_feed" => {
+                            focus_main_window(app);
+                            let _ = app.emit("lindo://tray-command", "refresh");
+                        }
+                        "quit_app" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            focus_main_window(tray.app_handle());
+                        }
+                    })
+                    .build(app);
+            }
+
+            // Check CLI args on cold start + initialize native bundle URL registration early
+            let startup_args: Vec<String> = std::env::args().collect();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(eng) = handle.try_state::<Arc<BridgeEngine>>() {
+                    let unread = { eng.state.lock().unwrap().unread_notifications };
+                    eng.set_dock_badge(unread).await;
+                    for arg in startup_args {
+                        if arg.starts_with("discourse://") || arg.starts_with("lindo://") {
+                            let _ = eng.handle_auth_redirect(&handle, &arg).await;
+                        }
+                    }
+                }
+            });
+            Ok(())
+        })
+        .on_window_event(|_window, _event| {
+            #[cfg(target_os = "macos")]
+            if _window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = _event {
+                    // Standard macOS native behavior: closing window hides to Dock/Tray instead of terminating process
+                    api.prevent_close();
+                    let _ = _window.hide();
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            bootstrap_state,
+            site_request,
+            site_upload,
+            site_fetch_media,
+            site_verify,
+            start_browser_auth,
+            update_current_user,
+            clear_expired_notice,
+            switch_account,
+            logout_account,
+            remove_saved_account,
+            add_account_web_login,
+            import_manual_credential,
+            open_in_app_forum_panel,
+            fetch_connect_page_html,
+            save_preferences,
+            record_read_floor,
+            clear_read_history,
+            save_local_draft,
+            delete_local_draft,
+            set_unread_badge,
+            check_app_update,
+            download_and_install_update,
+            export_diagnostic_log
+        ]);
+
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building Lindo Tauri application");
+
+    app.run(|app_handle, event| match event {
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => {
+            focus_main_window(app_handle);
+        }
+        #[cfg(target_os = "macos")]
+        RunEvent::Opened { urls } => {
+            focus_main_window(app_handle);
+            for u in urls {
+                let raw = u.to_string();
+                if raw.starts_with("discourse://") || raw.starts_with("lindo://") {
+                    let app_clone = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(eng) = app_clone.try_state::<Arc<BridgeEngine>>() {
+                            if let Err(err) = eng.handle_auth_redirect(&app_clone, &raw).await {
+                                let _ = app_clone.emit("lindo://auth-completing", false);
+                                let _ = app_clone.emit("lindo://auth-notice", err);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        _ => {
+            let _ = app_handle;
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_standard_github_release_assets_and_digest_across_macos_and_windows() {
+        let rel = serde_json::json!({
+            "tag_name": "v1.0.39",
+            "published_at": "2026-11-17T14:35:00Z",
+            "body": "## 更新说明\n- 楼层未读黄点平滑淡出\n- 纯 GitHub Release 三端自动升级",
+            "assets": [
+                {
+                    "name": "Lindo-1.0.39-macos-arm64.zip",
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.0.39/Lindo-1.0.39-macos-arm64.zip"
+                },
+                {
+                    "name": "Lindo-1.0.39-macos-x64.zip",
+                    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.0.39/Lindo-1.0.39-macos-x64.zip"
+                },
+                {
+                    "name": "Lindo-1.0.39-windows-x64-setup.exe",
+                    "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.0.39/Lindo-1.0.39-windows-x64-setup.exe"
+                },
+                {
+                    "name": "Lindo-1.0.39-windows-x64.msi",
+                    "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.0.39/Lindo-1.0.39-windows-x64.msi"
+                }
+            ]
+        });
+
+        let arm = parse_github_release_for_desktop(&rel, None, "1.0.38", "macos", "arm64");
+        assert!(arm.has_update);
+        assert_eq!(arm.latest_version, "1.0.39");
+        assert_eq!(arm.arch, "arm64");
+        assert_eq!(
+            arm.sha256,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(arm.notes.len(), 2);
+
+        let x64 = parse_github_release_for_desktop(&rel, None, "1.0.38", "macos", "x64");
+        assert!(x64.has_update);
+        assert_eq!(x64.arch, "x64");
+        assert!(x64.zip_url.ends_with("Lindo-1.0.39-macos-x64.zip"));
+        assert_eq!(
+            x64.sha256,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+
+        let win = parse_github_release_for_desktop(&rel, None, "1.0.38", "windows", "x64");
+        assert!(win.has_update);
+        assert_eq!(win.arch, "windows-x64");
+        assert!(win.zip_url.ends_with("Lindo-1.0.39-windows-x64-setup.exe"));
+        assert!(win.dmg_url.ends_with("Lindo-1.0.39-windows-x64.msi"));
+        assert_eq!(
+            win.sha256,
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_github_release_e2e_when_enabled() {
+        let mode = std::env::var("LINDO_LIVE_GH_RELEASE_MODE").unwrap_or_default();
+        if mode.is_empty() {
+            return;
+        }
+        let info = check_app_update()
+            .await
+            .expect("check_app_update should succeed against GitHub API");
+        println!("LIVE GH DESKTOP UPDATE INFO ({mode}): {info:?}");
+        if mode == "expect_empty" {
+            assert!(
+                !info.has_update,
+                "Expected no update when GitHub has 0 releases"
+            );
+            return;
+        }
+        if mode == "expect_update" {
+            assert!(info.has_update, "Expected has_update=true from live GitHub Release");
+            assert!(
+                info.zip_url.starts_with("https://github.com/lucaslus/LinDo/releases/download/"),
+                "Unexpected zip_url: {}",
+                info.zip_url
+            );
+            assert_eq!(info.sha256.len(), 64, "Expected 64-hex SHA-256 from GitHub Release");
+
+            let tmp = std::env::temp_dir().join("lindo_gh_live_e2e_test");
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).unwrap();
+            let zip_path = tmp.join("pkg.zip");
+
+            let (bytes, actual_sha) = stream_download_and_verify_sha256(
+                &info.zip_url,
+                &zip_path,
+                &info.sha256,
+                |_, _| {},
+            )
+            .await
+            .expect("Pure-Rust streaming download + SHA-256 verification failed");
+            assert!(bytes > 1024, "Downloaded zip seems unexpectedly small");
+            assert_eq!(actual_sha, info.sha256.to_ascii_lowercase());
+
+            #[cfg(target_os = "macos")]
+            {
+                let ext = tmp.join("extracted");
+                std::fs::create_dir_all(&ext).unwrap();
+                let unz = tokio::process::Command::new("/usr/bin/ditto")
+                    .args(["-x", "-k", zip_path.to_str().unwrap(), ext.to_str().unwrap()])
+                    .status()
+                    .await
+                    .unwrap();
+                assert!(unz.success(), "ditto extraction of downloaded zip failed");
+                assert!(
+                    ext.join("Lindo.app").exists(),
+                    "Extracted Lindo.app bundle must exist"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+}

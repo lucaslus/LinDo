@@ -109,8 +109,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 53
-        versionName = "0.2.32"
+        versionCode = 68
+        versionName = "0.2.34"
     }
 
     packaging {
@@ -171,7 +171,7 @@ compose.desktop {
             vendor = "Lindo Community"
 
             macOS {
-                packageBuildVersion = "1.0.53"
+                packageBuildVersion = "1.0.59"
                 bundleID = "do.linux.lindo"
                 iconFile.set(project.file("src/desktopMain/resources/icon.icns"))
                 infoPlist {
@@ -245,4 +245,21 @@ tasks.matching { it.name == "packageDmg" }.configureEach {
             }
         }
     }
+}
+
+// Compile the native WebKit host into desktop resources. Android never packages it.
+if (org.gradle.internal.os.OperatingSystem.current().isMacOsX) {
+    val webKitResources = layout.buildDirectory.dir("generated/webkitResources")
+    val buildMacWebKit by tasks.registering(Exec::class) {
+        val source = file("src/desktopMain/native/LindoWebView.m")
+        val output = webKitResources.map { it.file("native/libLindoWebView.dylib") }
+        inputs.file(source)
+        outputs.file(output)
+        doFirst { output.get().asFile.parentFile.mkdirs() }
+        commandLine("xcrun", "clang", "-dynamiclib", "-fobjc-arc", "-fblocks", "-O2",
+            "-mmacosx-version-min=11.0", "-framework", "Cocoa", "-framework", "WebKit",
+            source.absolutePath, "-o", output.get().asFile.absolutePath)
+    }
+    kotlin.sourceSets.getByName("desktopMain").resources.srcDir(webKitResources)
+    tasks.named("desktopProcessResources") { dependsOn(buildMacWebKit) }
 }

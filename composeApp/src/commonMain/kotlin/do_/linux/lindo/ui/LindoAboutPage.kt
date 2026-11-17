@@ -14,7 +14,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
+import do_.linux.lindo.core.update.AppUpdateManager
 import do_.linux.lindo.ui.components.LinDoIcons
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_brand_mark
 import org.jetbrains.compose.resources.painterResource
@@ -29,7 +32,17 @@ internal fun LindoAboutPage(
     onOpenDebugDiagnostics: () -> Unit = {}
 ) {
     val palette = LocalPalette.current
+    val scope = rememberCoroutineScope()
     var showLicenses by remember { mutableStateOf(false) }
+    var checkHint by remember { mutableStateOf<String?>(null) }
+    val updateInfo = AppUpdateManager.latestInfo
+    val checkingUpdate = AppUpdateManager.checking
+    LaunchedEffect(checkHint) {
+        if (checkHint != null) {
+            delay(2800L)
+            checkHint = null
+        }
+    }
     val (debugHint, onVersionTap) = rememberDebugUnlockTapState(onUnlocked = onOpenDebugDiagnostics)
     LinDoFullScreenPage(onBack = onDismiss) {
         LinDoPageTopBar(title = "关于 Lindo", onBack = onDismiss)
@@ -49,9 +62,40 @@ internal fun LindoAboutPage(
                         if (debugHint != null) Text(debugHint, fontSize = 12.sp, color = palette.activeChipText)
                     }
                 }
+                item {
+                    val statusValue = when {
+                        checkingUpdate -> "正在检查..."
+                        updateInfo?.hasUpdate == true -> "发现新版本 build ${updateInfo.latestVersionCode}"
+                        checkHint != null -> checkHint.orEmpty()
+                        updateInfo != null -> "当前最新"
+                        else -> ""
+                    }
+                    LinDoSettingRow(
+                        icon = LinDoIcons.Download,
+                        title = "检查更新",
+                        value = statusValue,
+                        onClick = {
+                            if (updateInfo?.hasUpdate == true) {
+                                AppUpdateManager.openDialog()
+                            } else if (!checkingUpdate) {
+                                scope.launch {
+                                    val res = AppUpdateManager.checkForUpdates(openDialogWhenAvailable = true)
+                                    res.onSuccess { info ->
+                                        if (!info.hasUpdate) {
+                                            checkHint = "已是最新版本 (build ${info.currentVersionCode})"
+                                        }
+                                    }.onFailure {
+                                        checkHint = "检查未成功，请稍后重试"
+                                    }
+                                }
+                            }
+                        }
+                    )
+                }
                 item { LinDoSettingRow(LinDoIcons.Globe, "项目主页", onClick = { onOpenLink(LINDO_PROJECT_URL) }) }
                 item { LinDoSettingRow(LinDoIcons.MessageCircle, "问题反馈", onClick = { onOpenLink("$LINDO_PROJECT_URL/issues") }) }
-                item { LinDoSettingRow(LinDoIcons.Code, "开源许可", showDivider = false, onClick = { showLicenses = true }) }
+                item { LinDoSettingRow(LinDoIcons.Code, "开源许可", onClick = { showLicenses = true }) }
+                item { LinDoSettingRow(LinDoIcons.FileText, "诊断与崩溃日志", showDivider = false, onClick = onOpenDebugDiagnostics) }
             }
         }
     }

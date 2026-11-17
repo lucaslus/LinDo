@@ -75,7 +75,7 @@ enum class LinDoCommonCopy(override val text: String) : LinDoCopyEntry {
     LOGIN("登录"),
     GO_LOGIN("去登录"),
     GO_VERIFY("去验证"),
-    OPEN_WEB_VERIFY("打开网页验证"),
+    OPEN_WEB_VERIFY("验证并继续"),
     BACK_TO_LIST("返回列表"),
     SELECTED("已选中"),
     NOT_SET("未设置"),

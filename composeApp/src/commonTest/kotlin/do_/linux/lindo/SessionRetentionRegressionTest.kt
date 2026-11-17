@@ -80,6 +80,53 @@ class SessionRetentionRegressionTest {
         assertNull(LinuxDoRepository.fetchCurrentUserProfile())
         assertFalse(UserApiKeyAuthManager.isAuthorized())
         assertTrue(SavedAccounts.accounts.single().needsLogin)
+        assertEquals("reader", UserApiKeyAuthManager.expiredSessionUsername)
+    }
+
+    @Test fun expiredSessionNoticeClearsOnReauthOrExplicitLogoutAndErrorKindPrioritizesRelogin() = runTest {
+        login()
+        UserApiKeyAuthManager.handleServerAuthInvalidated()
+        assertEquals("reader", UserApiKeyAuthManager.expiredSessionUsername)
+
+        // Even before local isAuthorized flips, explicit not_logged_in / expired copy must offer relogin rather than lacks-trust-level
+        assertEquals(
+            do_.linux.lindo.core.copy.UiErrorKind.GUEST_LOGIN_REQUIRED,
+            do_.linux.lindo.core.copy.UiErrorKind.classify("登录状态已过期，请重新登录", isAuthorized = true)
+        )
+        assertEquals(
+            do_.linux.lindo.core.copy.UiErrorKind.GUEST_LOGIN_REQUIRED,
+            do_.linux.lindo.core.copy.UiErrorKind.classify("""{"errors":["您需要登录才能执行此操作。"],"error_type":"not_logged_in"}""", isAuthorized = true)
+        )
+
+        UserApiKeyAuthManager.onSessionAuthenticated(user, "_t=fresh-token")
+        assertNull(UserApiKeyAuthManager.expiredSessionUsername)
+
+        UserApiKeyAuthManager.handleServerAuthInvalidated()
+        assertEquals("reader", UserApiKeyAuthManager.expiredSessionUsername)
+        UserApiKeyAuthManager.logout(removeSavedAccount = true)
+        assertNull(UserApiKeyAuthManager.expiredSessionUsername)
+    }
+
+    @Test fun webViewReadNotLoggedInWithLoggedInHeaderRetriesPublicReadWithoutHeader() = runTest {
+        login()
+        val seenLoggedInHeaders = mutableListOf<Boolean>()
+        UserApiKeyAuthManager.webViewHttpExecutor = { url, _, _, headers ->
+            when {
+                url.startsWith("https://linux.do/latest.json") -> {
+                    val hasLoggedInHdr = headers.containsKey("Discourse-Logged-In")
+                    seenLoggedInHeaders += hasLoggedInHdr
+                    if (hasLoggedInHdr) {
+                        403 to """{"errors":["You need to be logged in to do that."],"error_type":"not_logged_in"}"""
+                    } else {
+                        200 to """{"users":[],"topic_list":{"topics":[]}}"""
+                    }
+                }
+                else -> 200 to """{"current_user":$userJson}"""
+            }
+        }
+        val topics = LinuxDoRepository.fetchTopics("/latest.json")
+        assertTrue(topics.isEmpty())
+        assertEquals(listOf(true, false), seenLoggedInHeaders)
     }
     @Test fun guestHtmlDoesNotInvalidateAnApiKeyOnlyAccount() = runTest {
         SavedAccounts.configure(null) {}
@@ -129,9 +176,12 @@ class SessionRetentionRegressionTest {
     }
     @Test fun preloadParserSupportsLegacyAndRejectsChallengeAndMalformedHtml() {
         val legacy = "<div id='data-preloaded' data-preloaded='{\"currentUser\":$userJson}'></div>"
+        val modernAnonGuest = """<!DOCTYPE html><html lang="en" class="text-size-normal anon"><head><meta name="discourse_current_homepage" content="latest"></head><body><div id="data-preloaded" data-preloaded="{&quot;site&quot;:&quot;{}&quot;}"></div></body></html>"""
         assertIs<DiscourseSessionPage.Authenticated>(readDiscourseSessionPage(200, legacy))
         assertEquals(DiscourseSessionPage.Guest, readDiscourseSessionPage(200, guestPage))
+        assertEquals(DiscourseSessionPage.Guest, readDiscourseSessionPage(200, modernAnonGuest))
         assertEquals(DiscourseSessionPage.Unknown, readDiscourseSessionPage(200, "<html>Just a moment...</html>"))
+        assertEquals(DiscourseSessionPage.Unknown, readDiscourseSessionPage(200, "<div id='data-preloaded' data-preloaded='{}'></div>"))
         assertEquals(DiscourseSessionPage.Unknown, readDiscourseSessionPage(200, "<script id='data-preloaded'>broken</script>"))
         assertEquals(DiscourseSessionPage.Unknown, readDiscourseSessionPage(503, guestPage))
     }

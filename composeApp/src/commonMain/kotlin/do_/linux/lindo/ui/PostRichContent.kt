@@ -294,9 +294,8 @@ private fun SelectablePostText(
                 Row(
                     modifier = Modifier
                         .testTag("quote_and_reply_pill")
-                        .shadow(elevation = 8.dp, shape = pillShape)
-                        .clip(pillShape)
-                        .background(pillBg)
+                        .shadow(elevation = 8.dp, shape = pillShape, clip = false)
+                        .background(pillBg, pillShape)
                         .border(0.6.dp, Color.White.copy(alpha = 0.14f), pillShape)
                         .padding(horizontal = 4.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically,

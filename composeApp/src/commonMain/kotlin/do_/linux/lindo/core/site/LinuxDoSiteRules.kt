@@ -208,4 +208,249 @@ object LinuxDoSiteRules {
             isStaff = isStaff
         )
     }
+
+    /* ==================== 外链安全风险分级与白名单记忆（对齐官方 Web Theme #128） ==================== */
+
+    enum class ExternalUrlSafetyTier {
+        INTERNAL,
+        TRUSTED,
+        STANDARD,
+        RISKY,
+        BLOCKED
+    }
+
+    data class ExternalUrlAssessment(
+        val tier: ExternalUrlSafetyTier,
+        val normalizedUrl: String,
+        val hostname: String,
+        val canRememberHost: Boolean,
+        val riskReason: String? = null
+    )
+
+    private val shortLinkDomains = setOf(
+        "bit.ly",
+        "t.cn",
+        "tinyurl.com",
+        "dwz.cn",
+        "url.cn",
+        "is.gd",
+        "cutt.ly",
+        "rb.gy",
+        "reurl.cc",
+        "suo.im",
+        "shorturl.at",
+        "goo.gl",
+        "ow.ly",
+        "v.gd",
+        "tiny.cc",
+        "t.co",
+        "b23.tv"
+    )
+
+    private val typosquatBlockedDomains = setOf(
+        "linuxdo.com",
+        "linux-do.com",
+        "linuxdo.org",
+        "linux-do.org",
+        "linuxdo.net",
+        "linux-do.net",
+        "1inux.do",
+        "llnux.do",
+        "iinux.do",
+        "linux.d0"
+    )
+
+    private val rawIpv4HostRegex = Regex("""^\d{1,3}(?:\.\d{1,3}){3}$""")
+    private val trustedExternalHosts = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    @Volatile
+    var onPersistTrustedHosts: ((Set<String>) -> Unit)? = null
+
+    fun hydrateTrustedExternalHosts(hosts: Collection<String>) {
+        trustedExternalHosts.clear()
+        hosts.map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() && it !in shortLinkDomains }
+            .forEach { trustedExternalHosts.add(it) }
+    }
+
+    fun isTrustedExternalHost(hostname: String): Boolean {
+        val clean = hostname.trim().lowercase()
+        return clean.isNotEmpty() && trustedExternalHosts.contains(clean)
+    }
+
+    fun rememberTrustedExternalHost(hostname: String) {
+        val clean = hostname.trim().lowercase()
+        if (clean.isEmpty() || clean in shortLinkDomains) return
+        trustedExternalHosts.add(clean)
+        onPersistTrustedHosts?.invoke(trustedExternalHosts.toSet())
+    }
+
+    fun clearTrustedExternalHostsForTest() {
+        trustedExternalHosts.clear()
+    }
+
+    fun classifyExternalUrl(rawUrl: String, anchorDisplayText: String? = null): ExternalUrlAssessment {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.BLOCKED,
+                normalizedUrl = "",
+                hostname = "",
+                canRememberHost = false,
+                riskReason = "无效的空链接"
+            )
+        }
+        val lower = trimmed.lowercase()
+        if (
+            lower.startsWith("javascript:") ||
+            lower.startsWith("vbscript:") ||
+            lower.startsWith("data:") ||
+            lower.startsWith("file:") ||
+            lower.startsWith("blob:")
+        ) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.BLOCKED,
+                normalizedUrl = trimmed,
+                hostname = "",
+                canRememberHost = false,
+                riskReason = "已拦截不安全的脚本或本地协议链接"
+            )
+        }
+        if (lower.startsWith("mailto:")) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.INTERNAL,
+                normalizedUrl = trimmed,
+                hostname = "mailto",
+                canRememberHost = false
+            )
+        }
+
+        val resolved = resolveUrl(trimmed)
+        val uri = runCatching { java.net.URI(resolved) }.getOrNull()
+            ?: return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.BLOCKED,
+                normalizedUrl = trimmed,
+                hostname = "",
+                canRememberHost = false,
+                riskReason = "链接地址格式异常，无法安全解析"
+            )
+
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        if (scheme != "https" && scheme != "http") {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.BLOCKED,
+                normalizedUrl = resolved,
+                hostname = uri.host?.lowercase().orEmpty(),
+                canRememberHost = false,
+                riskReason = "不支持打开非网页协议 ($scheme)"
+            )
+        }
+
+        val host = uri.host?.lowercase().orEmpty()
+        if (host.isEmpty()) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.BLOCKED,
+                normalizedUrl = resolved,
+                hostname = "",
+                canRememberHost = false,
+                riskReason = "链接缺少有效域名"
+            )
+        }
+
+        val isOfficialInternal = host == "linux.do" ||
+            host.endsWith(".linux.do") ||
+            host == "ldstatic.com" ||
+            host.endsWith(".ldstatic.com")
+
+        if (isOfficialInternal) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.INTERNAL,
+                normalizedUrl = resolved,
+                hostname = host,
+                canRememberHost = false
+            )
+        }
+
+        val bareHost = host.removePrefix("www.")
+        if (host in typosquatBlockedDomains || bareHost in typosquatBlockedDomains) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.BLOCKED,
+                normalizedUrl = resolved,
+                hostname = host,
+                canRememberHost = false,
+                riskReason = "检测到疑似仿冒 LINUX DO 社区的混淆域名，已为您拦截访问"
+            )
+        }
+
+        val cleanAnchor = anchorDisplayText?.trim().orEmpty()
+        val anchorHostMatch = Regex("""^https?://([a-zA-Z0-9.-]+)(?:[/:?#]|$)""").find(cleanAnchor)
+        if (anchorHostMatch != null) {
+            val shownHost = anchorHostMatch.groupValues[1].lowercase().removePrefix("www.")
+            if (shownHost.isNotEmpty() && shownHost != bareHost && !bareHost.endsWith(".$shownHost")) {
+                return ExternalUrlAssessment(
+                    tier = ExternalUrlSafetyTier.RISKY,
+                    normalizedUrl = resolved,
+                    hostname = host,
+                    canRememberHost = false,
+                    riskReason = "链接文字显示为 $shownHost，但实际指向 $host，请警惕伪装链接"
+                )
+            }
+        }
+
+        if (host in shortLinkDomains || bareHost in shortLinkDomains) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.RISKY,
+                normalizedUrl = resolved,
+                hostname = host,
+                canRememberHost = false,
+                riskReason = "短链接跳转服务隐藏了最终目标站点，打开前请确认发帖人可信"
+            )
+        }
+
+        if (rawIpv4HostRegex.matches(host) || host.startsWith("[")) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.RISKY,
+                normalizedUrl = resolved,
+                hostname = host,
+                canRememberHost = false,
+                riskReason = "该链接直接指向裸 IP 地址而非经过认证的域名，请注意甄别"
+            )
+        }
+
+        if (host.contains("xn--")) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.RISKY,
+                normalizedUrl = resolved,
+                hostname = host,
+                canRememberHost = false,
+                riskReason = "检测到国际化编码域名 (Punycode)，请核对域名拼写以防同形异义字符仿冒"
+            )
+        }
+
+        if (scheme == "http") {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.RISKY,
+                normalizedUrl = resolved,
+                hostname = host,
+                canRememberHost = false,
+                riskReason = "该链接使用未加密的 HTTP 协议，请勿在目标页面输入任何账号或密码"
+            )
+        }
+
+        if (isTrustedExternalHost(host)) {
+            return ExternalUrlAssessment(
+                tier = ExternalUrlSafetyTier.TRUSTED,
+                normalizedUrl = resolved,
+                hostname = host,
+                canRememberHost = true
+            )
+        }
+
+        return ExternalUrlAssessment(
+            tier = ExternalUrlSafetyTier.STANDARD,
+            normalizedUrl = resolved,
+            hostname = host,
+            canRememberHost = true
+        )
+    }
 }

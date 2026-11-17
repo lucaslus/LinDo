@@ -28,14 +28,14 @@ import do_.linux.lindo.ui.components.SmartAvatar
 internal fun AccountSettingsColumn(content: @Composable ColumnScope.() -> Unit) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 600.dp).fillMaxWidth().verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 8.dp), content = content)
+            .padding(horizontal = 4.dp, vertical = 8.dp), content = content)
     }
 }
 
 @Composable
 internal fun AccountSection(title: String) {
     Text(title, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = LocalPalette.current.inkTertiary,
-        modifier = Modifier.padding(top = 24.dp, bottom = 6.dp))
+        modifier = Modifier.padding(horizontal = 16.dp).padding(top = 24.dp, bottom = 6.dp))
 }
 
 @Composable
@@ -48,8 +48,8 @@ internal fun AccountDetailRow(
 ) {
     val p = LocalPalette.current
     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
-        .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-        .padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        .then(if (onClick != null) Modifier.rowClickable(onClick = onClick) else Modifier)
+        .padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
                 color = if (destructive) Color(0xFFEF4444) else p.inkPrimary)
@@ -65,13 +65,13 @@ internal fun AccountDetailRow(
             Icon(LinDoIcons.ChevronRight, null, Modifier.size(15.dp), tint = p.inkTertiary)
         }
     }
-    HorizontalDivider(thickness = 0.5.dp, color = p.hairline)
+    HorizontalDivider(Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp, color = p.hairline)
 }
 
 @Composable
 internal fun AccountIdentity(user: AuthenticatedUserProfile) {
     val p = LocalPalette.current
-    Row(Modifier.fillMaxWidth().padding(vertical = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 20.dp), verticalAlignment = Alignment.CenterVertically) {
         SmartAvatar(username = user.username, avatarTemplate = user.avatarTemplate,
             animatedAvatar = user.animatedAvatar, size = 44.dp, enableAnimations = false)
         Spacer(Modifier.width(14.dp))
@@ -82,14 +82,14 @@ internal fun AccountIdentity(user: AuthenticatedUserProfile) {
                 color = p.inkSecondary, modifier = Modifier.padding(top = 4.dp))
         }
     }
-    HorizontalDivider(thickness = 0.5.dp, color = p.hairline)
+    HorizontalDivider(Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp, color = p.hairline)
 }
 
 @Composable
 private fun AccountPrivacySwitch(title: String, detail: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
     val p = LocalPalette.current
-    Row(Modifier.fillMaxWidth().toggleable(checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
-        .padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().rowToggleable(checked, enabled = enabled, onValueChange = onChange)
+        .padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, fontSize = 15.sp, lineHeight = 21.sp, color = p.inkPrimary)
             Text(detail, fontSize = 12.sp, lineHeight = 18.sp, color = p.inkSecondary,
@@ -99,7 +99,7 @@ private fun AccountPrivacySwitch(title: String, detail: String, checked: Boolean
         Switch(checked = checked, enabled = enabled, onCheckedChange = null,
             colors = SwitchDefaults.colors(checkedTrackColor = p.brandGold, checkedThumbColor = p.onAccent))
     }
-    HorizontalDivider(thickness = 0.5.dp, color = p.hairline)
+    HorizontalDivider(Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp, color = p.hairline)
 }
 
 internal fun associatedAccountLabel(raw: String): Pair<String, String?> {
@@ -189,8 +189,8 @@ internal fun AccountSessionContent(
             Column(Modifier.selectableGroup()) { accounts.forEach { account ->
                 val current = user?.username.equals(account.profile.username, true)
                 Row(Modifier.fillMaxWidth().heightIn(min = 76.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Row(Modifier.weight(1f).selectable(selected = current, role = Role.RadioButton) { if (!current) onSelectAccount(account.profile.username) }
-                        .padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.weight(1f).rowSelectable(selected = current) { if (!current || account.needsLogin) onSelectAccount(account.profile.username) }
+                        .padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                         SmartAvatar(username = account.profile.username, avatarTemplate = account.profile.avatarTemplate,
                             animatedAvatar = account.profile.animatedAvatar, size = 40.dp, enableAnimations = false)
                         Spacer(Modifier.width(12.dp))
@@ -200,15 +200,18 @@ internal fun AccountSessionContent(
                             Text("@${account.profile.username}", fontSize = 12.sp, color = LocalPalette.current.inkSecondary)
                             if (account.needsLogin) Text("需登录", fontSize = 12.sp, color = LocalPalette.current.inkSecondary)
                         }
+                        if (current) {
+                            Spacer(Modifier.width(12.dp))
+                            Icon(LinDoIcons.Check, "当前账号", Modifier.size(20.dp), tint = LocalPalette.current.brandGold)
+                        }
                     }
-                    if (current) Icon(LinDoIcons.Check, "当前账号", Modifier.size(20.dp), tint = LocalPalette.current.brandGold)
-                    else if (managing) TextButton(onClick = { removing = account.profile.username }) { Text("移除", color = LocalPalette.current.inkTertiary, fontSize = 12.sp) }
+                    if (!current && managing) TextButton(onClick = { removing = account.profile.username }) { Text("移除", color = LocalPalette.current.inkTertiary, fontSize = 12.sp) }
                 }
-                HorizontalDivider(thickness = 0.5.dp, color = LocalPalette.current.hairline)
+                HorizontalDivider(Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp, color = LocalPalette.current.hairline)
             } }
         } else if (user != null) AccountIdentity(user)
         if (!status.isNullOrBlank()) Text(status, color = LocalPalette.current.inkSecondary,
-            fontSize = 13.sp, lineHeight = 20.sp, modifier = Modifier.padding(vertical = 16.dp))
+            fontSize = 13.sp, lineHeight = 20.sp, modifier = Modifier.padding(16.dp))
         if (accounts.isNotEmpty()) {
             AccountDetailRow("添加账号", onClick = onAddAccount)
         } else {

@@ -1,6 +1,8 @@
 package do_.linux.lindo.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -8,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -33,11 +36,8 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import do_.linux.lindo.core.copy.DiscourseNotificationKind
@@ -50,6 +50,9 @@ import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.ui.components.LinDoIcons
 import do_.linux.lindo.ui.components.LocalLinDoNetworkRestoreVersion
 import do_.linux.lindo.ui.components.SmartAvatar
+import lindo.composeapp.generated.resources.Res
+import lindo.composeapp.generated.resources.lindo_linuxdo_mark
+import org.jetbrains.compose.resources.painterResource
 
 @Composable
 internal fun LinDoNotificationActions(
@@ -141,25 +144,58 @@ internal fun LinDoNotificationRow(
     }
     val actor = effectiveActorUsername
     val resolvedAvatarTemplate = effectiveAvatarTemplate
-    val activity = remember(effectiveItem, actor, palette.inkPrimary) {
-        buildAnnotatedString {
-            if (actor != null) {
-                val displayActor = effectiveItem.actingUsername
-                    .takeUnless { UserNotificationItem.CONSOLIDATED_NOTIFICATION_ACTOR_REGEX.matches(it.trim()) }
-                    ?: actor
-                withStyle(SpanStyle(color = palette.inkPrimary, fontWeight = FontWeight.SemiBold)) {
-                    append(displayActor)
-                }
-                append(" ")
-            }
-            append(effectiveItem.typeLabel)
+    val displayActor = remember(effectiveItem, actor) {
+        if (actor != null) {
+            effectiveItem.actingUsername
+                .takeUnless { UserNotificationItem.CONSOLIDATED_NOTIFICATION_ACTOR_REGEX.matches(it.trim()) }
+                ?: actor
+        } else {
+            ""
         }
     }
-    val title = effectiveItem.title
+
+    val primaryHeadline = remember(effectiveItem, actor, displayActor, notificationKind) {
+        when {
+            effectiveItem.isGroupedReply && actor == null ->
+                "${effectiveItem.count.coerceAtLeast(2)} 个回复"
+            notificationKind == DiscourseNotificationKind.GRANTED_BADGE ->
+                "获得徽章"
+            actor != null && effectiveItem.count > 1 &&
+                (notificationKind == DiscourseNotificationKind.LIKED ||
+                    notificationKind == DiscourseNotificationKind.LIKED_CONSOLIDATED) ->
+                "$displayActor 等 ${effectiveItem.count} 人"
+            actor != null -> displayActor
+            else -> "LINUX DO"
+        }
+    }
+
+    val title = effectiveItem.title.trim()
     val excerpt = effectiveItem.excerpt.takeUnless { it.isBlank() || it.equals(title, ignoreCase = true) }
+    val secondaryContent = remember(effectiveItem, notificationKind, title, excerpt) {
+        when {
+            notificationKind == DiscourseNotificationKind.GRANTED_BADGE ->
+                effectiveItem.badgeName.ifBlank { title.ifBlank { effectiveItem.typeLabel } }
+            title.isNotBlank() -> title
+            excerpt != null -> excerpt
+            else -> effectiveItem.typeLabel
+        }
+    }
+
+    val cornerIcon = remember(effectiveItem) { resolveNotificationCornerBadgeIcon(effectiveItem) }
+    val unreadRowTint = if (!effectiveItem.read) {
+        if (palette.isDark) Color(0xFF0E7490).copy(alpha = 0.22f) else Color(0xFF0EA5E9).copy(alpha = 0.08f)
+    } else {
+        Color.Transparent
+    }
+    val cutoutRingColor = if (!effectiveItem.read) {
+        if (palette.isDark) Color(0xFF122B35) else Color(0xFFE6F4FE)
+    } else {
+        palette.cardSurface
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth()
+            .background(unreadRowTint)
             .then(
                 if (onClick != null) {
                     Modifier
@@ -170,12 +206,12 @@ internal fun LinDoNotificationRow(
                 }
             )
             .semantics { stateDescription = if (effectiveItem.read) LinDoCommonCopy.READ.text else LinDoCommonCopy.UNREAD.text }
-            .padding(start = 12.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(start = 14.dp, end = 16.dp, top = 11.dp, bottom = 11.dp),
+        horizontalArrangement = Arrangement.spacedBy(11.dp),
         verticalAlignment = Alignment.Top
     ) {
         Box(
-            modifier = Modifier.size(48.dp).then(
+            modifier = Modifier.padding(top = 1.dp).size(40.dp).then(
                 if (actor != null && onInspectUser != null) {
                     Modifier
                         .pointerHoverIcon(PointerIcon.Hand)
@@ -196,7 +232,7 @@ internal fun LinDoNotificationRow(
                     avatarTemplate = resolvedAvatarTemplate,
                     animatedAvatar = effectiveItem.actingAnimatedAvatar,
                     primaryGroupName = effectiveItem.actingPrimaryGroupName,
-                    size = 36.dp,
+                    size = 38.dp,
                     enableAnimations = false
                 )
             } else if (!postAuthorResolveDone) {
@@ -204,57 +240,124 @@ internal fun LinDoNotificationRow(
                     username = "L",
                     avatarTemplate = null,
                     animatedAvatar = null,
-                    size = 36.dp,
+                    size = 38.dp,
                     enableAnimations = false
                 )
             } else {
-                val icon = resolveNotificationIcon(effectiveItem)
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(palette.subtleSurface),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp), tint = palette.inkSecondary)
-                }
+                Image(
+                    painter = painterResource(Res.drawable.lindo_linuxdo_mark),
+                    contentDescription = "LINUX DO",
+                    modifier = Modifier.size(38.dp).clip(CircleShape)
+                )
+            }
+
+            // 右上角镂空语义动作角标（对齐官方消息中心：未读天蓝圆底白标，已读深浅自适应切边）
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 3.dp, y = (-2).dp)
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(if (!effectiveItem.read) Color(0xFF0EA5E9) else cutoutRingColor)
+                    .border(1.5.dp, cutoutRingColor, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = cornerIcon,
+                    contentDescription = null,
+                    modifier = Modifier.size(10.5.dp),
+                    tint = if (!effectiveItem.read) {
+                        Color.White
+                    } else if (palette.isDark) {
+                        Color(0xFFE5E7EB)
+                    } else {
+                        Color(0xFF4B5563)
+                    }
+                )
             }
         }
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.5.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    activity, modifier = Modifier.weight(1f),
-                    color = palette.inkSecondary, fontSize = 13.sp, lineHeight = 18.sp,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                    primaryHeadline, modifier = Modifier.weight(1f),
+                    color = palette.inkPrimary, fontSize = 13.8.sp, lineHeight = 18.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (item.createdAtText.isNotBlank()) {
-                        Text(item.createdAtText, color = palette.inkSecondary, fontSize = 11.5.sp, maxLines = 1)
-                    }
-                    Box(
-                        Modifier.size(6.dp).background(
-                            if (item.read) Color.Transparent else palette.tabIndicatorColor,
-                            CircleShape
-                        )
-                    )
+                if (item.createdAtText.isNotBlank()) {
+                    Text(item.createdAtText, color = palette.inkTertiary, fontSize = 11.2.sp, maxLines = 1)
                 }
             }
-            if (title.isNotBlank()) {
+            if (secondaryContent.isNotBlank()) {
                 Text(
-                    title, color = palette.inkPrimary, fontSize = 14.sp, lineHeight = 20.sp,
-                    fontWeight = if (item.read) FontWeight.Normal else FontWeight.SemiBold,
+                    secondaryContent,
+                    color = if (item.read) palette.inkSecondary else palette.inkPrimary,
+                    fontSize = 13.6.sp, lineHeight = 19.5.sp,
+                    fontWeight = if (item.read) FontWeight.Normal else FontWeight.Medium,
                     maxLines = 2, overflow = TextOverflow.Ellipsis
-                )
-            }
-            excerpt?.let {
-                Text(
-                    it, color = palette.inkSecondary, fontSize = 12.sp, lineHeight = 17.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
             }
         }
     }
-    HorizontalDivider(Modifier.padding(start = 68.dp, end = 16.dp), thickness = 0.5.dp, color = palette.hairline)
+    HorizontalDivider(Modifier.padding(start = 65.dp, end = 16.dp), thickness = 0.5.dp, color = palette.hairline)
+}
+
+internal fun resolveNotificationCornerBadgeIcon(item: UserNotificationItem): ImageVector {
+    val rx = item.reactionIcon.trim().lowercase()
+    when (rx) {
+        "rocket" -> return LinDoIcons.BoostRocket
+        "+1", "thumbsup", "clap", "tieba_087" -> return LinDoIcons.ThumbUp
+        "fire", "flame" -> return LinDoIcons.Flame
+        "tada", "confetti_ball", "sparkles" -> return LinDoIcons.Sparkles
+        "laughing", "joy", "open_mouth", "hugs", "distorted_face" -> return LinDoIcons.Smile
+    }
+    val boostKeyword = LinDoNetworkCopy.NOTIF_BOOSTED_POST.text.take(2)
+    val isBoostLabel = item.typeLabel.contains(boostKeyword) ||
+        item.typeLabel.contains("boost", ignoreCase = true)
+    if (isBoostLabel) return LinDoIcons.BoostRocket
+
+    return when (DiscourseNotificationKind.fromCode(item.notificationType)) {
+        DiscourseNotificationKind.BOOST_LEGACY,
+        DiscourseNotificationKind.BOOST,
+        DiscourseNotificationKind.PLUGIN_BOOST -> LinDoIcons.BoostRocket
+
+        DiscourseNotificationKind.LIKED,
+        DiscourseNotificationKind.LIKED_CONSOLIDATED,
+        DiscourseNotificationKind.REACTION,
+        DiscourseNotificationKind.CIRCLE_REACTION,
+        DiscourseNotificationKind.PLUGIN_REACTION_EXT -> when {
+            item.isGroupedReply -> LinDoIcons.Reply
+            item.badgeId > 0 -> LinDoIcons.Trophy
+            else -> LinDoIcons.HeartFilled
+        }
+
+        DiscourseNotificationKind.REPLIED,
+        DiscourseNotificationKind.POSTED,
+        DiscourseNotificationKind.FOLLOWING_REPLIED,
+        DiscourseNotificationKind.PLUGIN_FOLLOW_POST,
+        DiscourseNotificationKind.WATCHING_FIRST_POST,
+        DiscourseNotificationKind.FOLLOWING_CREATED_TOPIC,
+        DiscourseNotificationKind.PLUGIN_FOLLOW_TOPIC -> LinDoIcons.Reply
+
+        DiscourseNotificationKind.QUOTED,
+        DiscourseNotificationKind.CHAT_QUOTED -> LinDoIcons.Quote
+
+        DiscourseNotificationKind.MENTIONED,
+        DiscourseNotificationKind.GROUP_MENTIONED,
+        DiscourseNotificationKind.CHAT_MENTION,
+        DiscourseNotificationKind.CHAT_GROUP_MENTION -> LinDoIcons.AtSign
+
+        DiscourseNotificationKind.PRIVATE_MESSAGE,
+        DiscourseNotificationKind.INVITED_TO_PRIVATE_MESSAGE,
+        DiscourseNotificationKind.GROUP_MESSAGE_SUMMARY -> LinDoIcons.Inbox
+
+        DiscourseNotificationKind.GRANTED_BADGE -> LinDoIcons.Trophy
+
+        DiscourseNotificationKind.WATCHING_CATEGORY_OR_TAG,
+        DiscourseNotificationKind.PLUGIN_FOLLOWED -> LinDoIcons.User
+
+        else -> resolveNotificationIcon(item)
+    }
 }
 
 internal fun resolveNotificationIcon(item: UserNotificationItem): ImageVector {

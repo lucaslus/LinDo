@@ -1,10 +1,10 @@
-name: Build macOS DMG (Apple Silicon arm64 & Intel x64)
+name: "[Legacy Compose JVM] Build macOS DMG"
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Optional existing GitHub Release tag to upload DMG assets to (e.g. v0.2.27-draft)"
+        description: "Optional existing GitHub Release tag"
         required: false
         type: string
       arch_filter:
@@ -12,9 +12,6 @@ on:
         required: false
         default: "all"
         type: string
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: write

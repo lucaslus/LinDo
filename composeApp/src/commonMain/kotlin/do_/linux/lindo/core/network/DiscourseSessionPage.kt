@@ -28,7 +28,11 @@ internal fun readDiscourseSessionPage(status: Int, body: String): DiscourseSessi
             !name.isNullOrBlank() && name != "linuxdo_user") {
             DiscourseSessionPage.Authenticated(user)
         } else if ((raw == null || raw is JsonNull || (raw is JsonPrimitive && raw.content == "null")) &&
-            data.isNotEmpty() && doc.selectFirst("meta[name=csrf-token]") != null) {
+            data.isNotEmpty() && (
+                data.containsKey("site") ||
+                    data.containsKey("siteSettings") ||
+                    doc.selectFirst("meta[name=csrf-token], meta[name=discourse_current_homepage], html.anon") != null
+            )) {
             DiscourseSessionPage.Guest
         } else DiscourseSessionPage.Unknown
     }.getOrDefault(DiscourseSessionPage.Unknown)

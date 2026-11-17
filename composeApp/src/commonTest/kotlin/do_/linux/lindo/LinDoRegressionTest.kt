@@ -201,4 +201,93 @@ class LinDoRegressionTest {
         assertTrue(url.contains("application_name=Lindo"), "Expected application_name=Lindo in $url")
         assertFalse(url.contains("application_name=LinDo"))
     }
+
+    @Test
+    fun externalUrlClassifierEnforcesSafetyTiersAndBlocksDisguisesAndShortenersFromTrust() {
+        LinuxDoSiteRules.clearTrustedExternalHostsForTest()
+        try {
+            assertEquals(
+                LinuxDoSiteRules.ExternalUrlSafetyTier.INTERNAL,
+                LinuxDoSiteRules.classifyExternalUrl("https://connect.linux.do/").tier
+            )
+            assertEquals(
+                LinuxDoSiteRules.ExternalUrlSafetyTier.BLOCKED,
+                LinuxDoSiteRules.classifyExternalUrl("javascript:alert(1)").tier
+            )
+            assertEquals(
+                LinuxDoSiteRules.ExternalUrlSafetyTier.BLOCKED,
+                LinuxDoSiteRules.classifyExternalUrl("https://linux-do.com/login").tier
+            )
+
+            val github = LinuxDoSiteRules.classifyExternalUrl("https://github.com/lucaslus/LinDo")
+            assertEquals(LinuxDoSiteRules.ExternalUrlSafetyTier.STANDARD, github.tier)
+            assertTrue(github.canRememberHost)
+
+            LinuxDoSiteRules.rememberTrustedExternalHost("github.com")
+            assertEquals(
+                LinuxDoSiteRules.ExternalUrlSafetyTier.TRUSTED,
+                LinuxDoSiteRules.classifyExternalUrl("https://github.com/lucaslus/LinDo").tier
+            )
+
+            // Disguised link text pointing to another domain must escalate to RISKY even if target is HTTPS
+            val disguised = LinuxDoSiteRules.classifyExternalUrl(
+                "https://evil-mirror.example/repo",
+                anchorDisplayText = "https://github.com/lucaslus/LinDo"
+            )
+            assertEquals(LinuxDoSiteRules.ExternalUrlSafetyTier.RISKY, disguised.tier)
+            assertFalse(disguised.canRememberHost)
+
+            // Shorteners, raw IP, Punycode, and HTTP must be RISKY and shorteners must never be trusted
+            val shortener = LinuxDoSiteRules.classifyExternalUrl("https://bit.ly/3xyz")
+            assertEquals(LinuxDoSiteRules.ExternalUrlSafetyTier.RISKY, shortener.tier)
+            assertFalse(shortener.canRememberHost)
+            LinuxDoSiteRules.rememberTrustedExternalHost("bit.ly")
+            assertFalse(LinuxDoSiteRules.isTrustedExternalHost("bit.ly"))
+
+            assertEquals(
+                LinuxDoSiteRules.ExternalUrlSafetyTier.RISKY,
+                LinuxDoSiteRules.classifyExternalUrl("https://198.51.100.42/test").tier
+            )
+            assertEquals(
+                LinuxDoSiteRules.ExternalUrlSafetyTier.RISKY,
+                LinuxDoSiteRules.classifyExternalUrl("https://xn--80ak6aa92e.com/").tier
+            )
+            assertEquals(
+                LinuxDoSiteRules.ExternalUrlSafetyTier.RISKY,
+                LinuxDoSiteRules.classifyExternalUrl("http://example.com/plain").tier
+            )
+        } finally {
+            LinuxDoSiteRules.clearTrustedExternalHostsForTest()
+        }
+    }
+
+    @Test
+    fun flagPostSendsOfficialDiscoursePostActionPayload() = runTest {
+        val prev = UserApiKeyAuthManager.webViewHttpExecutor
+        var capturedUrl = ""
+        var capturedMethod = ""
+        var capturedForm: Map<String, String>? = null
+        try {
+            UserApiKeyAuthManager.webViewHttpExecutor = { url, method, form, _ ->
+                capturedUrl = url
+                capturedMethod = method
+                capturedForm = form
+                200 to """{"id":9876}"""
+            }
+            val ok = do_.linux.lindo.core.network.LinuxDoRepository.flagPost(
+                postId = 9876,
+                flagTypeId = 7,
+                message = "版主好，此楼包含违规引流内容请核查"
+            )
+            assertTrue(ok)
+            assertEquals("https://linux.do/post_actions.json", capturedUrl)
+            assertEquals("POST", capturedMethod)
+            assertEquals("9876", capturedForm?.get("id"))
+            assertEquals("7", capturedForm?.get("post_action_type_id"))
+            assertEquals("false", capturedForm?.get("flag_topic"))
+            assertEquals("版主好，此楼包含违规引流内容请核查", capturedForm?.get("message"))
+        } finally {
+            UserApiKeyAuthManager.webViewHttpExecutor = prev
+        }
+    }
 }

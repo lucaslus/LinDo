@@ -188,3 +188,12 @@ build 53 已将单层承载面板实现为公共组件 `VerificationPageSurface`
 - `composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LindoAboutPage.kt`、`LinDoBrand.kt`：品牌使用。
 - `composeApp/src/commonMain/kotlin/do_/linux/lindo/ui/LinDoInputDecoration.kt`：输入文字与提示文字基线对齐。
 - `docs/cloudflare-font-review-2026-11-15.md`：当前字号档位与验证恢复说明。
+
+### 交互行的边界（build 56）
+
+- 页面外边距与行内边距分别处理：悬停/按下背景内部也必须留白。账号页保持原有 20dp 内容对齐线，改由外层 4dp + 行内 16dp 组成。
+- 平铺操作行共用 `RowInteraction.kt` 的悬停、按下、键盘焦点反馈。背景保持平直、低对比，不为 hover 新增卡片或大圆角；状态在绘制阶段读取，避免整条内容因 hover 重新组合。
+- 可见选项较小时可以保留 48dp 触摸范围，但反馈绘制在可见选项内部，不能出现内圆外方的第二块底色。
+- 账号的头像、文字与当前勾选属于同一选择区域；移除操作独立。
+- 统计只展示服务端提供的字段。累计访问使用 `days_visited`；社区分数使用官方 `gamification_score`，不等同于 Credit 余额。加入天数按注册 UTC 日期计算并包含注册当天。缺失值不当作零；累计访问不能反推连续访问。
+- 数据导出沿用 Discourse `user_archive` 服务端作业，单次提交，完成后通过站内私信下载。每日限额和异常不触发自动重试；逐日记录可用于后续连续访问分析。

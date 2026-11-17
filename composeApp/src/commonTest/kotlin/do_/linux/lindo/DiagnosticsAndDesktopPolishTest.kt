@@ -100,7 +100,7 @@ class DiagnosticsAndDesktopPolishTest {
 
             val report = LinDoDiagnosticLogger.buildExportReport()
             assertTrue(report.contains("Lindo Diagnostic & Crash Log Report"))
-            assertTrue(report.contains("Version: Lindo v0.2.32"))
+            assertTrue(report.contains("Version: Lindo v${LinDoDiagnosticLogger.APP_VERSION_NAME}"))
             assertTrue(report.contains("cfRay=8f12ab34cd-SJC"))
             assertTrue(report.contains("IllegalStateException"))
 
@@ -288,7 +288,7 @@ class DiagnosticsAndDesktopPolishTest {
         assertEquals("Lv.3 活跃会员", DiscourseTrustLevel.displayLabel(3))
         assertEquals("已关闭此话题", SmallActionKind.localize("closed.enabled"))
         assertTrue(SpecialUserGroup.fromGroupName("g-merchant2").usesMerchantBadgeStyle)
-        assertEquals(ReaderFontScalePreset.MINIMUM, ReaderFontScalePreset.fromScale(0.85f))
+        assertEquals(ReaderFontScalePreset.MINIMUM, ReaderFontScalePreset.fromScale(ReaderFontScalePreset.MINIMUM.scale))
         assertEquals(DebugPreviewScene.NOTIFICATIONS, DebugPreviewScene.fromKey("notifications"))
     }
 

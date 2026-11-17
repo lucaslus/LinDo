@@ -117,7 +117,6 @@ import javax.imageio.ImageIO
 import javax.swing.RootPaneContainer
 import javax.swing.SwingUtilities
 import kotlin.math.abs
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sign
@@ -735,13 +734,13 @@ private object DesktopStateStore {
                 rawSetCookie.contains("_forum_session=")
             ) {
                 val cookies = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
-                update {
+                update(immediate = true) {
                     putOrRemove("raw_cookies", cookies.takeIf { it.isNotBlank() })
                 }
             }
         }
         UserApiKeyAuthManager.onPersistSession = { currentProfile, apiKey ->
-            update {
+            update(immediate = true) {
                 putOrRemove("api_key", apiKey)
                 putOrRemove("custom_user_agent", UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() })
                 val cookies = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
@@ -791,8 +790,8 @@ private object DesktopStateStore {
 }
 
 /**
- * Ghostty 风格一体化窗口栏配置：
- * 隐藏独立系统灰白标题栏文字与底色，使应用画布延伸至整个窗口顶部，并将窗口边框外观（Aqua / DarkAqua）与当前主题实时同步。
+ * Use a quiet, theme-matched native title bar. AppKit owns dragging, double-click
+ * behavior and fullscreen; the Compose canvas starts below the system decorations.
  */
 private fun applyMacSeamlessWindowChrome(window: AwtWindow?, isDark: Boolean) {
     if (!IS_MAC_OS) return
@@ -808,125 +807,11 @@ private fun applyMacSeamlessWindowChrome(window: AwtWindow?, isDark: Boolean) {
     runCatching {
         rootPane.background = bg
         rootPane.putClientProperty("apple.awt.windowAppearance", appearance)
-        rootPane.putClientProperty("apple.awt.fullWindowContent", true)
+        // Keep the title bar outside the Skia canvas: AppKit owns dragging and zoom.
+        rootPane.putClientProperty("apple.awt.fullWindowContent", false)
         rootPane.putClientProperty("apple.awt.transparentTitleBar", true)
         rootPane.putClientProperty("apple.awt.windowTitleVisible", false)
         rootPane.putClientProperty("apple.awt.fullscreenable", true)
-    }
-}
-
-private fun isMacWindowNativeFullScreen(window: AwtWindow): Boolean {
-    if (!IS_MAC_OS) return false
-    val gc = window.graphicsConfiguration ?: return false
-    val screenBounds = gc.bounds ?: return false
-    return window.width >= screenBounds.width && window.height >= screenBounds.height &&
-        abs(window.x - screenBounds.x) <= 2 && abs(window.y - screenBounds.y) <= 2
-}
-
-/**
- * 为一体化无标题栏窗口顶部区域（避开左侧 🔴🟡🟢 红绿灯）提供原生顺滑拖拽移动与双击缩放支持，
- * 同时仅在指针实际产生 >= 4px 位移时才接管拖拽，不拦截顶部右侧按钮（如登录、收藏、菜单）的正常点击。
- */
-private fun installMacTitleBarDragSupport(
-    window: AwtWindow,
-    dragZoneHeightPt: Int = 28,
-    trafficLightsRightClearancePt: Int = 74
-): () -> Unit {
-    if (!IS_MAC_OS) return {}
-    var armedInTitleZone = false
-    var draggingWindow = false
-    var pressScreenX = 0
-    var pressScreenY = 0
-    var startWindowX = 0
-    var startWindowY = 0
-    var restoreBoundsBeforeZoom: Rectangle? = null
-
-    val listener = AWTEventListener { rawEvent ->
-        val me = rawEvent as? MouseEvent ?: return@AWTEventListener
-        val src = me.component ?: return@AWTEventListener
-        val ownerWindow = if (src is AwtWindow) src else SwingUtilities.getWindowAncestor(src)
-        if (ownerWindow !== window) return@AWTEventListener
-        if (isMacWindowNativeFullScreen(window)) {
-            armedInTitleZone = false
-            draggingWindow = false
-            return@AWTEventListener
-        }
-
-        val ptInWin = runCatching { SwingUtilities.convertPoint(src, me.point, window) }.getOrNull() ?: return@AWTEventListener
-        val inTopDragBand = ptInWin.y in 0..dragZoneHeightPt && ptInWin.x >= trafficLightsRightClearancePt
-
-        when (me.id) {
-            MouseEvent.MOUSE_PRESSED -> {
-                if (SwingUtilities.isLeftMouseButton(me) && inTopDragBand) {
-                    armedInTitleZone = true
-                    draggingWindow = false
-                    pressScreenX = me.xOnScreen
-                    pressScreenY = me.yOnScreen
-                    startWindowX = window.x
-                    startWindowY = window.y
-                } else {
-                    armedInTitleZone = false
-                    draggingWindow = false
-                }
-            }
-            MouseEvent.MOUSE_DRAGGED -> {
-                if (armedInTitleZone) {
-                    val dx = me.xOnScreen - pressScreenX
-                    val dy = me.yOnScreen - pressScreenY
-                    if (!draggingWindow && (abs(dx) + abs(dy) >= 4)) {
-                        draggingWindow = true
-                    }
-                    if (draggingWindow) {
-                        window.setLocation(startWindowX + dx, startWindowY + dy)
-                        me.consume()
-                    }
-                }
-            }
-            MouseEvent.MOUSE_RELEASED -> {
-                val wasDragging = draggingWindow
-                armedInTitleZone = false
-                draggingWindow = false
-                if (wasDragging) {
-                    me.consume()
-                }
-            }
-            MouseEvent.MOUSE_CLICKED -> {
-                if (SwingUtilities.isLeftMouseButton(me) && me.clickCount == 2 && inTopDragBand && window is Frame) {
-                    val gc = window.graphicsConfiguration
-                    val insets = if (gc != null) Toolkit.getDefaultToolkit().getScreenInsets(gc) else null
-                    val screenBounds = gc?.bounds
-                    if (screenBounds != null && insets != null) {
-                        val maxRect = Rectangle(
-                            screenBounds.x + insets.left,
-                            screenBounds.y + insets.top,
-                            screenBounds.width - insets.left - insets.right,
-                            screenBounds.height - insets.top - insets.bottom
-                        )
-                        val cur = window.bounds
-                        val nearlyZoomed = abs(cur.width - maxRect.width) <= 24 && abs(cur.height - maxRect.height) <= 24
-                        if (nearlyZoomed && restoreBoundsBeforeZoom != null) {
-                            window.bounds = restoreBoundsBeforeZoom!!
-                            restoreBoundsBeforeZoom = null
-                        } else {
-                            restoreBoundsBeforeZoom = Rectangle(cur)
-                            window.bounds = maxRect
-                        }
-                    } else {
-                        window.extendedState = if (window.extendedState == Frame.MAXIMIZED_BOTH) {
-                            Frame.NORMAL
-                        } else {
-                            Frame.MAXIMIZED_BOTH
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    val mask = AWTEvent.MOUSE_EVENT_MASK or AWTEvent.MOUSE_MOTION_EVENT_MASK
-    Toolkit.getDefaultToolkit().addAWTEventListener(listener, mask)
-    return {
-        runCatching { Toolkit.getDefaultToolkit().removeAWTEventListener(listener) }
     }
 }
 
@@ -977,8 +862,12 @@ internal object DesktopSmoothWheelEngine {
     private val frameRequests = Channel<Unit>(Channel.CONFLATED)
 
     // 以下状态仅在 AWT EventDispatchThread（亦即 Compose Desktop UI 主线程）访问
-    private var remainingUnitsY: Double = 0.0
-    private var remainingUnitsX: Double = 0.0
+    private val motionY = WheelScrollMotion(initialLeadUnits = if (IS_MAC_OS) 0.2 else 0.0)
+    private val motionX = WheelScrollMotion(initialLeadUnits = if (IS_MAC_OS) 0.2 else 0.0)
+    private var lastNotchDirection = 0.0
+    private var lastNotchHorizontal = false
+    private var pendingStepY = 0.0
+    private var pendingStepX = 0.0
     private var lastFrameNano: Long = 0L
     private var lastRawEventMs: Long = 0L
     private var lastNotchMs: Long = 0L
@@ -994,12 +883,16 @@ internal object DesktopSmoothWheelEngine {
 
     fun attachToWindow(window: AwtWindow?) {
         if (trackedWindow !== window) {
-            remainingUnitsY = 0.0
-            remainingUnitsX = 0.0
+            motionY.reset()
+            motionX.reset()
+            pendingStepY = 0.0
+            pendingStepX = 0.0
             lastFrameNano = 0L
             lastRawEventMs = 0L
             lastNotchMs = 0L
             fastNotchVelocity = 1.0
+            lastNotchDirection = 0.0
+            lastNotchHorizontal = false
             trackpadGestureActive = false
             anchorComponent = null
             while (frameRequests.tryReceive().isSuccess) { }
@@ -1032,7 +925,8 @@ internal object DesktopSmoothWheelEngine {
                 do {
                     val keepGoing = withFrameNanos { frameTimeNanos ->
                         while (frameRequests.tryReceive().isSuccess) { /* coalesce wakeups, not motion */ }
-                        stepOnVsyncFrame(frameTimeNanos)
+                        val moving = stepOnVsyncFrame(frameTimeNanos)
+                        ScrollFrameProbe.frame(frameTimeNanos) || moving
                     }
                 } while (keepGoing)
             }
@@ -1150,11 +1044,16 @@ internal object DesktopSmoothWheelEngine {
             trackpadGestureActive = true
         }
 
-        if (!isDiscreteMouseWheelNotch(rawInt, rawPrecise, dtMs, trackpadGestureActive, IS_MAC_OS)) {
-            if (remainingUnitsY != 0.0 || remainingUnitsX != 0.0) {
-                remainingUnitsY = 0.0
-                remainingUnitsX = 0.0
-            }
+        val discreteNotch = isDiscreteMouseWheelNotch(rawInt, rawPrecise, dtMs, trackpadGestureActive, IS_MAC_OS)
+        if (ScrollFrameProbe.enabled) {
+            ScrollFrameProbe.input(event, discreteNotch)
+            frameRequests.trySend(Unit)
+        }
+        if (!discreteNotch) {
+            motionY.reset()
+            motionX.reset()
+            pendingStepY = 0.0
+            pendingStepX = 0.0
             return false
         }
 
@@ -1166,7 +1065,12 @@ internal object DesktopSmoothWheelEngine {
 
         val notchGapMs = if (lastNotchMs == 0L) Long.MAX_VALUE else (nowMs - lastNotchMs).coerceAtLeast(0L)
         lastNotchMs = nowMs
+        val changedDirection = direction != lastNotchDirection || event.isShiftDown != lastNotchHorizontal
+        lastNotchDirection = direction
+        lastNotchHorizontal = event.isShiftDown
         fastNotchVelocity = when {
+            IS_MAC_OS -> 1.0 // macOS already adjusts wheel deltas; avoid a second burst accelerator.
+            changedDirection -> 1.0
             notchGapMs <= 45L -> (fastNotchVelocity * 1.28).coerceAtMost(2.55)
             notchGapMs <= 95L -> (fastNotchVelocity * 1.14).coerceAtMost(2.10)
             notchGapMs <= 180L -> max(1.0, fastNotchVelocity * 0.90)
@@ -1187,17 +1091,12 @@ internal object DesktopSmoothWheelEngine {
         anchorYAbs = event.yOnScreen
         anchorBaseModifiers = event.modifiersEx and InputEvent.SHIFT_DOWN_MASK.inv()
 
-        if (event.isShiftDown) {
-            if (remainingUnitsX != 0.0 && sign(remainingUnitsX) != direction) {
-                remainingUnitsX = 0.0
-            }
-            remainingUnitsX = (remainingUnitsX + deltaUnits).coerceIn(-120.0, 120.0)
-        } else {
-            if (remainingUnitsY != 0.0 && sign(remainingUnitsY) != direction) {
-                remainingUnitsY = 0.0
-            }
-            remainingUnitsY = (remainingUnitsY + deltaUnits).coerceIn(-140.0, 140.0)
+        val motion = if (event.isShiftDown) motionX else motionY
+        if (changedDirection) {
+            if (event.isShiftDown) pendingStepX = 0.0 else pendingStepY = 0.0
         }
+        val lead = motion.add(deltaUnits, limit = if (event.isShiftDown) 120.0 else 140.0)
+        if (lead != 0.0) dispatchSyntheticWheelStep(src, lead, horizontal = event.isShiftDown)
 
         if (lastFrameNano == 0L) activeTargetHz = resolveTargetRefreshHz(targetWindow)
         frameRequests.trySend(Unit)
@@ -1207,8 +1106,10 @@ internal object DesktopSmoothWheelEngine {
     private fun stepOnVsyncFrame(frameTimeNanos: Long): Boolean {
         val comp = anchorComponent
         if (comp == null || !comp.isShowing) {
-            remainingUnitsY = 0.0
-            remainingUnitsX = 0.0
+            motionY.reset()
+            motionX.reset()
+            pendingStepY = 0.0
+            pendingStepX = 0.0
             lastFrameNano = 0L
             return false
         }
@@ -1216,39 +1117,15 @@ internal object DesktopSmoothWheelEngine {
         val dtSec = if (lastFrameNano == 0L) {
             1.0 / activeTargetHz.coerceIn(60, 240).toDouble()
         } else {
-            ((frameTimeNanos - lastFrameNano) / 1_000_000_000.0).coerceIn(0.002, 0.032)
+            ((frameTimeNanos - lastFrameNano) / 1_000_000_000.0).coerceAtLeast(0.0)
         }
         lastFrameNano = frameTimeNanos
 
-        // 指数弹簧阻尼系数 k = 22.0：锁定真实 VSync 帧间隔推进子像素步长
-        val alpha = 1.0 - exp(-dtSec * 22.0)
-
-        var active = false
-        if (abs(remainingUnitsY) > 0.012) {
-            val stepY = if (abs(remainingUnitsY) < 0.045) {
-                remainingUnitsY
-            } else {
-                remainingUnitsY * alpha
-            }
-            remainingUnitsY -= stepY
-            dispatchSyntheticWheelStep(comp, stepY, horizontal = false)
-            if (abs(remainingUnitsY) > 0.012) active = true else remainingUnitsY = 0.0
-        } else {
-            remainingUnitsY = 0.0
-        }
-
-        if (abs(remainingUnitsX) > 0.012) {
-            val stepX = if (abs(remainingUnitsX) < 0.045) {
-                remainingUnitsX
-            } else {
-                remainingUnitsX * alpha
-            }
-            remainingUnitsX -= stepX
-            dispatchSyntheticWheelStep(comp, stepX, horizontal = true)
-            if (abs(remainingUnitsX) > 0.012) active = true else remainingUnitsX = 0.0
-        } else {
-            remainingUnitsX = 0.0
-        }
+        val stepY = motionY.advance(dtSec)
+        if (stepY != 0.0) dispatchSyntheticWheelStep(comp, stepY, horizontal = false)
+        val stepX = motionX.advance(dtSec)
+        if (stepX != 0.0) dispatchSyntheticWheelStep(comp, stepX, horizontal = true)
+        val active = motionY.isActive || motionX.isActive
 
         if (!active) {
             lastFrameNano = 0L
@@ -1257,8 +1134,15 @@ internal object DesktopSmoothWheelEngine {
     }
 
     private fun dispatchSyntheticWheelStep(comp: Component, units: Double, horizontal: Boolean) {
-        // 确保 preciseWheelRotation 与 wheelRotation(0) 差值 > 0.001，触发 Compose 子像素即时位移分支
-        val safeUnits = if (abs(units) < 0.002) sign(units) * 0.002 else units
+        // Compose ignores deltas below 0.5 physical pixels. Accumulate these rather
+        // than dispatching/inflating tiny events that repeatedly restart scroll work.
+        val safeUnits = units + if (horizontal) pendingStepX else pendingStepY
+        val minimumUnits = if (IS_MAC_OS) 0.05 else 0.002
+        if (abs(safeUnits) < minimumUnits) {
+            if (horizontal) pendingStepX = safeUnits else pendingStepY = safeUnits
+            return
+        }
+        if (horizontal) pendingStepX = 0.0 else pendingStepY = 0.0
         val mods = if (horizontal) {
             anchorBaseModifiers or InputEvent.SHIFT_DOWN_MASK
         } else {
@@ -1792,7 +1676,7 @@ fun main(args: Array<String> = emptyArray()) {
     }
     if (IS_MAC_OS) {
         MacDesktopSettings.install(DesktopStateStore.load()) { change -> DesktopStateStore.update(mutator = change) }
-        MacBrowserTransport.install(DesktopStateStore.load().getProperty("mac_browser_session") == "true", { enabled ->
+        MacBrowserTransport.install({ enabled ->
             DesktopStateStore.update { setProperty("mac_browser_session", enabled.toString()) }
         }, { currentMainWindow?.apply { isVisible = true; toFront(); requestFocus() } })
     } else {
@@ -1837,7 +1721,6 @@ fun main(args: Array<String> = emptyArray()) {
             position = WindowPosition.Aligned(Alignment.Center)
         )
         var isWindowVisible by remember { mutableStateOf(true) }
-        var isMacFullScreen by remember { mutableStateOf(false) }
         var trayInstalled by remember { mutableStateOf(false) }
         var pendingTrayCommand by remember { mutableStateOf<DesktopTrayCommand?>(null) }
         var activeWindowRef by remember { mutableStateOf<AwtWindow?>(null) }
@@ -1959,7 +1842,6 @@ fun main(args: Array<String> = emptyArray()) {
                 applyDesktopMinimumWindowSize(window)
                 applyMacSeamlessWindowChrome(window, isDark = UserApiKeyAuthManager.uiDarkTheme)
                 DesktopSmoothWheelEngine.attachToWindow(window)
-                val removeDrag = installMacTitleBarDragSupport(window)
                 val removeMouseBack = installDesktopMouseBackSupport(window)
                 if (latestUnreadCount > 0) {
                     DesktopTrayController.updateUnreadState(latestUnreadCount, latestUsername, window)
@@ -1968,11 +1850,6 @@ fun main(args: Array<String> = emptyArray()) {
                 val compListener = object : ComponentAdapter() {
                     override fun componentResized(e: ComponentEvent?) {
                         applyDesktopMinimumWindowSize(window)
-                        isMacFullScreen = isMacWindowNativeFullScreen(window)
-                    }
-
-                    override fun componentMoved(e: ComponentEvent?) {
-                        isMacFullScreen = isMacWindowNativeFullScreen(window)
                     }
                 }
                 val winListener = object : WindowAdapter() {
@@ -1984,10 +1861,8 @@ fun main(args: Array<String> = emptyArray()) {
                 }
                 window.addComponentListener(compListener)
                 window.addWindowListener(winListener)
-                isMacFullScreen = isMacWindowNativeFullScreen(window)
 
                 onDispose {
-                    removeDrag()
                     removeMouseBack()
                     window.removeComponentListener(compListener)
                     window.removeWindowListener(winListener)
@@ -2008,7 +1883,8 @@ fun main(args: Array<String> = emptyArray()) {
                 }
             }
 
-            val topTitleInset = if (IS_MAC_OS && !isMacFullScreen) 28.dp else 0.dp
+            // Native decorations reserve their own height, including fullscreen transitions.
+            val topTitleInset = 0.dp
             DesktopSmoothWheelEngine.VSyncDriver()
             Box(
                 modifier = Modifier

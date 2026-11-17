@@ -544,10 +544,19 @@ class DesktopPolishV0232RegressionTest {
             onEdt { onNodeWithText("889900.json", substring = true).assertIsDisplayed() }
 
             // Export .log file via platform save handler
-            onEdt { onNodeWithText("导出 .log 文件").performClick() }
+            onEdt { onNodeWithTag("debug_export_logs_btn").performClick() }
             waitUntil(timeoutMillis = 3_000L) { exportedText != null }
             assertNotNull(exportedText)
             assertTrue(exportedText!!.contains("test-ray-999"))
+
+            // Clear diagnostic logs from DebugDiagnosticsSheet confirm dialog
+            onEdt { onNodeWithTag("debug_clear_logs_btn").performClick() }
+            waitUntil(timeoutMillis = 3_000L) {
+                onEdt { onAllNodesWithText(do_.linux.lindo.core.copy.LinDoMessagesCopy.CLEAR_LOGS_ACTION.text).fetchSemanticsNodes().isNotEmpty() }
+            }
+            onEdt { onNodeWithText(do_.linux.lindo.core.copy.LinDoMessagesCopy.CLEAR_LOGS_ACTION.text).performClick() }
+            waitUntil(timeoutMillis = 3_000L) { LinDoDiagnosticLogger.entryCount() == 0 }
+            assertEquals(0L, LinDoDiagnosticLogger.persistedFileSizeBytes())
 
             // Close Debug sheet & About sheet via BackNavigationBridge
             runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
@@ -555,14 +564,16 @@ class DesktopPolishV0232RegressionTest {
             runOnIdle { assertTrue(BackNavigationBridge.dispatchBack()) }
             waitForIdle()
 
-            // Click "清理本地缓存" -> choose "同时清理缓存与诊断日志" -> verify logs wiped to 0
-            onEdt { onNodeWithText("清理本地缓存").performClick() }
+            // Verify "检查更新" entry exists & click "清理本地缓存" -> "清理"
+            onEdt { onNodeWithText("检查更新").performScrollTo().assertIsDisplayed() }
+            onEdt { onNodeWithText("清理本地缓存").performScrollTo().performClick() }
             waitUntil(timeoutMillis = 3_000L) {
-                onEdt { onAllNodesWithText("同时清理缓存与诊断日志").fetchSemanticsNodes().isNotEmpty() }
+                onEdt { onAllNodesWithText("清理缓存？").fetchSemanticsNodes().isNotEmpty() }
             }
-            onEdt { onNodeWithText("同时清理缓存与诊断日志").performClick() }
-            waitUntil(timeoutMillis = 3_000L) { LinDoDiagnosticLogger.entryCount() == 0 }
-            assertEquals(0L, LinDoDiagnosticLogger.persistedFileSizeBytes())
+            onEdt { onNodeWithText("清理").performClick() }
+            waitUntil(timeoutMillis = 3_000L) {
+                onEdt { onAllNodesWithText("已清理").fetchSemanticsNodes().isNotEmpty() }
+            }
         } finally {
             tempLogDir.deleteRecursively()
         }

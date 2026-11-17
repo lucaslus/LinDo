@@ -47,10 +47,44 @@ class MacInputRegressionTest {
                     step.invoke(engine, 1_000_000_000L)
                     assertEquals(true, intercept.invoke(engine, notch(1008L)))
                     for (i in 1..120) step.invoke(engine, 1_000_000_000L + i * 6_944_444L)
-                    // 5.4 units for the first notch + 5.4 * 1.28 for the next.
-                    assertTrue(abs(delivered - 12.312) < 0.02, "lost motion: delivered=$delivered")
+                    // Two identical macOS notches keep identical distance; no second acceleration layer.
+                    assertTrue(abs(delivered - 10.8) < 0.02, "lost motion: delivered=$delivered")
                     canvas.removeMouseWheelListener(listener)
                 }
+            } finally {
+                engine.attachToWindow(null)
+                frame.dispose()
+            }
+        }
+    }
+
+    @Test
+    fun rapidReversalStartsWithoutThePreviousDirectionsAcceleration() {
+        if (!IS_MAC_OS) return
+        SwingUtilities.invokeAndWait {
+            val frame = Frame()
+            val canvas = object : Canvas() { override fun isShowing() = true }
+            frame.add(canvas)
+            val engine = DesktopSmoothWheelEngine
+            val intercept = engine.javaClass.getDeclaredMethod("interceptRawWheelIfNeeded", MouseWheelEvent::class.java)
+                .apply { isAccessible = true }
+            val step = engine.javaClass.getDeclaredMethod("stepOnVsyncFrame", Long::class.javaPrimitiveType)
+                .apply { isAccessible = true }
+            try {
+                engine.attachToWindow(null)
+                engine.attachToWindow(frame)
+                var delivered = 0.0
+                canvas.addMouseWheelListener { delivered += it.preciseWheelRotation }
+                fun notch(time: Long, direction: Int) = MouseWheelEvent(
+                    canvas, MouseEvent.MOUSE_WHEEL, time, 0, 1, 1, 1, 1, 0, false,
+                    MouseWheelEvent.WHEEL_UNIT_SCROLL, 1, direction, direction * 0.1
+                )
+                repeat(4) { intercept.invoke(engine, notch(1000L + it * 8, 1)) }
+                delivered = 0.0
+                intercept.invoke(engine, notch(1032L, -1))
+                assertTrue(delivered < 0.0, "reversal should respond immediately")
+                for (i in 0..40) step.invoke(engine, 1_000_000_000L + i * 8_333_333L)
+                assertEquals(-5.4, delivered, 0.02, "reversal must not inherit 2x acceleration")
             } finally {
                 engine.attachToWindow(null)
                 frame.dispose()

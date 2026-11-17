@@ -1,15 +1,12 @@
-name: Verify & Package Windows Desktop (Tests + MSI)
+name: "[Legacy Compose JVM] Verify & Package Windows MSI"
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Optional existing GitHub Release tag to upload Windows MSI to (e.g. v0.2.31-draft)"
+        description: "Optional existing GitHub Release tag"
         required: false
         type: string
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: write

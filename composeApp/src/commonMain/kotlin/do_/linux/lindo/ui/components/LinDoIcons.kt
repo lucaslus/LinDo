@@ -624,17 +624,41 @@ object LinDoIcons {
     }
 
     val Refresh: ImageVector by lazy {
+        // 180°-point-symmetric dual-arc centered at exact (12f, 12f) so rotation is 100% concentric with zero vertical wobble
         lucideIcon("Refresh") {
+            strokePath(1.85f) {
+                // Upper arc from (4.86f, 7.88f) clockwise through top (12f, 3.75f) to (19.62f, 8.84f) + arrowhead
+                moveTo(4.86f, 7.88f)
+                curveTo(6.30f, 5.38f, 8.96f, 3.75f, 12f, 3.75f)
+                curveTo(15.42f, 3.75f, 18.35f, 5.83f, 19.62f, 8.84f)
+                moveTo(20.15f, 4.70f)
+                verticalLineTo(9.05f)
+                horizontalLineTo(15.80f)
+                // Lower mirror arc from (19.14f, 16.12f) clockwise through bottom (12f, 20.25f) to (4.38f, 15.16f) + arrowhead
+                moveTo(19.14f, 16.12f)
+                curveTo(17.70f, 18.62f, 15.04f, 20.25f, 12f, 20.25f)
+                curveTo(8.58f, 20.25f, 5.65f, 18.17f, 4.38f, 15.16f)
+                moveTo(3.85f, 19.30f)
+                verticalLineTo(14.95f)
+                horizontalLineTo(8.20f)
+            }
+        }
+    }
+
+    val Download: ImageVector by lazy {
+        lucideIcon("Download") {
             strokePath(1.8f) {
-                moveTo(21f, 4f)
-                verticalLineTo(10f)
-                horizontalLineTo(15f)
-                moveTo(20.49f, 15f)
-                curveTo(19.24f, 18.39f, 15.91f, 20.8f, 12f, 20.8f)
-                curveTo(7.03f, 20.8f, 3f, 16.77f, 3f, 11.8f)
-                curveTo(3f, 6.83f, 7.03f, 2.8f, 12f, 2.8f)
-                curveTo(15.72f, 2.8f, 18.92f, 5.05f, 20.3f, 8.26f)
-                lineTo(21f, 10f)
+                moveTo(12f, 3.5f)
+                verticalLineTo(15.2f)
+                moveTo(7.5f, 10.8f)
+                lineTo(12f, 15.3f)
+                lineTo(16.5f, 10.8f)
+                moveTo(4.5f, 17.2f)
+                verticalLineTo(19.2f)
+                curveTo(4.5f, 20.0f, 5.15f, 20.5f, 6.0f, 20.5f)
+                horizontalLineTo(18.0f)
+                curveTo(18.85f, 20.5f, 19.5f, 20.0f, 19.5f, 19.2f)
+                verticalLineTo(17.2f)
             }
         }
     }
@@ -1466,6 +1490,43 @@ object LinDoIcons {
                 moveTo(9f, 12.2f)
                 lineTo(11.1f, 14.3f)
                 lineTo(15.2f, 10.2f)
+            }
+        }
+    }
+
+    val Flag: ImageVector by lazy {
+        lucideIcon("Flag") {
+            strokePath(1.85f) {
+                moveTo(4f, 15f)
+                curveTo(5.5f, 14f, 7f, 14f, 8.5f, 15f)
+                curveTo(10f, 16f, 12f, 16f, 13.5f, 15f)
+                curveTo(15f, 14f, 16.5f, 14f, 19f, 15f)
+                verticalLineTo(4f)
+                curveTo(16.5f, 3f, 15f, 3f, 13.5f, 4f)
+                curveTo(12f, 5f, 10f, 5f, 8.5f, 4f)
+                curveTo(7f, 3f, 5.5f, 3f, 4f, 4f)
+                close()
+                moveTo(4f, 22f)
+                verticalLineTo(15f)
+            }
+        }
+    }
+
+    val AlertTriangle: ImageVector by lazy {
+        lucideIcon("AlertTriangle") {
+            strokePath(1.85f) {
+                moveTo(10.29f, 3.86f)
+                lineTo(1.82f, 18f)
+                curveTo(1.1f, 19.2f, 1.97f, 20.7f, 3.38f, 20.7f)
+                horizontalLineTo(20.62f)
+                curveTo(22.03f, 20.7f, 22.9f, 19.2f, 22.18f, 18f)
+                lineTo(13.71f, 3.86f)
+                curveTo(13.0f, 2.66f, 11.0f, 2.66f, 10.29f, 3.86f)
+                close()
+                moveTo(12f, 9f)
+                verticalLineTo(13.2f)
+                moveTo(12f, 17f)
+                lineTo(12.01f, 17f)
             }
         }
     }

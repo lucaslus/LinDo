@@ -9,13 +9,13 @@ import org.junit.Assume.assumeTrue
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
-/** Explicit opt-in only: opens Lindo's dedicated browser profile, never the user's normal profile. */
+/** Explicit opt-in only: opens Lindo's in-app WebKit panel, never the user's normal profile. */
 class MacBrowserSmokeTest {
     @Test fun guestVerificationReturnsToApp() = runBlocking {
         assumeTrue(System.getenv("LINDO_VERIFY_BROWSER_SMOKE") == "1")
         DesktopNetworkPolicy.enabled = true
 
-        MacBrowserTransport.install(false, {}, {})
+        MacBrowserTransport.install({}, {})
         val success = withTimeoutOrNull(45_000) { PlatformSessionRecovery.verifySession!!.invoke() } == true
         assertTrue(success, "${PlatformSessionRecovery.verificationMessage}; ${MacBrowserTransport.verificationDiagnostic}")
     }

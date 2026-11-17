@@ -18,3 +18,16 @@ captures/
 # Local authentication material and account-identifying captures
 lindo-session-import.json
 docs/review-evidence/2026-11-06/connect-native.png
+
+# Tauri desktop build artifacts
+desktop-tauri/node_modules/
+desktop-tauri/dist/
+desktop-tauri/dist-release/
+desktop-tauri/src-tauri/target/
+desktop-tauri/src-tauri/gen/
+
+# Official website (Next.js / Nextra) build artifacts
+website/node_modules/
+website/.next/
+website/out/
+.next/

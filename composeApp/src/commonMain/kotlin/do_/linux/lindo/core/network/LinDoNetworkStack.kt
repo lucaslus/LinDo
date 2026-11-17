@@ -252,11 +252,14 @@ object CookieSentinel {
      */
     fun syncFromAuthoritativeBrowserCookieString(
         rawCookieHeader: String?,
-        domain: String = "linux.do"
+        domain: String = "linux.do",
+        verified: Boolean = false
     ) {
         if (rawCookieHeader.isNullOrBlank()) return
-        ingestRawCookieString(rawCookieHeader, domain = domain, hostOnly = false)
-        // 当完整浏览器快照携带有效 `_t` 会话时，同步淘汰浏览器侧已过期的 Cloudflare 信任 Cookie，防止旧 cf_clearance 被持久化并在冷启动时回灌
+        val normalizedDomain = domain.trim().lowercase().trimStart('.')
+        val existingWinnerT = resolveWinningCookies(targetHost = normalizedDomain)["_t"]?.value
+        val observedTValues = mutableListOf<String>()
+        val observedCfValues = mutableListOf<String>()
         val presentCookies = LinkedHashMap<String, String>()
         rawCookieHeader.split(";").forEach { segment ->
             val trimmed = segment.trim()
@@ -266,9 +269,45 @@ object CookieSentinel {
                 val value = trimmed.substring(eqIdx + 1).trim()
                 if (name.isNotEmpty()) {
                     presentCookies[name] = value
+                    if (name == "_t" && value.isNotEmpty() && value != "demo_session_token") {
+                        observedTValues += value
+                    } else if (name == "cf_clearance" && value.isNotEmpty()) {
+                        observedCfValues += value
+                    }
                 }
             }
         }
+        ingestRawCookieString(rawCookieHeader, domain = domain, hostOnly = false)
+        // 若浏览器瞬态同时携带多个 _t（例如旧 Domain Cookie 与新 Host-Only Cookie 并存），优先保留已知有效会话或最后一个值，避免被死 Cookie 覆盖
+        if (observedTValues.size > 1) {
+            val preferredT = existingWinnerT?.takeIf { it in observedTValues } ?: observedTValues.last()
+            ingestRawCookieString("_t=$preferredT", domain = domain, hostOnly = true)
+            presentCookies["_t"] = preferredT
+        }
+        // 通过 CfClearanceAuthority 仲裁多变体与已受挑战失效票据：锁定保护健康的 incumbent，并在验证完成时立即晋升新 cf_clearance
+        if (observedCfValues.isNotEmpty()) {
+            val winnerCf = CfClearanceAuthority.selectWinner(observedCfValues, verified = verified)
+            if (winnerCf != null) {
+                removeCookieByName("cf_clearance", domain = domain)
+                putCookie(
+                    StoredCookieRecord(
+                        key = CookieQuadrupleKey(
+                            name = "cf_clearance",
+                            domain = normalizedDomain,
+                            path = "/",
+                            hostOnly = false
+                        ),
+                        value = winnerCf,
+                        updatedAtEpochMs = System.currentTimeMillis()
+                    )
+                )
+                presentCookies["cf_clearance"] = winnerCf
+            } else {
+                removeCookieByName("cf_clearance", domain = domain)
+                presentCookies.remove("cf_clearance")
+            }
+        }
+        // 当完整浏览器快照携带有效 `_t` 会话时，同步淘汰浏览器侧已过期的 Cloudflare 信任 Cookie，防止旧 cf_clearance 被持久化并在冷启动时回灌
         val tVal = presentCookies["_t"]
         if (!tVal.isNullOrBlank() && tVal != "demo_session_token") {
             for (cfName in cfTrustCookieNames) {
@@ -363,11 +402,13 @@ object CookieSentinel {
     @Synchronized
     fun clear() {
         store.clear()
+        CfClearanceAuthority.reset()
     }
 
     @Synchronized
     fun clearAll() {
         store.clear()
+        CfClearanceAuthority.reset()
     }
 
     /**
@@ -456,6 +497,9 @@ object UserApiKeyAuthManager {
     var onUnreadCountChanged: ((Int) -> Unit)? = null
     var onNetworkRestored: (() -> Unit)? = null
     var onPrepareManualRecovery: (suspend () -> Unit)? = null
+    var onPrepareFreshAuthExchange: (suspend () -> Unit)? = null
+    @Volatile
+    var lastAuthenticatedAtEpochMs: Long = 0L
     var openExternalUrlLauncher: ((String) -> Unit)? = null
     var onLogoutPlatformClear: (() -> Unit)? = null
     var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
@@ -610,11 +654,25 @@ object UserApiKeyAuthManager {
         }
     }
 
+    @Volatile
+    var expiredSessionUsername: String? = null
+
+    fun clearExpiredSessionNotice() {
+        expiredSessionUsername = null
+    }
+
     fun handleServerAuthInvalidated() {
         if (SavedAccounts.busy || !isAuthorized()) return
         if (!invalidatingServerAuth.compareAndSet(false, true)) return
         try {
+            val expiredName = currentUser?.username?.takeIf { it.isNotBlank() && it != "linuxdo_user" }
+            LinDoDiagnosticLogger.warn(
+                DiagnosticCategory.AUTH,
+                "Session",
+                "Server confirmed session expired for ${expiredName ?: "account"}; switching to guest"
+            )
             SavedAccounts.markExpired(currentUser)
+            expiredSessionUsername = expiredName
             logout(removeSavedAccount = false)
         } finally {
             invalidatingServerAuth.set(false)
@@ -630,16 +688,23 @@ object UserApiKeyAuthManager {
         profile: AuthenticatedUserProfile,
         rawCookies: String? = null
     ) {
+        expiredSessionUsername = null
+        lastAuthenticatedAtEpochMs = System.currentTimeMillis()
         val prevUsername = currentUser?.username
-        if (prevUsername.isNullOrBlank() || !prevUsername.equals(profile.username, ignoreCase = true)) {
+        val prevToken = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
+        if (!rawCookies.isNullOrBlank()) {
+            CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
+        }
+        val newToken = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
+        val accountChanged = prevUsername.isNullOrBlank() || !prevUsername.equals(profile.username, ignoreCase = true)
+        if (accountChanged || (newToken != null && newToken != prevToken)) {
             sessionGeneration++
+        }
+        if (accountChanged) {
             fullProfileCache = null
             cachedUnreadNotificationCount = 0
             onUnreadCountChanged?.invoke(0)
             LinuxDoRepository.clearUserSessionCaches()
-        }
-        if (!rawCookies.isNullOrBlank()) {
-            CookieSentinel.ingestRawCookieString(rawCookies, domain = "linux.do", hostOnly = false)
         }
         if (hasValidWebSessionCookie()) {
             activeUserApiKey = null
@@ -660,6 +725,8 @@ object UserApiKeyAuthManager {
         userTitle: String? = null
     ) {
         if (username.isBlank() || username == "linuxdo_user") return
+        expiredSessionUsername = null
+        lastAuthenticatedAtEpochMs = System.currentTimeMillis()
         val prevUsername = currentUser?.username
         val accountChanged = prevUsername.isNullOrBlank() || !prevUsername.equals(username, ignoreCase = true)
         if (accountChanged) {
@@ -707,6 +774,7 @@ object UserApiKeyAuthManager {
 
     internal fun replaceActiveSession(profile: AuthenticatedUserProfile?, apiKey: String?, cookies: String?, reads: String?, drafts: String?) {
         sessionGeneration++
+        lastAuthenticatedAtEpochMs = 0L
         activeUserApiKey = null
         currentUser = null
         fullProfileCache = null
@@ -739,8 +807,12 @@ object UserApiKeyAuthManager {
     }
 
     fun logout(removeSavedAccount: Boolean = true) {
-        if (removeSavedAccount) currentUser?.let { SavedAccounts.forget(it.username) }
+        if (removeSavedAccount) {
+            expiredSessionUsername = null
+            currentUser?.let { SavedAccounts.forget(it.username) }
+        }
         sessionGeneration++
+        lastAuthenticatedAtEpochMs = 0L
         activeUserApiKey = null
         currentUser = null
         fullProfileCache = null
@@ -2047,6 +2119,7 @@ object LinuxDoRepository {
         HttpClient(OkHttp) {
             engine {
                 config {
+                    dns(SmartDohDns)
                     connectionPool(sharedConnectionPool)
                     connectTimeout(6, TimeUnit.SECONDS)
                     readTimeout(15, TimeUnit.SECONDS)
@@ -2060,6 +2133,7 @@ object LinuxDoRepository {
         HttpClient(OkHttp) {
             engine {
                 config {
+                    dns(SmartDohDns)
                     connectionPool(longReadConnectionPool)
                     connectTimeout(10, TimeUnit.SECONDS)
                     readTimeout(35, TimeUnit.SECONDS)
@@ -2074,6 +2148,7 @@ object LinuxDoRepository {
             followRedirects = false
             engine {
                 config {
+                    dns(SmartDohDns)
                     followRedirects(false)
                     followSslRedirects(false)
                     connectTimeout(8, TimeUnit.SECONDS)
@@ -2088,6 +2163,7 @@ object LinuxDoRepository {
         HttpClient(OkHttp) {
             engine {
                 config {
+                    dns(SmartDohDns)
                     connectionPool(uploadConnectionPool)
                     connectTimeout(15, TimeUnit.SECONDS)
                     writeTimeout(90, TimeUnit.SECONDS)
@@ -2111,15 +2187,27 @@ object LinuxDoRepository {
     @Volatile
     private var activeAuthVerifyJob: kotlinx.coroutines.Job? = null
     private val lastAuthVerifyEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val authFailureGeneration = java.util.concurrent.atomic.AtomicLong(-1L)
+    private val authFailureUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val inFlightForegroundApiCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private fun isAuthFailureCooldownActive(): Boolean =
+        authFailureGeneration.get() == UserApiKeyAuthManager.sessionGeneration &&
+            System.currentTimeMillis() < authFailureUntilMs.get()
+
+    private fun clearAuthFailureCooldown() {
+        authFailureUntilMs.set(0L)
+    }
 
     internal fun scheduleAuthVerificationIfNeeded() {
         if (!UserApiKeyAuthManager.isAuthorized()) return
         val now = System.currentTimeMillis()
+        val expectedGen = UserApiKeyAuthManager.sessionGeneration
+        authFailureGeneration.set(expectedGen)
+        authFailureUntilMs.updateAndGet { prev -> maxOf(prev, now + 30_000L) }
         val prev = lastAuthVerifyEpochMs.get()
         if (now - prev in 0 until 8_000L) return
         if (!lastAuthVerifyEpochMs.compareAndSet(prev, now)) return
-        val expectedGen = UserApiKeyAuthManager.sessionGeneration
         activeAuthVerifyJob?.cancel()
         activeAuthVerifyJob = authVerifyScope.launch {
             if (UserApiKeyAuthManager.sessionGeneration != expectedGen) return@launch
@@ -2181,6 +2269,7 @@ object LinuxDoRepository {
         HttpClient(OkHttp) {
             engine {
                 config {
+                    dns(SmartDohDns)
                     connectionPool(imageConnectionPool)
                     retryOnConnectionFailure(true)
                     dispatcher(
@@ -2205,20 +2294,22 @@ object LinuxDoRepository {
                                 }
                             }
                             .trimEnd('?', '&')
-                        // 将遗留落入主站域名的静态头像请求（/user_avatar/linux.do/ 与 /letter_avatar_proxy/）统一分流至官方静态边缘 CDN，
-                        // 既免除 WebView Base64 桥接开销，又避免主站高并发图片请求触发 Cloudflare WAF 速率挑战；GIF 动图保持原主站路径走同源桥接
+                        // 将遗留落入主站域名的静态头像与标准表情请求统一分流至官方静态边缘 CDN (`cdn.ldstatic.com` / `avatars.discourse-cdn.com`)，
+                        // 既免除 WebView Base64 桥接开销，又大幅降低主站高并发子资源触发 Cloudflare WAF 速率挑战的概率；GIF 动图保持原主站路径走同源桥接
                         val isGifAvatar = strippedUrl.substringBefore('?').endsWith(".gif", ignoreCase = true)
-                        val cleanUrl = if (
+                        val cleanUrl = when {
+                            strippedUrl.startsWith("https://linux.do/images/emoji/") ->
+                                strippedUrl.replaceFirst("https://linux.do", do_.linux.lindo.core.site.LinuxDoSiteRules.CDN_BASE_URL)
+                            strippedUrl.startsWith("http://linux.do/images/emoji/") ->
+                                strippedUrl.replaceFirst("http://linux.do", do_.linux.lindo.core.site.LinuxDoSiteRules.CDN_BASE_URL)
                             !isGifAvatar && (
                                 strippedUrl.startsWith("https://linux.do/user_avatar/linux.do/") ||
                                     strippedUrl.startsWith("http://linux.do/user_avatar/linux.do/") ||
                                     strippedUrl.startsWith("https://linux.do/letter_avatar_proxy/") ||
                                     strippedUrl.startsWith("http://linux.do/letter_avatar_proxy/")
-                                )
-                        ) {
-                            do_.linux.lindo.core.site.LinuxDoSiteRules.resolveStaticAvatarUrl(strippedUrl, 144)
-                        } else {
-                            strippedUrl
+                                ) ->
+                                do_.linux.lindo.core.site.LinuxDoSiteRules.resolveStaticAvatarUrl(strippedUrl, 144)
+                            else -> strippedUrl
                         }
                         val host = runCatching { java.net.URI(cleanUrl).host?.lowercase() }
                             .getOrNull()
@@ -2287,6 +2378,9 @@ object LinuxDoRepository {
                                 rawUa.replace("; wv)", ")").replace(" wv)", ")")
                             }
                             builder.header("User-Agent", safeUa)
+                            ClientHints.fromUserAgent(safeUa).forEach { (chKey, chVal) ->
+                                builder.header(chKey, chVal)
+                            }
                         }
                         if (host == "linux.do" || host.endsWith(".linux.do") || host == "cdn.ldstatic.com") {
                             builder.header("Referer", "https://linux.do/")
@@ -2383,6 +2477,8 @@ object LinuxDoRepository {
     }
 
     private fun noteChallengeHit(cooldownMs: Long = 60_000L) {
+        val carriedCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
+        CfClearanceAuthority.noteChallenged(carriedCf)
         val until = System.currentTimeMillis() + cooldownMs
         challengeBlockedUntilMs.updateAndGet { prev -> maxOf(prev, until) }
     }
@@ -2452,10 +2548,11 @@ object LinuxDoRepository {
     private suspend fun executeHttp(
         url: String, method: String = "GET", formParams: Map<String, String>? = null,
         extraHeaders: Map<String, String> = emptyMap(), preserveFailure: Boolean = false,
-        clientOverride: HttpClient = sharedClient
+        clientOverride: HttpClient = sharedClient,
+        explicitAuthExchange: Boolean = false
     ): Pair<Int, String>? = AccountSessionGate.read {
         if (!NetworkRecoveryPolicy.enabled || method.uppercase() !in setOf("GET", "HEAD")) {
-            return@read executeHttpUncoalesced(url, method, formParams, extraHeaders, preserveFailure, clientOverride)
+            return@read executeHttpUncoalesced(url, method, formParams, extraHeaders, preserveFailure, clientOverride, explicitAuthExchange)
         }
         val key = "${UserApiKeyAuthManager.sessionGeneration}|$method|$url|${extraHeaders.toSortedMap()}|${System.identityHashCode(clientOverride)}"
         val generation = UserApiKeyAuthManager.sessionGeneration
@@ -2473,9 +2570,12 @@ object LinuxDoRepository {
         formParams: Map<String, String>? = null,
         extraHeaders: Map<String, String> = emptyMap(),
         preserveFailure: Boolean = false,
-        clientOverride: HttpClient = sharedClient
+        clientOverride: HttpClient = sharedClient,
+        explicitAuthExchange: Boolean = false
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
-        if (shouldPauseForSiteVerification(url)) {
+        // A fresh user-authorized OTP gets one attempt; all other traffic remains paused.
+        // The rate-limit gate below still applies, and an actual challenge re-arms the pause.
+        if (!explicitAuthExchange && shouldPauseForSiteVerification(url)) {
             return@withContext if (preserveFailure) 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>cf-browser-verification</html>" else null
         }
         if (NetworkRecoveryPolicy.enabled && isRateLimitedNow()) return@withContext if (preserveFailure) 429 to "{\"errors\":[\"请求较频繁，请稍后再试\"]}" else null
@@ -2492,9 +2592,15 @@ object LinuxDoRepository {
             silenceLogger = url.contains("/topics/timings"),
             includeOrigin = !isReadMethod
         )
+        val expectsHtml = extraHeaders.entries.any {
+            it.key.equals("Accept", ignoreCase = true) && it.value.startsWith("text/html", ignoreCase = true)
+        }
+        fun isExpectedResponse(status: Int, body: String): Boolean =
+            if (expectsHtml) status in 200..299 && !looksLikeCloudflareChallenge(body) && body.trimStart().startsWith("<")
+            else isSuccessfulApiResponse(status, body)
         val mergedHeaders = buildMap {
             put("Accept", "application/json, text/javascript, */*; q=0.01")
-            put("X-Requested-With", "XMLHttpRequest")
+            if (!expectsHtml) put("X-Requested-With", "XMLHttpRequest")
             presenceHeaders.forEach { (k, v) -> put(k, v) }
             // 当不存在 Web 会话 Cookie 且持有有效 User-Api-Key 时，附带 User-Api-Key 与 User-Api-Client-Id（含 WebView 通道）
             if (!hasWebCookie && apiKey != null) {
@@ -2519,13 +2625,13 @@ object LinuxDoRepository {
             if (UserApiKeyAuthManager.requireBrowserTransportOnly && UserApiKeyAuthManager.webViewHttpExecutor == null) {
                 return@withContext null
             }
-            suspend fun callWebView(): Pair<Int, String>? {
+            suspend fun callWebView(overrideHeaders: Map<String, String> = mergedHeaders): Pair<Int, String>? {
                 val executor = UserApiKeyAuthManager.webViewHttpExecutor ?: return null
                 val startMs = System.currentTimeMillis()
                 return try {
-                    val result = executor(url, method, formParams, mergedHeaders)?.takeIf { it.first != 0 }
+                    val result = executor(url, method, formParams, overrideHeaders)?.takeIf { it.first != 0 }
                     val elapsedMs = System.currentTimeMillis() - startMs
-                    if (!isSilentTiming && (result == null || !isSuccessfulApiResponse(result.first, result.second))) {
+                    if (!isSilentTiming && (result == null || !isExpectedResponse(result.first, result.second))) {
                         val cfFlag = if (result != null && looksLikeCloudflareChallenge(result.second)) "challenge" else null
                         LinDoDiagnosticLogger.recordHttpFailure(
                             method = method,
@@ -2554,6 +2660,7 @@ object LinuxDoRepository {
                     null
                 }
             }
+            val isSessionProbeUrl = url.contains("/session/current.json", ignoreCase = true)
             // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
             if (!isReadMethod && UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 val writeResult = callWebView()
@@ -2562,25 +2669,43 @@ object LinuxDoRepository {
                     noteChallengeHit()
                 } else if (writeResult != null && isSuccessfulApiResponse(writeResult.first, writeResult.second)) {
                     challengeBlockedUntilMs.set(0L)
+                    CfClearanceAuthority.confirmHealthy(
+                        CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
+                    )
+                } else if (!isSessionProbeUrl && writeResult != null && isDiscourseNotLoggedInResponse(writeResult.first, writeResult.second)) {
+                    scheduleAuthVerificationIfNeeded()
                 }
                 return@withContext writeResult?.takeIf {
                     preserveFailure || isSuccessfulApiResponse(it.first, it.second)
                 }
             }
 
-            // 只要平台已挂载同源 Chromium WebView 通道（Android），所有请求一律走 WebView BoringSSL 通道，
+            // 只要平台已挂载同源 WebView 通道（Android / macOS），所有请求一律走 WebView 通道，
             // 对前台只读请求在瞬时网络抖动或非 Cloudflare 429/5xx 时退避重试一次，
             // 同时严禁回落至缺少 cf_clearance 且为 Java TLS 指纹的 OkHttp sharedClient！
             val maxReadAttempts = if (isReadMethod && isForegroundRequest) 2 else 1
             var firstBrowserResult: Pair<Int, String>? = null
             if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 for (attempt in 0 until maxReadAttempts) {
-                    val candidate = callWebView()
+                    var candidate = callWebView()
+                    if (candidate != null && !isSessionProbeUrl && isDiscourseNotLoggedInResponse(candidate.first, candidate.second)) {
+                        scheduleAuthVerificationIfNeeded()
+                        if (isReadMethod && mergedHeaders.containsKey("Discourse-Logged-In")) {
+                            val guestHeaders = mergedHeaders.toMutableMap().apply { remove("Discourse-Logged-In") }
+                            val strippedRetry = callWebView(guestHeaders)
+                            if (strippedRetry != null) {
+                                candidate = strippedRetry
+                            }
+                        }
+                    }
                     if (candidate?.first == 429 && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
                     if (candidate != null && looksLikeCloudflareChallenge(candidate.second)) {
                         noteChallengeHit()
                     }
-                    if (candidate != null && isSuccessfulApiResponse(candidate.first, candidate.second)) {
+                    if (candidate != null && isExpectedResponse(candidate.first, candidate.second)) {
+                        CfClearanceAuthority.confirmHealthy(
+                            CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
+                        )
                         if (isForegroundRequest) {
                             if (!NetworkRecoveryPolicy.enabled) rateLimitedUntilMs.set(0L)
                             UserPresenceService.recordSuccessfulForegroundRequest()
@@ -2591,7 +2716,7 @@ object LinuxDoRepository {
                         firstBrowserResult = candidate
                     }
                     val retryable = candidate == null || (
-                        candidate.first in setOf(429, 500, 502, 503, 504) &&
+                        candidate.first in setOf(429, 502, 503, 504) &&
                             !looksLikeCloudflareChallenge(candidate.second)
                     )
                     if (!retryable || attempt >= maxReadAttempts - 1 || (NetworkRecoveryPolicy.enabled && candidate?.first == 429)) break
@@ -2641,8 +2766,11 @@ object LinuxDoRepository {
                     if (!hasWebCookie && !hasApiKey) {
                         requestHeaders.remove("Discourse-Logged-In")
                     }
-                    UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let {
-                        requestHeaders["User-Agent"] = it
+                    UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let { ua ->
+                        requestHeaders["User-Agent"] = ua
+                        ClientHints.fromUserAgent(ua).forEach { (chKey, chVal) ->
+                            requestHeaders.putIfAbsent(chKey, chVal)
+                        }
                     }
                     val isMutation = !isReadMethod
                     if (isMutation && hasWebCookie && !requestHeaders.containsKey("X-CSRF-Token")) {
@@ -2676,8 +2804,11 @@ object LinuxDoRepository {
                             if (looksLikeCloudflareChallenge(text)) noteChallengeHit()
                         }
                     }
-                    // 若携带 Discourse-Logged-In 头遭遇非 Cloudflare 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次
+                    // 若携带 Discourse-Logged-In 头遭遇非 Cloudflare 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次并异步复核会话
                     if (status == 403 && !looksLikeCloudflareChallenge(text) && requestHeaders.containsKey("Discourse-Logged-In") && method.equals("GET", true)) {
+                        if (!isSessionProbeUrl && isDiscourseNotLoggedInResponse(status, text)) {
+                            scheduleAuthVerificationIfNeeded()
+                        }
                         requestHeaders.remove("Discourse-Logged-In")
                         response = executeApiRequest(clientOverride, url, method, formParams, requestHeaders)
                         response.headers.getAll("Set-Cookie")?.forEach { setCookie ->
@@ -2689,6 +2820,9 @@ object LinuxDoRepository {
                         cfMitigated = decorated.second
                         cfRay = decorated.third
                         if (looksLikeCloudflareChallenge(text)) noteChallengeHit()
+                    }
+                    if (!isSessionProbeUrl && isDiscourseNotLoggedInResponse(status, text)) {
+                        scheduleAuthVerificationIfNeeded()
                     }
                     // Include a 429 returned by an authentication/CSRF recovery request as well.
                     if (status == 429 && NetworkRecoveryPolicy.enabled) noteRetryAfter(response.headers["Retry-After"])
@@ -2779,7 +2913,11 @@ object LinuxDoRepository {
      * - 再 POST `/session/otp/$otp` 直接捕获服务端下发的 `_t` 会话 Cookie 并同步至系统 `CookieManager`；
      * - 若直连兑换成功返回 `true`（直接完成登录），若被拦截则返回 `false` 交由 WebView 兜底。
      */
-    suspend fun redeemOtpSilently(otp: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun redeemOtpSilently(
+        otp: String,
+        onSessionAccepted: (() -> Unit)? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (NetworkRecoveryPolicy.enabled && isRateLimitedNow()) return@withContext false
         if (otp.isBlank()) {
             if (!UserApiKeyAuthManager.getApiKey().isNullOrBlank()) {
                 val epochBefore = UserApiKeyAuthManager.authStateNotifyEpoch
@@ -2800,6 +2938,11 @@ object LinuxDoRepository {
             if (currentT.isBlank() || currentT == "demo_session_token") {
                 return false
             }
+            // Tell the caller the one-time token was consumed even if the profile probe fails.
+            onSessionAccepted?.invoke()
+            // Successful explicit redemption permits one new session check, even if the
+            // browser kept the same valid token. A new challenge immediately pauses again.
+            clearChallengeCooldown()
             val epochBefore = UserApiKeyAuthManager.authStateNotifyEpoch
             if (currentT == previousT) {
                 val preservedApiKey = UserApiKeyAuthManager.getApiKey()
@@ -2818,6 +2961,7 @@ object LinuxDoRepository {
                     return false
                 }
                 UserApiKeyAuthManager.clearApiKeyQuietly()
+                SavedAccounts.captureCurrent()
                 UserApiKeyAuthManager.persistSessionQuietly()
                 if (UserApiKeyAuthManager.authStateNotifyEpoch == epochBefore) {
                     UserApiKeyAuthManager.onAuthStateChanged?.invoke()
@@ -2825,24 +2969,37 @@ object LinuxDoRepository {
                 return true
             }
             UserApiKeyAuthManager.clearApiKeyQuietly()
-            val profile = fetchCurrentUserProfile()
+            // A rotated session is a new login, not another retry of the blocked request.
+            // Do not mistake the previous account's cached profile for confirmation, and never allow
+            // a transient probe during OTP finalization to evict the newly minted session.
+            UserApiKeyAuthManager.fullProfileCache = null
+            val profile = UserApiKeyAuthManager.withServerAuthInvalidationSuppressed {
+                fetchCurrentUserProfile()
+            }
+            if (profile != null) {
+                UserApiKeyAuthManager.lastAuthenticatedAtEpochMs = System.currentTimeMillis()
+                SavedAccounts.captureCurrent()
+            }
             UserApiKeyAuthManager.persistSessionQuietly()
             if (UserApiKeyAuthManager.authStateNotifyEpoch == epochBefore) {
                 UserApiKeyAuthManager.onAuthStateChanged?.invoke()
             }
-            return profile != null || UserApiKeyAuthManager.isAuthorized()
+            return profile != null && !isChallengeCooldownActive()
         }
 
         try {
             val previousT = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
                 ?.takeUnless { it == "demo_session_token" }
                 .orEmpty()
+            updateCsrfToken(null)
+            runCatching { UserApiKeyAuthManager.onPrepareFreshAuthExchange?.invoke() }
             if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 val otpRes = executeHttp(
                     url = "https://linux.do/session/otp/${otp.trim()}",
                     method = "POST",
                     formParams = emptyMap(),
-                    preserveFailure = true
+                    preserveFailure = true,
+                    explicitAuthExchange = true
                 )
                 if (otpRes != null && otpRes.first in 200..399 && !looksLikeCloudflareChallenge(otpRes.second)) {
                     return@withContext verifyAndFinalizeOtpSession(previousT)
@@ -3201,8 +3358,8 @@ object LinuxDoRepository {
         }
 
         var res = executeHttp(url = url, method = "GET", extraHeaders = extraHeaders, preserveFailure = true)
-        if (trackVisit && res != null && res.first in 500..599 && !looksLikeCloudflareChallenge(res.second)) {
-            // Discourse track_visit=true 写计数锁偶发返回 502/503，清理连接池后降级为纯只读路径重试一次
+        if (trackVisit && res != null && res.first in setOf(502, 503, 504) && !looksLikeCloudflareChallenge(res.second)) {
+            // Discourse track_visit=true 写计数锁偶发返回 502/503/504（不含 500 帖子级异常，避免 4 连发触发 Cloudflare 429 挑战），清理连接池后降级为纯只读路径重试一次
             evictHttpConnectionPools()
             val fallbackQuery = if (!filterUsername.isNullOrBlank()) {
                 "?username_filters=${encodeUrlSegment(filterUsername)}"
@@ -3250,10 +3407,10 @@ object LinuxDoRepository {
             } else {
                 LinDoNetworkCopy.GUEST_TOPIC_LOGIN_REQUIRED.text
             }
-            statusCode == 403 -> if (!isAuthorizedNow) {
-                LinDoNetworkCopy.GUEST_TOPIC_LOGIN_REQUIRED.text
-            } else {
-                extractActionErrorMessage(res, LinDoNetworkCopy.TOPIC_PERMISSION_DENIED.text)
+            statusCode == 403 -> when {
+                !isAuthorizedNow -> LinDoNetworkCopy.GUEST_TOPIC_LOGIN_REQUIRED.text
+                isDiscourseNotLoggedInResponse(statusCode, res?.second) -> LinDoNetworkCopy.AUTH_EXPIRED_SHORT.text
+                else -> extractActionErrorMessage(res, LinDoNetworkCopy.TOPIC_PERMISSION_DENIED.text)
             }
             statusCode == 429 -> LinDoNetworkCopy.RATE_LIMITED_SHORT.text
             statusCode in 500..599 -> LinDoNetworkCopy.SERVER_UNAVAILABLE_SHORT.text
@@ -3323,6 +3480,17 @@ object LinuxDoRepository {
         knownAuthorBadges = emptyMap<Int, List<GrantedBadge>>(),
         lastReadPostNumber = lastReadPostNumber
     )
+
+    internal fun isDiscourseNotLoggedInResponse(status: Int, rawBody: String?): Boolean {
+        if (rawBody.isNullOrBlank() || looksLikeCloudflareChallenge(rawBody)) return false
+        if (status == 401) return true
+        if (status != 403) return false
+        val trimmed = rawBody.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart()
+        if (!trimmed.startsWith("{")) return false
+        val root = runCatching { json.parseToJsonElement(trimmed) as? JsonObject }.getOrNull() ?: return false
+        val rawErrorType = root["error_type"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
+        return DiscourseErrorType.fromRaw(rawErrorType) == DiscourseErrorType.NOT_LOGGED_IN
+    }
 
     private fun isConfirmedDiscourseUnauthenticatedSessionResponse(status: Int, rawBody: String): Boolean {
         if (looksLikeCloudflareChallenge(rawBody)) return false
@@ -3456,6 +3624,7 @@ object LinuxDoRepository {
         val currentUsername = cu["username"]?.jsonPrimitive?.contentOrNull?.takeIf {
             it.isNotBlank() && it != "linuxdo_user"
         } ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+        clearAuthFailureCooldown()
         val sameCachedUser = cachedAccount?.username?.equals(currentUsername, ignoreCase = true) == true
         var displayName = cu["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             ?: (if (sameCachedUser) cachedAccount?.displayName else null)
@@ -3494,6 +3663,8 @@ object LinuxDoRepository {
         var flair = FlairInfo()
 
         var daysVisited = 0
+        var reportedDaysVisited: Int? = null
+        var communityScore: Long? = null
         var timeReadSeconds = 0
         var recentTimeReadSeconds = 0
         var topicsEntered = 0
@@ -3522,6 +3693,7 @@ object LinuxDoRepository {
                 val root = json.parseToJsonElement(userRes.second).jsonObject
                 val uObj = root["user"] as? JsonObject
                 if (uObj != null) {
+                    communityScore = (uObj["gamification_score"] as? JsonPrimitive)?.longOrNull
                     userId = uObj["id"]?.jsonPrimitive?.intOrNull ?: userId
                     displayName = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: displayName.ifBlank { uname }
                     val rawTpl = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull ?: ""
@@ -3565,7 +3737,8 @@ object LinuxDoRepository {
                 val root = json.parseToJsonElement(summaryRes.second).jsonObject
                 val us = root["user_summary"] as? JsonObject
                 if (us != null) {
-                    daysVisited = us["days_visited"]?.jsonPrimitive?.intOrNull ?: 0
+                    reportedDaysVisited = (us["days_visited"] as? JsonPrimitive)?.intOrNull?.takeIf { it >= 0 }
+                    daysVisited = reportedDaysVisited ?: 0
                     timeReadSeconds = us["time_read"]?.jsonPrimitive?.intOrNull ?: 0
                     recentTimeReadSeconds = us["recent_time_read"]?.jsonPrimitive?.intOrNull ?: 0
                     topicsEntered = us["topics_entered"]?.jsonPrimitive?.intOrNull ?: 0
@@ -3610,6 +3783,8 @@ object LinuxDoRepository {
             moderator = moderator,
             createdAtText = createdAtText,
             daysVisited = daysVisited,
+            reportedDaysVisited = reportedDaysVisited,
+            communityScore = communityScore,
             timeReadSeconds = timeReadSeconds,
             recentTimeReadSeconds = recentTimeReadSeconds,
             topicsEntered = topicsEntered,
@@ -4000,6 +4175,11 @@ object LinuxDoRepository {
             val badgeId = dataObj?.get("badge_id")?.jsonPrimitive?.intOrNull ?: 0
             val badgeName = dataObj?.get("badge_name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             val chatChannelId = dataObj?.get("chat_channel_id")?.jsonPrimitive?.intOrNull ?: 0
+            val reactionIcon = (
+                dataObj?.get("reaction_icon")?.jsonPrimitive?.contentOrNull
+                    ?: dataObj?.get("reaction")?.jsonPrimitive?.contentOrNull
+                    ?: dataObj?.get("emoji")?.jsonPrimitive?.contentOrNull
+                )?.trim().orEmpty()
             val nonConsolidatedDisplayUsername = rawDisplayUsername?.takeIf { consolidatedMatch == null }
             val cachedPostAuthor = when {
                 kind.needsPostAuthorLookup && originalPostId > 0 -> postAuthorCache[originalPostId]
@@ -4084,6 +4264,7 @@ object LinuxDoRepository {
                 actingFlair = cachedPostAuthor?.flair?.takeIf { it.hasFlair } ?: cachedVisual?.flair ?: FlairInfo(),
                 excerpt = excerpt,
                 count = count,
+                reactionIcon = reactionIcon,
                 badgeId = badgeId,
                 badgeName = badgeName,
                 chatChannelId = chatChannelId
@@ -4096,13 +4277,20 @@ object LinuxDoRepository {
         extraHeaders: Map<String, String>,
         expectedGeneration: Long = UserApiKeyAuthManager.sessionGeneration
     ): List<UserNotificationItem>? {
+        if (isAuthFailureCooldownActive()) return null
         val res = executeHttp(
             url = "https://linux.do/notifications.json?offset=0&limit=60&silent=true",
             method = "GET",
             extraHeaders = extraHeaders,
-            preserveFailure = false
+            preserveFailure = true
         ) ?: return null
         val bodyTrimmed = res.second.trimStart()
+        if (!looksLikeCloudflareChallenge(res.second) &&
+            (res.first == 401 || (res.first == 403 && bodyTrimmed.contains("\"not_logged_in\"")))
+        ) {
+            scheduleAuthVerificationIfNeeded()
+            return null
+        }
         if (res.first !in 200..299 || !bodyTrimmed.startsWith("{") || looksLikeCloudflareChallenge(res.second)) {
             return null
         }
@@ -5283,6 +5471,8 @@ object LinuxDoRepository {
         }
 
         var daysVisited = 0
+        var reportedDaysVisited: Int? = null
+        var communityScore: Long? = null
         var timeReadSeconds = 0
         var recentTimeReadSeconds = 0
         var topicsEntered = 0
@@ -5300,7 +5490,8 @@ object LinuxDoRepository {
                 val root = json.parseToJsonElement(summaryRes.second).jsonObject
                 val us = root["user_summary"] as? JsonObject
                 if (us != null) {
-                    daysVisited = us["days_visited"]?.jsonPrimitive?.intOrNull ?: 0
+                    reportedDaysVisited = (us["days_visited"] as? JsonPrimitive)?.intOrNull?.takeIf { it >= 0 }
+                    daysVisited = reportedDaysVisited ?: 0
                     timeReadSeconds = us["time_read"]?.jsonPrimitive?.intOrNull ?: 0
                     recentTimeReadSeconds = us["recent_time_read"]?.jsonPrimitive?.intOrNull ?: 0
                     topicsEntered = us["topics_entered"]?.jsonPrimitive?.intOrNull ?: 0
@@ -5334,6 +5525,8 @@ object LinuxDoRepository {
             moderator = moderator,
             createdAtText = createdAtText,
             daysVisited = daysVisited,
+            reportedDaysVisited = reportedDaysVisited,
+            communityScore = communityScore,
             timeReadSeconds = timeReadSeconds,
             recentTimeReadSeconds = recentTimeReadSeconds,
             topicsEntered = topicsEntered,
@@ -5732,7 +5925,13 @@ object LinuxDoRepository {
             else account?.username?.let { username.equals(it, ignoreCase = true) } == true
         val rawBoosts = parsePostBoostsArray(pObj["boosts"])
         val boostSnap = postBoostSnapshots[pid]
-        val finalBoosts = boostSnap?.boosts ?: rawBoosts
+        val finalBoosts = if (boostSnap == null) {
+            rawBoosts
+        } else {
+            val othersFromServer = rawBoosts.filterNot { it.isBy(account?.userId, account?.username) }
+            val mineFromSnap = boostSnap.boosts.filter { it.isBy(account?.userId, account?.username) }
+            (othersFromServer + mineFromSnap).distinctBy { it.id }
+        }
         val alreadyBoostedByMe = finalBoosts.any { it.isBy(account?.userId, account?.username) }
         val canBoost = boostSnap?.canBoost
             ?: (pObj["can_boost"]?.jsonPrimitive?.booleanOrNull ?: (!isOwnPost && !alreadyBoostedByMe))
@@ -5906,6 +6105,10 @@ object LinuxDoRepository {
         }
 
         val detailsObj = root["details"] as? JsonObject
+        if (detailsObj != null && !detailsObj.containsKey("notification_level") && UserApiKeyAuthManager.isAuthorized()) {
+            // Discourse TopicViewDetailsSerializer 仅对登录态会话下发 notification_level；若收到匿名响应，异步触发会话复核以提示用户重新登录
+            scheduleAuthVerificationIfNeeded()
+        }
         val notifLevel = detailsObj?.get("notification_level")?.jsonPrimitive?.intOrNull ?: 1
         val canEditTopic = detailsObj?.get("can_edit")?.jsonPrimitive?.booleanOrNull == true
         var smallActionClosed: Boolean? = null
@@ -6964,6 +7167,7 @@ object LinuxDoRepository {
         val params = buildMap {
             put("id", postId.toString())
             put("post_action_type_id", flagTypeId.toString())
+            put("flag_topic", "false")
             if (message.isNotBlank()) {
                 put("message", message.trim())
             }
@@ -7046,7 +7250,13 @@ object LinuxDoRepository {
      */
     suspend fun fetchCloudDraftByKey(draftKey: String): RemoteDraftLookup = withContext(Dispatchers.IO) {
         val encodedKey = encodeUrlSegment(draftKey)
-        val root = readApiObject(executeHttp("https://linux.do/drafts/$encodedKey.json", preserveFailure = true))
+        val root = readApiObject(
+            executeHttp(
+                url = "https://linux.do/drafts/$encodedKey.json",
+                extraHeaders = mapOf("Discourse-Background" to "true"),
+                preserveFailure = true
+            )
+        )
         val sequence = root["draft_sequence"]?.jsonPrimitive?.intOrNull
             ?: root["sequence"]?.jsonPrimitive?.intOrNull
             ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
@@ -7107,10 +7317,11 @@ object LinuxDoRepository {
                 put("recipients", normalizedRecipients)
             }
         }
-        val extraHeaders = if (topicId != null && topicId > 0) {
-            mapOf("Referer" to "https://linux.do/t/$topicId")
-        } else {
-            emptyMap()
+        val extraHeaders = buildMap {
+            put("Discourse-Background", "true")
+            if (topicId != null && topicId > 0) {
+                put("Referer", "https://linux.do/t/$topicId")
+            }
         }
         val root = requireMutationObject(executeHttp(
             url = "https://linux.do/drafts.json",
@@ -7411,6 +7622,14 @@ object LinuxDoRepository {
     /**
      * 读取个人账号与偏好设置 (`GET /u/{username}.json` + `/user-badges/{username}.json?grouped=true`)
      */
+    /** Official Discourse archive job. A mutation is submitted once, never polled/replayed. */
+    suspend fun requestUserArchive(): Unit = withContext(Dispatchers.IO) {
+        requireMutationSuccess(executeHttp(
+            "https://linux.do/export_csv/export_entity.json", method = "POST",
+            formParams = mapOf("entity" to "user_archive"), preserveFailure = true
+        ))
+    }
+
     suspend fun fetchUserAccountPreferences(username: String): UserAccountPreferencesSnapshot? = withContext(Dispatchers.IO) {
         val targetUsername = username.ifBlank { UserApiKeyAuthManager.currentUser?.username.orEmpty() }
         if (targetUsername.isBlank() || targetUsername == "linuxdo_user") throw ApiReadException(ApiFailureKind.Authentication)

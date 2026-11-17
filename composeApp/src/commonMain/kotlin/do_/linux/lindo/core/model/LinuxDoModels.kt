@@ -439,6 +439,9 @@ data class UserFullProfileSummary(
     val moderator: Boolean = false,
     val createdAtText: String = "",
     val daysVisited: Int = 0,
+    // Null means the server did not supply this value, never a fabricated zero.
+    val reportedDaysVisited: Int? = null,
+    val communityScore: Long? = null,
     val timeReadSeconds: Int = 0,
     val recentTimeReadSeconds: Int = 0,
     val topicsEntered: Int = 0,
@@ -483,6 +486,7 @@ data class UserNotificationItem(
     val actingFlair: FlairInfo = FlairInfo(),
     val excerpt: String = "",
     val count: Int = 0,
+    val reactionIcon: String = "",
     val badgeId: Int = 0,
     val badgeName: String = "",
     val chatChannelId: Int = 0

@@ -116,6 +116,7 @@ fun LinDoBrandWordmark(
             )
         }
         Row(
+            modifier = Modifier.weight(1f, fill = false),
             horizontalArrangement = Arrangement.spacedBy(7.dp)
         ) {
             LindoColorWordmarkText(
@@ -133,7 +134,9 @@ fun LinDoBrandWordmark(
                     maxLines = 1,
                     softWrap = false,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    modifier = Modifier.alignByBaseline()
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .alignByBaseline()
                 )
             }
         }

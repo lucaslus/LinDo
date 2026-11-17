@@ -437,11 +437,23 @@ internal fun ComposerTagPicker(
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
+                    val headerHint = choices.forbiddenMessage
+                        ?: choices.requiredGroup?.let { LinDoComposerCopy.REQUIRED_TAG_GROUP_HINT.format(it) }
+                    if (headerHint != null) {
+                        Text(
+                            text = "· $headerHint",
+                            color = palette.brandGold,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
                 Box(
                     modifier = Modifier
                         .size(30.dp)
-                        .clip(CircleShape)
+                        .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                         .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center
                 ) {
@@ -550,8 +562,6 @@ internal fun ComposerTagPicker(
                             )
                     }
 
-                    val message = choices.forbiddenMessage
-                        ?: choices.requiredGroup?.let { LinDoComposerCopy.SELECT_REQUIRED_GROUP_FIRST.format(it) }
                     val hasExactMatch = baseOptions.any { it.name.equals(cleanQuery, ignoreCase = true) }
                     val canCreateNewTag = canCreateTag &&
                         cleanQuery.isNotEmpty() &&
@@ -571,17 +581,6 @@ internal fun ComposerTagPicker(
                                 .heightIn(min = 320.dp, max = if (imeVisible) 340.dp else 480.dp)
                                 .verticalScroll(rememberScrollState())
                         ) {
-                            if (message != null) {
-                                Text(
-                                    text = message,
-                                    color = palette.brandGold,
-                                    fontSize = 12.2.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.padding(vertical = 8.dp)
-                                )
-                                HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
-                            }
-
                             if (canCreateNewTag) {
                                 val normalizedNewTag = cleanQuery.take(20)
                                 Row(

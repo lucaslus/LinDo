@@ -507,7 +507,10 @@ internal fun ComposerSheet(
                 created
             }
 
-            if (initialDraft == null || !initialDraft.sequenceKnown) {
+            if ((initialDraft == null || !initialDraft.sequenceKnown) &&
+                !LinuxDoRepository.isChallengeCooldownActive() &&
+                !LinuxDoRepository.isRateLimitedNow()
+            ) {
                 val remoteConflict = runCatching {
                     activeSession.prepareWithRemote(
                         untouchedBaselineRaw = if (action == ComposerAction.EDIT) originalRaw else appliedTemplate
@@ -570,10 +573,14 @@ internal fun ComposerSheet(
         }
     }
 
+    // 后台云端草稿同步：本机草稿已实时加密落盘（每次按键零网络请求），云端同步退避至停笔 8s 后静默执行；
+    // 即使遇到 VPN 抖动或 Cloudflare 拦截也严禁阻断编辑器「发送」按钮或主动弹出验证页（仅在实际点击发送被拦截时才提示验证）！
     LaunchedEffect(draft, prepared, syncRetry, conflictRemoteDraft, draftSyncBlockedByVerification) {
         if (!prepared || !hasChanges || isUntouchedTemplate || conflictRemoteDraft != null || draftSyncBlockedByVerification) return@LaunchedEffect
-        delay(1200)
+        if (draft.raw.trim().length < 5) return@LaunchedEffect
+        delay(8_000L)
         if (!hasChanges || isUntouchedTemplate || conflictRemoteDraft != null || draftSyncBlockedByVerification) return@LaunchedEffect
+        if (LinuxDoRepository.isChallengeCooldownActive() || LinuxDoRepository.isRateLimitedNow()) return@LaunchedEffect
         try {
             val ok = session?.sync() == true
             draftSyncFailed = !ok
@@ -587,15 +594,12 @@ internal fun ComposerSheet(
             val needsSiteVerify = (error is ApiReadException && error.kind == ApiFailureKind.Verification) ||
                 error.message.isSiteVerificationError()
             draftSyncBlockedByVerification = needsSiteVerify
-            draftSyncErrorMsg = if (needsSiteVerify) {
-                LinDoComposerCopy.DRAFT_SAVED_LOCAL_NEED_VERIFY.text
-            } else {
-                null
-            }
+            draftSyncErrorMsg = null
         }
     }
 
-    LaunchedEffect(draft.categoryId, draft.tags, tagQuery, tagRetry, prepared, hasTopicMetaControls) {
+    val requiredGroupSelectedTagsKey = if (tagChoices.requiredGroup != null) draft.tags else emptyList()
+    LaunchedEffect(draft.categoryId, requiredGroupSelectedTagsKey, tagQuery, tagRetry, prepared, hasTopicMetaControls) {
         if (!prepared || !hasTopicMetaControls) return@LaunchedEffect
         val hadExistingOptions = accumulatedTagOptions.isNotEmpty()
         if (!hadExistingOptions) {
@@ -648,13 +652,30 @@ internal fun ComposerSheet(
         }
     }
 
-    val titleRemaining = LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH - draft.title.trim().length
-    val titleValidation = if (prepared && hasTopicMetaControls && titleRemaining > 0) {
-        LinDoComposerCopy.TITLE_CHARS_REMAINING.format(titleRemaining)
-    } else null
-    val bodyRemaining = LinuxDoSiteRules.MIN_POST_RAW_LENGTH - draft.raw.trim().length
+    var submitAttempted by remember { mutableStateOf(false) }
+    val titleFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    val bodyFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(draft.categoryId) {
+        submitAttempted = false
+    }
+
+    val titleTrimmed = draft.title.trim()
+    val titleRemaining = LinuxDoSiteRules.MIN_TOPIC_TITLE_LENGTH - titleTrimmed.length
+    val titleValidation = when {
+        !prepared || !hasTopicMetaControls -> null
+        titleTrimmed.isEmpty() -> LinDoComposerCopy.REQUIRED_TITLE_HINT.text
+        titleRemaining > 0 -> LinDoComposerCopy.TITLE_CHARS_REMAINING.format(titleRemaining)
+        else -> null
+    }
+    val rawTrimmed = draft.raw.trim()
+    val bodyRemaining = LinuxDoSiteRules.MIN_POST_RAW_LENGTH - rawTrimmed.length
     val bodyValidation = when {
         !prepared -> null
+        rawTrimmed.isEmpty() -> if (action == ComposerAction.REPLY) {
+            LinDoComposerCopy.REQUIRED_REPLY_HINT.text
+        } else {
+            LinDoComposerCopy.REQUIRED_BODY_HINT.text
+        }
         bodyRemaining > 0 -> LinDoComposerCopy.BODY_CHARS_REMAINING.format(bodyRemaining)
         else -> null
     }
@@ -664,10 +685,10 @@ internal fun ComposerSheet(
             tagChoices.requiredGroup == null &&
             tagChoices.forbiddenMessage == null
         )
-    val needsVerification = draftSyncBlockedByVerification || submitError.isSiteVerificationError()
-    val canSubmit = prepared && !busy && !needsVerification && !PlatformSessionRecovery.verifying && titleValidation == null && bodyValidation == null &&
-        tagValidationOk &&
+    val needsVerification = submitError.isSiteVerificationError()
+    val canClickSubmit = prepared && !busy && !needsVerification && !PlatformSessionRecovery.verifying &&
         (action != ComposerAction.EDIT || hasChanges)
+    val canSubmit = canClickSubmit && titleValidation == null && bodyValidation == null && tagValidationOk
 
     fun submit(allowResubmit: Boolean = false) {
         if (!canSubmit || submitting) return
@@ -823,9 +844,27 @@ internal fun ComposerSheet(
                     ComposerAction.EDIT -> LinDoCommonCopy.SAVE.text
                 }
                 TextButton(
-                    enabled = canSubmit,
+                    enabled = canClickSubmit,
                     contentPadding = PaddingValues(horizontal = 10.dp),
+                    modifier = Modifier.pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand),
                     onClick = {
+                        if (!canClickSubmit || submitting) return@TextButton
+                        if (hasTopicMetaControls && tagsLoading) return@TextButton
+                        val missingTitle = hasTopicMetaControls && titleValidation != null
+                        val missingTag = hasTopicMetaControls && !tagValidationOk
+                        val missingBody = bodyValidation != null
+                        if (missingTitle || missingTag || missingBody) {
+                            submitAttempted = true
+                            when {
+                                missingTitle -> runCatching { titleFocusRequester.requestFocus() }
+                                missingTag -> {
+                                    keyboard?.hide()
+                                    activePicker = ActiveComposerPicker.TAG
+                                }
+                                missingBody -> runCatching { bodyFocusRequester.requestFocus() }
+                            }
+                            return@TextButton
+                        }
                         if (action == ComposerAction.NEW_TOPIC && LinuxDoSiteRules.requiresTopicCostConfirmation(draft.tags)) {
                             showCost = true
                         } else submit()
@@ -836,7 +875,7 @@ internal fun ComposerSheet(
                     } else {
                         Text(
                             actionLabel, fontWeight = FontWeight.Bold, maxLines = 1,
-                            color = if (canSubmit) palette.activeChipText else palette.inkTertiary
+                            color = if (canClickSubmit) palette.activeChipText else palette.inkTertiary
                         )
                     }
                 }
@@ -971,12 +1010,12 @@ internal fun ComposerSheet(
                             // 1. 版块类别抽屉触发器（无底色无边框，与版块图标体系严格一致）
                             Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
+                                    .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                                     .clickable(enabled = !busy) {
                                         keyboard?.hide()
                                         activePicker = ActiveComposerPicker.CATEGORY
                                     }
-                                    .padding(vertical = 4.dp),
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
@@ -1020,11 +1059,11 @@ internal fun ComposerSheet(
                                 val tagVisual = remember(tag) { resolveOfficialTagVisual(tag) }
                                 Row(
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
+                                        .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                                         .clickable(enabled = !busy) {
                                             update(draft.copy(tags = draft.tags - tag))
                                         }
-                                        .padding(vertical = 4.dp),
+                                        .padding(horizontal = 6.dp, vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
@@ -1058,16 +1097,32 @@ internal fun ComposerSheet(
                                 }
                             }
 
-                            // 3. 标签抽屉触发器（无底色无边框，清爽图标+文字）
+                            // 3. 标签抽屉触发器（仅在提交校验未满足必选标签时高亮该控件本身，绝不独占一行预展示）
+                            val tagRequiredErrorMsg = if (submitAttempted && !tagsLoading) {
+                                tagChoices.forbiddenMessage
+                                    ?: tagChoices.requiredGroup?.let { LinDoComposerCopy.REQUIRED_TAG_GROUP_HINT.format(it) }
+                            } else null
+                            val tagHighlightActive = tagRequiredErrorMsg != null
+                            val tagHighlightColor = MaterialTheme.colorScheme.error
+                            val tagChipShape = RoundedCornerShape(7.dp)
                             Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
+                                    .then(
+                                        if (tagHighlightActive) {
+                                            Modifier
+                                                .background(tagHighlightColor.copy(alpha = 0.11f), tagChipShape)
+                                                .border(0.8.dp, tagHighlightColor.copy(alpha = 0.68f), tagChipShape)
+                                        } else {
+                                            Modifier
+                                        }
+                                    )
+                                    .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                                     .clickable(enabled = !busy) {
                                         keyboard?.hide()
                                         if (tagsError != null) tagRetry++
                                         activePicker = ActiveComposerPicker.TAG
                                     }
-                                    .padding(vertical = 4.dp),
+                                    .padding(horizontal = if (tagHighlightActive) 8.dp else 6.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
@@ -1075,38 +1130,18 @@ internal fun ComposerSheet(
                                     imageVector = LinDoIcons.Plus,
                                     contentDescription = LinDoComposerCopy.OPEN_TAG_DRAWER_DESC.text,
                                     modifier = Modifier.size(13.dp),
-                                    tint = palette.inkSecondary
+                                    tint = if (tagHighlightActive) tagHighlightColor else palette.inkSecondary
                                 )
                                 Text(
-                                    text = if (draft.tags.isEmpty()) LinDoComposerCopy.SELECT_TAGS.text else LinDoComposerCopy.MANAGE_TAGS_COUNT.format(draft.tags.size, COMPOSER_TAG_LIMIT),
-                                    fontSize = 13.2.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.inkSecondary
+                                    text = tagRequiredErrorMsg
+                                        ?: if (draft.tags.isEmpty()) LinDoComposerCopy.SELECT_TAGS.text
+                                        else LinDoComposerCopy.MANAGE_TAGS_COUNT.format(draft.tags.size, COMPOSER_TAG_LIMIT),
+                                    fontSize = 13.sp,
+                                    fontWeight = if (tagHighlightActive) FontWeight.SemiBold else FontWeight.Medium,
+                                    color = if (tagHighlightActive) tagHighlightColor else palette.inkSecondary,
+                                    maxLines = 1
                                 )
                             }
-                        }
-
-                        val tagHintMessage = tagChoices.forbiddenMessage
-                            ?: tagChoices.requiredGroup?.let { LinDoComposerCopy.REQUIRED_TAG_GROUP_HINT.format(it) }
-                        if (tagHintMessage != null) {
-                            Text(
-                                text = tagHintMessage,
-                                fontSize = 11.8.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = palette.brandGold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
-                                    .clickable(enabled = !busy) {
-                                        keyboard?.hide()
-                                        activePicker = ActiveComposerPicker.TAG
-                                    }
-                                    .padding(horizontal = 4.dp, vertical = 4.dp)
-                            )
                         }
 
                         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
@@ -1158,7 +1193,8 @@ internal fun ComposerSheet(
                             )
                         }
 
-                        // 无边框大字号话题标题输入栏
+                        // 无边框大字号话题标题输入栏（仅在点击提交且不满足条件时高亮底边与右侧内联提示，不插入额外行）
+                        val showTitleError = submitAttempted && titleValidation != null
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
                         ) {
@@ -1168,18 +1204,14 @@ internal fun ComposerSheet(
                                 placeholder = LinDoComposerCopy.TOPIC_TITLE_PLACEHOLDER.text,
                                 enabled = !busy,
                                 title = true,
-                                autofocus = !focusBodyInitially
+                                autofocus = !focusBodyInitially,
+                                focusRequester = titleFocusRequester,
+                                errorHint = if (showTitleError) titleValidation else null
                             )
-                            if (titleValidation != null && (draft.title.isNotBlank() || draft.raw.isNotBlank())) {
-                                Text(
-                                    titleValidation, fontSize = 11.5.sp, color = palette.inkSecondary,
-                                    modifier = Modifier.padding(bottom = 6.dp)
-                                )
-                            }
                         }
                         HorizontalDivider(
-                            color = palette.hairline,
-                            thickness = 0.5.dp
+                            color = if (showTitleError) MaterialTheme.colorScheme.error.copy(alpha = 0.72f) else palette.hairline,
+                            thickness = if (showTitleError) 0.9.dp else 0.5.dp
                         )
                     }
 
@@ -1235,10 +1267,6 @@ internal fun ComposerSheet(
                             onVerify = { openWebUrl.invoke("https://linux.do/") },
                             modifier = Modifier.padding(horizontal = 14.dp)
                         )
-                    } else if (draftSyncFailed && submitError == null && !busy) {
-                        LinDoLoadFailure(draftSyncErrorMsg ?: LinDoComposerCopy.DRAFT_SAVED_LOCAL_CLOUD_FAILED.text) {
-                            syncRetry++
-                        }
                     }
                     if (submitError != null && !submitError.isSiteVerificationError()) {
                         Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
@@ -1247,6 +1275,7 @@ internal fun ComposerSheet(
                     }
 
                     // ==================== 4. 顶部 Action Tools Bar + 弹性全高创作画布 ====================
+                    val showBodyError = submitAttempted && bodyValidation != null
                     LinDoMarkdownWorkbench(
                         rawValue = draft.raw,
                         onRawValueChange = { update(draft.copy(raw = it)) },
@@ -1260,7 +1289,9 @@ internal fun ComposerSheet(
                         onUploadingChange = { uploading = it },
                         externalViewMode = viewMode,
                         restoreKeyboardFromPreview = keyboardBeforePreview,
-                        validationHint = bodyValidation,
+                        validationHint = if (showBodyError) bodyValidation else null,
+                        validationError = showBodyError,
+                        externalFocusRequester = bodyFocusRequester,
                         fillAvailableHeight = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -1339,10 +1370,13 @@ internal fun ComposerTextInput(
     placeholder: String,
     enabled: Boolean,
     title: Boolean = false,
-    autofocus: Boolean = false
+    autofocus: Boolean = false,
+    focusRequester: androidx.compose.ui.focus.FocusRequester? = null,
+    errorHint: String? = null
 ) {
     val palette = LocalPalette.current
-    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    val focus = focusRequester ?: remember { androidx.compose.ui.focus.FocusRequester() }
+    val errorColor = MaterialTheme.colorScheme.error
     LaunchedEffect(autofocus) {
         if (autofocus) {
             delay(120)
@@ -1355,28 +1389,44 @@ internal fun ComposerTextInput(
         lineHeight = if (title) 24.sp else 18.sp,
         fontWeight = if (title) FontWeight.Bold else FontWeight.Normal
     )
-    BasicTextField(
-        value = value,
-        onValueChange = { next -> onChange(if (title) next.replace(Regex("[\\r\\n]+"), " ") else next) },
-        enabled = enabled,
-        singleLine = !title,
-        maxLines = if (title) 3 else 1,
-        textStyle = style,
-        cursorBrush = SolidColor(palette.brandGold),
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = if (title) 44.dp else 36.dp)
-            .then(Modifier.focusRequester(focus)),
-        decorationBox = { inner ->
-            LinDoInputDecoration(
-                empty = value.isEmpty(),
-                placeholder = placeholder,
-                textStyle = style,
-                placeholderColor = palette.inkSecondary,
-                modifier = Modifier.fillMaxWidth().padding(vertical = if (title) 8.dp else 6.dp),
-                alignment = Alignment.TopStart,
-                innerTextField = inner
+            .heightIn(min = if (title) 44.dp else 38.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        BasicTextField(
+            value = value,
+            onValueChange = { next -> onChange(if (title) next.replace(Regex("[\\r\\n]+"), " ") else next) },
+            enabled = enabled,
+            singleLine = !title,
+            maxLines = if (title) 3 else 1,
+            textStyle = style,
+            cursorBrush = SolidColor(if (errorHint != null) errorColor else palette.brandGold),
+            modifier = Modifier
+                .weight(1f)
+                .focusRequester(focus),
+            decorationBox = { inner ->
+                LinDoInputDecoration(
+                    empty = value.isEmpty(),
+                    placeholder = placeholder,
+                    textStyle = style,
+                    placeholderColor = if (errorHint != null && value.isEmpty()) errorColor.copy(alpha = 0.78f) else palette.inkSecondary,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = if (title) 8.dp else 6.dp),
+                    alignment = Alignment.TopStart,
+                    innerTextField = inner
+                )
+            }
+        )
+        if (errorHint != null) {
+            Text(
+                text = errorHint,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = errorColor,
+                maxLines = 1
             )
         }
-    )
+    }
 }
