@@ -22,27 +22,32 @@
   --font-mono: "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   --font-scale: 1;
 
-  --canvas: #101217;
-  --grouped-canvas: #101217;
-  --card-surface: #101217;
-  --subtle-surface: #181b22;
-  --nav-bar-surface: #11141b;
-  --tonal-pill: #212631;
-  --on-tonal-pill: #f3f4f6;
-  --ink-primary: #f3f4f6;
-  --ink-secondary: #a1a8b5;
-  --ink-tertiary: #7d8594;
-  --hairline: #1e222b;
+  --canvas: #161a23;
+  --grouped-canvas: #161a23;
+  --card-surface: #161a23;
+  --feed-surface: #11141b;
+  --selected-card-bg: #1c212e;
+  --selected-card-border: rgba(252, 211, 77, 0.22);
+  --subtle-surface: #1b202b;
+  --nav-bar-surface: #0c0e13;
+  --tonal-pill: #212735;
+  --on-tonal-pill: #f1f3f7;
+  --ink-primary: #f1f3f7;
+  --ink-secondary: #9ba3b2;
+  --ink-tertiary: #6e7787;
+  --hairline: rgba(255, 255, 255, 0.058);
+  --hairline-soft: rgba(255, 255, 255, 0.042);
+  --hover-floor-bg: rgba(255, 255, 255, 0.024);
   --accent: #fcd34d;
   --brand-gold: #fcd34d;
   --logo-do: #f59e0b;
   --tab-indicator: #fcd34d;
-  --active-chip-bg: #3f2e05;
+  --active-chip-bg: rgba(252, 211, 77, 0.14);
   --active-chip-text: #fcd34d;
   --publish-btn-bg: #fcd34d;
   --publish-btn-fg: #111827;
-  --hover-overlay: rgba(243, 244, 246, 0.048);
-  --press-overlay: rgba(243, 244, 246, 0.085);
+  --hover-overlay: rgba(241, 243, 247, 0.046);
+  --press-overlay: rgba(241, 243, 247, 0.082);
   --error-fg: #f87171;
   --error-bg: rgba(248, 113, 113, 0.11);
   --error-border: rgba(248, 113, 113, 0.68);
@@ -118,6 +123,20 @@ textarea {
   background-color: var(--hairline);
   flex-shrink: 0;
 }
+.lindo-divider-feed {
+  height: 0.5px;
+  margin-left: 72px;
+  margin-right: 18px;
+  background-color: var(--hairline-soft);
+  flex-shrink: 0;
+}
+.lindo-divider-feed-compact {
+  height: 0.5px;
+  margin-left: 52px;
+  margin-right: 14px;
+  background-color: var(--hairline-soft);
+  flex-shrink: 0;
+}
 
 /* Seamless GPU-composited shimmer skeleton (0% and 100% frames are 100% off-element -> zero loop jump at 144Hz!) */
 @keyframes lindo-shimmer-sweep {
@@ -151,6 +170,9 @@ textarea {
 }
 
 /* Linux.do exclusive site visual rules (@neo square avatar, blue/gold glow, official text-clipped holographic title) */
+.lindo-avatar-wrap {
+  contain: layout style paint;
+}
 .lindo-avatar-square {
   border-radius: 11% !important;
 }
@@ -159,6 +181,44 @@ textarea {
 }
 .lindo-glow-gold {
   box-shadow: 0 0 0 1.5px rgba(245, 191, 3, 0.78), 0 0 10px rgba(245, 191, 3, 0.28);
+}
+
+/* Pause animated GIF/WebP avatar overlays & expensive Gaussian shadow blurs during active 144Hz scroll or split-pane slide;
+   static crisp CDN base avatar underneath remains 100% visible, then animation resumes seamlessly 145ms after settle! */
+html.lindo-scrolling .lindo-avatar-anim,
+html.lindo-pane-animating .lindo-avatar-anim {
+  display: none !important;
+}
+html.lindo-scrolling .lindo-glow-blue,
+html.lindo-pane-animating .lindo-glow-blue {
+  box-shadow: 0 0 0 1.5px rgba(0, 174, 255, 0.72);
+}
+html.lindo-scrolling .lindo-glow-gold,
+html.lindo-pane-animating .lindo-glow-gold {
+  box-shadow: 0 0 0 1.5px rgba(245, 191, 3, 0.78);
+}
+
+/* Skip layout/paint of offscreen post floors ONLY during the 200ms split-pane collapse/expand animation
+   (keeps normal scroll offsetTop 100% exact while making collapse/expand <0.3ms/frame at 144Hz) */
+html.lindo-pane-animating .lindo-offscreen-floor {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
+}
+
+/* Atomic zero-lag theme switch: suppresses per-element hover transitions (`transition-colors`, `.lindo-interactive`)
+   so search pills, quote bars, tabs, and reply bars NEVER lag behind the main canvas during light/dark toggle */
+html.lindo-theme-switching,
+html.lindo-theme-switching *,
+html.lindo-theme-switching *::before,
+html.lindo-theme-switching *::after {
+  transition: none !important;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 155ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  mix-blend-mode: normal;
 }
 
 @keyframes lindo-holo-text {
@@ -260,11 +320,20 @@ a:focus-visible,
 }
 
 /* Eliminate stationary-cursor :hover transition repaint churn during active 144Hz scrolling */
-html.lindo-scrolling .lindo-interactive {
+html.lindo-scrolling .lindo-interactive,
+html.lindo-scrolling .lindo-reply-floor {
   transition: none !important;
 }
-html.lindo-scrolling .lindo-interactive:hover:not(:active) {
+html.lindo-scrolling .lindo-interactive:hover:not(:active),
+html.lindo-scrolling .lindo-reply-floor:hover {
   background-color: transparent;
+}
+
+.lindo-reply-floor {
+  transition: background-color 120ms ease;
+}
+.lindo-reply-floor:hover {
+  background-color: var(--hover-floor-bg);
 }
 
 /*Mathematically concentric GPU rotation (zero eccentric wobble on Retina displays) */
@@ -335,6 +404,8 @@ html.lindo-scrolling .lindo-interactive:hover:not(:active) {
 .text-\[18\.5px\] { font-size: calc(18.5px * var(--font-scale)); font-size: round(nearest, calc(18.5px * var(--font-scale)), 0.5px); }
 .text-\[19px\] { font-size: calc(19px * var(--font-scale)); font-size: round(nearest, calc(19px * var(--font-scale)), 0.5px); }
 .text-\[20px\] { font-size: calc(20px * var(--font-scale)); font-size: round(nearest, calc(20px * var(--font-scale)), 0.5px); }
+.text-\[21px\] { font-size: calc(21px * var(--font-scale)); font-size: round(nearest, calc(21px * var(--font-scale)), 0.5px); }
+.text-\[22px\] { font-size: calc(22px * var(--font-scale)); font-size: round(nearest, calc(22px * var(--font-scale)), 0.5px); }
 .text-\[24px\] { font-size: calc(24px * var(--font-scale)); font-size: round(nearest, calc(24px * var(--font-scale)), 0.5px); }
 
 .lindo-cooked p {

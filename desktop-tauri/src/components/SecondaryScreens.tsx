@@ -1,68 +1,17 @@
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  Fire,
-  ArrowRight,
-  ArrowLeft,
-  ArrowClockwise,
-  Lock,
-  Check,
-  EnvelopeSimple,
-  Bell,
-  PaperPlaneTilt,
-  SignOut,
-  Plus,
-  MagnifyingGlass,
-  X,
-  BookmarkSimple,
-  Palette,
-  Sun,
-  Moon,
-  Desktop,
-  TextAa,
-  Trash,
-  ShieldCheck,
-  Gift,
-  Coins,
-  Globe,
-  User,
-  ClockCounterClockwise,
-  FileText,
-  CalendarBlank,
-  Trophy,
-  Users,
-  Sparkle,
-  Info,
-  CaretRight,
-  CaretDown,
-  PencilSimple,
-  Rows,
-  ListBullets,
-  BookOpen,
-  Cloud,
-  Heart,
-  ChatCircle,
-  RocketLaunch,
-  At,
-  UserPlus,
-  ArrowBendUpLeft,
-  Quotes,
-  ThumbsUp,
-  Smiley,
-  MagnifyingGlassPlus,
-  MagnifyingGlassMinus,
-  ArrowSquareOut,
-  LinkSimple,
-  DownloadSimple,
-  Copy,
-  Archive,
-  Warning,
-} from "@phosphor-icons/react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  LinDoCategoryBadge,
+  LinDoIcons,
+  resolveOfficialCategoryVisual,
+  resolveOfficialTagVisual,
+} from "./LinDoIcons";
 import type { ExternalUrlAssessment } from "../lib/cooked";
 import { useForumImageSrc } from "../lib/forumMedia";
 import {
   buildDiagReport,
   clearDiagEntries,
+  DESKTOP_APP_VERSION,
   type DiagCategory,
   exportDiagLogToFile,
   getDiagEntries,
@@ -114,6 +63,7 @@ import {
   markAllNotificationsRead,
   markSingleNotificationRead,
   refreshCurrentUserSession,
+  requestUserArchive,
   searchCommunity,
   sendPrivateMessage,
   SiteError,
@@ -194,45 +144,45 @@ function notificationFallbackVerb(type: number): string {
 function resolveNotificationCornerIcon(n: NotificationItem): React.ReactNode {
   const rx = (n.reactionIcon || "").toLowerCase();
   if (rx === "rocket" || [38, 40, 43, 803].includes(n.notificationType)) {
-    return <RocketLaunch size={10.5} weight="fill" />;
+    return <LinDoIcons.BoostRocket size={10.5} />;
   }
   if (["+1", "thumbsup", "clap", "tieba_087"].includes(rx)) {
-    return <ThumbsUp size={10.5} weight="fill" />;
+    return <LinDoIcons.ThumbUp size={10.5} />;
   }
   if (["fire", "flame"].includes(rx)) {
-    return <Fire size={10.5} weight="fill" />;
+    return <LinDoIcons.FaFire size={10.5} />;
   }
   if (["tada", "confetti_ball", "sparkles"].includes(rx)) {
-    return <Sparkle size={10.5} weight="fill" />;
+    return <LinDoIcons.Sparkles size={10.5} />;
   }
   if (["laughing", "joy", "open_mouth", "hugs", "distorted_face"].includes(rx)) {
-    return <Smiley size={10.5} weight="fill" />;
+    return <LinDoIcons.Smile size={10.5} />;
   }
   if ([5, 19, 25].includes(n.notificationType)) {
-    return <Heart size={10.5} weight="fill" />;
+    return <LinDoIcons.HeartFilled size={10.5} />;
   }
   if (n.isConsolidatedReplies || [2, 9, 17, 37, 801, 802].includes(n.notificationType)) {
-    return <ArrowBendUpLeft size={10.5} weight="bold" />;
+    return <LinDoIcons.Reply size={10.5} />;
   }
   if ([3, 33].includes(n.notificationType)) {
-    return <Quotes size={10.5} weight="fill" />;
+    return <LinDoIcons.Quote size={10.5} />;
   }
   if ([1, 15, 29, 32].includes(n.notificationType)) {
-    return <At size={10.5} weight="bold" />;
+    return <LinDoIcons.AtSign size={10.5} />;
   }
   if ([6, 7, 16].includes(n.notificationType)) {
-    return <EnvelopeSimple size={10.5} weight="fill" />;
+    return <LinDoIcons.Mail size={10.5} />;
   }
   if (n.notificationType === 12 || Boolean(n.badgeId && n.badgeId > 0)) {
-    return <Trophy size={10.5} weight="fill" />;
+    return <LinDoIcons.Trophy size={10.5} />;
   }
   if ([36, 800].includes(n.notificationType)) {
-    return <UserPlus size={10.5} weight="fill" />;
+    return <LinDoIcons.UserPlus size={10.5} />;
   }
-  return <Bell size={10.5} weight="fill" />;
+  return <LinDoIcons.BellSelected size={10.5} />;
 }
 
-/* ==================== 100% 几何同心双弧刷新图标（零偏心晃动，120Hz 顺滑旋转） ==================== */
+/* ==================== 100% 几何同心双弧刷新图标（1:1 共享移动端 LinDoIcons.Refresh） ==================== */
 export const SmoothRefreshIcon: React.FC<{
   spinning?: boolean;
   size?: number;
@@ -240,7 +190,6 @@ export const SmoothRefreshIcon: React.FC<{
 }> = ({ spinning = false, size = 16, className = "" }) => {
   const px = Math.round(size);
   if (spinning) {
-    // 100% 轴对称纯圆环轨道 + 90° 圆弧指示器：无任何外凸箭头尖角，几何包络与视觉质心恒定为 (12, 12)，144Hz 旋转 0.00px 浮动！
     return (
       <svg
         width={px}
@@ -257,22 +206,7 @@ export const SmoothRefreshIcon: React.FC<{
       </svg>
     );
   }
-  return (
-    <svg
-      width={px}
-      height={px}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.95}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={`block shrink-0 ${className}`}
-    >
-      <path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5" />
-      <path d="M20 4.5v4h-4" />
-    </svg>
-  );
+  return <LinDoIcons.Refresh size={px} className={`block shrink-0 ${className}`} />;
 };
 
 export const MascotExpression: React.FC<{
@@ -418,7 +352,7 @@ export const AvatarWithFlair: React.FC<{
   flair?: FlairInfo | null;
   sizePx?: number;
   className?: string;
-}> = ({
+}> = React.memo(({
   username,
   avatarTemplate,
   animatedAvatar,
@@ -450,7 +384,7 @@ export const AvatarWithFlair: React.FC<{
 
   return (
     <div
-      className={`relative inline-flex shrink-0 ${className}`}
+      className={`lindo-avatar-wrap relative inline-flex shrink-0 ${className}`}
       style={{ width: sizePx, height: sizePx }}
     >
       {/* Base layer: instant ~3KB static edge CDN avatar (never waits for multi-MB GIF download!) */}
@@ -461,13 +395,13 @@ export const AvatarWithFlair: React.FC<{
         className={shapeAndGlow}
         style={{ backgroundColor: "var(--subtle-surface)" }}
       />
-      {/* Overlay layer: seamlessly mounts animated GIF/WebP once bridged & ready */}
+      {/* Overlay layer: seamlessly mounts animated GIF/WebP once bridged & ready; auto-paused during active scroll/pane-slide */}
       {animatedSrc && animatedSrc !== staticAvatarSrc && (
         <img
           src={animatedSrc}
           alt=""
           decoding="async"
-          className={`absolute inset-0 ${shapeAndGlow}`}
+          className={`lindo-avatar-anim absolute inset-0 ${shapeAndGlow}`}
         />
       )}
       {flairVis && (
@@ -509,7 +443,7 @@ export const AvatarWithFlair: React.FC<{
       )}
     </div>
   );
-};
+});
 
 export const BadgeDetailModal: React.FC<{
   badge: GrantedBadge;
@@ -548,7 +482,7 @@ export const BadgeDetailModal: React.FC<{
             className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
             style={{ color: "var(--ink-secondary)" }}
           >
-            <X size={15} />
+            <LinDoIcons.Close size={15} />
           </button>
         </div>
 
@@ -695,7 +629,7 @@ export const WelcomeLoginScreen: React.FC<{
               className="lindo-no-drag lindo-interactive flex h-9 w-9 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              {isDark ? <Sun size={19} /> : <Moon size={19} />}
+              {isDark ? <LinDoIcons.Sun size={19} /> : <LinDoIcons.Moon size={19} />}
             </button>
           )}
         </header>
@@ -732,7 +666,7 @@ export const WelcomeLoginScreen: React.FC<{
             }}
           >
             <span>使用 LINUX DO 登录</span>
-            <ArrowRight size={18} weight="bold" />
+            <LinDoIcons.ArrowRight size={18} />
           </button>
 
           <button
@@ -744,18 +678,51 @@ export const WelcomeLoginScreen: React.FC<{
               color: "var(--ink-primary)",
             }}
           >
-            <Globe size={17} style={{ color: "var(--ink-secondary)" }} />
-            <span>浏览器授权（推荐 · 支持 Passkey）</span>
+            <LinDoIcons.Globe size={17} style={{ color: "var(--ink-secondary)" }} />
+            <span>
+              {isWaitingBrowserCallback
+                ? "重新打开默认浏览器授权页"
+                : "使用默认浏览器一键授权（推荐）"}
+            </span>
           </button>
 
+          <p
+            className="px-2 text-center text-[11.5px] leading-relaxed"
+            style={{ color: "var(--ink-tertiary)" }}
+          >
+            默认浏览器若已登录社区可直接点「授权」；未登录时可使用浏览器保存的密码或 Passkey
+          </p>
+
           {onImportAuthCallback && (isWaitingBrowserCallback || showPasteBox) && (
-            <div className="pt-0.5">
+            <div className="pt-1">
+              {isWaitingBrowserCallback && (
+                <div
+                  className="mb-2 flex items-start gap-2.5 rounded-xl px-3.5 py-2.5 text-left"
+                  style={{
+                    backgroundColor: "var(--subtle-surface)",
+                    border: "0.5px solid color-mix(in srgb, var(--brand-gold) 36%, var(--hairline))",
+                  }}
+                >
+                  <span
+                    className="mt-1.5 h-2 w-2 shrink-0 animate-pulse rounded-full"
+                    style={{ backgroundColor: "var(--brand-gold)" }}
+                  />
+                  <div className="min-w-0 flex-1 text-[12px] leading-relaxed" style={{ color: "var(--ink-secondary)" }}>
+                    <div className="font-semibold" style={{ color: "var(--ink-primary)" }}>
+                      正在等待浏览器授权返回…
+                    </div>
+                    <div className="mt-0.5">
+                      请在浏览器点击「授权」，并在弹窗确认「打开 Lindo」。若浏览器拦截了外部跳转，可点击下方手动粘贴完成登录。
+                    </div>
+                  </div>
+                </div>
+              )}
               {!showPasteBox ? (
                 <button
                   type="button"
                   onClick={() => setShowPasteBox(true)}
                   className="mx-auto block py-1 text-[12px] hover:underline cursor-pointer"
-                  style={{ color: "var(--ink-tertiary)" }}
+                  style={{ color: "var(--brand-gold)" }}
                 >
                   浏览器未自动跳回？粘贴回调链接或 _t 完成登录
                 </button>
@@ -917,7 +884,7 @@ export const DiscoverView: React.FC<{
       requiresAuth: true,
       guestTitle: "登录后访问 Connect 中心",
       guestSub: "查看信任等级进度、保级指标与专属社区权益",
-      icon: <ShieldCheck size={19} weight="duotone" />,
+      icon: <LinDoIcons.ShieldCheck size={19} />,
     },
     {
       title: "全站徽章墙",
@@ -927,7 +894,7 @@ export const DiscoverView: React.FC<{
       requiresAuth: false,
       guestTitle: "",
       guestSub: "",
-      icon: <Trophy size={19} weight="duotone" />,
+      icon: <LinDoIcons.Trophy size={19} />,
     },
     {
       title: "Credit 积分",
@@ -937,7 +904,7 @@ export const DiscoverView: React.FC<{
       requiresAuth: true,
       guestTitle: "登录后访问 Credit 积分",
       guestSub: "积分流转与服务认证需通过 LINUX DO 账号授权",
-      icon: <Coins size={19} weight="duotone" />,
+      icon: <LinDoIcons.Coins size={19} />,
     },
     {
       title: "CDK 分发",
@@ -947,7 +914,7 @@ export const DiscoverView: React.FC<{
       requiresAuth: true,
       guestTitle: "登录后访问 CDK 分发",
       guestSub: "领取或发布社区福利需登录 LINUX DO 账号",
-      icon: <Gift size={19} weight="duotone" />,
+      icon: <LinDoIcons.Gift size={19} />,
     },
     {
       title: "LD Hub",
@@ -957,7 +924,7 @@ export const DiscoverView: React.FC<{
       requiresAuth: true,
       guestTitle: "登录后访问 LD Hub",
       guestSub: "访问生态 AI 与聚合中心需登录 LINUX DO 账号",
-      icon: <Sparkle size={19} weight="duotone" />,
+      icon: <LinDoIcons.Sparkles size={19} />,
     },
     {
       title: "社区 Wiki",
@@ -967,7 +934,7 @@ export const DiscoverView: React.FC<{
       requiresAuth: false,
       guestTitle: "",
       guestSub: "",
-      icon: <BookOpen size={19} weight="duotone" />,
+      icon: <LinDoIcons.BookOpen size={19} />,
     },
     {
       title: "IDC Flare",
@@ -977,7 +944,7 @@ export const DiscoverView: React.FC<{
       requiresAuth: false,
       guestTitle: "",
       guestSub: "",
-      icon: <Cloud size={19} weight="duotone" />,
+      icon: <LinDoIcons.CloudServer size={19} />,
     },
     {
       title: "Lottery 抽奖",
@@ -987,7 +954,7 @@ export const DiscoverView: React.FC<{
       requiresAuth: true,
       guestTitle: "登录后访问 Lottery 抽奖",
       guestSub: "使用官方楼层开奖与抽奖工具需登录 LINUX DO 账号",
-      icon: <Trophy size={19} weight="duotone" />,
+      icon: <LinDoIcons.AwardBadge size={19} />,
     },
   ];
 
@@ -1015,7 +982,7 @@ export const DiscoverView: React.FC<{
           className="lindo-no-drag lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
           style={{ color: "var(--ink-primary)" }}
         >
-          <MagnifyingGlass size={18} />
+          <LinDoIcons.Search size={18} />
         </button>
       </header>
 
@@ -1031,6 +998,13 @@ export const DiscoverView: React.FC<{
           <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
             {parentCats.map((cat) => {
               const vis = resolveCategoryVisual(cat.name, cat.colorHex);
+              const offVis = resolveOfficialCategoryVisual(
+                cat.name,
+                vis.dotColor,
+                undefined,
+                cat.readRestricted
+              );
+              const CatIcon = offVis.Icon;
               const subs = categories.filter((s) => s.parentId === cat.id);
               const isExpanded = expandedParentId === cat.id;
               return (
@@ -1048,10 +1022,7 @@ export const DiscoverView: React.FC<{
                       onClick={() => onSelectCategoryInHome(cat.id)}
                       className="flex min-w-0 flex-1 items-center gap-2 text-left cursor-pointer"
                     >
-                      <span
-                        className="h-2.5 w-2.5 shrink-0 rounded-full"
-                        style={{ backgroundColor: vis.dotColor }}
-                      />
+                      <CatIcon size={14} style={{ color: offVis.color }} />
                       <span
                         className="truncate text-[13.8px] font-semibold"
                         style={{ color: "var(--ink-primary)" }}
@@ -1059,17 +1030,22 @@ export const DiscoverView: React.FC<{
                         {cat.name}
                       </span>
                       {cat.readRestricted && (
-                        <Lock size={11.5} style={{ color: "var(--ink-tertiary)" }} />
+                        <LinDoIcons.FaLock size={11} style={{ color: "var(--ink-tertiary)" }} />
                       )}
                     </button>
                     {subs.length > 0 && (
                       <button
                         type="button"
                         onClick={() => setExpandedParentId(isExpanded ? null : cat.id)}
-                        className="lindo-interactive ml-1 rounded-md px-1.5 py-0.5 text-[11px]"
+                        className="lindo-interactive ml-1 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px]"
                         style={{ color: "var(--ink-tertiary)" }}
                       >
-                        {subs.length} 子项 {isExpanded ? "▴" : "▾"}
+                        <span>{subs.length} 子项</span>
+                        {isExpanded ? (
+                          <LinDoIcons.ChevronUp size={11} />
+                        ) : (
+                          <LinDoIcons.ChevronDown size={11} />
+                        )}
                       </button>
                     )}
                   </div>
@@ -1089,7 +1065,7 @@ export const DiscoverView: React.FC<{
                             color: "var(--ink-secondary)",
                           }}
                         >
-                          {sub.readRestricted && <Lock size={9.5} />}
+                          {sub.readRestricted && <LinDoIcons.FaLock size={9.5} />}
                           <span>{sub.subLabel || sub.name}</span>
                         </button>
                       ))}
@@ -1101,7 +1077,7 @@ export const DiscoverView: React.FC<{
           </div>
         </section>
 
-        {/* 2. 热门标签 */}
+        {/* 2. 热门标签（1:1 对齐移动端官方矢量标签图标） */}
         <section>
           <div
             className="mb-2.5 text-[13px] font-semibold"
@@ -1110,21 +1086,29 @@ export const DiscoverView: React.FC<{
             热门标签
           </div>
           <div className="flex flex-wrap gap-2">
-            {popularTags.map((tg) => (
-              <button
-                key={tg}
-                type="button"
-                onClick={() => onSelectTagInHome(tg)}
-                className="lindo-interactive rounded-full px-3 py-1 text-[12.5px] font-medium"
-                style={{
-                  backgroundColor: "var(--subtle-surface)",
-                  border: "0.5px solid var(--hairline)",
-                  color: "var(--ink-primary)",
-                }}
-              >
-                # {tg}
-              </button>
-            ))}
+            {popularTags.map((tg) => {
+              const tVis = resolveOfficialTagVisual(tg);
+              const TagIcon = tVis ? tVis.Icon : LinDoIcons.FaTag;
+              return (
+                <button
+                  key={tg}
+                  type="button"
+                  onClick={() => onSelectTagInHome(tg)}
+                  className="lindo-interactive inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.8px] font-medium"
+                  style={{
+                    backgroundColor: "var(--subtle-surface)",
+                    border: "0.5px solid var(--hairline)",
+                    color: "var(--ink-primary)",
+                  }}
+                >
+                  <TagIcon
+                    size={12}
+                    style={{ color: tVis ? tVis.color : "var(--ink-tertiary)" }}
+                  />
+                  <span>{tg}</span>
+                </button>
+              );
+            })}
           </div>
         </section>
 
@@ -1136,7 +1120,7 @@ export const DiscoverView: React.FC<{
                 className="flex items-center gap-1.5 text-[13px] font-semibold"
                 style={{ color: "var(--ink-secondary)" }}
               >
-                <Fire size={15} weight="fill" style={{ color: "#F59E0B" }} />
+                <LinDoIcons.Flame size={15} style={{ color: "#F59E0B" }} />
                 <span>热门话题</span>
               </div>
               <div className="flex items-center gap-1">
@@ -1234,26 +1218,23 @@ export const DiscoverView: React.FC<{
                 onClick={() =>
                   onOpenPortalUrl(p.url, p.requiresAuth, p.guestTitle, p.guestSub)
                 }
-                className="lindo-interactive flex flex-col justify-between rounded-2xl p-3.5 text-left"
+                className="lindo-interactive flex flex-col items-start justify-between rounded-2xl p-3.5 text-left"
                 style={{
                   backgroundColor: "var(--subtle-surface)",
                   border: "0.5px solid var(--hairline)",
                 }}
               >
-                <div className="mb-2 flex items-center justify-between">
-                  <span
-                    className="inline-flex rounded-xl p-2"
-                    style={{
-                      backgroundColor: `${p.color}1F`,
-                      color: p.color,
-                    }}
-                  >
-                    {p.icon}
-                  </span>
-                  <CaretRight size={13} style={{ color: "var(--ink-tertiary)" }} />
-                </div>
+                <span
+                  className="mb-2.5 inline-flex rounded-xl p-2"
+                  style={{
+                    backgroundColor: `${p.color}1F`,
+                    color: p.color,
+                  }}
+                >
+                  {p.icon}
+                </span>
                 <div>
-                  <div className="text-[13.5px] font-bold" style={{ color: "var(--ink-primary)" }}>
+                  <div className="text-[13.5px] font-semibold" style={{ color: "var(--ink-primary)" }}>
                     {p.title}
                   </div>
                   <div className="mt-0.5 text-[11.5px]" style={{ color: "var(--ink-secondary)" }}>
@@ -1409,7 +1390,7 @@ export const MessagesView: React.FC<{
   return (
     <div
       className="lindo-hairline-r flex h-full w-full flex-col"
-      style={{ backgroundColor: "var(--card-surface)" }}
+      style={{ backgroundColor: "var(--feed-surface)" }}
     >
       <div
         onMouseDown={handleTitlebarMouseDown}
@@ -1445,7 +1426,7 @@ export const MessagesView: React.FC<{
                   className="lindo-interactive flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] font-medium"
                   style={{ color: "var(--ink-secondary)" }}
                 >
-                  <Check size={14} />
+                  <LinDoIcons.Check size={14} />
                   <span>全部标为已读</span>
                 </button>
                 <button
@@ -1473,7 +1454,7 @@ export const MessagesView: React.FC<{
                   <span>返回私信箱</span>
                 ) : (
                   <>
-                    <Plus size={13.5} />
+                    <LinDoIcons.Plus size={13.5} />
                     <span>写私信</span>
                   </>
                 )}
@@ -1582,7 +1563,7 @@ export const MessagesView: React.FC<{
             className="mb-3 flex h-11 w-11 items-center justify-center rounded-full"
             style={{ backgroundColor: "var(--subtle-surface)", color: "var(--ink-secondary)" }}
           >
-            <Lock size={20} />
+            <LinDoIcons.Lock size={20} />
           </div>
           <p className="text-[13.5px]" style={{ color: "var(--ink-secondary)" }}>
             登录后查看社区通知与站内私信
@@ -1714,7 +1695,7 @@ export const MessagesView: React.FC<{
                   color: "var(--publish-btn-fg)",
                 }}
               >
-                <PaperPlaneTilt size={15} weight="fill" />
+                <LinDoIcons.Send size={15} />
                 <span>{pmSending ? "发送中..." : "发送私信"}</span>
               </button>
             </div>
@@ -1847,9 +1828,9 @@ export const MessagesView: React.FC<{
                           style={{ color: "var(--ink-secondary)" }}
                         >
                           {pmBox === "inbox" ? (
-                            <Archive size={15} />
+                            <LinDoIcons.Archive size={15} />
                           ) : (
-                            <ArrowBendUpLeft size={15} />
+                            <LinDoIcons.Reply size={15} />
                           )}
                         </button>
                       )}
@@ -2085,6 +2066,7 @@ export const ProfileSettingsView: React.FC<{
   checkingUpdate?: boolean;
   onCheckUpdate?: () => void;
   onOpenUpdateModal?: () => void;
+  onOpenMessages?: () => void;
 }> = ({
   isAuthorized,
   isDark,
@@ -2112,6 +2094,7 @@ export const ProfileSettingsView: React.FC<{
   checkingUpdate = false,
   onCheckUpdate,
   onOpenUpdateModal,
+  onOpenMessages,
 }) => {
   const [expandedRow, setExpandedRow] = useState<
     "appearance" | "theme" | "density" | "font" | null
@@ -2137,12 +2120,43 @@ export const ProfileSettingsView: React.FC<{
     return subscribeDiagEntries(() => setDiagTick((n) => n + 1));
   }, [subSheet]);
 
+  const allDiagEntries = useMemo(
+    () => (subSheet === "diagnostics" ? getDiagEntries("ALL") : []),
+    [subSheet, diagTick]
+  );
   const diagEntries = useMemo(
     () => (subSheet === "diagnostics" ? getDiagEntries(diagFilter) : []),
     [subSheet, diagFilter, diagTick]
   );
+  const foldedDiagEntries = useMemo(() => {
+    const out: Array<{ entry: (typeof diagEntries)[number]; repeatCount: number }> = [];
+    for (const item of diagEntries) {
+      const prev = out[out.length - 1];
+      if (
+        prev &&
+        prev.entry.category === item.category &&
+        prev.entry.level === item.level &&
+        prev.entry.summary === item.summary &&
+        (prev.entry.detail || "") === (item.detail || "")
+      ) {
+        prev.repeatCount += 1;
+      } else {
+        out.push({ entry: item, repeatCount: 1 });
+      }
+    }
+    return out;
+  }, [diagEntries]);
   const [showClearCacheConfirm, setShowClearCacheConfirm] = useState(false);
   const [cacheClearedNotice, setCacheClearedNotice] = useState<string | null>(null);
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
+  const [archiveState, setArchiveState] = useState<"idle" | "pending" | "requested" | "quota">("idle");
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setArchiveState("idle");
+    setArchiveError(null);
+    setShowArchiveConfirm(false);
+  }, [currentUser?.username, isAuthorized]);
 
   const [bookmarks, setBookmarks] = useState<any[]>([]);
   const [historyTopics, setHistoryTopics] = useState<TopicSummary[]>([]);
@@ -2292,7 +2306,7 @@ export const ProfileSettingsView: React.FC<{
           className="lindo-no-drag lindo-interactive flex h-8.5 w-8.5 items-center justify-center rounded-full"
           style={{ color: "var(--ink-primary)" }}
         >
-          {isDark ? <Sun size={18} /> : <Moon size={18} />}
+          {isDark ? <LinDoIcons.Sun size={18} /> : <LinDoIcons.Moon size={18} />}
         </button>
       </header>
 
@@ -2332,7 +2346,7 @@ export const ProfileSettingsView: React.FC<{
                       color: "var(--ink-secondary)",
                     }}
                   >
-                    <User size={22} />
+                    <LinDoIcons.User size={22} />
                   </button>
                 )}
 
@@ -2399,7 +2413,7 @@ export const ProfileSettingsView: React.FC<{
                   className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
                   style={{ color: "var(--ink-secondary)" }}
                 >
-                  <PencilSimple size={17} />
+                  <LinDoIcons.Edit size={18} />
                 </button>
               ) : (
                 <div className="flex items-center gap-1.5">
@@ -2431,28 +2445,28 @@ export const ProfileSettingsView: React.FC<{
                 {
                   key: "bookmarks",
                   label: "收藏",
-                  icon: <BookmarkSimple size={20} />,
+                  icon: <LinDoIcons.Bookmark size={21} />,
                   guestTitle: "登录后使用我的收藏",
                   guestSub: "随时收藏干货好帖，跨端同步书签记录",
                 },
                 {
                   key: "history",
                   label: "历史",
-                  icon: <ClockCounterClockwise size={20} />,
+                  icon: <LinDoIcons.HistoryClock size={21} />,
                   guestTitle: "",
                   guestSub: "",
                 },
                 {
                   key: "drafts",
                   label: "草稿",
-                  icon: <FileText size={20} />,
+                  icon: <LinDoIcons.FileText size={21} />,
                   guestTitle: "",
                   guestSub: "",
                 },
                 {
                   key: "activity",
                   label: "活动",
-                  icon: <CalendarBlank size={20} />,
+                  icon: <LinDoIcons.Calendar size={21} />,
                   guestTitle: "登录后查看个人动态",
                   guestSub: "登录 LINUX DO 账号后可查看发帖、回复与点赞记录",
                 },
@@ -2470,7 +2484,7 @@ export const ProfileSettingsView: React.FC<{
                   className="lindo-interactive flex flex-col items-center justify-center rounded-xl py-2"
                 >
                   <span style={{ color: "var(--ink-primary)" }}>{item.icon}</span>
-                  <span className="mt-1 text-[12px]" style={{ color: "var(--ink-secondary)" }}>
+                  <span className="mt-1.5 text-[12px]" style={{ color: "var(--ink-secondary)" }}>
                     {item.label}
                   </span>
                 </button>
@@ -2482,7 +2496,7 @@ export const ProfileSettingsView: React.FC<{
           <div className="lindo-hairline-b">
             <GroupHeader title="社区与账号" />
             <SettingRow
-              icon={<Trophy size={18} />}
+              icon={<LinDoIcons.Trophy size={19} />}
               title="社区徽章墙"
               onClick={() => {
                 setBadgeTab(isAuthorized ? "mine" : "site");
@@ -2490,7 +2504,7 @@ export const ProfileSettingsView: React.FC<{
               }}
             />
             <SettingRow
-              icon={<Users size={18} />}
+              icon={<LinDoIcons.Users size={19} />}
               title="关注与粉丝"
               onClick={() => {
                 if (isAuthorized && currentUser) {
@@ -2504,7 +2518,7 @@ export const ProfileSettingsView: React.FC<{
               }}
             />
             <SettingRow
-              icon={<Sparkle size={18} />}
+              icon={<LinDoIcons.Sparkles size={19} />}
               title="Connect 保级与成长"
               onClick={() => {
                 if (isAuthorized) onOpenInAppUrl("https://connect.linux.do/");
@@ -2516,7 +2530,7 @@ export const ProfileSettingsView: React.FC<{
               }}
             />
             <SettingRow
-              icon={<ShieldCheck size={18} />}
+              icon={<LinDoIcons.ShieldCheck size={19} />}
               title="账号与偏好设置"
               onClick={() => {
                 if (isAuthorized) setSubSheet("profile_edit");
@@ -2528,7 +2542,7 @@ export const ProfileSettingsView: React.FC<{
               }}
             />
             <SettingRow
-              icon={<Globe size={18} />}
+              icon={<LinDoIcons.Globe size={19} />}
               title="账号管理"
               value={
                 isAuthorized && currentUser
@@ -2542,215 +2556,221 @@ export const ProfileSettingsView: React.FC<{
             />
           </div>
 
-          {/* 3. 外观 */}
+          {/* 3. 外观（1:1 对齐安卓端 ExpandableSetting + SettingsChoices + SettingsThemeChoices） */}
           <div className="lindo-hairline-b">
             <GroupHeader title="外观" />
-            <SettingRow
-              icon={<Sun size={18} />}
+            <ExpandableSetting
+              icon={<LinDoIcons.Sun size={19} />}
               title="外观"
               value={appearanceLabel}
+              valueVisual={<AppearancePreviewVisual mode={preferences.appearance} />}
               expanded={expandedRow === "appearance"}
-              onClick={() =>
+              onToggle={() =>
                 setExpandedRow(expandedRow === "appearance" ? null : "appearance")
               }
-            />
-            {expandedRow === "appearance" && (
-              <>
-                <div className="flex flex-wrap items-center gap-2 px-5 pt-2.5 pb-4">
-                  {[
-                    { key: "light", label: "浅色", icon: <Sun size={14} /> },
-                    { key: "dark", label: "深色", icon: <Moon size={14} /> },
-                    { key: "system", label: "跟随系统", icon: <Desktop size={14} /> },
-                  ].map((opt) => {
-                    const selected = preferences.appearance === opt.key;
-                    return (
-                      <button
-                        key={opt.key}
-                        type="button"
-                        onClick={() =>
-                          onUpdatePreferences({ ...preferences, appearance: opt.key as any })
-                        }
-                        className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[12.5px] font-medium cursor-pointer"
-                        style={{
-                          backgroundColor: selected
-                            ? "var(--active-chip-bg)"
-                            : "var(--subtle-surface)",
-                          border: selected
-                            ? "0.5px solid var(--brand-gold)"
-                            : "0.5px solid var(--hairline)",
-                          color: selected ? "var(--active-chip-text)" : "var(--ink-primary)",
-                        }}
-                      >
-                        {opt.icon}
-                        <span>{opt.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="mx-5 h-[0.5px]" style={{ backgroundColor: "var(--hairline)" }} />
-              </>
-            )}
+            >
+              <SettingsSegmentedChoices
+                options={[
+                  {
+                    key: "light" as const,
+                    label: "浅色",
+                    visual: <AppearancePreviewVisual mode="light" />,
+                  },
+                  {
+                    key: "dark" as const,
+                    label: "深色",
+                    visual: <AppearancePreviewVisual mode="dark" />,
+                  },
+                  {
+                    key: "system" as const,
+                    label: "跟随系统",
+                    visual: <AppearancePreviewVisual mode="system" />,
+                  },
+                ]}
+                selected={preferences.appearance}
+                onSelect={(next) =>
+                  onUpdatePreferences({ ...preferences, appearance: next })
+                }
+              />
+            </ExpandableSetting>
 
-            <SettingRow
-              icon={<Palette size={18} />}
+            <ExpandableSetting
+              icon={<LinDoIcons.Palette size={19} />}
               title="主题色"
               value={currentThemeSpec.label}
-              leadingValueDot={currentThemeSpec.swatchColor}
-              hideDivider
-              expanded={expandedRow === "theme"}
-              onClick={() => setExpandedRow(expandedRow === "theme" ? null : "theme")}
-            />
-            {expandedRow === "theme" && (
-              <div className="flex flex-wrap gap-2 px-5 pt-2.5 pb-4">
-                {BRAND_THEMES.map((theme) => {
-                  const selected = preferences.themeOption === theme.key;
-                  return (
-                    <button
-                      key={theme.key}
-                      type="button"
-                      onClick={() =>
-                        onUpdatePreferences({ ...preferences, themeOption: theme.key })
-                      }
-                      className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-[12.5px] font-medium cursor-pointer"
-                      style={{
-                        backgroundColor: selected
-                          ? "var(--active-chip-bg)"
-                          : "var(--subtle-surface)",
-                        border: selected
-                          ? `0.5px solid ${theme.swatchColor}`
-                          : "0.5px solid var(--hairline)",
-                        color: selected ? "var(--active-chip-text)" : "var(--ink-primary)",
-                      }}
-                    >
-                      <span
-                        className="h-3 w-3 rounded-full"
-                        style={{ backgroundColor: theme.swatchColor }}
-                      />
-                      <span>{theme.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* 4. 阅读（PC 端首页常驻搜索框，移除冗余搜索框开关） */}
-          <div className="lindo-hairline-b">
-            <GroupHeader title="阅读" />
-            <SettingRow
-              icon={preferences.compactFeed ? <ListBullets size={18} /> : <Rows size={18} />}
-              title="首页列表视图"
-              value={preferences.compactFeed ? "紧凑" : "宽松"}
-              expanded={expandedRow === "density"}
-              onClick={() => setExpandedRow(expandedRow === "density" ? null : "density")}
-            />
-            {expandedRow === "density" && (
-              <>
-                <div className="flex items-center gap-2 px-5 pt-2.5 pb-4">
-                  {[
-                    { compact: false, label: "宽松", icon: <Rows size={14} /> },
-                    { compact: true, label: "紧凑", icon: <ListBullets size={14} /> },
-                  ].map((opt) => {
-                    const selected = preferences.compactFeed === opt.compact;
-                    return (
-                      <button
-                        key={opt.label}
-                        type="button"
-                        onClick={() =>
-                          onUpdatePreferences({ ...preferences, compactFeed: opt.compact })
-                        }
-                        className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[12.5px] font-medium cursor-pointer"
-                        style={{
-                          backgroundColor: selected
-                            ? "var(--active-chip-bg)"
-                            : "var(--subtle-surface)",
-                          border: selected
-                            ? "0.5px solid var(--brand-gold)"
-                            : "0.5px solid var(--hairline)",
-                          color: selected ? "var(--active-chip-text)" : "var(--ink-primary)",
-                        }}
-                      >
-                        {opt.icon}
-                        <span>{opt.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="mx-5 h-[0.5px]" style={{ backgroundColor: "var(--hairline)" }} />
-              </>
-            )}
-
-            <SettingRow
-              icon={<TextAa size={18} />}
-              title="阅读字号"
-              value={`${currentFontPreset.label} (${Math.round(currentFontPreset.scale * 100)}%)`}
-              hideDivider
-              expanded={expandedRow === "font"}
-              onClick={() => setExpandedRow(expandedRow === "font" ? null : "font")}
-            />
-            {expandedRow === "font" && (
-              <div className="space-y-2.5 px-5 pt-2.5 pb-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  {FONT_SCALE_PRESETS.map((p) => {
-                    const selected = currentFontPreset.label === p.label;
-                    return (
-                      <button
-                        key={p.label}
-                        type="button"
-                        onClick={() =>
-                          onUpdatePreferences({ ...preferences, fontScale: p.scale })
-                        }
-                        className="rounded-full px-3.5 py-1 text-[12.5px] font-medium cursor-pointer"
-                        style={{
-                          backgroundColor: selected
-                            ? "var(--active-chip-bg)"
-                            : "var(--subtle-surface)",
-                          border: selected
-                            ? "0.5px solid var(--brand-gold)"
-                            : "0.5px solid var(--hairline)",
-                          color: selected ? "var(--active-chip-text)" : "var(--ink-primary)",
-                        }}
-                      >
-                        {p.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div
-                  className="rounded-xl px-3.5 py-2.5"
+              valueVisual={
+                <span
+                  className="h-[18px] w-[18px] rounded-full"
                   style={{
-                    backgroundColor: "var(--subtle-surface)",
+                    backgroundColor: currentThemeSpec.swatchColor,
                     border: "0.5px solid var(--hairline)",
                   }}
+                />
+              }
+              hideDivider
+              expanded={expandedRow === "theme"}
+              onToggle={() => setExpandedRow(expandedRow === "theme" ? null : "theme")}
+            >
+              <SettingsThemeSwatches
+                selectedKey={preferences.themeOption}
+                onSelect={(nextKey) =>
+                  onUpdatePreferences({ ...preferences, themeOption: nextKey })
+                }
+              />
+            </ExpandableSetting>
+          </div>
+
+          {/* 4. 阅读（1:1 对齐安卓端 SettingsChoices + SettingsFontSlider 无边框步进滑杆与实时预览） */}
+          <div className="lindo-hairline-b">
+            <GroupHeader title="阅读" />
+            <ExpandableSetting
+              icon={
+                preferences.compactFeed ? (
+                  <LinDoIcons.LayoutCompact size={19} />
+                ) : (
+                  <LinDoIcons.LayoutCards size={19} />
+                )
+              }
+              title="首页列表视图"
+              value={preferences.compactFeed ? "紧凑" : "宽松"}
+              valueVisual={
+                preferences.compactFeed ? (
+                  <LinDoIcons.LayoutCompact size={16} />
+                ) : (
+                  <LinDoIcons.LayoutCards size={16} />
+                )
+              }
+              expanded={expandedRow === "density"}
+              onToggle={() => setExpandedRow(expandedRow === "density" ? null : "density")}
+            >
+              <SettingsSegmentedChoices
+                options={[
+                  {
+                    key: "loose" as const,
+                    label: "宽松",
+                    visual: <LinDoIcons.LayoutCards size={15} />,
+                  },
+                  {
+                    key: "compact" as const,
+                    label: "紧凑",
+                    visual: <LinDoIcons.LayoutCompact size={15} />,
+                  },
+                ]}
+                selected={preferences.compactFeed ? "compact" : "loose"}
+                onSelect={(next) =>
+                  onUpdatePreferences({ ...preferences, compactFeed: next === "compact" })
+                }
+              />
+            </ExpandableSetting>
+
+            <ExpandableSetting
+              icon={<LinDoIcons.Sliders size={19} />}
+              title="阅读字号"
+              value={currentFontPreset.label}
+              valueVisual={
+                <span
+                  data-fixed-scale="1"
+                  aria-hidden="true"
+                  className="inline-flex min-w-[22px] items-center justify-center leading-none font-medium"
+                  style={{
+                    fontSize: `${Math.round(13.5 * currentFontPreset.scale * 10) / 10}px`,
+                    color: "var(--ink-secondary)",
+                  }}
                 >
-                  <div className="text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
-                    真诚 · 友善 · 团结 · 专业
-                  </div>
-                  <div className="mt-0.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                    话题列表、楼层标题、正文与消息通知字号将同步按 {Math.round(currentFontPreset.scale * 100)}% 缩放。
-                  </div>
-                </div>
-              </div>
-            )}
+                  Aa
+                </span>
+              }
+              hideDivider
+              expanded={expandedRow === "font"}
+              onToggle={() => setExpandedRow(expandedRow === "font" ? null : "font")}
+            >
+              <SettingsFontSlider
+                currentScale={preferences.fontScale}
+                onSelectScale={(scale) =>
+                  onUpdatePreferences({ ...preferences, fontScale: scale })
+                }
+              />
+            </ExpandableSetting>
           </div>
 
           {/* 5. 通用 */}
           <div className="lindo-hairline-b">
             <GroupHeader title="通用" />
             <ToggleSettingRow
-              icon={<Sparkle size={18} />}
+              icon={<LinDoIcons.Sparkles size={19} />}
               title="界面与头像动效"
               checked={preferences.enableAnimations}
               onChange={(v) => onUpdatePreferences({ ...preferences, enableAnimations: v })}
             />
             <SettingRow
-              icon={<Trash size={18} />}
+              icon={<LinDoIcons.Trash size={19} />}
               title="清理本地缓存"
               value={cacheClearedNotice ?? ""}
               onClick={() => setShowClearCacheConfirm(true)}
             />
+            {isAuthorized && currentUser && (
+              <>
+                <SettingRow
+                  icon={<LinDoIcons.FileText size={19} />}
+                  title="导出我的数据"
+                  value={
+                    archiveState === "pending"
+                      ? "正在申请…"
+                      : archiveState === "requested"
+                        ? "查看私信"
+                        : archiveState === "quota"
+                          ? "今日已申请 · 查看私信"
+                          : ""
+                  }
+                  onClick={() => {
+                    if (archiveState === "pending") return;
+                    if (archiveState === "requested" || archiveState === "quota") {
+                      onOpenMessages?.();
+                      return;
+                    }
+                    setShowArchiveConfirm(true);
+                  }}
+                />
+                {(archiveState === "requested" || archiveState === "quota" || archiveError) && (
+                  <div
+                    className="ml-[52px] mr-5 flex items-center justify-between gap-3 py-2 text-[12px]"
+                    style={{
+                      color: archiveError ? "#F59E0B" : "var(--ink-tertiary)",
+                      borderBottom: "0.5px solid var(--hairline)",
+                    }}
+                  >
+                    <span className="min-w-0 flex-1 leading-relaxed">
+                      {archiveError
+                        ? archiveError
+                        : archiveState === "quota"
+                          ? "今日已申请过个人数据导出（每 24 小时限 1 次），可前往站内私信查看下载链接。"
+                          : "导出任务已提交，生成完成后将通过站内私信发送下载链接（含逐日访问记录）。"}
+                    </span>
+                    {onOpenMessages && (
+                      <button
+                        type="button"
+                        onClick={onOpenMessages}
+                        className="shrink-0 rounded-full px-2.5 py-1 text-[11.5px] font-medium cursor-pointer"
+                        style={{
+                          backgroundColor: "var(--active-chip-bg)",
+                          color: "var(--active-chip-text)",
+                        }}
+                      >
+                        查看私信
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
             <SettingRow
-              icon={<SmoothRefreshIcon spinning={checkingUpdate} size={18} />}
+              icon={
+                checkingUpdate ? (
+                  <SmoothRefreshIcon spinning size={19} />
+                ) : (
+                  <LinDoIcons.Download size={19} />
+                )
+              }
               title="检查更新"
               badgeText={
                 updateInfo?.hasUpdate ? `发现新版本 v${updateInfo.latestVersion}` : undefined
@@ -2759,7 +2779,7 @@ export const ProfileSettingsView: React.FC<{
                 checkingUpdate
                   ? "正在检查..."
                   : !updateInfo?.hasUpdate
-                    ? `当前 v${updateInfo?.currentVersion || "1.0.45"}`
+                    ? `当前 v${updateInfo?.currentVersion || DESKTOP_APP_VERSION}`
                     : undefined
               }
               onClick={() => {
@@ -2771,12 +2791,12 @@ export const ProfileSettingsView: React.FC<{
               }}
             />
             <SettingRow
-              icon={<FileText size={18} />}
+              icon={<LinDoIcons.FileText size={19} />}
               title="诊断日志与导出"
               onClick={() => setSubSheet("diagnostics")}
             />
             <SettingRow
-              icon={<Info size={18} />}
+              icon={<LinDoIcons.InfoCircle size={19} />}
               title="关于 Lindo"
               hideDivider
               onClick={() => setSubSheet("about")}
@@ -2788,10 +2808,10 @@ export const ProfileSettingsView: React.FC<{
             <button
               type="button"
               onClick={onRequestLogout}
-              className="lindo-interactive lindo-hairline-b flex h-[50px] w-full items-center justify-center gap-2 text-[14px] font-medium"
+              className="lindo-interactive lindo-hairline-b flex h-[48px] w-full items-center justify-center gap-2 text-[14.5px] font-medium"
               style={{ color: "#EF4444" }}
             >
-              <SignOut size={17} />
+              <LinDoIcons.LogOut size={16.5} />
               <span>退出当前账号</span>
             </button>
           )}
@@ -2812,6 +2832,35 @@ export const ProfileSettingsView: React.FC<{
         />
       )}
 
+      {/* 导出个人数据二次确认框 */}
+      {showArchiveConfirm && (
+        <ConfirmDialog
+          title="确认导出个人数据？"
+          detail={"社区将在后台打包你的个人数据归档（含发帖、互动、书签与逐日访问记录），生成完成后会通过「站内私信」发送下载链接给你。\n\n注：社区服务端限制每 24 小时仅可申请导出 1 次。"}
+          confirmLabel="确认导出"
+          onCancel={() => setShowArchiveConfirm(false)}
+          onConfirm={async () => {
+            setShowArchiveConfirm(false);
+            setArchiveState("pending");
+            setArchiveError(null);
+            try {
+              await requestUserArchive();
+              setArchiveState("requested");
+              setToast("导出申请已提交，完成后将发送至站内私信");
+            } catch (e: any) {
+              const msg = String(e?.message || "未能确认导出结果，请先查看私信");
+              if (/每天只能导出一次|once per day|24/i.test(msg)) {
+                setArchiveState("quota");
+                setToast("今日已申请过数据导出，可前往站内私信查看");
+              } else {
+                setArchiveState("idle");
+                setArchiveError(msg);
+              }
+            }
+          }}
+        />
+      )}
+
       {/* 快捷子抽屉：收藏 / 历史 / 草稿 / 活动 / 关注与粉丝 / 徽章 / 编辑资料 / 关于（恒定尺寸零压缩抖动） */}
       {subSheet && (
         <div
@@ -2824,7 +2873,9 @@ export const ProfileSettingsView: React.FC<{
                 ? "w-[420px]"
                 : subSheet === "profile_edit"
                   ? "max-h-[84vh] w-[580px]"
-                  : "h-[min(640px,82vh)] w-[640px] max-w-full"
+                  : subSheet === "diagnostics"
+                    ? "h-[min(660px,84vh)] w-[680px] max-w-full"
+                    : "h-[min(640px,82vh)] w-[640px] max-w-full"
             }`}
             style={{
               backgroundColor: "var(--card-surface)",
@@ -2832,9 +2883,9 @@ export const ProfileSettingsView: React.FC<{
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="lindo-hairline-b flex h-12 shrink-0 items-center justify-between px-4">
-              <div className="flex items-baseline gap-2">
-                <span className="text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
+            <div className="lindo-hairline-b flex h-[52px] shrink-0 items-center justify-between px-5">
+              <div className="flex items-center gap-2">
+                <span className="text-[15.5px] font-semibold" style={{ color: "var(--ink-primary)" }}>
                   {subSheet === "bookmarks"
                     ? "我的书签与收藏"
                     : subSheet === "history"
@@ -2854,30 +2905,41 @@ export const ProfileSettingsView: React.FC<{
                                   : "关于 Lindo"}
                 </span>
                 {subSheet === "diagnostics" && (
-                  <span className="text-[11.5px] tabular-nums" style={{ color: "var(--ink-tertiary)" }}>
-                    {diagEntries.length} 条 · 已脱敏
+                  <span
+                    className="rounded-full px-2 py-[1.5px] text-[10.5px] font-medium"
+                    style={{
+                      backgroundColor: "var(--subtle-surface)",
+                      color: "var(--ink-tertiary)",
+                      border: "0.5px solid var(--hairline)",
+                    }}
+                  >
+                    已脱敏
                   </span>
                 )}
               </div>
 
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5">
                 {subSheet === "diagnostics" && (
                   <>
                     <button
                       type="button"
                       onClick={() => {
                         const report = buildDiagReport(
-                          updateInfo?.currentVersion || "1.0.45",
+                          updateInfo?.currentVersion || DESKTOP_APP_VERSION,
                           isAuthorized,
                           diagFilter
                         );
                         navigator.clipboard.writeText(report);
-                        setToast("已复制诊断日志");
+                        setToast("已复制诊断日志（敏感凭据已自动脱敏）");
                       }}
-                      className="lindo-interactive flex h-7 items-center gap-1 rounded-md px-2 text-[12px]"
-                      style={{ color: "var(--ink-secondary)" }}
+                      className="lindo-interactive flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium cursor-pointer"
+                      style={{
+                        backgroundColor: "var(--subtle-surface)",
+                        border: "0.5px solid var(--hairline)",
+                        color: "var(--ink-primary)",
+                      }}
                     >
-                      <Copy size={13.5} />
+                      <LinDoIcons.Copy size={13} />
                       <span>复制</span>
                     </button>
                     <button
@@ -2885,7 +2947,7 @@ export const ProfileSettingsView: React.FC<{
                       onClick={async () => {
                         try {
                           const savedPath = await exportDiagLogToFile(
-                            updateInfo?.currentVersion || "1.0.45",
+                            updateInfo?.currentVersion || DESKTOP_APP_VERSION,
                             isAuthorized,
                             diagFilter
                           );
@@ -2895,29 +2957,33 @@ export const ProfileSettingsView: React.FC<{
                           setToast(e?.message || "导出日志失败");
                         }
                       }}
-                      className="lindo-interactive flex h-7 items-center gap-1 rounded-md px-2 text-[12px]"
-                      style={{ color: "var(--ink-secondary)" }}
+                      className="flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] font-semibold transition-opacity hover:opacity-90 cursor-pointer"
+                      style={{
+                        backgroundColor: "var(--active-chip-bg)",
+                        border: "0.5px solid color-mix(in srgb, var(--brand-gold) 42%, transparent)",
+                        color: "var(--active-chip-text)",
+                      }}
                     >
-                      <DownloadSimple size={13.5} />
+                      <LinDoIcons.Download size={13} />
                       <span>导出</span>
                     </button>
-                    {diagEntries.length > 0 && (
+                    {allDiagEntries.length > 0 && (
                       <button
                         type="button"
-                        title="清空日志"
+                        title="清空本地日志"
                         onClick={() => {
                           clearDiagEntries();
-                          setToast("已清空本地日志");
+                          setExpandedDiagId(null);
+                          setToast("已清空本地诊断日志");
                         }}
-                        className="lindo-interactive flex h-7 items-center gap-1 rounded-md px-2 text-[12px]"
+                        className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full cursor-pointer"
                         style={{ color: "var(--ink-tertiary)" }}
                       >
-                        <Trash size={13.5} />
-                        <span>清空</span>
+                        <LinDoIcons.Trash size={14} />
                       </button>
                     )}
                     <span
-                      className="mx-1 h-3.5 w-[0.5px]"
+                      className="mx-0.5 h-3.5 w-[0.5px]"
                       style={{ backgroundColor: "var(--hairline)" }}
                     />
                   </>
@@ -2943,7 +3009,7 @@ export const ProfileSettingsView: React.FC<{
                   onClick={() => setSubSheet(null)}
                   className="lindo-interactive rounded-full p-1"
                 >
-                  <X size={16} />
+                  <LinDoIcons.Close size={16} />
                 </button>
               </div>
             </div>
@@ -3119,7 +3185,7 @@ export const ProfileSettingsView: React.FC<{
                         className="lindo-interactive rounded-full p-1.5"
                         style={{ color: "var(--ink-tertiary)" }}
                       >
-                        <Trash size={14} />
+                        <LinDoIcons.Trash size={14} />
                       </button>
                     </div>
                   ))
@@ -3259,13 +3325,12 @@ export const ProfileSettingsView: React.FC<{
                               >
                                 {h.categoryName && (
                                   <>
-                                    <span className="inline-flex items-center gap-1">
-                                      <span
-                                        className="h-1.5 w-1.5 rounded-full"
-                                        style={{ backgroundColor: cv.dotColor }}
-                                      />
-                                      <span>{h.categoryName}</span>
-                                    </span>
+                                    <LinDoCategoryBadge
+                                      name={h.categoryName}
+                                      fallbackColor={cv.dotColor}
+                                      iconSize={11}
+                                      className="text-[11.5px]"
+                                    />
                                     <span style={{ color: "var(--ink-tertiary)" }}>·</span>
                                   </>
                                 )}
@@ -3384,7 +3449,7 @@ export const ProfileSettingsView: React.FC<{
                           className="lindo-interactive rounded-full p-1.5"
                           style={{ color: "var(--ink-tertiary)" }}
                         >
-                          <Trash size={14} />
+                          <LinDoIcons.Trash size={14} />
                         </button>
                       </div>
                     ))}
@@ -3452,7 +3517,7 @@ export const ProfileSettingsView: React.FC<{
                           className="lindo-interactive rounded-full p-1.5"
                           style={{ color: "var(--ink-tertiary)" }}
                         >
-                          <Trash size={14} />
+                          <LinDoIcons.Trash size={14} />
                         </button>
                       </div>
                     ))}
@@ -3891,175 +3956,437 @@ export const ProfileSettingsView: React.FC<{
                   </div>
                 </div>
               ) : subSheet === "diagnostics" ? (
-                <div className="flex h-full flex-col">
-                  {/* 克制极简底线标签栏（与首页 Feed Tab 视觉语言 1:1 统一） */}
-                  <div className="lindo-hairline-b flex h-[38px] shrink-0 items-center justify-between px-4">
-                    <div className="flex items-center gap-5">
-                      {(
-                        [
-                          ["ALL", "全部"],
-                          ["NETWORK", "网络"],
-                          ["AUTH", "登录与验证"],
-                          ["ERROR", "仅告警"],
-                          ["SYSTEM", "系统"],
-                        ] as const
-                      ).map(([k, label]) => {
-                        const active = diagFilter === k;
-                        return (
-                          <button
-                            key={k}
-                            type="button"
-                            onClick={() => setDiagFilter(k)}
-                            className="relative flex h-[38px] items-center text-[13px] transition-colors cursor-pointer"
-                            style={{
-                              color: active ? "var(--ink-primary)" : "var(--ink-secondary)",
-                              fontWeight: active ? 600 : 400,
-                            }}
-                          >
-                            <span>{label}</span>
-                            {active && (
-                              <span
-                                className="absolute inset-x-0 bottom-0 mx-auto h-[2px] w-[14px] rounded-full"
-                                style={{ backgroundColor: "var(--tab-indicator)" }}
-                              />
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
+                (() => {
+                  const warnOrErrCount = allDiagEntries.filter(
+                    (e) => e.level === "ERROR" || e.level === "WARN" || e.category === "ERROR"
+                  ).length;
+                  const countFor = (k: DiagCategory | "ALL") => {
+                    if (k === "ALL") return allDiagEntries.length;
+                    if (k === "ERROR") return warnOrErrCount;
+                    return allDiagEntries.filter((e) => e.category === k).length;
+                  };
+                  const formatDurationMs = (rawMs: string | undefined): string | null => {
+                    if (!rawMs) return null;
+                    const n = Number.parseInt(rawMs.replace(/ms$/i, ""), 10);
+                    if (Number.isNaN(n)) return rawMs;
+                    return n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${n}ms`;
+                  };
+                  const parseEntryVisual = (rawSummary: string) => {
+                    const httpMatch = rawSummary
+                      .trim()
+                      .match(
+                        /^(GET|POST|PUT|DELETE|PATCH|HEAD)\s+https?:\/\/linux\.do([^\s]*)\s+->\s+HTTP\s+(\d+)(?:\s*\(([^)]*)\))?$/i
+                      );
+                    if (httpMatch) {
+                      const method = httpMatch[1].toUpperCase();
+                      const fullPath = httpMatch[2] || "/";
+                      const base = fullPath.split("?")[0] || "/";
+                      const query = fullPath.includes("?") ? fullPath.slice(base.length + 1) : "";
+                      const cleanPath =
+                        query === "no_definitions=true" || !query
+                          ? base
+                          : fullPath.length > 52
+                            ? `${base}?…`
+                            : fullPath;
+                      const status = httpMatch[3];
+                      const paren = (httpMatch[4] || "").trim();
+                      const msMatch = paren.match(/(\d+ms)$/i);
+                      const latency = formatDurationMs(msMatch?.[1]);
+                      const notePart = paren
+                        .replace(/,?\s*\d+ms$/i, "")
+                        .trim();
+                      const statusBadge = notePart
+                        ? `HTTP ${status} · ${notePart
+                            .replace("站点验证挑战", "需站点验证")
+                            .replace("未授权或登录态失效", "登录态失效")}`
+                        : `HTTP ${status}`;
+                      return {
+                        isHttp: true,
+                        method,
+                        cleanPath,
+                        title: cleanPath,
+                        statusBadge,
+                        latency,
+                      };
+                    }
+                    const ipcErrMatch = rawSummary
+                      .trim()
+                      .match(
+                        /^(GET|POST|PUT|DELETE|PATCH|HEAD)\s+https?:\/\/linux\.do([^\s]*)\s+调用异常\s*\((\d+ms)\)$/i
+                      );
+                    if (ipcErrMatch) {
+                      return {
+                        isHttp: true,
+                        method: ipcErrMatch[1].toUpperCase(),
+                        cleanPath: ipcErrMatch[2] || "/",
+                        title: ipcErrMatch[2] || "/",
+                        statusBadge: "网络调用异常",
+                        latency: formatDurationMs(ipcErrMatch[3]),
+                      };
+                    }
+                    return {
+                      isHttp: false,
+                      method: null as string | null,
+                      cleanPath: null as string | null,
+                      title: rawSummary.replace(/^https?:\/\/linux\.do/i, ""),
+                      statusBadge: null as string | null,
+                      latency: null as string | null,
+                    };
+                  };
 
-                    <span
-                      className="inline-flex items-center gap-1.5 text-[11.5px]"
-                      style={{ color: "var(--ink-tertiary)" }}
-                    >
-                      <span
-                        className="h-[5.5px] w-[5.5px] rounded-full"
-                        style={{
-                          backgroundColor: isAuthorized ? "var(--brand-gold)" : "var(--ink-tertiary)",
-                        }}
-                      />
-                      <span>{isAuthorized ? "已登录" : "访客"}</span>
-                    </span>
-                  </div>
+                  return (
+                    <div className="flex h-full flex-col">
+                      {/* 1. 运行状态概览条 + 圆角胶囊分类筛选器（100% 遵循 Lindo 统一视觉规范） */}
+                      <div className="lindo-hairline-b shrink-0 px-5 pt-3 pb-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[12px] tabular-nums" style={{ color: "var(--ink-secondary)" }}>
+                            Lindo Desktop v{updateInfo?.currentVersion || DESKTOP_APP_VERSION} · 共 {allDiagEntries.length} 条记录
+                          </span>
 
-                  <div className="lindo-scroll flex-1 min-h-0">
-                    {diagEntries.length === 0 ? (
-                      <div
-                        className="flex h-full flex-col items-center justify-center gap-2 py-20 text-[13px]"
-                        style={{ color: "var(--ink-tertiary)" }}
-                      >
-                        <MascotExpression expression="sleepy" sizePx={42} className="opacity-80" />
-                        <span>当前筛选下暂无记录</span>
-                      </div>
-                    ) : (
-                      <div>
-                        {diagEntries.map((entry) => {
-                          const isExpanded = expandedDiagId === entry.id;
-                          const dotColor =
-                            entry.level === "ERROR"
-                              ? "var(--error-fg)"
-                              : entry.level === "WARN"
-                                ? "#F59E0B"
-                                : "color-mix(in srgb, var(--ink-tertiary) 58%, transparent)";
-                          const categoryLabel =
-                            entry.category === "NETWORK"
-                              ? "网络"
-                              : entry.category === "AUTH"
-                                ? "认证"
-                                : entry.category === "ERROR"
-                                  ? "运行"
-                                  : "系统";
-                          let timeText = entry.timestampIso;
-                          try {
-                            const d = new Date(entry.timestampIso);
-                            if (!Number.isNaN(d.getTime())) {
-                              const pad = (n: number) => String(n).padStart(2, "0");
-                              timeText = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
-                                d.getHours()
-                              )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-                            }
-                          } catch {}
-                          return (
-                            <div
-                              key={entry.id}
-                              onClick={() =>
-                                entry.detail
-                                  ? setExpandedDiagId((prev) =>
-                                      prev === entry.id ? null : entry.id
-                                    )
-                                  : undefined
-                              }
-                              className={`lindo-hairline-b px-4 py-2.5 transition-colors ${
-                                entry.detail ? "lindo-interactive" : ""
-                              }`}
+                          <div className="flex items-center gap-2">
+                            <span
+                              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-[3px] text-[11px] font-medium"
+                              style={{
+                                backgroundColor: "var(--subtle-surface)",
+                                color: "var(--ink-secondary)",
+                              }}
                             >
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex min-w-0 flex-1 items-start gap-2.5">
+                              <span
+                                className="h-[5.5px] w-[5.5px] rounded-full"
+                                style={{
+                                  backgroundColor: isAuthorized ? "#10B981" : "var(--ink-tertiary)",
+                                }}
+                              />
+                              <span>
+                                {isAuthorized
+                                  ? currentUser?.username
+                                    ? `已登录 · @${currentUser.username}`
+                                    : "会话已保持"
+                                  : "访客模式"}
+                              </span>
+                            </span>
+
+                            <span
+                              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-[3px] text-[11px] font-medium tabular-nums"
+                              style={{
+                                backgroundColor: "var(--subtle-surface)",
+                                color: "var(--ink-secondary)",
+                              }}
+                            >
+                              <span
+                                className="h-[5.5px] w-[5.5px] rounded-full"
+                                style={{
+                                  backgroundColor: warnOrErrCount > 0 ? "#F59E0B" : "#10B981",
+                                }}
+                              />
+                              <span>{warnOrErrCount > 0 ? `${warnOrErrCount} 条告警` : "运行平稳"}</span>
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="no-scrollbar mt-2.5 flex items-center gap-1.5 overflow-x-auto">
+                          {(
+                            [
+                              ["ALL", "全部"],
+                              ["NETWORK", "网络"],
+                              ["AUTH", "登录与验证"],
+                              ["ERROR", "仅告警"],
+                              ["SYSTEM", "系统"],
+                            ] as const
+                          ).map(([k, label]) => {
+                            const active = diagFilter === k;
+                            const cnt = countFor(k);
+                            return (
+                              <button
+                                key={k}
+                                type="button"
+                                onClick={() => setDiagFilter(k)}
+                                className="inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-[4.5px] text-[12px] transition-colors cursor-pointer"
+                                style={{
+                                  backgroundColor: active
+                                    ? "var(--active-chip-bg)"
+                                    : "var(--subtle-surface)",
+                                  border: active
+                                    ? "0.5px solid color-mix(in srgb, var(--brand-gold) 45%, transparent)"
+                                    : "0.5px solid transparent",
+                                  color: active ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                                  fontWeight: active ? 600 : 400,
+                                }}
+                              >
+                                <span>{label}</span>
+                                {cnt > 0 && (
                                   <span
-                                    className="mt-[6.5px] h-[6px] w-[6px] shrink-0 rounded-full"
-                                    style={{ backgroundColor: dotColor }}
-                                  />
-                                  <span
-                                    className="mt-[1px] shrink-0 text-[11.5px] font-medium"
-                                    style={{ color: "var(--ink-tertiary)" }}
-                                  >
-                                    {categoryLabel}
-                                  </span>
-                                  <span
-                                    className="lindo-selectable min-w-0 flex-1 text-[12.8px] leading-[1.45] break-all"
+                                    className="text-[11px] tabular-nums"
                                     style={{
-                                      color:
-                                        entry.level === "ERROR"
-                                          ? "var(--error-fg)"
-                                          : "var(--ink-primary)",
+                                      color: active
+                                        ? "color-mix(in srgb, var(--active-chip-text) 85%, transparent)"
+                                        : "var(--ink-tertiary)",
                                     }}
                                   >
-                                    {entry.summary}
+                                    {cnt}
                                   </span>
-                                </div>
-
-                                <div
-                                  className="flex shrink-0 items-center gap-1 pt-[1px] text-[11px] tabular-nums"
-                                  style={{
-                                    color: "var(--ink-tertiary)",
-                                    fontFamily: "var(--font-mono)",
-                                  }}
-                                >
-                                  <span>{timeText}</span>
-                                  {entry.detail &&
-                                    (isExpanded ? (
-                                      <CaretDown size={11} />
-                                    ) : (
-                                      <CaretRight size={11} />
-                                    ))}
-                                </div>
-                              </div>
-
-                              {entry.detail && isExpanded && (
-                                <pre
-                                  className="lindo-selectable mt-2 ml-[42px] overflow-x-auto rounded-lg px-3 py-2 text-[11.2px] leading-relaxed whitespace-pre-wrap break-all"
-                                  style={{
-                                    fontFamily: "var(--font-mono)",
-                                    backgroundColor: "var(--subtle-surface)",
-                                    border: "0.5px solid var(--hairline)",
-                                    color: "var(--ink-secondary)",
-                                  }}
-                                >
-                                  {entry.detail}
-                                </pre>
-                              )}
-                            </div>
-                          );
-                        })}
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
-                    )}
-                  </div>
-                </div>
+
+                      {/* 2. 双层结构化日志列表（自动折叠连续重复项 + 清晰方法胶囊/路径截断 + 点击展开详情检视器） */}
+                      <div className="lindo-scroll flex-1 min-h-0">
+                        {foldedDiagEntries.length === 0 ? (
+                          <div
+                            className="flex h-full flex-col items-center justify-center gap-2.5 py-20 text-[13px]"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            <MascotExpression expression="sleepy" sizePx={44} className="opacity-80" />
+                            <span>当前筛选下暂无诊断记录</span>
+                          </div>
+                        ) : (
+                          <div className="py-1">
+                            {foldedDiagEntries.map(({ entry, repeatCount }, idx) => {
+                              const isExpanded = expandedDiagId === entry.id;
+                              const parsed = parseEntryVisual(entry.summary);
+                              const isAuthPending =
+                                entry.level === "INFO" &&
+                                entry.category === "AUTH" &&
+                                (entry.tag === "AuthPending" ||
+                                  /^(发起|打开|已打开|正在等待|收到.*正在)/.test(entry.summary));
+                              const isAuthSuccess =
+                                entry.level === "INFO" &&
+                                entry.category === "AUTH" &&
+                                !isAuthPending;
+                              const accentColor =
+                                entry.level === "ERROR"
+                                  ? "var(--error-fg)"
+                                  : entry.level === "WARN"
+                                    ? "#F59E0B"
+                                    : isAuthSuccess
+                                      ? "#10B981"
+                                      : "#60A5FA";
+                              const categoryLabel =
+                                entry.category === "NETWORK"
+                                  ? "网络请求"
+                                  : entry.category === "AUTH"
+                                    ? "登录与验证"
+                                    : entry.category === "ERROR"
+                                      ? "运行异常"
+                                      : "系统事件";
+                              const levelLabel =
+                                entry.level === "ERROR"
+                                  ? "异常"
+                                  : entry.level === "WARN"
+                                    ? "告警"
+                                    : isAuthPending
+                                      ? "进行中"
+                                      : isAuthSuccess
+                                        ? "已完成"
+                                        : "正常";
+                              const effectiveStatusBadge =
+                                parsed.statusBadge || (isAuthPending ? "等待回调" : null);
+
+                              let shortTime = entry.timestampIso;
+                              let fullTime = entry.timestampIso;
+                              try {
+                                const d = new Date(entry.timestampIso);
+                                if (!Number.isNaN(d.getTime())) {
+                                  const pad = (n: number) => String(n).padStart(2, "0");
+                                  shortTime = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(
+                                    d.getSeconds()
+                                  )}`;
+                                  fullTime = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(
+                                    d.getDate()
+                                  )} ${shortTime}`;
+                                }
+                              } catch {}
+
+                              return (
+                                <React.Fragment key={entry.id}>
+                                  <div
+                                    onClick={() =>
+                                      setExpandedDiagId((prev) =>
+                                        prev === entry.id ? null : entry.id
+                                      )
+                                    }
+                                    className="lindo-interactive px-5 py-3 transition-colors cursor-pointer"
+                                  >
+                                    <div className="flex items-start gap-3">
+                                      <span
+                                        className="mt-[6px] h-[6.5px] w-[6.5px] shrink-0 rounded-full"
+                                        style={{ backgroundColor: accentColor }}
+                                      />
+
+                                      <div className="min-w-0 flex-1">
+                                        {/* 第一行：模块分类 · 级别 + 状态胶囊 + 重复次数 / 右侧耗时 + 时间 */}
+                                        <div className="flex items-center justify-between gap-2">
+                                          <div className="flex min-w-0 items-center gap-1.5">
+                                            <span
+                                              className="shrink-0 text-[11.5px] font-semibold"
+                                              style={{ color: accentColor }}
+                                            >
+                                              {categoryLabel} · {levelLabel}
+                                            </span>
+
+                                            {effectiveStatusBadge && (
+                                              <span
+                                                className="shrink-0 rounded px-1.5 py-[1px] text-[10.5px] font-medium tabular-nums"
+                                                style={{
+                                                  backgroundColor: `color-mix(in srgb, ${accentColor} 13%, transparent)`,
+                                                  color: accentColor,
+                                                }}
+                                              >
+                                                {effectiveStatusBadge}
+                                              </span>
+                                            )}
+
+                                            {repeatCount > 1 && (
+                                              <span
+                                                className="shrink-0 rounded-full px-1.5 py-[0.5px] text-[10.5px] font-semibold tabular-nums"
+                                                style={{
+                                                  backgroundColor: "var(--tonal-pill)",
+                                                  color: "var(--ink-secondary)",
+                                                }}
+                                              >
+                                                ×{repeatCount}
+                                              </span>
+                                            )}
+                                          </div>
+
+                                          <div
+                                            className="flex shrink-0 items-center gap-2 text-[11px] tabular-nums"
+                                            style={{
+                                              color: "var(--ink-tertiary)",
+                                              fontFamily: "var(--font-mono)",
+                                            }}
+                                          >
+                                            {parsed.latency && <span>{parsed.latency}</span>}
+                                            <span title={fullTime}>{shortTime}</span>
+                                            {isExpanded ? (
+                                              <LinDoIcons.ChevronUp size={12} />
+                                            ) : (
+                                              <LinDoIcons.ChevronDown size={12} className="opacity-65" />
+                                            )}
+                                          </div>
+                                        </div>
+
+                                        {/* 第二行：HTTP 方法胶囊 + 干净接口路径 或 自然中文事件标题（绝不断词乱折行） */}
+                                        <div className="mt-1 flex min-w-0 items-center gap-2">
+                                          {parsed.isHttp && parsed.method ? (
+                                            <>
+                                              <span
+                                                className="shrink-0 rounded px-1.5 py-[1px] text-[10.5px] font-semibold"
+                                                style={{
+                                                  fontFamily: "var(--font-mono)",
+                                                  backgroundColor: "var(--tonal-pill)",
+                                                  color: "var(--ink-secondary)",
+                                                }}
+                                              >
+                                                {parsed.method}
+                                              </span>
+                                              <span
+                                                className="truncate text-[12.5px] leading-[1.45]"
+                                                style={{
+                                                  fontFamily: "var(--font-mono)",
+                                                  color: "var(--ink-primary)",
+                                                }}
+                                              >
+                                                {parsed.cleanPath}
+                                              </span>
+                                            </>
+                                          ) : (
+                                            <span
+                                              className="truncate text-[13px] leading-[1.45]"
+                                              style={{ color: "var(--ink-primary)" }}
+                                            >
+                                              {parsed.title}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        {/* 展开详情检视卡片 */}
+                                        {isExpanded && (
+                                          <div
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="mt-2.5 rounded-xl p-3"
+                                            style={{
+                                              backgroundColor: "var(--subtle-surface)",
+                                              border: "0.5px solid var(--hairline)",
+                                            }}
+                                          >
+                                            <div className="flex items-center justify-between gap-2 pb-2">
+                                              <span
+                                                className="text-[11px] tabular-nums"
+                                                style={{
+                                                  fontFamily: "var(--font-mono)",
+                                                  color: "var(--ink-tertiary)",
+                                                }}
+                                              >
+                                                {fullTime} · {entry.category}/{entry.tag}
+                                              </span>
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  const single = `[${entry.timestampIso}] [${entry.level}] [${entry.category}/${entry.tag}] ${entry.summary}${
+                                                    entry.detail ? `\n${entry.detail}` : ""
+                                                  }`;
+                                                  navigator.clipboard.writeText(single);
+                                                  setToast("已复制该条记录（已脱敏）");
+                                                }}
+                                                className="rounded-md px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-85 cursor-pointer"
+                                                style={{
+                                                  backgroundColor: "var(--active-chip-bg)",
+                                                  color: "var(--active-chip-text)",
+                                                }}
+                                              >
+                                                复制单条
+                                              </button>
+                                            </div>
+                                            <div
+                                              className="lindo-selectable text-[11.5px] leading-relaxed break-all"
+                                              style={{
+                                                fontFamily: "var(--font-mono)",
+                                                color: "var(--ink-primary)",
+                                              }}
+                                            >
+                                              {entry.summary}
+                                            </div>
+                                            {entry.detail && (
+                                              <pre
+                                                className="lindo-selectable mt-2 border-t pt-2 text-[11px] leading-relaxed whitespace-pre-wrap break-all"
+                                                style={{
+                                                  fontFamily: "var(--font-mono)",
+                                                  borderColor: "var(--hairline)",
+                                                  color: "var(--ink-secondary)",
+                                                }}
+                                              >
+                                                {entry.detail}
+                                              </pre>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  {idx < foldedDiagEntries.length - 1 && (
+                                    <div
+                                      className="mr-5 ml-[39px] h-[0.5px]"
+                                      style={{ backgroundColor: "var(--hairline)" }}
+                                    />
+                                  )}
+                                </React.Fragment>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()
               ) : (
                 <div className="space-y-3 p-6 text-center">
                   <img src="/brand/lindo-mark.svg" alt="Lindo" className="mx-auto h-14 w-14" />
                   <div className="text-[17px] font-bold" style={{ color: "var(--ink-primary)" }}>
-                    Lindo Desktop v{updateInfo?.currentVersion || "1.0.45"}
+                    Lindo Desktop v{updateInfo?.currentVersion || DESKTOP_APP_VERSION}
                   </div>
                   <p className="text-[12.5px]" style={{ color: "var(--ink-secondary)" }}>
                     LINUX DO 第三方原生桌面客户端 · 真诚 · 友善 · 团结 · 专业
@@ -4140,40 +4467,368 @@ export const ProfileSettingsView: React.FC<{
 
 const GroupHeader: React.FC<{ title: string }> = ({ title }) => (
   <div
-    className="px-5 pt-4 pb-1.5 text-[12px] font-semibold"
+    className="px-5 pt-4 pb-1.5 text-[12px] font-medium"
     style={{ color: "var(--ink-tertiary)" }}
   >
     {title}
   </div>
 );
 
+function hexLuminance(hexColor: string): number {
+  const clean = hexColor.replace("#", "").trim();
+  if (clean.length !== 6) return 0.5;
+  const r = parseInt(clean.slice(0, 2), 16) / 255;
+  const g = parseInt(clean.slice(2, 4), 16) / 255;
+  const b = parseInt(clean.slice(4, 6), 16) / 255;
+  const toLinear = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b);
+}
+
+/** 1:1 对齐移动端 SettingsAppearanceVisual：浅色太阳、深色弯月、跟随系统左白右黑双拼圆环 */
+const AppearancePreviewVisual: React.FC<{ mode: "light" | "dark" | "system" }> = ({ mode }) => {
+  if (mode === "light") return <LinDoIcons.Sun size={15.5} />;
+  if (mode === "dark") return <LinDoIcons.Moon size={15.5} />;
+  return (
+    <svg
+      width={15.5}
+      height={15.5}
+      viewBox="0 0 16 16"
+      className="inline-block shrink-0"
+      aria-hidden="true"
+    >
+      <defs>
+        <clipPath id="lindo-appearance-split-clip">
+          <circle cx="8" cy="8" r="6.7" />
+        </clipPath>
+      </defs>
+      <g clipPath="url(#lindo-appearance-split-clip)">
+        <rect x="0" y="0" width="8" height="16" fill="#F5F5F5" />
+        <rect x="8" y="0" width="8" height="16" fill="#17191E" />
+      </g>
+      <circle
+        cx="8"
+        cy="8"
+        r="6.7"
+        fill="none"
+        stroke="currentColor"
+        strokeOpacity="0.62"
+        strokeWidth="1"
+      />
+    </svg>
+  );
+};
+
+/** 1:1 对齐移动端 ExpandableSetting：展开时隐藏右侧折叠预览摘要，统一左对齐 52px 内缩细分割线 */
+const ExpandableSetting: React.FC<{
+  icon: React.ReactNode;
+  title: string;
+  value: string;
+  valueVisual?: React.ReactNode;
+  expanded: boolean;
+  hideDivider?: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}> = ({ icon, title, value, valueVisual, expanded, hideDivider, onToggle, children }) => (
+  <div>
+    <button
+      type="button"
+      aria-expanded={expanded}
+      onClick={onToggle}
+      className="lindo-interactive flex min-h-[48px] w-full items-center justify-between px-5 py-3 text-left"
+    >
+      <span
+        className="flex items-center gap-3.5 text-[14.5px] font-medium"
+        style={{ color: "var(--ink-primary)" }}
+      >
+        <span className="inline-flex shrink-0" style={{ color: "var(--ink-secondary)" }}>
+          {icon}
+        </span>
+        <span>{title}</span>
+      </span>
+
+      <span className="flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
+        {!expanded && (
+          <>
+            {valueVisual ? (
+              <span className="inline-flex items-center" style={{ color: "var(--ink-secondary)" }}>
+                {valueVisual}
+              </span>
+            ) : null}
+            <span className="max-w-[140px] truncate">{value}</span>
+          </>
+        )}
+        {expanded ? <LinDoIcons.ChevronUp size={14} /> : <LinDoIcons.ChevronDown size={14} />}
+      </span>
+    </button>
+
+    {expanded && <div className="max-w-[560px] px-5 pt-1 pb-3.5">{children}</div>}
+
+    {!hideDivider && (
+      <div className="ml-[52px] mr-5 h-[0.5px]" style={{ backgroundColor: "var(--hairline)" }} />
+    )}
+  </div>
+);
+
+/** 1:1 对齐移动端 SettingsChoices：无硬描边等宽柔和圆角分段块 */
+function SettingsSegmentedChoices<K extends string>({
+  options,
+  selected,
+  onSelect,
+}: {
+  options: Array<{ key: K; label: string; visual?: React.ReactNode }>;
+  selected: K;
+  onSelect: (key: K) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      className="grid gap-1.5"
+      style={{
+        gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`,
+        maxWidth: `${options.length * 124}px`,
+      }}
+    >
+      {options.map((opt) => {
+        const active = opt.key === selected;
+        return (
+          <button
+            key={opt.key}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onSelect(opt.key)}
+            className="lindo-interactive flex h-[36px] items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[13px] transition-colors cursor-pointer"
+            style={{
+              backgroundColor: active
+                ? "var(--active-chip-bg)"
+                : "color-mix(in srgb, var(--subtle-surface) 68%, transparent)",
+              color: active ? "var(--active-chip-text)" : "var(--ink-secondary)",
+              fontWeight: active ? 500 : 400,
+            }}
+          >
+            {opt.visual ? <span className="inline-flex items-center">{opt.visual}</span> : null}
+            <span>{opt.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 1:1 对齐移动端 SettingsThemeChoices：纯粹精致的双环圆色盘 + 亮度自适应对勾 */
+const SettingsThemeSwatches: React.FC<{
+  selectedKey: UserPreferences["themeOption"];
+  onSelect: (key: UserPreferences["themeOption"]) => void;
+}> = ({ selectedKey, onSelect }) => (
+  <div role="radiogroup" className="flex flex-wrap items-center gap-1">
+    {BRAND_THEMES.map((theme) => {
+      const active = theme.key === selectedKey;
+      const checkColor = hexLuminance(theme.swatchColor) > 0.4 ? "#101217" : "#FFFFFF";
+      return (
+        <button
+          key={theme.key}
+          type="button"
+          role="radio"
+          aria-checked={active}
+          aria-label={theme.label}
+          title={theme.label}
+          onClick={() => onSelect(theme.key)}
+          className="group flex h-11 w-11 items-center justify-center rounded-full cursor-pointer transition-transform hover:scale-105"
+        >
+          <span
+            className="flex h-[30px] w-[30px] items-center justify-center rounded-full transition-colors"
+            style={{
+              border: active ? "1.2px solid var(--active-chip-text)" : "1.2px solid transparent",
+            }}
+          >
+            <span
+              className="flex h-[22px] w-[22px] items-center justify-center rounded-full"
+              style={{ backgroundColor: theme.swatchColor }}
+            >
+              {active && <LinDoIcons.Check size={13} style={{ color: checkColor }} />}
+            </span>
+          </span>
+        </button>
+      );
+    })}
+  </div>
+);
+
+/** 1:1 对齐移动端 SettingsFontSlider：最小/当前档位/最大 + 5 档步进金色滑杆 + 无边框实时字号预览句 */
+const SettingsFontSlider: React.FC<{
+  currentScale: number;
+  onSelectScale: (scale: number) => void;
+}> = ({ currentScale, onSelectScale }) => {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const committedIdx = useMemo(() => {
+    const preset = nearestFontPreset(currentScale);
+    const idx = FONT_SCALE_PRESETS.findIndex((p) => p.label === preset.label);
+    return idx >= 0 ? idx : 2;
+  }, [currentScale]);
+
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const activeIdx = dragIdx ?? committedIdx;
+  const previewPreset = FONT_SCALE_PRESETS[activeIdx] ?? FONT_SCALE_PRESETS[2];
+  const lastIdx = FONT_SCALE_PRESETS.length - 1;
+  const pct = (activeIdx / lastIdx) * 100;
+
+  const resolveIndexFromClientX = (clientX: number): number => {
+    const el = trackRef.current;
+    if (!el) return committedIdx;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return committedIdx;
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return Math.round(ratio * lastIdx);
+  };
+
+  return (
+    <div className="w-full select-none">
+      <div className="flex items-center justify-between">
+        <span className="text-[12px]" style={{ color: "var(--ink-secondary)" }}>
+          最小
+        </span>
+        <span className="text-[13px] font-medium" style={{ color: "var(--active-chip-text)" }}>
+          {previewPreset.label}
+        </span>
+        <span className="text-[12px]" style={{ color: "var(--ink-secondary)" }}>
+          最大
+        </span>
+      </div>
+
+      <div
+        ref={trackRef}
+        role="slider"
+        tabIndex={0}
+        aria-label="阅读字号滑块"
+        aria-valuemin={0}
+        aria-valuemax={lastIdx}
+        aria-valuenow={activeIdx}
+        aria-valuetext={previewPreset.label}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+            e.preventDefault();
+            const next = Math.max(0, committedIdx - 1);
+            if (next !== committedIdx) onSelectScale(FONT_SCALE_PRESETS[next].scale);
+          } else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+            e.preventDefault();
+            const next = Math.min(lastIdx, committedIdx + 1);
+            if (next !== committedIdx) onSelectScale(FONT_SCALE_PRESETS[next].scale);
+          }
+        }}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          const target = e.currentTarget;
+          target.setPointerCapture(e.pointerId);
+          let latest = resolveIndexFromClientX(e.clientX);
+          setDragIdx(latest);
+
+          const onMove = (ev: PointerEvent) => {
+            latest = resolveIndexFromClientX(ev.clientX);
+            setDragIdx(latest);
+          };
+          const onEnd = (ev: PointerEvent) => {
+            if (target.hasPointerCapture(ev.pointerId)) {
+              target.releasePointerCapture(ev.pointerId);
+            }
+            target.removeEventListener("pointermove", onMove);
+            target.removeEventListener("pointerup", onEnd);
+            target.removeEventListener("pointercancel", onEnd);
+            setDragIdx(null);
+            const chosen = FONT_SCALE_PRESETS[latest];
+            if (chosen && Math.abs(chosen.scale - currentScale) > 0.001) {
+              onSelectScale(chosen.scale);
+            }
+          };
+          target.addEventListener("pointermove", onMove);
+          target.addEventListener("pointerup", onEnd);
+          target.addEventListener("pointercancel", onEnd);
+        }}
+        className="relative my-1 flex h-8 w-full items-center cursor-pointer outline-none"
+      >
+        <div
+          className="relative h-[4px] w-full rounded-full"
+          style={{ backgroundColor: "var(--hairline)" }}
+        >
+          <div
+            className="absolute inset-y-0 left-0 rounded-full"
+            style={{
+              width: `${pct}%`,
+              backgroundColor: "var(--brand-gold)",
+            }}
+          />
+          {FONT_SCALE_PRESETS.map((p, idx) => {
+            const stopPct = (idx / lastIdx) * 100;
+            const passed = idx <= activeIdx;
+            return (
+              <span
+                key={p.label}
+                className="pointer-events-none absolute top-1/2 h-[6px] w-[6px] -translate-x-1/2 -translate-y-1/2 rounded-full"
+                style={{
+                  left: `${stopPct}%`,
+                  backgroundColor: passed ? "var(--brand-gold)" : "var(--hairline)",
+                }}
+              />
+            );
+          })}
+        </div>
+
+        <span
+          className="pointer-events-none absolute top-1/2 h-[18px] w-[18px] -translate-x-1/2 -translate-y-1/2 rounded-full transition-transform duration-75"
+          style={{
+            left: `${pct}%`,
+            backgroundColor: "var(--brand-gold)",
+            boxShadow: "0 1px 4px rgba(0, 0, 0, 0.28)",
+          }}
+        />
+      </div>
+
+      <div
+        data-fixed-scale="1"
+        className="pt-0.5 transition-[font-size] duration-100"
+        style={{
+          fontSize: `${Math.round(15.5 * previewPreset.scale * 10) / 10}px`,
+          lineHeight: `${Math.round(23.5 * previewPreset.scale * 10) / 10}px`,
+          color: "var(--ink-secondary)",
+        }}
+      >
+        恰好的字号，让阅读更舒服。
+      </div>
+    </div>
+  );
+};
+
 const SettingRow: React.FC<{
   icon: React.ReactNode;
   title: string;
   value?: string;
   badgeText?: string;
-  leadingValueDot?: string;
-  expanded?: boolean;
   hideDivider?: boolean;
   onClick: () => void;
-}> = ({ icon, title, value, badgeText, leadingValueDot, expanded, hideDivider, onClick }) => (
+}> = ({ icon, title, value, badgeText, hideDivider, onClick }) => (
   <div>
     <button
       type="button"
       onClick={onClick}
-      className="lindo-interactive flex min-h-[48px] w-full items-center justify-between py-2.5 px-5 text-left"
+      className="lindo-interactive flex min-h-[46px] w-full items-center justify-between py-2.5 px-5 text-left"
     >
-      <span className="flex items-center gap-3 text-[14px]" style={{ color: "var(--ink-primary)" }}>
-        <span style={{ color: "var(--ink-secondary)" }}>{icon}</span>
+      <span
+        className="flex items-center gap-3.5 text-[14.5px]"
+        style={{ color: "var(--ink-primary)" }}
+      >
+        <span className="inline-flex shrink-0" style={{ color: "var(--ink-secondary)" }}>
+          {icon}
+        </span>
         <span>{title}</span>
       </span>
       <span
-        className="flex items-center gap-2 text-[13px]"
+        className="flex items-center gap-1.5 text-[13px]"
         style={{ color: "var(--ink-tertiary)" }}
       >
         {badgeText && (
           <span
-            className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
+            className="rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold"
             style={{
               backgroundColor: "var(--active-chip-bg)",
               color: "var(--active-chip-text)",
@@ -4182,15 +4837,12 @@ const SettingRow: React.FC<{
             {badgeText}
           </span>
         )}
-        {leadingValueDot && (
-          <span className="h-3 w-3 rounded-full" style={{ backgroundColor: leadingValueDot }} />
-        )}
-        {value && <span style={{ color: "var(--ink-secondary)" }}>{value}</span>}
-        {expanded ? <CaretDown size={14} /> : <CaretRight size={14} />}
+        {value && <span>{value}</span>}
+        <LinDoIcons.ChevronRight size={14} />
       </span>
     </button>
-    {!hideDivider && !expanded && (
-      <div className="mx-5 h-[0.5px]" style={{ backgroundColor: "var(--hairline)" }} />
+    {!hideDivider && (
+      <div className="ml-[52px] mr-5 h-[0.5px]" style={{ backgroundColor: "var(--hairline)" }} />
     )}
   </div>
 );
@@ -4202,28 +4854,37 @@ const ToggleSettingRow: React.FC<{
   onChange: (next: boolean) => void;
 }> = ({ icon, title, checked, onChange }) => (
   <div>
-    <div className="flex h-[48px] w-full items-center justify-between px-5">
-      <span className="flex items-center gap-3 text-[14px]" style={{ color: "var(--ink-primary)" }}>
-        <span style={{ color: "var(--ink-secondary)" }}>{icon}</span>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className="lindo-interactive flex h-[46px] w-full items-center justify-between px-5 text-left"
+    >
+      <span
+        className="flex items-center gap-3.5 text-[14.5px]"
+        style={{ color: "var(--ink-primary)" }}
+      >
+        <span className="inline-flex shrink-0" style={{ color: "var(--ink-secondary)" }}>
+          {icon}
+        </span>
         <span>{title}</span>
       </span>
-      <button
-        type="button"
-        onClick={() => onChange(!checked)}
-        className="h-6 w-11 rounded-full p-0.5 transition-colors cursor-pointer"
+      <span
+        className="inline-flex h-6 w-11 items-center rounded-full p-0.5 transition-colors"
         style={{
           backgroundColor: checked ? "var(--brand-gold)" : "var(--tonal-pill)",
         }}
       >
-        <div
+        <span
           className="h-5 w-5 rounded-full bg-white transition-transform"
           style={{
             transform: checked ? "translateX(20px)" : "translateX(0)",
           }}
         />
-      </button>
-    </div>
-    <div className="mx-5 h-[0.5px]" style={{ backgroundColor: "var(--hairline)" }} />
+      </span>
+    </button>
+    <div className="ml-[52px] mr-5 h-[0.5px]" style={{ backgroundColor: "var(--hairline)" }} />
   </div>
 );
 
@@ -4325,7 +4986,7 @@ export const AuthModal: React.FC<{
               className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
               style={{ color: "var(--ink-primary)" }}
             >
-              {adding || managing ? <ArrowLeft size={17} /> : <X size={17} />}
+              {adding || managing ? <LinDoIcons.ArrowLeft size={17} /> : <LinDoIcons.Close size={17} />}
             </button>
             <span className="text-[16px] font-bold" style={{ color: "var(--ink-primary)" }}>
               {adding ? "添加账号" : "账号管理"}
@@ -4357,11 +5018,19 @@ export const AuthModal: React.FC<{
                   else onWebLogin();
                 }}
                 onBrowserOneClickAuth={() => {
-                  onClose();
                   onBrowserOneClick();
+                }}
+                onImportAuthCallback={async (raw) => {
+                  const ok = await importManualCredentialInRust(raw, isDark);
+                  if (ok) {
+                    onManualImported();
+                    onClose();
+                  }
+                  return ok;
                 }}
               />
 
+              {(!statusHint?.includes("浏览器") || manualExpanded) && (
               <div className="px-6 pt-1">
                 <button
                   type="button"
@@ -4370,7 +5039,11 @@ export const AuthModal: React.FC<{
                   style={{ color: "var(--ink-tertiary)" }}
                 >
                   <span>{manualExpanded ? "收起手动登录" : "展开手动登录"}</span>
-                  {manualExpanded ? <CaretDown size={12} /> : <CaretRight size={12} />}
+                  {manualExpanded ? (
+                    <LinDoIcons.ChevronDown size={12} />
+                  ) : (
+                    <LinDoIcons.ChevronRight size={12} />
+                  )}
                 </button>
 
                 {manualExpanded && (
@@ -4446,6 +5119,7 @@ export const AuthModal: React.FC<{
                   </div>
                 )}
               </div>
+              )}
             </div>
           ) : (
             <div className="py-2">
@@ -4502,7 +5176,7 @@ export const AuthModal: React.FC<{
                           )}
                         </div>
                         {current && (
-                          <Check size={19} weight="bold" style={{ color: "var(--brand-gold)" }} />
+                          <LinDoIcons.Check size={19} style={{ color: "var(--brand-gold)" }} />
                         )}
                       </button>
 
@@ -4538,10 +5212,10 @@ export const AuthModal: React.FC<{
                 style={{ color: "var(--ink-primary)" }}
               >
                 <span className="flex items-center gap-2.5">
-                  <Plus size={16} style={{ color: "var(--ink-secondary)" }} />
+                  <LinDoIcons.Plus size={16} style={{ color: "var(--ink-secondary)" }} />
                   <span>添加账号</span>
                 </span>
-                <CaretRight size={14} style={{ color: "var(--ink-tertiary)" }} />
+                <LinDoIcons.ChevronRight size={14} style={{ color: "var(--ink-tertiary)" }} />
               </button>
 
               {isAuthorized && (
@@ -4557,7 +5231,7 @@ export const AuthModal: React.FC<{
                     style={{ color: "#EF4444" }}
                   >
                     <span>退出登录</span>
-                    <SignOut size={16} />
+                    <LinDoIcons.LogOut size={16} />
                   </button>
                 </>
               )}
@@ -4639,8 +5313,8 @@ export const GuestLoginGuideModal: React.FC<{
             color: "var(--ink-primary)",
           }}
         >
-          <Globe size={16} />
-          <span>通过系统浏览器免密授权</span>
+          <LinDoIcons.Globe size={16} />
+          <span>使用默认浏览器一键授权</span>
         </button>
 
         <button
@@ -4801,7 +5475,7 @@ export const GlobalSearchModal: React.FC<{
         onClick={(e) => e.stopPropagation()}
       >
         <div className="lindo-hairline-b flex items-center gap-2.5 px-4 py-3">
-          <MagnifyingGlass size={17} style={{ color: "var(--brand-gold)" }} />
+          <LinDoIcons.Search size={17} style={{ color: "var(--brand-gold)" }} />
           <input
             type="text"
             autoFocus
@@ -4817,7 +5491,7 @@ export const GlobalSearchModal: React.FC<{
               onClick={() => setQuery("")}
               className="lindo-interactive rounded-full p-1"
             >
-              <X size={13.5} style={{ color: "var(--ink-tertiary)" }} />
+              <LinDoIcons.Close size={13.5} style={{ color: "var(--ink-tertiary)" }} />
             </button>
           )}
           <button
@@ -4825,7 +5499,7 @@ export const GlobalSearchModal: React.FC<{
             onClick={onClose}
             className="lindo-interactive rounded-full p-1"
           >
-            <X size={15} />
+            <LinDoIcons.Close size={15} />
           </button>
         </div>
 
@@ -4923,13 +5597,12 @@ export const GlobalSearchModal: React.FC<{
                         style={{ color: "var(--ink-tertiary)" }}
                       >
                         {h.categoryName && (
-                          <span className="inline-flex items-center gap-1">
-                            <span
-                              className="h-1.5 w-1.5 rounded-full"
-                              style={{ backgroundColor: cv.dotColor }}
-                            />
-                            <span>{h.categoryName}</span>
-                          </span>
+                          <LinDoCategoryBadge
+                            name={h.categoryName}
+                            fallbackColor={cv.dotColor}
+                            iconSize={10.5}
+                            className="text-[11px]"
+                          />
                         )}
                         <span>@{h.username}</span>
                         <span>·</span>
@@ -5046,7 +5719,7 @@ export const PublicUserCardModal: React.FC<{
                 onClick={onClose}
                 className="lindo-interactive rounded-full p-1"
               >
-                <X size={16} />
+                <LinDoIcons.Close size={16} />
               </button>
             </div>
             <div className="space-y-2">
@@ -5126,7 +5799,7 @@ export const PublicUserCardModal: React.FC<{
                 onClick={onClose}
                 className="lindo-interactive rounded-full p-1"
               >
-                <X size={16} />
+                <LinDoIcons.Close size={16} />
               </button>
             </div>
 
@@ -5198,7 +5871,7 @@ export const PublicUserCardModal: React.FC<{
                     color: "var(--ink-primary)",
                   }}
                 >
-                  <EnvelopeSimple size={14.5} />
+                  <LinDoIcons.Mail size={14.5} />
                   <span>发私信</span>
                 </button>
               )}
@@ -5325,7 +5998,7 @@ export const ImageLightboxModal: React.FC<{
           className="rounded-full p-1 hover:bg-white/10 cursor-pointer"
           title="缩小"
         >
-          <MagnifyingGlassMinus size={16} />
+          <LinDoIcons.ZoomOut size={16} />
         </button>
         <button
           type="button"
@@ -5341,7 +6014,7 @@ export const ImageLightboxModal: React.FC<{
           className="rounded-full p-1 hover:bg-white/10 cursor-pointer"
           title="放大"
         >
-          <MagnifyingGlassPlus size={16} />
+          <LinDoIcons.ZoomIn size={16} />
         </button>
         <span className="h-3.5 w-[0.5px] bg-white/20" />
         <button
@@ -5353,7 +6026,7 @@ export const ImageLightboxModal: React.FC<{
           }}
           className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] hover:bg-white/10 cursor-pointer"
         >
-          {copied ? <Check size={14} /> : <LinkSimple size={14} />}
+          {copied ? <LinDoIcons.Check size={14} /> : <LinDoIcons.Link size={14} />}
           <span>{copied ? "已复制" : "复制链接"}</span>
         </button>
         <button
@@ -5361,7 +6034,7 @@ export const ImageLightboxModal: React.FC<{
           onClick={() => openUrl(src)}
           className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] hover:bg-white/10 cursor-pointer"
         >
-          <ArrowSquareOut size={14} />
+          <LinDoIcons.ExternalLink size={14} />
           <span>原图</span>
         </button>
         <button
@@ -5370,7 +6043,7 @@ export const ImageLightboxModal: React.FC<{
           className="ml-1 rounded-full p-1 hover:bg-white/10 cursor-pointer"
           title="关闭 (Esc)"
         >
-          <X size={16} />
+          <LinDoIcons.Close size={16} />
         </button>
       </div>
     </div>
@@ -5440,7 +6113,7 @@ export const DesktopUpdateModal: React.FC<{
               className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <X size={15} />
+              <LinDoIcons.Close size={15} />
             </button>
           )}
         </div>
@@ -5543,7 +6216,7 @@ export const DesktopUpdateModal: React.FC<{
                 color: "var(--publish-btn-fg)",
               }}
             >
-              <DownloadSimple size={15} weight="bold" />
+              <LinDoIcons.Download size={15} />
               <span>{installing ? "正在升级..." : "立即更新并重启"}</span>
             </button>
           </div>
@@ -5587,7 +6260,7 @@ export const ExternalLinkSafetyModal: React.FC<{
                 color: isRisky ? "#F59E0B" : "var(--ink-primary)",
               }}
             >
-              {isRisky ? <Warning size={19} weight="fill" /> : <Globe size={19} />}
+              {isRisky ? <LinDoIcons.AlertTriangle size={19} /> : <LinDoIcons.Globe size={19} />}
             </div>
             <div>
               <div className="text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
@@ -5607,7 +6280,7 @@ export const ExternalLinkSafetyModal: React.FC<{
             className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
             style={{ color: "var(--ink-secondary)" }}
           >
-            <X size={15} />
+            <LinDoIcons.Close size={15} />
           </button>
         </div>
 
@@ -5647,7 +6320,7 @@ export const ExternalLinkSafetyModal: React.FC<{
             className="lindo-interactive flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-[11.5px]"
             style={{ color: copied ? "var(--brand-gold)" : "var(--ink-secondary)" }}
           >
-            {copied ? <Check size={12.5} /> : <Copy size={12.5} />}
+            {copied ? <LinDoIcons.Check size={12.5} /> : <LinDoIcons.Copy size={12.5} />}
             <span>{copied ? "已复制" : "复制"}</span>
           </button>
         </div>
@@ -5686,7 +6359,7 @@ export const ExternalLinkSafetyModal: React.FC<{
             }}
           >
             <span>继续访问</span>
-            <ArrowSquareOut size={14} weight="bold" />
+            <LinDoIcons.ExternalLink size={14} />
           </button>
         </div>
       </div>
@@ -5736,7 +6409,7 @@ export const ConnectTrustLevelModal: React.FC<{
       >
         <div className="lindo-hairline-b flex h-12 shrink-0 items-center justify-between px-4">
           <div className="flex items-center gap-2">
-            <ShieldCheck size={17} weight="duotone" style={{ color: "var(--brand-gold)" }} />
+            <LinDoIcons.ShieldCheck size={17} style={{ color: "var(--brand-gold)" }} />
             <span className="text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
               Connect 保级与成长
             </span>
@@ -5751,7 +6424,7 @@ export const ConnectTrustLevelModal: React.FC<{
               className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full disabled:opacity-45"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <ArrowClockwise size={14.5} className={loading ? "animate-spin" : ""} />
+              <SmoothRefreshIcon spinning={loading} size={14.5} />
             </button>
             <button
               type="button"
@@ -5767,7 +6440,7 @@ export const ConnectTrustLevelModal: React.FC<{
               }}
             >
               <span>网页版 Connect</span>
-              <ArrowSquareOut size={13} />
+              <LinDoIcons.ExternalLink size={13} />
             </button>
             <button
               type="button"
@@ -5775,7 +6448,7 @@ export const ConnectTrustLevelModal: React.FC<{
               className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <X size={15} />
+              <LinDoIcons.Close size={15} />
             </button>
           </div>
         </div>

@@ -6,7 +6,7 @@ import { Steps, Callout } from "nextra/components";
 
 # 下载与安装
 
-所有安装包都发布在 [GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)。
+所有安装包与校验清单（`SHA256SUMS.txt`）均发布在 [GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)，也可直接在官网[下载区](/#download)按当前系统获取。
 
 ## Android
 
@@ -14,26 +14,26 @@ import { Steps, Callout } from "nextra/components";
 
 ### 下载 APK
 
-在 Releases 页面下载最新的 `.apk` 文件。
+在官网下载区点击 **下载 APK**（或在电脑端点击 **手机扫码**），获取最新 `.apk` 安装包。
 
 ### 允许安装
 
-首次安装时，系统可能会要求允许当前浏览器或文件管理器“安装未知应用”。
+首次安装时，系统可能会提示允许当前浏览器或文件管理器“安装未知应用”。
 
 ### 登录
 
-打开 LinDo，选择“使用 LINUX DO 登录”，或使用系统浏览器授权。
+打开 LinDo，选择“使用 LINUX DO 登录”，或通过访客模式直接浏览公开话题。
 
 </Steps>
 
 ## macOS
 
-下载 `.dmg`，打开后将 LinDo 拖入“应用程序”文件夹。需要 macOS 11 或更高版本。
+根据芯片架构下载对应的 `.dmg`（M 系列芯片选择 **Apple Silicon**，旧款 Mac 选择 **Intel 芯片**），打开后将 LinDo 拖入“应用程序”文件夹。需要 macOS 11 或更高版本。
 
 <Callout type="warning">
-  若系统提示“无法验证开发者”，请在“系统设置 → 隐私与安全性”中选择仍要打开。
+  若首次打开时系统提示“无法验证开发者”，请前往“系统设置 → 隐私与安全性”，在底部点击“仍要打开”。
 </Callout>
 
 ## Windows
 
-下载 `.msi` 安装包并按提示完成安装。
+支持 Windows 10 / 11（64 位）。普通用户推荐下载 **安装程序（`-setup.exe`）** 按向导完成安装；企业或批量部署环境也可选择 **MSI 安装包（`.msi`）**。

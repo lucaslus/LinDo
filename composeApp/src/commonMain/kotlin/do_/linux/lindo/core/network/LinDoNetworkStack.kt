@@ -2464,6 +2464,7 @@ object LinuxDoRepository {
 
     private val rateLimitedUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val challengeBlockedUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val challenge429Streak = java.util.concurrent.atomic.AtomicInteger(0)
     private val foregroundPriorityUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val readRateLimitRecovery = ReadRateLimitRecovery(
         remainingMillis = { (rateLimitedUntilMs.get() - System.currentTimeMillis()).coerceAtLeast(0L) },
@@ -2484,12 +2485,32 @@ object LinuxDoRepository {
         if (NetworkRecoveryPolicy.enabled) noteRateLimitHit(NetworkRecoveryPolicy.retryAfterMillis(value))
     }
 
-    private fun noteChallengeHit(cooldownMs: Long = 60_000L) {
+    /**
+     * `HTTP 429 + cf-mitigated: challenge` 属于边缘并发限流，绝不可拉黑健康的 `cf_clearance`；
+     * 采用阶梯冷却 `[12s, 24s, 40s]` 并尊重 `Retry-After`，待窗口恢复后继续使用现有凭证。
+     */
+    fun noteChallengeRateLimitHit(retryAfterHeader: String? = null) {
+        val streak = challenge429Streak.incrementAndGet()
+        val steppedMs = when {
+            streak <= 1 -> 12_000L
+            streak == 2 -> 24_000L
+            else -> 40_000L
+        }
+        val headerMs = if (!retryAfterHeader.isNullOrBlank()) {
+            NetworkRecoveryPolicy.retryAfterMillis(retryAfterHeader)
+        } else 0L
+        noteRateLimitHit(maxOf(steppedMs, headerMs))
+    }
+
+    private fun noteChallengeHit(cooldownMs: Long = 12_000L) {
         val carriedCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
         CfClearanceAuthority.noteChallenged(carriedCf)
         val until = System.currentTimeMillis() + cooldownMs
         challengeBlockedUntilMs.updateAndGet { prev -> maxOf(prev, until) }
     }
+
+    internal fun hasInFlightForegroundApi(): Boolean =
+        inFlightForegroundApiCount.get() > 0
 
     internal fun isRateLimitedNow(): Boolean =
         System.currentTimeMillis() < rateLimitedUntilMs.get()
@@ -2507,6 +2528,7 @@ object LinuxDoRepository {
 
     internal fun clearTransientRateLimit() {
         rateLimitedUntilMs.set(0L)
+        challenge429Streak.set(0)
         readRateLimitRecovery.reset()
     }
 
@@ -2672,11 +2694,12 @@ object LinuxDoRepository {
             // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
             if (!isReadMethod && UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 val writeResult = callWebView()
-                if (writeResult?.first == 429 && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
-                if (writeResult != null && looksLikeCloudflareChallenge(writeResult.second)) {
+                if (!isSilentTiming && writeResult?.first == 429 && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
+                if (writeResult != null && writeResult.first != 429 && looksLikeCloudflareChallenge(writeResult.second)) {
                     noteChallengeHit()
                 } else if (writeResult != null && isSuccessfulApiResponse(writeResult.first, writeResult.second)) {
                     challengeBlockedUntilMs.set(0L)
+                    challenge429Streak.set(0)
                     CfClearanceAuthority.confirmHealthy(
                         CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                     )
@@ -2707,10 +2730,11 @@ object LinuxDoRepository {
                         }
                     }
                     if (candidate?.first == 429 && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
-                    if (candidate != null && looksLikeCloudflareChallenge(candidate.second)) {
+                    if (candidate != null && candidate.first != 429 && looksLikeCloudflareChallenge(candidate.second)) {
                         noteChallengeHit()
                     }
                     if (candidate != null && isExpectedResponse(candidate.first, candidate.second)) {
+                        challenge429Streak.set(0)
                         CfClearanceAuthority.confirmHealthy(
                             CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                         )
@@ -2743,12 +2767,14 @@ object LinuxDoRepository {
             }
 
             fun decorateOkHttpChallengeBody(
+                status: Int,
                 headers: Headers,
                 rawBody: String
             ): Triple<String, String?, String?> {
                 val cfMitigated = headers["cf-mitigated"]
                 val cfRay = headers["cf-ray"]
                 val taggedBody = if (
+                    status != 429 &&
                     cfMitigated?.contains("challenge", ignoreCase = true) == true &&
                     !rawBody.startsWith(CF_MITIGATED_CHALLENGE_PREFIX)
                 ) {
@@ -2791,9 +2817,9 @@ object LinuxDoRepository {
                         ingestSetCookieHeader(setCookie, domain = "linux.do")
                     }
                     var status = response.status.value
-                    var (text, cfMitigated, cfRay) = decorateOkHttpChallengeBody(response.headers, response.bodyAsText())
-                    if (status == 429 && !NetworkRecoveryPolicy.enabled) noteRateLimitHit()
-                    if (looksLikeCloudflareChallenge(text)) noteChallengeHit()
+                    var (text, cfMitigated, cfRay) = decorateOkHttpChallengeBody(status, response.headers, response.bodyAsText())
+                    if (!isSilentTiming && status == 429 && !NetworkRecoveryPolicy.enabled) noteRateLimitHit()
+                    if (status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
                     if (isMutation && status in setOf(403, 422) && !looksLikeCloudflareChallenge(text) && text.contains("CSRF", ignoreCase = true) && hasWebCookie) {
                         val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
                         if (!freshCsrf.isNullOrBlank()) {
@@ -2805,11 +2831,11 @@ object LinuxDoRepository {
                                 ingestSetCookieHeader(setCookie, domain = "linux.do")
                             }
                             status = response.status.value
-                            val decorated = decorateOkHttpChallengeBody(response.headers, response.bodyAsText())
+                            val decorated = decorateOkHttpChallengeBody(status, response.headers, response.bodyAsText())
                             text = decorated.first
                             cfMitigated = decorated.second
                             cfRay = decorated.third
-                            if (looksLikeCloudflareChallenge(text)) noteChallengeHit()
+                            if (status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
                         }
                     }
                     // 若携带 Discourse-Logged-In 头遭遇非 Cloudflare 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次并异步复核会话
@@ -2823,17 +2849,23 @@ object LinuxDoRepository {
                             ingestSetCookieHeader(setCookie, domain = "linux.do")
                         }
                         status = response.status.value
-                        val decorated = decorateOkHttpChallengeBody(response.headers, response.bodyAsText())
+                        val decorated = decorateOkHttpChallengeBody(status, response.headers, response.bodyAsText())
                         text = decorated.first
                         cfMitigated = decorated.second
                         cfRay = decorated.third
-                        if (looksLikeCloudflareChallenge(text)) noteChallengeHit()
+                        if (status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
                     }
                     if (!isSessionProbeUrl && isDiscourseNotLoggedInResponse(status, text)) {
                         scheduleAuthVerificationIfNeeded()
                     }
-                    // Include a 429 returned by an authentication/CSRF recovery request as well.
-                    if (status == 429 && NetworkRecoveryPolicy.enabled) noteRetryAfter(response.headers["Retry-After"])
+                    // Include a 429 returned by an authentication/CSRF recovery request as well (excluding background /topics/timings).
+                    if (!isSilentTiming && status == 429 && NetworkRecoveryPolicy.enabled) {
+                        if (cfMitigated?.contains("challenge", ignoreCase = true) == true) {
+                            noteChallengeRateLimitHit(response.headers["Retry-After"])
+                        } else {
+                            noteRetryAfter(response.headers["Retry-After"])
+                        }
+                    }
                     // 避免在已挂载 WebView 的平台上，用 OkHttp 缺少 cf_clearance 触发的 Cloudflare HTML 403 覆盖真实响应
                     val trimmedBody = text.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX).trimStart()
                     val isHtmlChallenge403 = status == 403 &&
@@ -6696,7 +6728,7 @@ object LinuxDoRepository {
                 return@withPermit null
             }
             val fastBody = fastRes?.second
-            if (fastBody != null && looksLikeCloudflareChallenge(fastBody)) {
+            if (fastBody != null && statusCode != 429 && looksLikeCloudflareChallenge(fastBody)) {
                 noteChallengeHit()
                 return@withPermit null
             }
@@ -6794,7 +6826,7 @@ object LinuxDoRepository {
             extraHeaders = headers,
             preserveFailure = true
         )
-        if (res != null && looksLikeCloudflareChallenge(res.second)) {
+        if (res != null && res.first != 429 && looksLikeCloudflareChallenge(res.second)) {
             noteChallengeHit()
             return@withContext ScreenTrackEngine.STATUS_SITE_VERIFICATION_REQUIRED
         }

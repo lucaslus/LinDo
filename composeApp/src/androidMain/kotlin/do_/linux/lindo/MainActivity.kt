@@ -77,6 +77,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX
+import do_.linux.lindo.core.network.CfClearanceAuthority
 import do_.linux.lindo.core.network.CookieSentinel
 import do_.linux.lindo.core.network.NetworkRecoveryPolicy
 import do_.linux.lindo.core.network.LinuxDoRepository
@@ -110,6 +111,7 @@ import do_.linux.lindo.ui.PlatformWebLoginHost
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -206,12 +208,22 @@ class MainActivity : ComponentActivity() {
     private val pendingHttpCallbacks = ConcurrentHashMap<String, CompletableDeferred<Pair<Int, String>>>()
     private val pendingBinaryCallbacks = ConcurrentHashMap<String, CompletableDeferred<Triple<Int, String, String>>>()
     private val pendingUploadPayloads = ConcurrentHashMap<String, ByteArray>()
-    // 控制同源 Chromium WebView 并发槽位：
-    // - 前台交互请求专享 6 路并发槽位，后台静默预取/曝光上报隔离在独立 2 路槽位，彻底消除后台任务队头阻塞前台刷帖/看帖；
-    // - 12 路 HTTP/2 多路复用图片桥接兜底（头像已优先直连官方静态 CDN）。
-    private val webViewForegroundHttpSemaphore = kotlinx.coroutines.sync.Semaphore(6)
+    // 控制同源 Chromium WebView 并发槽位（对齐真实浏览器节流节奏，防止多路并发 fetch 触发 Cloudflare 瞬时突发挑战）：
+    // - 前台交互请求专享 3 路并发槽位，后台静默预取/曝光上报隔离在独立 2 路槽位；
+    // - 同源二进制图片桥接按三车道隔离：表情包 8 路、头像 3 路、常规媒体 4 路，避免表情/头像风暴阻塞帖子图片或挤占 API 通道。
+    private val webViewForegroundHttpSemaphore = kotlinx.coroutines.sync.Semaphore(3)
     private val webViewBackgroundHttpSemaphore = kotlinx.coroutines.sync.Semaphore(2)
-    private val webViewBinarySemaphore = kotlinx.coroutines.sync.Semaphore(12)
+    private val webViewEmojiSemaphore = kotlinx.coroutines.sync.Semaphore(8)
+    private val webViewAvatarSemaphore = kotlinx.coroutines.sync.Semaphore(3)
+    private val webViewMediaSemaphore = kotlinx.coroutines.sync.Semaphore(4)
+    private val silentTimingReqIds = ConcurrentHashMap.newKeySet<String>()
+    private val silentChallengeMutex = kotlinx.coroutines.sync.Mutex()
+    @Volatile
+    private var silentChallengeInFlight: CompletableDeferred<Boolean>? = null
+    @Volatile
+    private var lastSilentChallengeAtMs: Long = 0L
+    @Volatile
+    private var lastSilentChallengeResult: Boolean = false
     private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile
     private var activeValidatedNetworkHandle: Long = 0L
@@ -399,7 +411,9 @@ class MainActivity : ComponentActivity() {
 
         @JavascriptInterface
         fun onHttpResultWithMeta(reqId: String, status: Int, body: String, cfMitigated: String) {
-            val taggedBody = if (cfMitigated.contains("challenge", ignoreCase = true)) {
+            val isChallengeMitigated = cfMitigated.contains("challenge", ignoreCase = true)
+            // HTTP 429 属于限流而非 cf_clearance 损坏：严禁打上挑战前缀导致误弹验证页或拉黑健康凭证
+            val taggedBody = if (status != 429 && isChallengeMitigated) {
                 "$CF_MITIGATED_CHALLENGE_PREFIX$body"
             } else {
                 body
@@ -409,8 +423,14 @@ class MainActivity : ComponentActivity() {
 
         @JavascriptInterface
         fun onHttpResultWithRetryAfter(reqId: String, status: Int, body: String, cfMitigated: String, retryAfter: String) {
-            // Publish the cooldown before resuming the waiting request coroutine.
-            if (pendingHttpCallbacks.containsKey(reqId) && status == 429) LinuxDoRepository.noteRetryAfter(retryAfter)
+            // Publish the cooldown before resuming the waiting request coroutine (excluding background /topics/timings).
+            if (pendingHttpCallbacks.containsKey(reqId) && status == 429 && !silentTimingReqIds.contains(reqId)) {
+                if (cfMitigated.contains("challenge", ignoreCase = true)) {
+                    LinuxDoRepository.noteChallengeRateLimitHit(retryAfter)
+                } else {
+                    LinuxDoRepository.noteRetryAfter(retryAfter)
+                }
+            }
             onHttpResultWithMeta(reqId, status, body, cfMitigated)
         }
 
@@ -1221,6 +1241,8 @@ class MainActivity : ComponentActivity() {
             cm.setAcceptCookie(true)
             cm.setAcceptThirdPartyCookies(wv, true)
 
+            val initialCookies = cm.getCookie("https://linux.do").orEmpty()
+            val hasWarmCfCookie = hasCookieNamed(initialCookies, "cf_clearance") || hasCookieNamed(initialCookies, "__cf_bm")
             val bootstrapIntercepted = java.util.concurrent.atomic.AtomicBoolean(false)
             wv.addJavascriptInterface(LinDoJsBridge(), "LinDoJsBridge")
             wv.webViewClient = object : WebViewClient() {
@@ -1230,7 +1252,9 @@ class MainActivity : ComponentActivity() {
                 ): android.webkit.WebResourceResponse? {
                     val reqUrl = request?.url
                     val encodedPath = reqUrl?.encodedPath
-                    if (request != null &&
+                    // 仅当浏览器已持有有效 cf_clearance / __cf_bm 时做零网络本地引导；冷会话首次启动走真实 /about 顶层导航以获取 Cloudflare __cf_bm
+                    if (hasWarmCfCookie &&
+                        request != null &&
                         request.isForMainFrame &&
                         reqUrl?.scheme.equals("https", ignoreCase = true) &&
                         reqUrl?.host.equals("linux.do", ignoreCase = true) &&
@@ -1252,6 +1276,17 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     return super.shouldInterceptRequest(view, request)
+                }
+
+                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                    super.onPageCommitVisible(view, url)
+                    if (view != null && view !== apiWebView) return
+                    if (url?.startsWith("https://linux.do") == true) {
+                        view?.evaluateJavascript(installBinaryBridgeHelperJs, null)
+                        if (!apiWebViewReady.isCompleted) {
+                            apiWebViewReady.complete(true)
+                        }
+                    }
                 }
 
                 override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
@@ -1325,10 +1360,11 @@ class MainActivity : ComponentActivity() {
                 wv.onResume()
                 wv.resumeTimers()
             }
-            // 通过单次本地拦截的真实 HTTPS 同源根路径初始化 https://linux.do/ 上下文（零启动网络请求）：
-            // 相比 loadDataWithBaseURL（内部保留 data: 文档 URL 导致 Chromium 剥离 fetch Referer 标头、在 5G/VPN 下 POST /drafts.json 与 /posts.json 易触发 Cloudflare WAF），
-            // 真实提交 https://linux.do/ 使 window.location、Origin、Referer 与 Sec-Fetch-Site 100% 对齐官方 Ember SPA！
-            wv.loadUrl(BRIDGE_BOOTSTRAP_URL)
+            // 若已有 cf_clearance / __cf_bm 走本地拦截快速引导，冷会话首次启动走轻量真实 https://linux.do/about 顶层导航以获取 Cloudflare __cf_bm
+            wv.loadUrl(if (hasWarmCfCookie) BRIDGE_BOOTSTRAP_URL else "https://linux.do/about")
+            if (!hasCookieNamed(initialCookies, "cf_clearance")) {
+                scheduleSilentChallengePrewarmIfNeeded(delayMs = 1_800L)
+            }
         }.onFailure {
             apiWebView = null
             if (!apiWebViewReady.isCompleted) {
@@ -1338,11 +1374,204 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun scheduleSilentChallengePrewarmIfNeeded(delayMs: Long = 800L) {
+        activityScope.launch {
+            if (delayMs > 0L) delay(delayMs)
+            if (isFinishing || isDestroyed || !UserPresenceService.isForeground) return@launch
+            if (LinuxDoRepository.isRateLimitedNow() || NetworkRecoveryPolicy.verifying) return@launch
+            val existingCf = withContext(Dispatchers.Main) {
+                runCatching { getCookieValue(CookieManager.getInstance().getCookie("https://linux.do"), "cf_clearance") }.getOrNull()
+            }
+            if (!existingCf.isNullOrBlank() && !CfClearanceAuthority.isChallenged(existingCf)) return@launch
+            silentRevalidateChallenge(previousClearance = existingCf)
+        }
+    }
+
+    /**
+     * 单飞静默 `/challenge` 通行证刷新（对齐 `xuemk/linuxdo-android` 的 `BrowserSession.refreshClearance`）：
+     * 在 1x1 隐藏宿主内使用临时同源 WebView 访问 `https://linux.do/challenge`：
+     * - 若为非交互式 Cloudflare Turnstile 挑战，约 1~2s 自动签发新 `cf_clearance` 并落入源站轻量 404，全程用户零感知；
+     * - 若检测到交互式 `.cf-turnstile` 小组件且 900ms 内未自动放行，立即中止静默流程交由前台遮罩验证窗展示。
+     */
+    private suspend fun silentRevalidateChallenge(previousClearance: String? = null): Boolean {
+        if (isFinishing || isDestroyed || LinuxDoRepository.isRateLimitedNow() || NetworkRecoveryPolicy.verifying) {
+            return false
+        }
+        val (existingDeferred, isLeader) = silentChallengeMutex.withLock {
+            val now = System.currentTimeMillis()
+            silentChallengeInFlight?.let { return@withLock it to false }
+            if (now - lastSilentChallengeAtMs < 8_000L) {
+                return lastSilentChallengeResult
+            }
+            val created = CompletableDeferred<Boolean>()
+            silentChallengeInFlight = created
+            created to true
+        }
+        if (!isLeader) return existingDeferred.await()
+
+        var succeeded = false
+        var tempWv: WebView? = null
+        try {
+            val done = CompletableDeferred<Boolean>()
+            withContext(Dispatchers.Main) {
+                if (isFinishing || isDestroyed) {
+                    done.complete(false)
+                    return@withContext
+                }
+                val cm = CookieManager.getInstance()
+                ensureAuthCookiesInWebKit(cm)
+                val wv = WebView(this@MainActivity).apply {
+                    alpha = 0f
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        databaseEnabled = true
+                        UserApiKeyAuthManager.customUserAgent?.takeIf { it.isNotBlank() }?.let { userAgentString = it }
+                    }
+                    cm.setAcceptCookie(true)
+                    cm.setAcceptThirdPartyCookies(this, true)
+                    webViewClient = object : WebViewClient() {
+                        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                            if (!done.isCompleted) done.complete(false)
+                            releaseNativeWebView(view, rendererGone = true)
+                            if (tempWv === view) tempWv = null
+                            return true
+                        }
+                        override fun onReceivedHttpError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            errorResponse: android.webkit.WebResourceResponse?
+                        ) {
+                            super.onReceivedHttpError(view, request, errorResponse)
+                            if (request?.isForMainFrame == true &&
+                                request.url?.host.equals("linux.do", ignoreCase = true) &&
+                                request.url?.path?.startsWith("/challenge") == true &&
+                                errorResponse?.statusCode == 404 &&
+                                errorResponse.responseHeaders?.entries?.none {
+                                    it.key.equals("cf-mitigated", ignoreCase = true) &&
+                                        it.value.contains("challenge", ignoreCase = true)
+                                } != false
+                            ) {
+                                // 抵达源站 /challenge 轻量 404 说明已穿过 Cloudflare WAF
+                                view?.postDelayed({
+                                    if (!done.isCompleted) done.complete(true)
+                                }, 180L)
+                            }
+                        }
+                    }
+                }
+                tempWv = wv
+                val decorGroup = window?.decorView as? ViewGroup
+                val host = apiWebViewHost?.takeIf { it.parent === decorGroup } ?: decorGroup
+                host?.addView(wv, ViewGroup.LayoutParams(1, 1))
+                wv.measure(
+                    View.MeasureSpec.makeMeasureSpec(1, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(1, View.MeasureSpec.EXACTLY)
+                )
+                wv.layout(0, 0, 1, 1)
+                wv.onResume()
+                wv.resumeTimers()
+                wv.loadUrl("https://linux.do/challenge")
+            }
+
+            val startAt = System.currentTimeMillis()
+            var interactiveSeenSince = 0L
+            while (!done.isCompleted && System.currentTimeMillis() - startAt < 5_800L) {
+                delay(280L)
+                val probeState = withContext(Dispatchers.Main) {
+                    val wv = tempWv ?: return@withContext "gone"
+                    val cm = CookieManager.getInstance()
+                    val latestCookies = cm.getCookie("https://linux.do").orEmpty()
+                    val freshCf = getCookieValue(latestCookies, "cf_clearance")
+                    if (!freshCf.isNullOrBlank() && freshCf != previousClearance && !CfClearanceAuthority.isChallenged(freshCf)) {
+                        return@withContext "cf_rotated"
+                    }
+                    val jsRes = suspendCancellableCoroutine<String?> { cont ->
+                        wv.evaluateJavascript(do_.linux.lindo.core.network.webVerificationProbeScript()) { raw ->
+                            if (cont.isActive) cont.resume(raw)
+                        }
+                    }
+                    decodeJsStringResult(jsRes).orEmpty()
+                }
+                if (probeState == "gone") break
+                if (probeState == "cf_rotated") {
+                    done.complete(true)
+                    break
+                }
+                val parsed = runCatching { JSONObject(probeState) }.getOrNull()
+                if (parsed?.optBoolean("ok") == true) {
+                    parsed.optString("csrf").takeIf { it.isNotBlank() }?.let { freshCsrf ->
+                        LinuxDoRepository.updateCsrfToken(freshCsrf)
+                    }
+                    done.complete(true)
+                    break
+                }
+                if (parsed?.optBoolean("challenge") == true) {
+                    if (interactiveSeenSince == 0L) interactiveSeenSince = System.currentTimeMillis()
+                    else if (System.currentTimeMillis() - interactiveSeenSince >= 950L) {
+                        // 出现需要人工点击的 Turnstile，快速中止静默流程以让前台验证窗接管
+                        done.complete(false)
+                        break
+                    }
+                } else {
+                    interactiveSeenSince = 0L
+                }
+            }
+
+            if (done.isCompleted && done.await()) {
+                withContext(Dispatchers.Main) {
+                    val cm = CookieManager.getInstance()
+                    runCatching { cm.flush() }
+                    val latest = cm.getCookie("https://linux.do").orEmpty()
+                    if (latest.isNotBlank()) {
+                        CookieSentinel.syncFromAuthoritativeBrowserCookieString(latest, verified = true)
+                    }
+                    val freshCf = getCookieValue(latest, "cf_clearance")
+                    succeeded = !freshCf.isNullOrBlank() && !CfClearanceAuthority.isChallenged(freshCf)
+                    if (succeeded) {
+                        LinuxDoRepository.clearChallengeCooldown()
+                        val freshCsrf = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
+                        apiWebView?.evaluateJavascript(
+                            "window.__lindoCsrf = $freshCsrf || null; window.__lindoCsrfPromise = null;",
+                            null
+                        )
+                        LinDoDiagnosticLogger.info(
+                            DiagnosticCategory.AUTH,
+                            "SilentVerify",
+                            "Cloudflare verification completed"
+                        )
+                    }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            succeeded = false
+        } finally {
+            withContext(Dispatchers.Main) {
+                tempWv?.let { wv ->
+                    tempWv = null
+                    releaseNativeWebView(wv)
+                }
+            }
+            silentChallengeMutex.withLock {
+                lastSilentChallengeAtMs = System.currentTimeMillis()
+                lastSilentChallengeResult = succeeded
+                silentChallengeInFlight = null
+            }
+            if (!existingDeferred.isCompleted) {
+                existingDeferred.complete(succeeded)
+            }
+        }
+        return succeeded
+    }
+
     private suspend fun executeHttpViaWebViewBridge(
         url: String,
         method: String,
         formParams: Map<String, String>?,
-        headers: Map<String, String>
+        headers: Map<String, String>,
+        allowSilentChallengeRetry: Boolean = true
     ): Pair<Int, String>? {
         if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
         val isRead = method.equals("GET", true) || method.equals("HEAD", true)
@@ -1649,6 +1878,8 @@ class MainActivity : ComponentActivity() {
             }
             if (LinuxDoRepository.shouldPauseForSiteVerification(url)) return 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>需要完成站点验证</html>"
             if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
+            val isSilentTimingUrl = url.contains("/topics/timings", ignoreCase = true)
+            if (isSilentTimingUrl) silentTimingReqIds.add(reqId)
             pendingHttpCallbacks[reqId] = deferred
             val launched = withContext(Dispatchers.Main) {
                 val liveWv = apiWebView ?: return@withContext false
@@ -1695,6 +1926,7 @@ class MainActivity : ComponentActivity() {
                 runCatching { cm?.flush() }
             }
         } finally {
+            silentTimingReqIds.remove(reqId)
             pendingHttpCallbacks.remove(reqId)
             val targetWv = dispatchedWv
             if (!completedFromJs && targetWv != null) {
@@ -1730,6 +1962,27 @@ class MainActivity : ComponentActivity() {
                 activityScope.launch {
                     rebuildApiWebView(reason = "consecutive_status_zero", expectedGeneration = observedGen)
                 }
+            }
+        }
+
+        // 前台请求首次命中 Cloudflare 403/503 边缘挑战时（请求在 CDN 边缘即被拦截，从未抵达源站 Rails，故写请求重放同样幂等安全），
+        // 先单飞尝试静默 `/challenge` 续期：若非交互式挑战自动通过，立即无感重放原请求，避免弹出验证窗打断用户！
+        if (allowSilentChallengeRetry &&
+            !isBackground &&
+            bridgeResult != null &&
+            bridgeResult!!.first in setOf(403, 503) &&
+            do_.linux.lindo.core.network.looksLikeCloudflareChallenge(bridgeResult!!.second)
+        ) {
+            val staleCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
+            CfClearanceAuthority.noteChallenged(staleCf)
+            if (silentRevalidateChallenge(previousClearance = staleCf)) {
+                return executeHttpViaWebViewBridge(
+                    url = url,
+                    method = method,
+                    formParams = formParams,
+                    headers = headers,
+                    allowSilentChallengeRetry = false
+                )
             }
         }
 
@@ -1912,7 +2165,17 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        webViewBinarySemaphore.acquire()
+        var fgYieldMs = 0L
+        while (fgYieldMs < 240L && LinuxDoRepository.hasInFlightForegroundApi()) {
+            delay(80L)
+            fgYieldMs += 80L
+        }
+        val mediaLaneSemaphore = when {
+            "/images/emoji/" in lowerUrl || "/svg-sprite/" in lowerUrl || "twemoji" in lowerUrl || "noto" in lowerUrl -> webViewEmojiSemaphore
+            "/user_avatar/" in lowerUrl || "/letter_avatar" in lowerUrl -> webViewAvatarSemaphore
+            else -> webViewMediaSemaphore
+        }
+        mediaLaneSemaphore.acquire()
         val rawTriple = try {
             val first = invokeOnce(injectHelperFirst = false)
             if (first != null && first.first == -3) {
@@ -1921,7 +2184,7 @@ class MainActivity : ComponentActivity() {
                 first
             }
         } finally {
-            webViewBinarySemaphore.release()
+            mediaLaneSemaphore.release()
         } ?: return null
 
         val (status, contentType, b64Body) = rawTriple
@@ -2842,6 +3105,7 @@ private fun AndroidWebLoginModal(
     val isLoginFlow = purpose == do_.linux.lindo.core.network.WebPagePurpose.LOGIN
 
     var verificationExpanded by remember(initialUrl) { mutableStateOf(false) }
+    var interactiveChallengeActive by remember(initialUrl) { mutableStateOf(false) }
     var pageProgress by remember(initialUrl) { mutableStateOf(0) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var completed by remember(initialUrl) { mutableStateOf(false) }
@@ -2870,8 +3134,35 @@ private fun AndroidWebLoginModal(
         if (view?.url == url) view.reload() else view?.loadUrl(url)
     }
 
+    fun handleUserDismiss() {
+        val view = webViewRef
+        if (isVerificationFlow && !completed && view != null) {
+            view.evaluateJavascript(do_.linux.lindo.core.network.webVerificationProbeScript()) { raw ->
+                val result = decodeJsStringResult(raw)?.let { runCatching { JSONObject(it) }.getOrNull() }
+                if (!completed && result?.optBoolean("ok") == true) {
+                    result.optString("csrf").takeIf { it.isNotBlank() }?.let { freshCsrf ->
+                        csrfSyncedInModal = true
+                        LinuxDoRepository.updateCsrfToken(freshCsrf)
+                    }
+                    completed = true
+                    NetworkRecoveryPolicy.androidVerifying = false
+                    CookieManager.getInstance().flush()
+                    val latestAfterVerify = CookieManager.getInstance().getCookie("https://linux.do").orEmpty()
+                    CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestAfterVerify, verified = true)
+                    LinuxDoRepository.clearChallengeCooldown()
+                    UserApiKeyAuthManager.persistSessionQuietly()
+                    onLoginSuccess()
+                } else {
+                    onDismiss()
+                }
+            }
+            return
+        }
+        onDismiss()
+    }
+
     BackHandler {
-        if (pageLoadError == null && webViewRef?.canGoBack() == true) webViewRef?.goBack() else onDismiss()
+        if (pageLoadError == null && webViewRef?.canGoBack() == true) webViewRef?.goBack() else handleUserDismiss()
     }
 
     fun completeWithUserObject(u: JSONObject) {
@@ -2935,7 +3226,12 @@ private fun AndroidWebLoginModal(
                 verificationProbeRunning = false
                 if (!completed) {
                     val result = decodeJsStringResult(raw)?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    interactiveChallengeActive = result?.optBoolean("challenge") == true
+                    if (result?.optInt("status") == 429) {
+                        LinuxDoRepository.noteRetryAfter(result.optString("retryAfter"))
+                    }
                     if (result?.optBoolean("ok") == true) {
+                        interactiveChallengeActive = false
                         result.optString("csrf").takeIf { it.isNotBlank() }?.let { freshCsrf ->
                             csrfSyncedInModal = true
                             LinuxDoRepository.updateCsrfToken(freshCsrf)
@@ -3107,11 +3403,12 @@ private fun AndroidWebLoginModal(
         wv.loadUrl(initialUrl)
     }
 
-    // 仅在登录流开启时轮询探测登录完成状态（非登录容器页如 Connect / Credit 不轮询）
+    // 仅在登录或验证流开启时轮询探测完成状态（验证流 320ms 敏捷检测，一旦真实页面渲染即秒级自动收起并恢复原帖）
     LaunchedEffect(webViewRef, completed, isLoginFlow, isVerificationFlow) {
         if (!isLoginFlow && !isVerificationFlow) return@LaunchedEffect
+        val pollDelayMs = if (isVerificationFlow) 320L else 650L
         while (!completed && webViewRef != null) {
-            delay(750L)
+            delay(pollDelayMs)
             tryExtractSessionAndComplete(webViewRef)
         }
     }
@@ -3149,7 +3446,7 @@ private fun AndroidWebLoginModal(
     do_.linux.lindo.ui.VerificationPageSurface(
         verification = isVerificationFlow,
         expanded = verificationExpanded,
-        onDismiss = onDismiss
+        onDismiss = ::handleUserDismiss
     ) {
         Column(Modifier.fillMaxSize().background(barBg)) {
             Row(
@@ -3161,7 +3458,7 @@ private fun AndroidWebLoginModal(
                     .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                androidx.compose.material3.IconButton(onClick = onDismiss) {
+                androidx.compose.material3.IconButton(onClick = ::handleUserDismiss) {
                     androidx.compose.material3.Icon(
                         imageVector = do_.linux.lindo.ui.components.LinDoIcons.Close,
                         contentDescription = LinDoAuthCopy.CLOSE_WEB_PAGE.text,
@@ -3351,12 +3648,37 @@ private fun AndroidWebLoginModal(
                                         loginProbeRunning = false
                                         verificationProbeRunning = false
                                         confirmingLogin = false
+                                        if (isVerificationFlow) {
+                                            interactiveChallengeActive = false
+                                        }
                                         if (url != null &&
                                             (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))
                                         ) {
                                             pendingUrl = url
                                         }
                                         pageLoadError = null
+                                    }
+                                }
+
+                                override fun onReceivedHttpError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    errorResponse: android.webkit.WebResourceResponse?
+                                ) {
+                                    super.onReceivedHttpError(view, request, errorResponse)
+                                    if (isVerificationFlow &&
+                                        view === webViewRef &&
+                                        request?.isForMainFrame == true &&
+                                        request.url?.host.equals("linux.do", ignoreCase = true) &&
+                                        request.url?.path?.startsWith("/challenge") == true &&
+                                        errorResponse?.statusCode == 404 &&
+                                        errorResponse.responseHeaders?.entries?.none {
+                                            it.key.equals("cf-mitigated", ignoreCase = true) &&
+                                                it.value.contains("challenge", ignoreCase = true)
+                                        } != false
+                                    ) {
+                                        interactiveChallengeActive = false
+                                        tryExtractSessionAndComplete(view, isPageFinished = true)
                                     }
                                 }
 
@@ -3388,11 +3710,17 @@ private fun AndroidWebLoginModal(
                         if (!rendererGone) releaseNativeWebView(view)
                     }
                 )
-                if (confirmingLogin && pageLoadError == null) {
+                if ((confirmingLogin || (isVerificationFlow && !interactiveChallengeActive)) && pageLoadError == null) {
                     Box(Modifier.fillMaxSize().background(barBg).pointerInput(Unit) {
                         awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
                     }, contentAlignment = Alignment.Center) {
-                        LinDoLoadingIndicator(label = "正在完成登录…")
+                        LinDoLoadingIndicator(
+                            label = when {
+                                isVerificationFlow && completed -> "安全验证已完成，正在恢复连接…"
+                                isVerificationFlow -> "正在进行安全验证…"
+                                else -> "正在完成登录…"
+                            }
+                        )
                     }
                 }
                 val loadError = pageLoadError

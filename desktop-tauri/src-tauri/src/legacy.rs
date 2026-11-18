@@ -291,6 +291,7 @@ pub fn load_or_migrate_state() -> PersistedState {
         };
         if let Some(ref props) = legacy_props {
             apply_legacy_props(&mut fresh, props);
+            let _ = fs::rename(&legacy_file, legacy_file.with_extension("properties.migrated"));
         }
         save_state(&fresh);
         return fresh;
@@ -304,14 +305,9 @@ pub fn load_or_migrate_state() -> PersistedState {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("lindo-desktop-{}", uuid::Uuid::new_v4().simple()));
     }
-    // If tauri_state has no active session yet, opportunistically import from session.properties
-    if existing.current_user.is_none() && !existing.raw_cookies.contains("_t=") {
-        if let Some(ref props) = legacy_props {
-            if props.get("raw_cookies").map(|c| c.contains("_t=")).unwrap_or(false) {
-                apply_legacy_props(&mut existing, props);
-                save_state(&existing);
-            }
-        }
+    // Retire stale legacy session.properties once tauri_state.json already exists so expired sessions are NEVER resurrected on restart!
+    if legacy_file.exists() {
+        let _ = fs::rename(&legacy_file, legacy_file.with_extension("properties.migrated"));
     }
     existing
 }
@@ -399,9 +395,24 @@ fn apply_legacy_props(target: &mut PersistedState, props: &HashMap<String, Strin
 }
 
 pub fn save_state(state: &PersistedState) {
+    let mut sanitized = state.clone();
+    sanitized.raw_cookies = sanitized
+        .raw_cookies
+        .split(';')
+        .map(|s| s.trim())
+        .filter(|s| {
+            !s.is_empty()
+                && !s.starts_with("cf_clearance=")
+                && !s.starts_with("__cf")
+                && !s.starts_with("_cf")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    sanitized.cf_clearance_updated_at_ms = 0;
+
     let path = tauri_state_path();
     let tmp = path.with_extension("json.tmp");
-    if let Ok(serialized) = serde_json::to_string_pretty(state) {
+    if let Ok(serialized) = serde_json::to_string_pretty(&sanitized) {
         if fs::write(&tmp, serialized).is_ok() {
             let _ = fs::rename(&tmp, &path);
         }

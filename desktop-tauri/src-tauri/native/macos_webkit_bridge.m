@@ -68,7 +68,7 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 @interface LindoBridgePanel : NSPanel
 @end
 @implementation LindoBridgePanel
-- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeKeyWindow { return self.isVisible; }
 - (void)cancelOperation:(id)sender {
     if ([self.delegate respondsToSelector:@selector(windowShouldClose:)]) {
         [self.delegate windowShouldClose:self];
@@ -96,9 +96,26 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 }
 @end
 
+@interface LindoVerifyMaskView : NSView
+@end
+@implementation LindoVerifyMaskView
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (void)mouseDown:(NSEvent *)event {}
+- (void)mouseUp:(NSEvent *)event {}
+- (void)rightMouseDown:(NSEvent *)event {}
+- (void)scrollWheel:(NSEvent *)event {}
+@end
+
 @interface LindoBridgeHost : NSObject <WKNavigationDelegate, WKUIDelegate, NSWindowDelegate>
 @property WKWebView *web;
 @property NSPanel *panel;
+@property NSView *panelRoot;
+@property LindoVerifyMaskView *maskView;
+@property NSProgressIndicator *maskSpinner;
+@property NSTextField *maskLabel;
+@property BOOL maskVisibleState;
+@property BOOL maskDarkState;
+@property NSString *maskMessageState;
 @property NSProgressIndicator *progress;
 @property NSTextField *originLabel;
 @property NSButton *browserAuthBtn;
@@ -118,76 +135,105 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
         WKWebsiteDataStore *store = WKWebsiteDataStore.defaultDataStore;
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
         config.websiteDataStore = store;
-        // Preserve genuine macOS WKWebView User-Agent and untouched document head (zero user scripts or UA spoofing).
+        // Keep `_web` 100% unparented (offscreen, no NSWindow/CGSWindow) until `show:loginMode:` actually displays a sheet!
+        // This guarantees background `/challenge` prewarms & `fetch()` calls NEVER touch WindowServer, NSCursor, or screenshot drags.
         _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 680, 524) configuration:config];
         _web.navigationDelegate = self;
         _web.UIDelegate = self;
         _web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-
-        _panel = [[LindoBridgePanel alloc]
-            initWithContentRect:NSMakeRect(0, 0, 680, 560)
-                      styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
-                        backing:NSBackingStoreBuffered
-                          defer:NO];
-        _panel.title = @"linux.do";
-        _panel.releasedWhenClosed = NO;
-        _panel.delegate = self;
-        _panel.hidesOnDeactivate = NO;
-        _panel.minSize = NSMakeSize(380, 400);
-
-        NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 680, 560)];
-        root.wantsLayer = YES;
-        root.layer.backgroundColor = [NSColor colorWithRed:0.063 green:0.071 blue:0.090 alpha:1.0].CGColor;
-        [_web setFrame:NSMakeRect(0, 0, 680, 524)];
-        [root addSubview:_web];
-
-        NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect(0, 524, 680, 36)];
-        bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
-        NSButton *close = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"xmark" accessibilityDescription:@"关闭"]
-                                             target:self
-                                             action:@selector(closePanel:)];
-        close.bordered = NO;
-        close.frame = NSMakeRect(8, 4, 28, 28);
-        [bar addSubview:close];
-
-        _originLabel = [NSTextField labelWithString:@"linux.do"];
-        _originLabel.textColor = NSColor.secondaryLabelColor;
-        _originLabel.font = [NSFont systemFontOfSize:12];
-        _originLabel.alignment = NSTextAlignmentCenter;
-        _originLabel.frame = NSMakeRect(160, 9, 360, 18);
-        _originLabel.autoresizingMask = NSViewWidthSizable;
-        [bar addSubview:_originLabel];
-
-        _browserAuthBtn = [NSButton buttonWithTitle:@"浏览器授权 (支持 Passkey) ↗"
-                                             target:self
-                                             action:@selector(switchToBrowserAuth:)];
-        _browserAuthBtn.bordered = NO;
-        _browserAuthBtn.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
-        _browserAuthBtn.contentTintColor = [NSColor colorWithRed:0.988 green:0.827 blue:0.302 alpha:1.0];
-        _browserAuthBtn.frame = NSMakeRect(462, 4, 154, 28);
-        _browserAuthBtn.autoresizingMask = NSViewMinXMargin;
-        _browserAuthBtn.hidden = YES;
-        [bar addSubview:_browserAuthBtn];
-
-        _progress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(620, 9, 18, 18)];
-        _progress.style = NSProgressIndicatorStyleSpinning;
-        _progress.controlSize = NSControlSizeSmall;
-        _progress.displayedWhenStopped = NO;
-        _progress.autoresizingMask = NSViewMinXMargin;
-        [bar addSubview:_progress];
-
-        NSButton *reload = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"arrow.clockwise" accessibilityDescription:@"重新加载"]
-                                              target:self
-                                              action:@selector(reloadPage:)];
-        reload.bordered = NO;
-        reload.frame = NSMakeRect(644, 4, 28, 28);
-        reload.autoresizingMask = NSViewMinXMargin;
-        [bar addSubview:reload];
-
-        [root addSubview:bar];
-        _panel.contentView = root;
+        _maskVisibleState = NO;
+        _maskDarkState = YES;
+        _maskMessageState = @"正在连接安全验证服务…";
     }
     return self;
+}
+
+- (void)ensurePanelCreated {
+    if (_panel) return;
+    _panel = [[LindoBridgePanel alloc]
+        initWithContentRect:NSMakeRect(0, 0, 680, 560)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+                    backing:NSBackingStoreBuffered
+                      defer:YES];
+    _panel.title = @"linux.do";
+    _panel.releasedWhenClosed = NO;
+    _panel.delegate = self;
+    _panel.hidesOnDeactivate = NO;
+    _panel.minSize = NSMakeSize(380, 400);
+
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 680, 560)];
+    root.wantsLayer = YES;
+    root.layer.backgroundColor = [NSColor colorWithRed:0.063 green:0.071 blue:0.090 alpha:1.0].CGColor;
+    _panelRoot = root;
+
+    _maskView = [[LindoVerifyMaskView alloc] initWithFrame:NSMakeRect(0, 0, 680, 524)];
+    _maskView.wantsLayer = YES;
+    _maskView.layer.backgroundColor = [NSColor colorWithRed:0.063 green:0.071 blue:0.090 alpha:1.0].CGColor;
+    _maskView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _maskView.hidden = YES;
+
+    _maskSpinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(328, 276, 24, 24)];
+    _maskSpinner.style = NSProgressIndicatorStyleSpinning;
+    _maskSpinner.controlSize = NSControlSizeRegular;
+    _maskSpinner.displayedWhenStopped = NO;
+    _maskSpinner.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin | NSViewMaxYMargin;
+    [_maskView addSubview:_maskSpinner];
+
+    _maskLabel = [NSTextField labelWithString:@"正在连接安全验证服务…"];
+    _maskLabel.textColor = NSColor.secondaryLabelColor;
+    _maskLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    _maskLabel.alignment = NSTextAlignmentCenter;
+    _maskLabel.frame = NSMakeRect(90, 238, 500, 22);
+    _maskLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin | NSViewMaxYMargin;
+    [_maskView addSubview:_maskLabel];
+
+    [root addSubview:_maskView];
+
+    NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect(0, 524, 680, 36)];
+    bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    NSButton *close = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"xmark" accessibilityDescription:@"关闭"]
+                                         target:self
+                                         action:@selector(closePanel:)];
+    close.bordered = NO;
+    close.frame = NSMakeRect(8, 4, 28, 28);
+    [bar addSubview:close];
+
+    _originLabel = [NSTextField labelWithString:@"linux.do"];
+    _originLabel.textColor = NSColor.secondaryLabelColor;
+    _originLabel.font = [NSFont systemFontOfSize:12];
+    _originLabel.alignment = NSTextAlignmentCenter;
+    _originLabel.frame = NSMakeRect(160, 9, 360, 18);
+    _originLabel.autoresizingMask = NSViewWidthSizable;
+    [bar addSubview:_originLabel];
+
+    _browserAuthBtn = [NSButton buttonWithTitle:@"切换默认浏览器一键授权 ↗"
+                                         target:self
+                                         action:@selector(switchToBrowserAuth:)];
+    _browserAuthBtn.bordered = NO;
+    _browserAuthBtn.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
+    _browserAuthBtn.contentTintColor = [NSColor colorWithRed:0.988 green:0.827 blue:0.302 alpha:1.0];
+    _browserAuthBtn.frame = NSMakeRect(458, 4, 158, 28);
+    _browserAuthBtn.autoresizingMask = NSViewMinXMargin;
+    _browserAuthBtn.hidden = YES;
+    [bar addSubview:_browserAuthBtn];
+
+    _progress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(620, 9, 18, 18)];
+    _progress.style = NSProgressIndicatorStyleSpinning;
+    _progress.controlSize = NSControlSizeSmall;
+    _progress.displayedWhenStopped = NO;
+    _progress.autoresizingMask = NSViewMinXMargin;
+    [bar addSubview:_progress];
+
+    NSButton *reload = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"arrow.clockwise" accessibilityDescription:@"重新加载"]
+                                          target:self
+                                          action:@selector(reloadPage:)];
+    reload.bordered = NO;
+    reload.frame = NSMakeRect(644, 4, 28, 28);
+    reload.autoresizingMask = NSViewMinXMargin;
+    [bar addSubview:reload];
+
+    [root addSubview:bar];
+    _panel.contentView = root;
 }
 
 - (void)handleGetURLEvent:(NSAppleEventDescriptor *)event withReplyEvent:(NSAppleEventDescriptor *)replyEvent {
@@ -207,9 +253,48 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     }
 }
 - (void)closePanel:(id)sender { [self windowShouldClose:_panel]; }
+- (void)applyMaskVisuals {
+    if (!_maskView) return;
+    NSColor *bg = _maskDarkState
+        ? [NSColor colorWithRed:0.063 green:0.071 blue:0.090 alpha:1.0]
+        : [NSColor colorWithRed:0.969 green:0.973 blue:0.980 alpha:1.0];
+    _maskView.layer.backgroundColor = bg.CGColor;
+    _maskLabel.textColor = _maskDarkState
+        ? [NSColor colorWithRed:0.631 green:0.659 blue:0.710 alpha:1.0]
+        : [NSColor colorWithRed:0.322 green:0.345 blue:0.400 alpha:1.0];
+    if (_maskMessageState.length > 0) {
+        _maskLabel.stringValue = _maskMessageState;
+    }
+    if (_maskVisibleState) {
+        _maskView.hidden = NO;
+        if (_panel && _panel.isVisible) {
+            [_maskSpinner startAnimation:nil];
+        }
+    } else {
+        [_maskSpinner stopAnimation:nil];
+        _maskView.hidden = YES;
+    }
+}
+- (void)setVerifyMask:(BOOL)visible dark:(BOOL)dark message:(NSString *)msg {
+    _maskVisibleState = visible;
+    _maskDarkState = dark;
+    if (msg.length > 0) {
+        _maskMessageState = [msg copy];
+    }
+    [self applyMaskVisuals];
+}
 - (void)hide {
-    if (_panel.sheetParent) [_panel.sheetParent endSheet:_panel];
-    [_panel orderOut:nil];
+    _maskVisibleState = NO;
+    if (_maskSpinner) [_maskSpinner stopAnimation:nil];
+    if (_progress) [_progress stopAnimation:nil];
+    if (_maskView) _maskView.hidden = YES;
+    if (_panel) {
+        if (_panel.sheetParent) [_panel.sheetParent endSheet:_panel];
+        [_panel orderOut:nil];
+    }
+    if (_web.superview) {
+        [_web removeFromSuperview];
+    }
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     self.cancelled = YES;
@@ -218,17 +303,24 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 }
 - (void)show:(BOOL)dark loginMode:(BOOL)loginMode {
     self.cancelled = NO;
+    [self ensurePanelCreated];
+    if (_web.superview != _panelRoot) {
+        [_web setFrame:NSMakeRect(0, 0, _panelRoot.bounds.size.width, MAX(100, _panelRoot.bounds.size.height - 36))];
+        [_panelRoot addSubview:_web positioned:NSWindowBelow relativeTo:_maskView];
+    }
     _browserAuthBtn.hidden = !loginMode;
-    _originLabel.frame = loginMode ? NSMakeRect(42, 9, 412, 18) : NSMakeRect(60, 9, 560, 18);
+    _originLabel.frame = loginMode ? NSMakeRect(42, 9, 408, 18) : NSMakeRect(60, 9, 560, 18);
     _originLabel.alignment = loginMode ? NSTextAlignmentLeft : NSTextAlignmentCenter;
     _panel.appearance = [NSAppearance appearanceNamed:dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
     _panel.contentView.layer.backgroundColor = (dark
         ? [NSColor colorWithRed:0.063 green:0.071 blue:0.090 alpha:1.0]
         : NSColor.windowBackgroundColor).CGColor;
+    [self applyMaskVisuals];
     [NSApp activateIgnoringOtherApps:YES];
     if (_panel.isVisible) {
         [_panel makeKeyAndOrderFront:nil];
         [_panel makeFirstResponder:_web];
+        if (_maskVisibleState) [_maskSpinner startAnimation:nil];
         return;
     }
     NSWindow *owner = NSApp.keyWindow;
@@ -251,34 +343,42 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
         [_panel makeKeyAndOrderFront:nil];
         [_panel makeFirstResponder:_web];
     }
+    if (_maskVisibleState) [_maskSpinner startAnimation:nil];
 }
 
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)nav {
     self.navigationError = nil;
     self.processTerminated = NO;
-    [_progress startAnimation:nil];
+    if (_panel && _panel.isVisible) {
+        [_progress startAnimation:nil];
+    }
 }
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)nav {
-    NSString *host = webView.URL.host ?: @"linux.do";
-    _panel.title = host;
-    _originLabel.stringValue = host;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(900 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-        [webView evaluateJavaScript:@"Boolean(document.querySelector('meta[name=\"csrf-token\"]') || document.getElementById('data-preloaded'))"
-                  completionHandler:^(id res, NSError *err) {
-            if (!err && [res respondsToSelector:@selector(boolValue)] && [res boolValue]) {
-                [self.progress stopAnimation:nil];
-            }
-        }];
-    });
+    if (_panel && _panel.isVisible) {
+        NSString *host = webView.URL.host ?: @"linux.do";
+        _panel.title = host;
+        _originLabel.stringValue = host;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(900 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            if (!self.panel || !self.panel.isVisible) return;
+            [webView evaluateJavaScript:@"Boolean(document.querySelector('meta[name=\"csrf-token\"]') || document.getElementById('data-preloaded'))"
+                      completionHandler:^(id res, NSError *err) {
+                if (!err && [res respondsToSelector:@selector(boolValue)] && [res boolValue]) {
+                    [self.progress stopAnimation:nil];
+                }
+            }];
+        });
+    }
 }
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)nav {
-    [_progress stopAnimation:nil];
-    NSString *host = webView.URL.host ?: @"linux.do";
-    _panel.title = host;
-    _originLabel.stringValue = host;
+    if (_progress) [_progress stopAnimation:nil];
+    if (_panel && _panel.isVisible) {
+        NSString *host = webView.URL.host ?: @"linux.do";
+        _panel.title = host;
+        _originLabel.stringValue = host;
+    }
 }
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
-    [_progress stopAnimation:nil];
+    if (_progress) [_progress stopAnimation:nil];
     self.processTerminated = YES;
     NSURL *recoverUrl = [NSURL URLWithString:@"https://linux.do/about"];
     if (recoverUrl) {
@@ -286,7 +386,7 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     }
 }
 - (void)failNavigation:(NSError *)error {
-    [_progress stopAnimation:nil];
+    if (_progress) [_progress stopAnimation:nil];
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
     if ([error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 102) return;
     self.navigationError = error.localizedDescription ?: @"Navigation failed";
@@ -308,7 +408,7 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
         return;
     }
     BOOL allowed = [scheme isEqualToString:@"https"] || [url.absoluteString isEqualToString:@"about:blank"];
-    if (allowed && action.targetFrame.isMainFrame && url.host.length) {
+    if (allowed && action.targetFrame.isMainFrame && url.host.length && _panel && _panel.isVisible) {
         _panel.title = url.host;
         _originLabel.stringValue = url.host;
     }
@@ -702,14 +802,19 @@ static WKWebView *findFirstWKWebView(NSView *view) {
     return nil;
 }
 
+static id gInactiveHoverGuardMonitor = nil;
+
 static void unlockAllAppWebViews(void) {
     for (NSWindow *win in [NSApp windows]) {
+        // Never unlock 144Hz/240Hz display updates on the hidden background network bridge panel (`gHost.panel`)!
+        if (gHost && win == gHost.panel) continue;
+        // Guarantee background clicks/drags never initiate AppKit window moves during screenshot selection!
+        win.movableByWindowBackground = NO;
         WKWebView *wv = findFirstWKWebView(win.contentView);
         if (wv) {
             unlockHighRefreshRateForWebView(wv);
         }
     }
-    if (gHost && gHost.web) unlockHighRefreshRateForWebView(gHost.web);
     if (gBrowser && gBrowser.web) unlockHighRefreshRateForWebView(gBrowser.web);
 }
 
@@ -725,6 +830,21 @@ static double mapDiscreteWheelLinesToPixels(double lines) {
 
 static void installHighRefreshAndSmoothWheelMonitor(void) {
     unlockAllAppWebViews();
+    if (!gInactiveHoverGuardMonitor) {
+        // Prevent WKWebView's `NSTrackingActiveAlways` tracking areas from overriding `NSCursor` (e.g. `col-resize` on the split seam)
+        // or popping up native `NSToolTipPanel` windows while external screenshot overlays (macOS / Feishu / WeChat / Snipaste) are active!
+        NSEventMask hoverMask = NSEventMaskMouseMoved | NSEventMaskCursorUpdate | NSEventMaskMouseEntered | NSEventMaskMouseExited;
+        gInactiveHoverGuardMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:hoverMask handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
+            if (!NSApp.isActive) {
+                return nil;
+            }
+            NSWindow *win = event.window;
+            if (win && !win.isKeyWindow) {
+                return nil;
+            }
+            return event;
+        }];
+    }
     if (gScrollWheelMonitor) return;
 
     gScrollWheelMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
@@ -809,19 +929,22 @@ static void installHighRefreshAndSmoothWheelMonitor(void) {
 }
 
 static void registerDefaultUrlSchemesForCurrentBundle(void) {
-    NSBundle *mainBundle = [NSBundle mainBundle];
-    NSURL *bundleUrl = mainBundle.bundleURL;
-    if (bundleUrl && [bundleUrl.path hasSuffix:@".app"]) {
-        LSRegisterURL((__bridge CFURLRef)bundleUrl, true);
-    }
-    NSString *bundleId = mainBundle.bundleIdentifier;
-    if (bundleId.length > 0) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        LSSetDefaultHandlerForURLScheme(CFSTR("discourse"), (__bridge CFStringRef)bundleId);
-        LSSetDefaultHandlerForURLScheme(CFSTR("lindo"), (__bridge CFStringRef)bundleId);
-        #pragma clang diagnostic pop
-    }
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSBundle *mainBundle = [NSBundle mainBundle];
+        NSURL *bundleUrl = mainBundle.bundleURL;
+        if (bundleUrl && [bundleUrl.path hasSuffix:@".app"]) {
+            LSRegisterURL((__bridge CFURLRef)bundleUrl, true);
+        }
+        NSString *bundleId = mainBundle.bundleIdentifier;
+        if (bundleId.length > 0) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            LSSetDefaultHandlerForURLScheme(CFSTR("discourse"), (__bridge CFStringRef)bundleId);
+            LSSetDefaultHandlerForURLScheme(CFSTR("lindo"), (__bridge CFStringRef)bundleId);
+            #pragma clang diagnostic pop
+        }
+    });
 }
 
 __attribute__((visibility("default"))) void lindo_bridge_enable_high_refresh(int jsReady) {
@@ -915,6 +1038,12 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             sendReply(callback, request, @{}, nil);
         } else if ([method isEqualToString:@"hide"]) {
             [gHost hide];
+            sendReply(callback, request, @{}, nil);
+        } else if ([method isEqualToString:@"setVerifyMask"]) {
+            BOOL visible = [p[@"visible"] boolValue];
+            BOOL dark = p[@"dark"] ? [p[@"dark"] boolValue] : YES;
+            NSString *msg = [p[@"message"] isKindOfClass:NSString.class] ? p[@"message"] : @"正在连接安全验证服务…";
+            [gHost setVerifyMask:visible dark:dark message:msg];
             sendReply(callback, request, @{}, nil);
         } else if ([method isEqualToString:@"status"]) {
             sendReply(callback, request, @{

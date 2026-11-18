@@ -1,14 +1,10 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { useTheme } from "next-themes";
-import type { AccentKey } from "@/lib/site";
 
 const ACCENT_STORAGE = "lindo-accent";
-
-type AccentCtx = { accent: AccentKey; setAccent: (a: AccentKey) => void };
-const AccentContext = createContext<AccentCtx>({ accent: "gold", setAccent: () => {} });
 
 /** 官网固定使用品牌金：清掉早期版本留在本地的主题色设置 */
 export function AccentProvider({ children }: { children: ReactNode }) {
@@ -18,17 +14,13 @@ export function AccentProvider({ children }: { children: ReactNode }) {
     } catch {}
     delete document.documentElement.dataset.accent;
   }, []);
-  return <AccentContext.Provider value={{ accent: "gold", setAccent: () => {} }}>{children}</AccentContext.Provider>;
+  return <>{children}</>;
 }
-
-export const useAccent = () => useContext(AccentContext);
-
 
 type Origin = { x: number; y: number } | null;
 
 /**
- * 黑白主题切换：官网与所有 App 渲染图共用同一套 CSS 变量，
- * 因此一次切换会同时改变页面、手机、折叠屏和桌面窗口。
+ * 深浅色主题切换：官网与所有真机截图同时切换。
  * 支持 View Transitions 时从点击位置圆形展开。
  */
 export function useThemeSwitch() {
@@ -55,7 +47,9 @@ export function useThemeSwitch() {
       }
 
       const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      const doc = document as Document & { startViewTransition?: (cb: () => void) => { ready: Promise<void> } };
+      const doc = document as Document & {
+        startViewTransition?: (cb: () => void) => { ready: Promise<void>; finished?: Promise<void> };
+      };
 
       if (!doc.startViewTransition || reduce) {
         if (!reduce) {
@@ -69,13 +63,17 @@ export function useThemeSwitch() {
       const x = origin?.x ?? window.innerWidth - 40;
       const y = origin?.y ?? 32;
       const r = Math.hypot(Math.max(x, window.innerWidth - x), Math.max(y, window.innerHeight - y));
+      root.classList.add("vt-active");
       const vt = doc.startViewTransition(apply);
-      vt.ready.then(() => {
-        root.animate(
-          { clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${r}px at ${x}px ${y}px)`] },
-          { duration: 620, easing: "cubic-bezier(0.65, 0, 0.35, 1)", pseudoElement: "::view-transition-new(root)" },
-        );
-      });
+      vt.ready
+        .then(() => {
+          root.animate(
+            { clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${r}px at ${x}px ${y}px)`] },
+            { duration: 540, easing: "cubic-bezier(0.22, 1, 0.36, 1)", pseudoElement: "::view-transition-new(root)" },
+          );
+        })
+        .catch(() => {});
+      Promise.resolve(vt.finished).finally(() => root.classList.remove("vt-active"));
     },
     [resolvedTheme, setTheme],
   );

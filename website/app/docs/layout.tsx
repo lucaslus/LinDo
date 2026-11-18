@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { Footer, LastUpdated, Layout, Navbar } from "nextra-theme-docs";
 import { getPageMap } from "nextra/page-map";
 import { Search } from "nextra/components";
@@ -10,7 +11,7 @@ const logo = (
     {/* eslint-disable-next-line @next/next/no-img-element */}
     <img src="/brand/lindo-mark.svg" alt="" width={28} height={28} />
     <span>
-      Lin<span style={{ color: "#F59E0B" }}>Do</span>
+      Lin<span style={{ color: "var(--logo-do, #f59e0b)" }}>Do</span>
     </span>
     <span style={{ fontWeight: 400, opacity: 0.6, fontSize: 14 }}>文档</span>
   </span>
@@ -19,7 +20,25 @@ const logo = (
 export default async function DocsLayout({ children }: { children: ReactNode }) {
   return (
     <Layout
-      navbar={<Navbar logo={logo} logoLink="/" projectLink={SITE.repo} />}
+      navbar={
+        <Navbar logo={logo} logoLink="/" projectLink={SITE.repo}>
+          <Link
+            href="/#download"
+            style={{
+              fontSize: 14,
+              fontWeight: 500,
+              padding: "5px 12px",
+              borderRadius: 8,
+              background: "var(--publish-bg, #f59e0b)",
+              color: "var(--publish-fg, #111827)",
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            下载客户端
+          </Link>
+        </Navbar>
+      }
       footer={<Footer>LinDo · LINUX DO 第三方客户端</Footer>}
       pageMap={await getPageMap("/docs")}
       docsRepositoryBase={`${SITE.repo}/tree/main/website`}

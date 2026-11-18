@@ -141,10 +141,15 @@ private fun parseCleanDiagnosticSummary(entry: DiagnosticLogEntry): ParsedDiagno
         }
         val status = match.groupValues[3].trim().replace("IO_ERR", "连接中断")
         val flags = match.groupValues[4]
-        val latency = match.groupValues[5]
+        val rawMs = match.groupValues[5].removeSuffix("ms").toLongOrNull()
+        val latency = when {
+            rawMs == null -> match.groupValues[5]
+            rawMs >= 1_000L -> String.format(java.util.Locale.US, "%.1fs", rawMs / 1000.0)
+            else -> "${rawMs}ms"
+        }
         val badge = when {
-            flags.contains("challenge", ignoreCase = true) -> "CF 验证"
             status.contains("429") -> "限流"
+            flags.contains("challenge", ignoreCase = true) -> "CF 验证"
             else -> null
         }
         return ParsedDiagnosticSummary(
@@ -183,6 +188,32 @@ private fun levelLabelZh(level: DiagnosticLevel): String = when (level) {
     DiagnosticLevel.FATAL -> "崩溃"
 }
 
+private data class CollapsedDiagnosticItem(
+    val entry: DiagnosticLogEntry,
+    val repeatCount: Int
+)
+
+private fun collapseConsecutiveDiagnosticEntries(items: List<DiagnosticLogEntry>): List<CollapsedDiagnosticItem> {
+    if (items.isEmpty()) return emptyList()
+    val out = ArrayList<CollapsedDiagnosticItem>(items.size)
+    for (item in items) {
+        val prev = out.lastOrNull()
+        val prevKey = prev?.let { parseCleanDiagnosticSummary(it.entry).displayTitle }
+        val curKey = parseCleanDiagnosticSummary(item).displayTitle
+        if (prev != null &&
+            prev.entry.category == item.category &&
+            prev.entry.level == item.level &&
+            prev.entry.tag == item.tag &&
+            prevKey == curKey
+        ) {
+            out[out.lastIndex] = prev.copy(repeatCount = prev.repeatCount + 1)
+        } else {
+            out.add(CollapsedDiagnosticItem(entry = item, repeatCount = 1))
+        }
+    }
+    return out
+}
+
 @Composable
 internal fun DebugDiagnosticsSheet(
     onDismiss: () -> Unit
@@ -206,6 +237,7 @@ internal fun DebugDiagnosticsSheet(
         val cat = selectedTab.category
         if (cat == null) allEntries else allEntries.filter { it.category == cat }
     }
+    val collapsedEntries = remember(entries) { collapseConsecutiveDiagnosticEntries(entries) }
     val categoryCounts = remember(allEntries) {
         allEntries.groupingBy { it.category }.eachCount()
     }
@@ -428,7 +460,9 @@ internal fun DebugDiagnosticsSheet(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     contentPadding = PaddingValues(vertical = 2.dp)
                 ) {
-                    itemsIndexed(entries, key = { _, it -> it.id }) { index, entry ->
+                    itemsIndexed(collapsedEntries, key = { _, it -> it.entry.id }) { index, collapsed ->
+                        val entry = collapsed.entry
+                        val repeatCount = collapsed.repeatCount
                         var expanded by remember(entry.id) { mutableStateOf(entry.category == DiagnosticCategory.CRASH) }
                         val parsed = remember(entry.id, entry.summary) { parseCleanDiagnosticSummary(entry) }
                         val compactTime = remember(entry.id, entry.timestampIso) { formatCompactTimestamp(entry.timestampIso) }
@@ -494,6 +528,22 @@ internal fun DebugDiagnosticsSheet(
                                                     fontSize = 10.sp,
                                                     fontWeight = FontWeight.Medium,
                                                     color = dotColor
+                                                )
+                                            }
+                                        }
+                                        if (repeatCount > 1) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(CircleShape)
+                                                    .background(palette.subtleSurface)
+                                                    .border(0.5.dp, palette.hairline, CircleShape)
+                                                    .padding(horizontal = 5.5.dp, vertical = 0.5.dp)
+                                            ) {
+                                                Text(
+                                                    text = "×$repeatCount",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = palette.inkSecondary
                                                 )
                                             }
                                         }
@@ -601,7 +651,7 @@ internal fun DebugDiagnosticsSheet(
                             }
                         }
 
-                        if (index < entries.lastIndex) {
+                        if (index < collapsedEntries.lastIndex) {
                             HorizontalDivider(
                                 thickness = 0.5.dp,
                                 color = palette.hairline,

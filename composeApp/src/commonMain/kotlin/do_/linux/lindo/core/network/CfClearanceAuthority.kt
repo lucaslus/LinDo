@@ -7,6 +7,9 @@ package do_.linux.lindo.core.network
  * 3. 当用户在内置验证页完成人机验证（`verified = true`）或浏览器自然轮换出新票据时，优先晋升非 `challenged` 的新票据并淘汰残留死票。
  */
 object CfClearanceAuthority {
+    private const val MAX_CHALLENGED_HISTORY = 16
+    private val challengedHistory = ArrayDeque<String>(MAX_CHALLENGED_HISTORY)
+
     @Volatile
     var incumbent: String? = null
         private set
@@ -20,9 +23,24 @@ object CfClearanceAuthority {
         private set
 
     @Synchronized
+    fun isChallenged(value: String?): Boolean {
+        val clean = value?.trim().orEmpty()
+        if (clean.isEmpty()) return false
+        return clean == challenged || challengedHistory.contains(clean)
+    }
+
+    private fun pushChallengedHistory(token: String) {
+        challengedHistory.remove(token)
+        while (challengedHistory.size >= MAX_CHALLENGED_HISTORY) {
+            challengedHistory.removeFirst()
+        }
+        challengedHistory.addLast(token)
+    }
+
+    @Synchronized
     fun confirmHealthy(value: String?, nowMs: Long = System.currentTimeMillis()) {
         val clean = value?.trim().orEmpty()
-        if (clean.isEmpty() || clean == challenged) return
+        if (clean.isEmpty() || isChallenged(clean)) return
         incumbent = clean
         updatedAtEpochMs = nowMs
     }
@@ -35,6 +53,7 @@ object CfClearanceAuthority {
                 incumbent = null
             }
             challenged = target
+            pushChallengedHistory(target)
         }
     }
 
@@ -44,27 +63,33 @@ object CfClearanceAuthority {
         verified: Boolean = false,
         nowMs: Long = System.currentTimeMillis()
     ): String? {
-        val valid = observedValues
+        val cleaned = observedValues
             .map { it.trim() }
-            .filter { it.isNotEmpty() && it != challenged }
+            .filter { it.isNotEmpty() }
+        val unchallenged = cleaned.filterNot { isChallenged(it) }
 
-        if (verified && valid.isNotEmpty()) {
-            val rotated = valid.lastOrNull { it != incumbent } ?: valid.last()
-            incumbent = rotated
-            challenged = null
-            updatedAtEpochMs = nowMs
-            return rotated
+        if (verified && cleaned.isNotEmpty()) {
+            val rotated = unchallenged.lastOrNull { it != incumbent }
+                ?: unchallenged.lastOrNull()
+                ?: cleaned.lastOrNull { it != challenged }
+            if (rotated != null) {
+                challengedHistory.remove(rotated)
+                incumbent = rotated
+                challenged = null
+                updatedAtEpochMs = nowMs
+                return rotated
+            }
         }
 
         val currentIncumbent = incumbent
-        if (!currentIncumbent.isNullOrEmpty() && currentIncumbent != challenged) {
-            if (currentIncumbent in valid) {
+        if (!currentIncumbent.isNullOrEmpty() && !isChallenged(currentIncumbent)) {
+            if (currentIncumbent in unchallenged) {
                 if (updatedAtEpochMs == 0L) updatedAtEpochMs = nowMs
                 return currentIncumbent
             }
         }
 
-        val natural = valid.lastOrNull()
+        val natural = unchallenged.lastOrNull()
         if (natural != null) {
             incumbent = natural
             updatedAtEpochMs = nowMs
@@ -78,6 +103,7 @@ object CfClearanceAuthority {
     fun reset() {
         incumbent = null
         challenged = null
+        challengedHistory.clear()
         updatedAtEpochMs = 0L
     }
 }

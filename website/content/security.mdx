@@ -1,0 +1,58 @@
+---
+title: 安全与隐私
+---
+
+import { Callout } from "nextra/components";
+
+# 安全、隐私与代码审计
+
+LinDo 是面向 [LINUX DO](https://linux.do) 社区开发的完全开源客户端。作为第三方客户端，我们把**零隐私收集、无中转后端、公开可审计**作为最基本的工程红线。
+
+<Callout type="info">
+  LinDo **没有自建任何中转服务器**，也**未集成任何第三方统计、埋点、广告或崩溃上报 SDK**（无 Google Analytics、Firebase、Sentry、友盟等）。
+</Callout>
+
+## 出站网络通信白名单
+
+经全仓源码审计，客户端运行时产生的网络通信严格限定在以下公开目标：
+
+| 通信目标 | 触发场景与用途 | 是否携带社区凭证 |
+| --- | --- | --- |
+| `linux.do` 及官方子域（`connect.linux.do`、`credit.linux.do` 等） | 浏览话题、回复、消息同步、站点验证与个人面板直连 | 是（仅发往官方域名） |
+| `cdn.ldstatic.com`、`avatars.discourse-cdn.com` | 加载帖子静态图标、表情与用户头像 | 否 |
+| `api.github.com`、`github.com/lucaslus/LinDo` | 检查客户端新版本与下载 GitHub Releases 安装包 | 否 |
+| `223.5.5.5`、`1.12.12.12`（仅 Android 异常兜底） | 仅在系统 DNS 解析失败或被污染时，通过标准 HTTPS DoH 解析 `linux.do` 官方域名 IP | 否 |
+
+除上述请求及用户主动点击打开的帖子外链外，客户端不会向任何其他域名发起连接。
+
+## 本地存储与客户端安全加固
+
+- **纯本地凭证与数据存储**：账号登录态（Cookie / Discourse 标准 `User-Api-Key` 本机生成的非对称密钥）、多账号会话、未发草稿、浏览位置与诊断日志均 **100% 保存在操作系统应用沙盒目录**，不会自动上传至任何云端。
+- **诊断日志敏感字段脱敏**：内置诊断日志（`LinDoDiagnosticLogger`）仅供用户在本机排查网络或验证异常，并对敏感 Cookie 与授权令牌做脱敏保护。
+- **外链防钓鱼与同形异义域名拦截**：点击帖子内外部链接前会弹出目标域名确认，主动识别并拦截 **IDN 同形异义词域名（`xn--`）** 以及**文本与实际跳转不一致的伪装钓鱼链接**。
+- **受控 WebView 域名隔离**：应用内用于登录与站点验证的 WebView 严格限制受控域名白名单，拒绝越权指令跳转。
+
+## 构建透明度与安装包哈希核验
+
+所有正式发布的安装包（Android `.apk`、macOS `.dmg`、Windows `-setup.exe` / `.msi`）均通过公开的 GitHub Actions 工作流（[`.github/workflows/release.yml`](https://github.com/lucaslus/LinDo/blob/main/.github/workflows/release.yml)）在 GitHub 官方托管环境中自动编译生成，并随每次 Release 附带 `SHA256SUMS.txt`。
+
+下载安装包后，可在本地终端校验文件指纹是否与 `SHA256SUMS.txt` 完全一致：
+
+```sh
+# macOS / Linux
+shasum -a 256 Lindo-*.dmg
+
+# Windows PowerShell
+Get-FileHash .\Lindo-*-setup.exe -Algorithm SHA256
+```
+
+你也可以随时克隆仓库，按照仓库根目录 `README.md` 的说明在本地自行编译运行。
+
+## 欢迎代码审计与长期共建
+
+LinDo 的全部客户端与官网源码均公开在 [GitHub](https://github.com/lucaslus/LinDo)。我们非常欢迎各位佬友：
+
+- 对客户端与构建脚本进行**独立代码安全审计**；
+- 在 [GitHub Issues](https://github.com/lucaslus/LinDo/issues) 提交安全改进意见、性能优化建议或新功能需求，也欢迎直接发起 Pull Request。
+
+后续我们将保持长期高频维护，并在严格坚守**「数据不出本机、零隐私收集」**的前提下，陆续加入桌面陪伴挂件、本地离线收藏归档检索、本地阅读统计等实用的特色周边功能。

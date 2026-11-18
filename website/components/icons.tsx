@@ -55,6 +55,33 @@ export function IconArrowRight(props: P) {
   );
 }
 
+export function IconMenu(props: P) {
+  return (
+    <Base {...props}>
+      <path d="M4 7.5h16M4 12h16M4 16.5h16" />
+    </Base>
+  );
+}
+
+export function IconClose(props: P) {
+  return (
+    <Base {...props}>
+      <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+    </Base>
+  );
+}
+
+export function IconQrCode(props: P) {
+  return (
+    <Base {...props}>
+      <rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1.2" />
+      <rect x="14" y="3.5" width="6.5" height="6.5" rx="1.2" />
+      <rect x="3.5" y="14" width="6.5" height="6.5" rx="1.2" />
+      <path d="M14 14h2.5v2.5H14zM18 14h2.5v2.5H18zM16.2 16.5h2v2h-2zM14 18.5h2.5V20.5H14zM18.2 18.5H20.5V20.5h-2.3z" />
+    </Base>
+  );
+}
+
 /** 高刷新率与顺滑滚动（仪表指针） */
 export function IconGauge(props: P) {
   return (
@@ -117,27 +144,42 @@ export function IconUsers(props: P) {
   );
 }
 
-export function IconRefresh(props: P) {
+/** 零隐私本机锁存 */
+export function IconLock(props: P) {
   return (
     <Base {...props}>
-      <path d="M4.9 8.2A7.8 7.8 0 0 1 19.2 9M19.6 5.2v4h-4" />
-      <path d="M19.1 15.8A7.8 7.8 0 0 1 4.8 15M4.4 18.8v-4h4" />
+      <rect x="5" y="10.5" width="14" height="10" rx="2.4" />
+      <path d="M8.2 10.5V7.6a3.8 3.8 0 0 1 7.6 0v2.9" />
+      <circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
     </Base>
   );
 }
 
-export function IconCheck(props: P) {
+/** 开源代码安全审计 */
+export function IconCodeAudit(props: P) {
   return (
     <Base {...props}>
-      <path d="M19.5 6.5 9.4 16.6 4.5 11.7" />
+      <path d="m8.2 8.5-3.7 3.5 3.7 3.5M15.8 8.5l3.7 3.5-3.7 3.5M13.4 6.5l-2.8 11" />
     </Base>
   );
 }
 
-export function IconExternalLink(props: P) {
+/** 构建产物与哈希核验 */
+export function IconFileCheck(props: P) {
   return (
     <Base {...props}>
-      <path d="M18 13.5v4.3c0 1-.8 1.7-1.7 1.7H6.2c-1 0-1.7-.8-1.7-1.7V7.7c0-1 .8-1.7 1.7-1.7h4.3M14.8 4.5h4.7v4.7M10.5 13.5l9-9" />
+      <path d="M14 3.5H7.2c-1 0-1.7.8-1.7 1.8v13.4c0 1 .7 1.8 1.7 1.8h9.6c1 0 1.7-.8 1.7-1.8V8L14 3.5Z" />
+      <path d="M13.8 3.6V8h4.5M9.2 14.2l2 2 3.8-4" />
+    </Base>
+  );
+}
+
+/** 长期路线图与本地特色生态 */
+export function IconCompass(props: P) {
+  return (
+    <Base {...props}>
+      <circle cx="12" cy="12" r="8.8" />
+      <path d="m15.4 8.6-2.1 5.3-5.3 2.1 2.1-5.3 5.3-2.1Z" />
     </Base>
   );
 }

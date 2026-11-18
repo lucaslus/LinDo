@@ -1,6 +1,6 @@
 [package]
 name = "lindo-desktop"
-version = "1.0.45"
+version = "1.0.54"
 description = "Lindo — Native-Grade High-Performance Linux.do Desktop Client"
 authors = ["Lindo Community"]
 edition = "2021"

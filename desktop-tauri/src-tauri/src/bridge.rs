@@ -10,7 +10,8 @@ use std::ffi::{CStr, CString};
 #[cfg(target_os = "macos")]
 use std::os::raw::c_char;
 #[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
@@ -47,6 +48,7 @@ pub struct ForumMediaPayload {
 pub struct CfClearanceAuthority {
     pub incumbent: Option<String>,
     pub challenged: Option<String>,
+    pub challenged_history: VecDeque<String>,
     pub updated_at_ms: u64,
 }
 
@@ -62,12 +64,16 @@ impl CfClearanceAuthority {
         auth
     }
 
+    pub fn is_challenged(&self, value: &str) -> bool {
+        let trimmed = value.trim();
+        !trimmed.is_empty()
+            && (self.challenged.as_deref() == Some(trimmed)
+                || self.challenged_history.iter().any(|item| item == trimmed))
+    }
+
     pub fn confirm_healthy(&mut self, value: &str, now_ms: u64) {
         let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        if self.challenged.as_deref() == Some(trimmed) {
+        if trimmed.is_empty() || self.is_challenged(trimmed) {
             return;
         }
         self.incumbent = Some(trimmed.to_string());
@@ -84,6 +90,12 @@ impl CfClearanceAuthority {
             if self.incumbent.as_deref() == Some(dead.as_str()) {
                 self.incumbent = None;
             }
+            if !self.challenged_history.iter().any(|item| item == &dead) {
+                if self.challenged_history.len() >= 16 {
+                    self.challenged_history.pop_front();
+                }
+                self.challenged_history.push_back(dead.clone());
+            }
             self.challenged = Some(dead);
         }
     }
@@ -99,7 +111,7 @@ impl CfClearanceAuthority {
             .iter()
             .filter(|(v, _)| {
                 let t = v.trim();
-                !t.is_empty() && self.challenged.as_deref() != Some(t)
+                !t.is_empty() && !self.is_challenged(t)
             })
             .collect();
 
@@ -123,7 +135,7 @@ impl CfClearanceAuthority {
 
         // Sticky incumbent rule: if incumbent is healthy and still present in browser cookies, keep it regardless of enumeration order
         if let Some(ref inc) = self.incumbent {
-            if self.challenged.as_deref() != Some(inc.as_str()) {
+            if !self.is_challenged(inc) {
                 if valid.iter().any(|(v, _)| v == inc) {
                     if self.updated_at_ms == 0 {
                         self.updated_at_ms = now_ms;
@@ -151,7 +163,7 @@ impl CfClearanceAuthority {
         // Transient empty read protection: if browser returned 0 valid cf_clearance cookies transiently while incumbent is fresh & unchallenged
         if candidates.is_empty() {
             if let Some(ref inc) = self.incumbent {
-                if self.challenged.as_deref() != Some(inc.as_str())
+                if !self.is_challenged(inc)
                     && self.updated_at_ms > 0
                     && now_ms.saturating_sub(self.updated_at_ms) <= CF_COLD_SEED_MAX_AGE_MS
                 {
@@ -174,10 +186,7 @@ impl CfClearanceAuthority {
             return false;
         }
         let clean = saved_cf.trim();
-        if clean.is_empty() {
-            return false;
-        }
-        if self.challenged.as_deref() == Some(clean) {
+        if clean.is_empty() || self.is_challenged(clean) {
             return false;
         }
         saved_updated_at_ms > 0 && now_ms.saturating_sub(saved_updated_at_ms) <= CF_COLD_SEED_MAX_AGE_MS
@@ -309,7 +318,16 @@ extern "C" fn on_native_bridge_reply(request: i64, raw: *const c_char) {
                             let _ = app.opener().open_url(&url, None::<&str>);
                             let _ = app.emit(
                                 "lindo://auth-notice",
-                                "已在系统浏览器打开授权页（支持通行密钥 Passkey），点击「授权」后自动返回",
+                                "已在默认浏览器打开授权页，点击「授权」并在浏览器弹窗确认「打开 Lindo」即可完成登录",
+                            );
+                            let _ = app.emit(
+                                "lindo://diag-event",
+                                json!({
+                                    "level": "INFO",
+                                    "category": "AUTH",
+                                    "tag": "AuthPending",
+                                    "summary": "已切换至默认浏览器授权页，等待点击「授权」返回"
+                                }),
                             );
                         }
                     }
@@ -383,11 +401,71 @@ pub struct BridgeEngine {
     account_lock: RwLock<()>,
     fg_sem: Semaphore,
     bg_sem: Semaphore,
+    avatar_sem: Semaphore,
+    emoji_sem: Semaphore,
     media_sem: Semaphore,
+    active_fg_requests: AtomicUsize,
+    warmup_spawned: AtomicBool,
     inner: StdMutex<BridgeRuntime>,
     cf_authority: StdMutex<CfClearanceAuthority>,
     media_cache: StdMutex<MediaCacheState>,
     media_inflight: StdMutex<HashMap<String, Arc<Notify>>>,
+}
+
+struct FgRequestGuard<'a>(&'a AtomicUsize);
+impl<'a> FgRequestGuard<'a> {
+    fn enter(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+impl Drop for FgRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct VerifyingFlagGuard<'a>(&'a StdMutex<BridgeRuntime>);
+impl<'a> VerifyingFlagGuard<'a> {
+    fn enter(inner: &'a StdMutex<BridgeRuntime>) -> Self {
+        {
+            let mut rt = inner.lock().unwrap();
+            rt.verifying = true;
+            rt.origin_ready = false;
+            rt.bootstrap_challenged = false;
+            rt.rate_limit_until = None;
+            rt.fg_challenge_until = None;
+            rt.bg_challenge_until = None;
+        }
+        Self(inner)
+    }
+}
+impl Drop for VerifyingFlagGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut rt) = self.0.lock() {
+            rt.verifying = false;
+        }
+    }
+}
+
+fn emit_diag(
+    app: &AppHandle,
+    level: &str,
+    category: &str,
+    tag: &str,
+    summary: &str,
+    detail: Option<&str>,
+) {
+    let mut payload = json!({
+        "level": level,
+        "category": category,
+        "tag": tag,
+        "summary": summary
+    });
+    if let Some(d) = detail.filter(|s| !s.trim().is_empty()) {
+        payload["detail"] = json!(d);
+    }
+    let _ = app.emit("lindo://diag-event", payload);
 }
 
 struct BridgeRuntime {
@@ -398,29 +476,52 @@ struct BridgeRuntime {
     last_challenge_url: Option<String>,
     last_cookie_sync: Option<Instant>,
     last_login_at: Option<Instant>,
+    last_expiry_check: Option<Instant>,
     rate_limit_until: Option<Instant>,
     fg_challenge_until: Option<Instant>,
     bg_challenge_until: Option<Instant>,
+    silent_revalidate_until: Option<Instant>,
+    last_silent_cleared_at: Option<Instant>,
+    media_cooldown_until: Option<Instant>,
+    challenge_429_streak: u32,
+    last_challenge_429_at: Option<Instant>,
     verifying: bool,
     pending_rsa: Option<PendingRsaGrant>,
     consumed_nonces: Vec<String>,
 }
 
 impl BridgeEngine {
-    pub fn new(initial: PersistedState) -> Arc<Self> {
-        let initial_cf = CfClearanceAuthority::from_persisted(
-            &initial.raw_cookies,
-            initial.cf_clearance_updated_at_ms,
-            now_epoch_ms(),
-        );
+    pub fn new(mut initial: PersistedState) -> Arc<Self> {
+        // Decouple `_t` (durable session) from `cf_clearance` (ephemeral network/TLS-bound token):
+        // never re-import disk `cf_clearance` across cold restarts or IP/proxy changes!
+        let cleaned_cookies: Vec<String> = initial
+            .raw_cookies
+            .split(';')
+            .map(|s| s.trim())
+            .filter(|s| {
+                !s.is_empty()
+                    && !s.starts_with("cf_clearance=")
+                    && !s.starts_with("__cf")
+                    && !s.starts_with("_cf")
+            })
+            .map(|s| s.to_string())
+            .collect();
+        initial.raw_cookies = cleaned_cookies.join("; ");
+        initial.cf_clearance_updated_at_ms = 0;
+
         Arc::new(Self {
             state: StdMutex::new(initial),
             bootstrap_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
             account_lock: RwLock::new(()),
-            fg_sem: Semaphore::new(6),
+            fg_sem: Semaphore::new(3),
             bg_sem: Semaphore::new(2),
-            media_sem: Semaphore::new(6),
+            // 3-lane image concurrency gate (aligned with xuemk/Fluxdo): AVATAR=3, MEDIA=4, EMOJI=8
+            avatar_sem: Semaphore::new(3),
+            emoji_sem: Semaphore::new(8),
+            media_sem: Semaphore::new(4),
+            active_fg_requests: AtomicUsize::new(0),
+            warmup_spawned: AtomicBool::new(false),
             inner: StdMutex::new(BridgeRuntime {
                 initialized: false,
                 origin_ready: false,
@@ -429,23 +530,36 @@ impl BridgeEngine {
                 last_challenge_url: None,
                 last_cookie_sync: None,
                 last_login_at: None,
+                last_expiry_check: None,
                 rate_limit_until: None,
                 fg_challenge_until: None,
                 bg_challenge_until: None,
+                silent_revalidate_until: None,
+                last_silent_cleared_at: None,
+                media_cooldown_until: None,
+                challenge_429_streak: 0,
+                last_challenge_429_at: None,
                 verifying: false,
                 pending_rsa: None,
                 consumed_nonces: Vec::new(),
             }),
-            cf_authority: StdMutex::new(initial_cf),
+            cf_authority: StdMutex::new(CfClearanceAuthority::default()),
             media_cache: StdMutex::new(MediaCacheState::default()),
             media_inflight: StdMutex::new(HashMap::new()),
         })
     }
 
     pub fn spawn_warmup(self: &Arc<Self>) {
+        if self.warmup_spawned.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let eng = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             let _ = eng.ensure_ready(false).await;
+            // After initial foreground boot requests settle, silently prewarm `cf_clearance` via `/challenge`
+            // if the browser cookie store doesn't hold one yet — eliminating first-POST (Boost/Like) popups!
+            tokio::time::sleep(Duration::from_millis(1600)).await;
+            let _ = eng.prewarm_cf_clearance_if_needed().await;
         });
     }
 
@@ -522,6 +636,260 @@ impl BridgeEngine {
             }
         }
         out
+    }
+
+    async fn browser_cf_clearances(&self) -> Vec<String> {
+        let Ok(current) = native_call("cookies", json!({}), 6).await else {
+            return Vec::new();
+        };
+        current
+            .get("cookies")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        if item.get("name")?.as_str()? == "cf_clearance" {
+                            let val = item.get("value")?.as_str()?.trim().to_string();
+                            if !val.is_empty() {
+                                return Some(val);
+                            }
+                        }
+                        None
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Background silent prewarm of `cf_clearance` via `https://linux.do/challenge` when missing.
+    /// Never opens a panel or blocks foreground requests; if Cloudflare requires interactive Turnstile,
+    /// quietly restores `/about` so normal unchallenged GETs continue uninterrupted.
+    pub async fn prewarm_cf_clearance_if_needed(&self) -> bool {
+        {
+            let rt = self.inner.lock().unwrap();
+            if rt.verifying || !rt.initialized {
+                return false;
+            }
+            if let Some(until) = rt.rate_limit_until {
+                if Instant::now() < until {
+                    return false;
+                }
+            }
+        }
+        if self.active_fg_requests.load(Ordering::Relaxed) > 0 {
+            return false;
+        }
+        let existing = self.browser_cf_clearances().await;
+        let has_healthy = {
+            let auth = self.cf_authority.lock().unwrap();
+            existing.iter().any(|c| !auth.is_challenged(c))
+        };
+        if has_healthy {
+            return true;
+        }
+        self.silent_revalidate_challenge(false).await
+    }
+
+    /// Single-flight silent `/challenge` revalidation in the hidden bridge WebView (aligned with xuemk/Fluxdo):
+    /// - Coalesces concurrent requests within an 8s window (`COALESCE_CLEAR_WINDOW`).
+    /// - Navigates hidden WebView to `https://linux.do/challenge` (never showing UI).
+    /// - If non-interactive JS challenge auto-passes (fresh `cf_clearance` or Discourse origin 404), restores `/about` and returns `true`.
+    /// - If interactive `.cf-turnstile` widget stays active past ~1050ms, bails out promptly (`false`) so foreground UI can show the clean masked sheet without lag.
+    async fn silent_revalidate_challenge(&self, for_foreground_retry: bool) -> bool {
+        {
+            let rt = self.inner.lock().unwrap();
+            if rt.verifying {
+                return false;
+            }
+            if let Some(cleared_at) = rt.last_silent_cleared_at {
+                if cleared_at.elapsed() <= Duration::from_secs(8) {
+                    return true;
+                }
+            }
+            if let Some(blocked_until) = rt.silent_revalidate_until {
+                if Instant::now() < blocked_until {
+                    return false;
+                }
+            }
+        }
+
+        let _guard = self.bootstrap_lock.lock().await;
+        {
+            let rt = self.inner.lock().unwrap();
+            if rt.verifying {
+                return false;
+            }
+            if let Some(cleared_at) = rt.last_silent_cleared_at {
+                if cleared_at.elapsed() <= Duration::from_secs(8) {
+                    return true;
+                }
+            }
+            if let Some(blocked_until) = rt.silent_revalidate_until {
+                if Instant::now() < blocked_until {
+                    return false;
+                }
+            }
+        }
+
+        let need_init = !self.inner.lock().unwrap().initialized;
+        if need_init {
+            if native_call("init", json!({}), 10).await.is_err() {
+                return false;
+            }
+            self.inner.lock().unwrap().initialized = true;
+        }
+        let _ = self.seed_session().await;
+
+        let stale_cf: std::collections::HashSet<String> = self
+            .browser_cf_clearances()
+            .await
+            .into_iter()
+            .collect();
+
+        if native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+
+        let started = Instant::now();
+        let max_wait = if for_foreground_retry {
+            Duration::from_millis(3600)
+        } else {
+            Duration::from_millis(4500)
+        };
+        let mut interactive_since: Option<Instant> = None;
+        let mut quiet_rounds = 0u32;
+        let mut cleared = false;
+
+        while started.elapsed() < max_wait {
+            tokio::time::sleep(Duration::from_millis(240)).await;
+            if self.inner.lock().unwrap().verifying {
+                return false;
+            }
+
+            let state = native_call(
+                "evaluate",
+                json!({
+                    "isolated": true,
+                    "script": r#"(() => {
+                        if (location.origin !== 'https://linux.do') return { phase: 'waiting' };
+                        const hasTurnstile = !!document.querySelector('.cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]');
+                        const explicitChallenge = hasTurnstile
+                            || !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, script[src*="challenge-platform"]')
+                            || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
+                        if (explicitChallenge) return { phase: 'challenge', interactive: hasTurnstile };
+                        const html = ((document.documentElement?.innerHTML || '') + ' ' + (document.title || '')).toLowerCase();
+                        const origin404 = html.includes('page-not-found')
+                            || html.includes('discourse-no-results')
+                            || html.includes('"errortype":"notfound"')
+                            || html.includes('404-body')
+                            || html.includes('exist or is private')
+                            || html.includes('page you requested')
+                            || html.includes('该页面不存在');
+                        const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+                        const complete = document.readyState === 'complete';
+                        if (origin404 || (complete && csrf.length > 5)) {
+                            return { phase: 'origin', csrf };
+                        }
+                        return { phase: 'waiting' };
+                    })()"#
+                }),
+                5,
+            )
+            .await
+            .ok();
+
+            let phase = state
+                .as_ref()
+                .and_then(|v| v.get("phase")?.as_str())
+                .unwrap_or("waiting");
+            let interactive = state
+                .as_ref()
+                .and_then(|v| v.get("interactive")?.as_bool())
+                .unwrap_or(false);
+
+            if phase == "challenge" {
+                quiet_rounds = 0;
+                if interactive {
+                    let since = *interactive_since.get_or_insert_with(Instant::now);
+                    if for_foreground_retry && since.elapsed() >= Duration::from_millis(900) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            interactive_since = None;
+
+            let current_cfs = self.browser_cf_clearances().await;
+            let has_fresh_cf = {
+                let auth = self.cf_authority.lock().unwrap();
+                current_cfs
+                    .iter()
+                    .any(|c| !stale_cf.contains(c) && !auth.is_challenged(c))
+            };
+
+            if has_fresh_cf {
+                quiet_rounds += 1;
+                if quiet_rounds >= 2 || phase == "origin" {
+                    cleared = true;
+                    break;
+                }
+            } else if phase == "origin" {
+                quiet_rounds += 1;
+                if quiet_rounds >= 2 {
+                    cleared = has_fresh_cf || stale_cf.is_empty();
+                    break;
+                }
+            }
+        }
+
+        if cleared {
+            let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+            {
+                let mut rt = self.inner.lock().unwrap();
+                rt.last_silent_cleared_at = Some(Instant::now());
+                rt.fg_challenge_until = None;
+                rt.bg_challenge_until = None;
+                rt.bootstrap_challenged = false;
+                rt.silent_revalidate_until = None;
+            }
+        } else if for_foreground_retry {
+            self.inner.lock().unwrap().silent_revalidate_until =
+                Some(Instant::now() + Duration::from_secs(60));
+        }
+
+        // Restore clean lightweight `/about` document context for subsequent `fetch()` calls
+        let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            let ok = native_call(
+                "evaluate",
+                json!({
+                    "isolated": true,
+                    "script": "location.origin === 'https://linux.do' && document.readyState !== 'loading'"
+                }),
+                4,
+            )
+            .await
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+            if ok {
+                let _ = native_call(
+                    "evaluate",
+                    json!({ "script": "(() => { window.__lindoCsrf = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; window.__lindoIgnoreDomCsrf = false; return true; })()" }),
+                    4,
+                )
+                .await;
+                self.inner.lock().unwrap().origin_ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
+
+        cleared
     }
 
     async fn ensure_ready(&self, force_reload: bool) -> Result<(), String> {
@@ -605,7 +973,8 @@ impl BridgeEngine {
                             if (explicitChallenge) return { state: 'challenge' };
                             const tok = document.querySelector('meta[name="csrf-token"]')?.content || '';
                             const hasPreloaded = !!document.getElementById('data-preloaded');
-                            if (tok || hasPreloaded) {
+                            const hasDiscourseDom = hasPreloaded || !!document.querySelector('header.d-header, #main-outlet, #d-splash');
+                            if (tok || hasDiscourseDom) {
                                 return { state: 'ready', csrf: tok };
                             }
                             if (document.readyState === 'complete' && location.pathname.indexOf('/about') === 0) {
@@ -622,10 +991,12 @@ impl BridgeEngine {
                 if let Some(ref obj) = boot_state {
                     match obj.get("state").and_then(|v| v.as_str()) {
                         Some("ready") => {
-                            if let Some(tok) = obj.get("csrf").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                                let csrf_js = format!("window.__lindoCsrf = {};", json!(tok));
-                                let _ = native_call("evaluate", json!({ "script": csrf_js }), 4).await;
-                            }
+                            let tok_val = obj.get("csrf").and_then(|v| v.as_str()).unwrap_or("");
+                            let quiet_js = format!(
+                                "(() => {{ if ({tok}.length > 0) {{ window.__lindoCsrf = {tok}; window.__lindoIgnoreDomCsrf = false; }} try {{ const sp = document.getElementById('d-splash'); if (sp) sp.remove(); if (window.MessageBus && typeof window.MessageBus.stop === 'function') window.MessageBus.stop(); }} catch (_) {{}} return true; }})()",
+                                tok = json!(tok_val)
+                            );
+                            let _ = native_call("evaluate", json!({ "script": quiet_js }), 4).await;
                             let mut rt = self.inner.lock().unwrap();
                             rt.origin_ready = true;
                             rt.bootstrap_challenged = false;
@@ -651,14 +1022,38 @@ impl BridgeEngine {
     }
 
     async fn seed_session(&self) -> Result<(), String> {
-        let saved_raw = { self.state.lock().unwrap().raw_cookies.clone() };
-        let saved_map = Self::parse_cookie_map(&saved_raw);
-        let app_token = saved_map
-            .get("_t")
-            .cloned()
-            .filter(|v| !v.is_empty() && v != "demo_session_token");
+        self.seed_session_verified(false).await
+    }
 
-        {
+    async fn seed_session_verified(&self, verify_browser_store: bool) -> Result<(), String> {
+        let (saved_raw, fallback_acct_cookies, has_current_user) = {
+            let st = self.state.lock().unwrap();
+            let fb = st.current_user.as_ref().and_then(|u| {
+                st.saved_accounts
+                    .iter()
+                    .find(|a| !a.needs_login && a.profile.username.eq_ignore_ascii_case(&u.username))
+                    .map(|a| a.cookies.clone())
+            });
+            (st.raw_cookies.clone(), fb, st.current_user.is_some())
+        };
+        let mut saved_map = Self::parse_cookie_map(&saved_raw);
+        if !saved_map.contains_key("_t") {
+            if let Some(ref fb_raw) = fallback_acct_cookies {
+                for (k, v) in Self::parse_cookie_map(fb_raw) {
+                    saved_map.entry(k).or_insert(v);
+                }
+            }
+        }
+        let app_token = if has_current_user {
+            saved_map
+                .get("_t")
+                .cloned()
+                .filter(|v| !v.is_empty() && v != "demo_session_token")
+        } else {
+            None
+        };
+
+        if !verify_browser_store {
             let rt = self.inner.lock().unwrap();
             if rt.last_seeded_token == app_token.as_deref().unwrap_or("") {
                 return Ok(());
@@ -680,25 +1075,49 @@ impl BridgeEngine {
             })
             .unwrap_or(false);
 
-        let (t_count, has_dot_domain_t) = cookies_arr
+        let (t_count, has_dot_domain_t, fs_count, has_dot_domain_fs) = cookies_arr
             .map(|arr| {
-                let mut cnt = 0usize;
-                let mut dot = false;
+                let mut t_cnt = 0usize;
+                let mut t_dot = false;
+                let mut f_cnt = 0usize;
+                let mut f_dot = false;
                 for item in arr {
-                    if item.get("name").and_then(|n| n.as_str()) == Some("_t")
-                        && !item.get("value").and_then(|v| v.as_str()).unwrap_or("").is_empty()
-                    {
-                        cnt += 1;
-                        if item.get("hostOnly").and_then(|h| h.as_bool()) == Some(false) {
-                            dot = true;
+                    let val_non_empty = !item.get("value").and_then(|v| v.as_str()).unwrap_or("").is_empty();
+                    if !val_non_empty {
+                        continue;
+                    }
+                    let host_only = item.get("hostOnly").and_then(|h| h.as_bool()).unwrap_or(true);
+                    match item.get("name").and_then(|n| n.as_str()) {
+                        Some("_t") => {
+                            t_cnt += 1;
+                            if !host_only {
+                                t_dot = true;
+                            }
                         }
+                        Some("_forum_session") => {
+                            f_cnt += 1;
+                            if !host_only {
+                                f_dot = true;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                (cnt, dot)
+                (t_cnt, t_dot, f_cnt, f_dot)
             })
-            .unwrap_or((0, false));
+            .unwrap_or((0, false, 0, false));
 
-        if t_count > 1 || has_dot_domain_t {
+        if !has_current_user {
+            if t_count > 0 {
+                self.sweep_auth_cookies(true, None).await;
+            } else if fs_count > 1 || has_dot_domain_fs {
+                self.sweep_auth_cookies(false, None).await;
+            }
+            self.inner.lock().unwrap().last_seeded_token = String::new();
+            return Ok(());
+        }
+
+        if t_count > 1 || has_dot_domain_t || fs_count > 1 || has_dot_domain_fs {
             self.sweep_auth_cookies(false, app_token.as_deref()).await;
         }
 
@@ -729,7 +1148,7 @@ impl BridgeEngine {
                 })
         });
 
-        // Never overwrite WebKit/WebView2's live rotated `_t` or synthesize `cf_clearance` on startup.
+        // Preserve WebKit/WebView2's live rotated `_t` when present; otherwise reliably restore `_t` from persisted session!
         if let Some(bt) = browser_token {
             self.inner.lock().unwrap().last_seeded_token = bt.clone();
             if app_token.as_deref() != Some(bt.as_str()) || browser_has_cf {
@@ -739,10 +1158,17 @@ impl BridgeEngine {
         }
 
         let mut to_set = Vec::new();
-        for name in ["_t", "_forum_session"] {
-            if let Some(val) = saved_map.get(name) {
+        if let Some(val) = saved_map.get("_t") {
+            if !val.is_empty() && val != "demo_session_token" {
+                to_set.push(json!({ "name": "_t", "value": val }));
+            }
+        }
+        // Only seed persisted `_forum_session` when WKHTTPCookieStore has no live `_forum_session` yet,
+        // avoiding overwriting a fresh Turnstile/CSRF session cookie with an older disk copy!
+        if fs_count == 0 {
+            if let Some(val) = saved_map.get("_forum_session") {
                 if !val.is_empty() && val != "demo_session_token" {
-                    to_set.push(json!({ "name": name, "value": val }));
+                    to_set.push(json!({ "name": "_forum_session", "value": val }));
                 }
             }
         }
@@ -866,6 +1292,9 @@ impl BridgeEngine {
                 if found_t.is_none() && st.current_user.is_some() {
                     let prev_map = Self::parse_cookie_map(&st.raw_cookies);
                     for auth_name in ["_t", "_forum_session"] {
+                        if deduped.contains_key(auth_name) {
+                            continue;
+                        }
                         if let Some(saved_val) = prev_map.get(auth_name) {
                             if !saved_val.is_empty() && saved_val != "demo_session_token" {
                                 pairs.push(format!("{auth_name}={saved_val}"));
@@ -1022,6 +1451,11 @@ impl BridgeEngine {
         } else {
             self.fg_sem.acquire().await.ok()
         };
+        let _fg_guard = if !in_verification && !is_background {
+            Some(FgRequestGuard::enter(&self.active_fg_requests))
+        } else {
+            None
+        };
 
         if !in_verification {
             self.ensure_ready(false).await?;
@@ -1044,11 +1478,19 @@ impl BridgeEngine {
                 });
             }
         }
+        let is_timings_req = url.contains("/topics/timings");
         if !expects_html {
             safe_headers
                 .entry("X-Requested-With".to_string())
                 .or_insert_with(|| "XMLHttpRequest".to_string());
-            if !is_background && !url.contains("/topics/timings") {
+            if is_timings_req {
+                safe_headers
+                    .entry("Discourse-Background".to_string())
+                    .or_insert_with(|| "true".to_string());
+                safe_headers
+                    .entry("X-SILENCE-LOGGER".to_string())
+                    .or_insert_with(|| "true".to_string());
+            } else if !is_background {
                 safe_headers
                     .entry("Discourse-Present".to_string())
                     .or_insert_with(|| "true".to_string());
@@ -1231,12 +1673,63 @@ impl BridgeEngine {
             }
             eval_res = native_call("evaluate", json!({ "script": script }), 16).await;
         }
-        let eval_res = eval_res?;
+        let mut eval_res = eval_res?;
         if eval_res.get("originLost").and_then(|v| v.as_bool()) == Some(true) {
             return Err("内置网页上下文正在唤醒，请重试".to_string());
         }
         if let Some(net_err) = eval_res.get("netErr").and_then(|v| v.as_str()) {
             return Err(format!("网络请求超时或中断: {net_err}"));
+        }
+
+        // First-strike silent self-healing (aligned with xuemk/Fluxdo):
+        // 1. On isolated foreground GET 429 without Retry-After, wait 850ms and retry once.
+        // 2. On foreground 403/503 CF challenge (both GET and edge-blocked POST like Boost/Like, which never reached Discourse!),
+        //    attempt single-flight silent `/challenge` revalidation first; if non-interactive JS challenge clears, refresh CSRF & replay seamlessly!
+        if !in_verification && !is_background && !is_timings_req && !self.inner.lock().unwrap().verifying {
+            let first_status = eval_res.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let first_cf = eval_res.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
+            let first_body = eval_res.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let first_is_cf_challenge =
+                first_status != 429 && (first_cf == "challenge" || Self::looks_like_challenge(first_body));
+
+            if idempotent && first_status == 429 && first_cf != "challenge" && eval_res.get("retryAfter").is_none() {
+                tokio::time::sleep(Duration::from_millis(850)).await;
+                if !self.inner.lock().unwrap().verifying {
+                    if let Ok(second_res) = native_call("evaluate", json!({ "script": script }), 16).await {
+                        if second_res.is_object()
+                            && second_res.get("originLost").and_then(|v| v.as_bool()) != Some(true)
+                            && second_res.get("netErr").is_none()
+                        {
+                            eval_res = second_res;
+                        }
+                    }
+                }
+            } else if first_is_cf_challenge && !url.contains("/session/otp/") {
+                let carried_cf = {
+                    let raw = self.state.lock().unwrap().raw_cookies.clone();
+                    Self::parse_cookie_map(&raw).remove("cf_clearance")
+                };
+                self.cf_authority
+                    .lock()
+                    .unwrap()
+                    .note_challenged(carried_cf.as_deref());
+                if self.silent_revalidate_challenge(true).await && !self.inner.lock().unwrap().verifying {
+                    let _ = native_call(
+                        "evaluate",
+                        json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                        4,
+                    )
+                    .await;
+                    if let Ok(replayed) = native_call("evaluate", json!({ "script": script }), 16).await {
+                        if replayed.is_object()
+                            && replayed.get("originLost").and_then(|v| v.as_bool()) != Some(true)
+                            && replayed.get("netErr").is_none()
+                        {
+                            eval_res = replayed;
+                        }
+                    }
+                }
+            }
         }
 
         let status = eval_res
@@ -1252,13 +1745,21 @@ impl BridgeEngine {
             .get("challenge")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let body = if cf_header == "challenge" {
+
+        // CRITICAL (aligned with xuemk `ChallengeDetector.isChallenge`):
+        // HTTP 429 (even with `cf-mitigated: challenge`) is a WAF rate-limit rule, NOT a dead `cf_clearance`!
+        // Never tag 429 as `is_challenge`, never invalidate `cf_clearance`, and never pop a verification modal on 429!
+        let is_challenge_429 =
+            status == 429 && (cf_header == "challenge" || Self::looks_like_challenge(&raw_body));
+        let body = if status != 429 && cf_header == "challenge" {
             format!("{CF_CHALLENGE_PREFIX}{raw_body}")
+        } else if status == 429 && raw_body.trim_start().starts_with('<') {
+            "{\"errors\":[\"操作较为频繁，请稍候片刻再试\"]}".to_string()
         } else {
             raw_body
         };
 
-        let is_challenge = Self::looks_like_challenge(&body);
+        let is_challenge = status != 429 && Self::looks_like_challenge(&body);
         let had_unauth_logged_hdr = eval_res
             .get("hadUnauthLoggedHeader")
             .and_then(|v| v.as_bool())
@@ -1275,8 +1776,6 @@ impl BridgeEngine {
                 .lock()
                 .unwrap()
                 .note_challenged(carried_cf.as_deref());
-            // Background polls back off politely for 30s; foreground requests only dedupe simultaneous bursts (1.5s)
-            // and never touch `cf_clearance` in WebKit/WebView2!
             let now = Instant::now();
             let mut rt = self.inner.lock().unwrap();
             rt.bg_challenge_until = Some(now + Duration::from_secs(30));
@@ -1289,6 +1788,7 @@ impl BridgeEngine {
                 rt.fg_challenge_until = None;
                 rt.bg_challenge_until = None;
                 rt.bootstrap_challenged = false;
+                rt.challenge_429_streak = 0;
             }
             let live_cf = {
                 let raw = self.state.lock().unwrap().raw_cookies.clone();
@@ -1299,16 +1799,49 @@ impl BridgeEngine {
                 self.cf_authority.lock().unwrap().confirm_healthy(&cf_val, ts);
             }
         }
-        if status == 429 && !is_challenge {
-            let secs = eval_res
+        if status == 429 {
+            let retry_after_secs = eval_res
                 .get("retryAfter")
                 .and_then(|v| v.as_str())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .unwrap_or(8)
-                .clamp(3, 120);
-            let dur = Duration::from_secs(secs);
-            self.inner.lock().unwrap().rate_limit_until = Some(Instant::now() + dur);
-            rate_limited_ms = Some(dur.as_millis() as u64);
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            // `/topics/timings` is a discardable background stat: never lock out main app browsing on timings 429!
+            if !is_timings_req {
+                let secs = if is_challenge_429 {
+                    let step_secs = {
+                        let mut rt = self.inner.lock().unwrap();
+                        let now = Instant::now();
+                        if rt
+                            .last_challenge_429_at
+                            .map(|t| now.duration_since(t) > Duration::from_secs(180))
+                            .unwrap_or(true)
+                        {
+                            rt.challenge_429_streak = 0;
+                        }
+                        rt.last_challenge_429_at = Some(now);
+                        let steps = [12u64, 24u64, 40u64];
+                        let idx = (rt.challenge_429_streak as usize).min(steps.len() - 1);
+                        rt.challenge_429_streak = rt.challenge_429_streak.saturating_add(1);
+                        steps[idx]
+                    };
+                    retry_after_secs.unwrap_or(step_secs).max(step_secs).clamp(6, 120)
+                } else {
+                    retry_after_secs.unwrap_or(8).clamp(2, 120)
+                };
+                let dur = Duration::from_secs(secs);
+                self.inner.lock().unwrap().rate_limit_until = Some(Instant::now() + dur);
+                rate_limited_ms = Some(dur.as_millis() as u64);
+
+                // If 429 rate-challenge occurred while we held zero `cf_clearance`, schedule a quiet prewarm after cooldown
+                if is_challenge_429 {
+                    if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
+                        let eng_clone = Arc::clone(&eng);
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(dur + Duration::from_millis(400)).await;
+                            let _ = eng_clone.prewarm_cf_clearance_if_needed().await;
+                        });
+                    }
+                }
+            }
         }
 
         if !in_verification && !is_background && is_challenge && method_upper == "GET" {
@@ -1345,11 +1878,35 @@ impl BridgeEngine {
             }
         }
 
-        // Passive session expiry check if authorized request received explicit not_logged_in
-        if !in_verification && (is_unauth || had_unauth_logged_hdr) && !url.contains("/session/current.json") {
-            let had_user = { self.state.lock().unwrap().current_user.is_some() };
-            if had_user {
-                self.confirm_passive_expiry(app).await;
+        // Throttled non-blocking passive session expiry check (eliminates 4x synchronous request storm per click when `_t` expires!)
+        let session_404 = url.contains("/session/current.json") && status == 404 && !is_challenge;
+        if !in_verification && (is_unauth || had_unauth_logged_hdr || session_404) {
+            let should_check = {
+                let has_user = self.state.lock().unwrap().current_user.is_some();
+                if !has_user {
+                    false
+                } else {
+                    let mut rt = self.inner.lock().unwrap();
+                    let due = rt
+                        .last_expiry_check
+                        .map(|t| t.elapsed() >= Duration::from_secs(25))
+                        .unwrap_or(true);
+                    if due {
+                        rt.last_expiry_check = Some(Instant::now());
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if should_check {
+                if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
+                    let eng_clone = Arc::clone(&eng);
+                    let app_clone = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        eng_clone.confirm_passive_expiry(&app_clone).await;
+                    });
+                }
             }
         }
 
@@ -1363,72 +1920,95 @@ impl BridgeEngine {
     }
 
     async fn confirm_passive_expiry(&self, app: &AppHandle) {
-        // 新登录完成后的 20s 保护期内忽略飞行中旧请求返回的未登录信号，防止刚登录即误判过期
-        if self
-            .inner
-            .lock()
-            .unwrap()
-            .last_login_at
-            .map(|t| t.elapsed() < Duration::from_secs(20))
-            .unwrap_or(false)
+        // 新登录完成后的 20s 保护期内，或站点验证/登录面板正在操作期间，绝不触碰共享 WKWebView 的 Cookie 与会话！
         {
-            return;
+            let rt = self.inner.lock().unwrap();
+            if rt.verifying
+                || rt
+                    .last_login_at
+                    .map(|t| t.elapsed() < Duration::from_secs(20))
+                    .unwrap_or(false)
+            {
+                return;
+            }
         }
 
-        // 先对 WebKit 执行 _t 去重（剔除历史遗留的 .linux.do 死 Cookie 污染）并确保磁盘中的 _t 已同步回注 WebKit
+        // 先对 WebKit 执行 _t 去重并强制校验磁盘中的 _t 已真实注入 WebKit
         self.sweep_auth_cookies(false, None).await;
-        {
-            self.inner.lock().unwrap().last_seeded_token = "__recheck__".to_string();
-        }
-        let _ = self.seed_session().await;
+        let _ = self.seed_session_verified(true).await;
 
-        // 1. 复核 /session/current.json（遇到挑战/429/5xx 绝不踢出登录）
-        let Ok(probe) = Box::pin(self.request_unlocked(
-            app,
-            "https://linux.do/session/current.json",
-            "GET",
-            None,
-            None,
-            true,
-        ))
-        .await
-        else {
+        let check_current_json = || async {
+            if self.inner.lock().unwrap().verifying {
+                return None;
+            }
+            let script = r#"(async () => {
+                if (location.origin !== 'https://linux.do') return { originLost: true };
+                try {
+                    const r = await fetch('/session/current.json', {
+                        method: 'GET',
+                        credentials: 'include',
+                        cache: 'no-store',
+                        referrer: 'https://linux.do/',
+                        headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
+                        signal: AbortSignal.timeout(8000)
+                    });
+                    return {
+                        status: r.status,
+                        body: await r.text(),
+                        challenge: r.headers.get('cf-mitigated') || ''
+                    };
+                } catch (_) {
+                    return { netErr: true };
+                }
+            })()"#;
+            let val = native_call("evaluate", json!({ "script": script }), 12).await.ok()?;
+            if val.get("originLost").and_then(|b| b.as_bool()) == Some(true)
+                || val.get("netErr").and_then(|b| b.as_bool()) == Some(true)
+            {
+                return None;
+            }
+            let st = val.get("status").and_then(|v| v.as_u64())? as u16;
+            let body = val.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let cf = val.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
+            let is_chal = cf == "challenge" || Self::looks_like_challenge(&body);
+            Some((st, body, is_chal))
+        };
+
+        // 1. 第一次复核 /session/current.json（遇到挑战/429/5xx 绝不踢出登录）
+        let Some((st1, body1, chal1)) = check_current_json().await else {
             return;
         };
-        if probe.is_challenge || probe.status >= 500 || probe.status == 429 {
+        if chal1 || st1 >= 500 || st1 == 429 {
             return;
         }
-        let still_logged_in = (200..300).contains(&probe.status)
-            && serde_json::from_str::<Value>(&probe.body)
+        let logged_in_1 = (200..300).contains(&st1)
+            && serde_json::from_str::<Value>(&body1)
                 .ok()
                 .and_then(|v| v.get("current_user")?.get("username")?.as_str().map(|s| !s.is_empty()))
                 .unwrap_or(false);
-        if still_logged_in {
+        if logged_in_1 {
             return;
         }
 
-        // 2. 独立主站 HTML 双重确认：仅在真实主站页面明确渲染为游客 class="... anon" 且无 currentUser 时才判定服务端会话真正失效
-        let mut html_hdrs = HashMap::new();
-        html_hdrs.insert("Accept".to_string(), "text/html".to_string());
-        html_hdrs.insert("Cache-Control".to_string(), "no-cache".to_string());
-        let Ok(home_page) = Box::pin(self.request_unlocked(
-            app,
-            "https://linux.do/",
-            "GET",
-            None,
-            Some(html_hdrs),
-            true,
-        ))
-        .await
-        else {
+        // 2. 短暂退避后二次复核 /session/current.json（零 HTML 导航开销，避免触发 Cloudflare 整页挑战并准确识别失效 _t）
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        let Some((st2, body2, chal2)) = check_current_json().await else {
             return;
         };
-        if home_page.is_challenge || !(200..300).contains(&home_page.status) {
+        if chal2 || st2 >= 500 || st2 == 429 || self.inner.lock().unwrap().verifying {
+            return;
+        };
+        let logged_in_2 = (200..300).contains(&st2)
+            && serde_json::from_str::<Value>(&body2)
+                .ok()
+                .and_then(|v| v.get("current_user")?.get("username")?.as_str().map(|s| !s.is_empty()))
+                .unwrap_or(false);
+        if logged_in_2 {
             return;
         }
-        let lower_html = home_page.body.to_lowercase();
-        let confirmed_anon = lower_html.contains("data-preloaded")
-            && (lower_html.contains(" anon\"") || lower_html.contains(" anon ") || !home_page.body.contains("currentUser"));
+        let confirmed_anon = st2 == 404
+            || st2 == 401
+            || ((200..300).contains(&st2) && !logged_in_2);
         if !confirmed_anon {
             return;
         }
@@ -1464,7 +2044,7 @@ impl BridgeEngine {
             self.inner.lock().unwrap().last_seeded_token = String::new();
             let _ = native_call(
                 "evaluate",
-                json!({ "script": "window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true;" }),
+                json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
                 4,
             )
             .await;
@@ -1593,18 +2173,47 @@ impl BridgeEngine {
             if rt.verifying || rt.bootstrap_challenged {
                 return Err("Site verification in progress".to_string());
             }
+            let now = Instant::now();
+            if let Some(until) = rt.rate_limit_until {
+                if now < until {
+                    return Err("Rate limit cooldown active".to_string());
+                }
+            }
+            if let Some(until) = rt.media_cooldown_until {
+                if now < until {
+                    return Err("Media cooldown active".to_string());
+                }
+            }
             if let Some(until) = rt.bg_challenge_until {
-                if Instant::now() < until {
+                if now < until {
                     return Err("Challenge cooldown active".to_string());
                 }
             }
         }
-        let _permit = self.media_sem.acquire().await.ok();
+        // Yield politely while foreground JSON API calls are active so subresource image `fetch()` never spikes Cloudflare burst counters
+        let mut waited_ms = 0u64;
+        while waited_ms < 240 && self.active_fg_requests.load(Ordering::Relaxed) > 0 {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            waited_ms += 80;
+        }
+        // 3-lane image concurrency gate (aligned with xuemk/Fluxdo): AVATAR=3, MEDIA=4, EMOJI=8
+        let lower_url = clean_url.to_ascii_lowercase();
+        let is_emoji = lower_url.contains("/images/emoji/") || lower_url.contains("/svg-sprite/");
+        let is_avatar = lower_url.contains("/user_avatar/") || lower_url.contains("/letter_avatar");
+        let sem = if is_emoji {
+            &self.emoji_sem
+        } else if is_avatar {
+            &self.avatar_sem
+        } else {
+            &self.media_sem
+        };
+        let _permit = sem.acquire().await.ok();
         self.ensure_ready(false).await?;
         if self.inner.lock().unwrap().bootstrap_challenged {
             return Err("Site verification required".to_string());
         }
-        let cfg = json!({ "url": clean_url });
+        let cache_mode = if is_emoji || is_avatar { "force-cache" } else { "default" };
+        let cfg = json!({ "url": clean_url, "cacheMode": cache_mode });
         let script = format!(
             r#"(async () => {{
                 const c = {cfg};
@@ -1612,6 +2221,7 @@ impl BridgeEngine {
                 const r = await fetch(c.url, {{
                     method: 'GET',
                     credentials: 'include',
+                    cache: c.cacheMode || 'default',
                     referrer: 'https://linux.do/',
                     referrerPolicy: 'strict-origin-when-cross-origin',
                     headers: {{ 'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8' }},
@@ -1647,10 +2257,11 @@ impl BridgeEngine {
             .unwrap_or("")
             .to_string();
         let cf_hdr = res.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
-        if cf_hdr == "challenge" {
-            // Subresource image fetch must never lock out foreground user navigation!
-            self.inner.lock().unwrap().bg_challenge_until =
-                Some(Instant::now() + Duration::from_secs(20));
+        if status == 429 || cf_hdr == "challenge" {
+            // Isolate image throttling to `media_cooldown_until` so subresource fetches never lock out foreground API calls!
+            let cooldown = if cf_hdr == "challenge" { 8 } else { 4 };
+            self.inner.lock().unwrap().media_cooldown_until =
+                Some(Instant::now() + Duration::from_secs(cooldown));
         }
         Ok(ForumMediaPayload {
             status,
@@ -1714,6 +2325,54 @@ impl BridgeEngine {
         result
     }
 
+    pub(crate) fn extract_topic_id_from_url(url: &str) -> Option<u64> {
+        let path = url
+            .strip_prefix("https://linux.do")
+            .or_else(|| url.strip_prefix("https://www.linux.do"))
+            .unwrap_or(url)
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("");
+        let rest = path.strip_prefix("/t/")?;
+        for seg in rest.split('/') {
+            let clean = seg.strip_suffix(".json").unwrap_or(seg);
+            if !clean.is_empty() && clean.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(id) = clean.parse::<u64>() {
+                    if id > 0 {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn challenge_url_to_html_url(_challenge_url: &str) -> String {
+        // Dedicated Cloudflare verification endpoint (aligned with xuemk/Fluxdo):
+        // - Always intercepted by Cloudflare to issue/refresh `cf_clearance` (unlike `/` which often skips GET challenges);
+        // - Returns lightweight Discourse origin 404 once cleared (never loading heavy feeds, `Log In` guest chrome, or Rails 500 `Oops`!).
+        "https://linux.do/challenge".to_string()
+    }
+
+    pub(crate) fn challenge_url_to_probe_get_url(challenge_url: &str) -> String {
+        if let Some(tid) = Self::extract_topic_id_from_url(challenge_url) {
+            return format!("https://linux.do/t/{tid}.json?track_visit=false");
+        }
+        let clean_path = challenge_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("");
+        if clean_path.starts_with("https://linux.do/")
+            && clean_path.ends_with(".json")
+            && !clean_path.ends_with("/posts.json")
+            && !clean_path.contains("/post_actions")
+            && !clean_path.contains("/timings")
+        {
+            return challenge_url.to_string();
+        }
+        "https://linux.do/latest.json?no_definitions=true".to_string()
+    }
+
     async fn run_verify_loop(
         &self,
         app: &AppHandle,
@@ -1725,12 +2384,12 @@ impl BridgeEngine {
         self.inner.lock().unwrap().initialized = true;
 
         let is_otp_flow = otp_token.is_some();
-        if login || is_otp_flow {
-            // Clear stale Discourse `_t` / `_forum_session` before fresh login/OTP while keeping Cloudflare cookies untouched.
+        if login {
+            // Clear stale Discourse `_t` / `_forum_session` before fresh interactive login while keeping Cloudflare cookies untouched.
             self.sweep_auth_cookies(true, None).await;
             self.inner.lock().unwrap().last_seeded_token = String::new();
-        } else {
-            self.seed_session().await?;
+        } else if !is_otp_flow {
+            self.seed_session_verified(true).await?;
         }
         let recovery_url = {
             let rt = self.inner.lock().unwrap();
@@ -1747,29 +2406,55 @@ impl BridgeEngine {
         } else if login {
             "https://linux.do/login".to_string()
         } else {
-            "https://linux.do/".to_string()
+            Self::challenge_url_to_html_url(&recovery_url)
         };
+        let probe_get_url = Self::challenge_url_to_probe_get_url(&recovery_url);
+
+        let stale_cf: std::collections::HashSet<String> = if !login && !is_otp_flow {
+            self.browser_cf_clearances().await.into_iter().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        let mut mask_visible = false;
+        if !login && !is_otp_flow {
+            mask_visible = true;
+            let _ = native_call(
+                "setVerifyMask",
+                json!({
+                    "visible": true,
+                    "dark": is_dark,
+                    "message": "正在连接安全验证服务…"
+                }),
+                4,
+            )
+            .await;
+        } else {
+            let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
+        }
 
         native_call("navigate", json!({ "url": initial_url }), 10).await?;
         let mut panel_shown = false;
-        if !is_otp_flow {
+        if login {
             panel_shown = true;
-            native_call("show", json!({ "dark": is_dark, "login": login }), 8).await?;
+            native_call("show", json!({ "dark": is_dark, "login": true }), 8).await?;
         }
 
         let mut requested_login = login || is_otp_flow;
         let mut otp_submitted = false;
+        let mut oops_reloaded = false;
         let mut challenge_ticks = 0u32;
+        let mut quiet_rounds = 0u32;
         let mut last_current_session_poll: Option<Instant> = None;
-        let deadline = Instant::now() + Duration::from_secs(180);
+        let loop_started = Instant::now();
+        let deadline = loop_started + Duration::from_secs(180);
 
         while Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(750)).await;
+            let poll_sleep = if requested_login { 500 } else { 260 };
+            tokio::time::sleep(Duration::from_millis(poll_sleep)).await;
 
             let status_obj = native_call("status", json!({}), 6).await?;
-            if status_obj.get("cancelled").and_then(|v| v.as_bool()) == Some(true) {
-                return Ok(false);
-            }
+            let user_cancelled = status_obj.get("cancelled").and_then(|v| v.as_bool()) == Some(true);
 
             // Passive read-only DOM observation in isolated `defaultClientWorld` (macOS) / zero-global sync eval (Windows):
             // never touches `pageWorld` or mutates `window` while site verification is on screen!
@@ -1785,16 +2470,30 @@ impl BridgeEngine {
                         const hasCsrf = !!csrfVal;
                         const preloadedEl = document.getElementById('data-preloaded');
                         const hasPreloaded = !!preloadedEl;
+                        const hasDiscourseDom = hasPreloaded || !!document.querySelector('header.d-header, #main-outlet .topic-list, #main-outlet #topic-title, #main-outlet .container, #d-splash');
                         const isOtpPage = location.pathname.indexOf('/session/otp/') === 0;
+                        const isChallengePath = location.pathname === '/challenge';
                         const isLoginPage = location.pathname === '/login'
                             || location.pathname.indexOf('/login/') === 0
                             || location.pathname.indexOf('/signup') === 0
                             || location.pathname.indexOf('/u/email-login') === 0
                             || location.pathname.indexOf('/session/email-login') === 0
                             || location.pathname.indexOf('/auth/') === 0;
+                        const bodyText = (document.body?.innerText || '').trim();
+                        const lowerHtml = ((document.documentElement?.innerHTML || '') + ' ' + (document.title || '')).toLowerCase();
                         const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"], script[src*="challenge-platform"]')
                             || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
-                        const missingDiscourseBoot = site && complete && !hasCsrf && !(document.body?.innerText || '').trim().startsWith('{');
+                        const isOrigin404 = site && !explicitChallenge && (
+                            lowerHtml.includes('page-not-found')
+                            || lowerHtml.includes('discourse-no-results')
+                            || lowerHtml.includes('"errortype":"notfound"')
+                            || lowerHtml.includes('404-body')
+                            || lowerHtml.includes('exist or is private')
+                            || lowerHtml.includes('page you requested')
+                            || lowerHtml.includes('该页面不存在')
+                        );
+                        const isDiscourseOops = site && complete && !explicitChallenge && /discussion forum encountered an unexpected problem/i.test(bodyText);
+                        const missingDiscourseBoot = site && complete && !hasCsrf && !isOrigin404 && !isDiscourseOops && !bodyText.startsWith('{');
                         let preloadedUserJson = null;
                         if (site && domReady && hasCsrf && hasPreloaded && !explicitChallenge) {
                             try {
@@ -1816,9 +2515,14 @@ impl BridgeEngine {
                             hasCsrf,
                             csrfVal,
                             hasPreloaded,
+                            hasDiscourseDom,
                             isOtpPage,
+                            isChallengePath,
+                            isOrigin404,
                             isLoginPage,
+                            isDiscourseOops,
                             preloadedUserJson,
+                            explicitChallenge,
                             challenge: explicitChallenge || missingDiscourseBoot
                         };
                     })()"#
@@ -1828,19 +2532,202 @@ impl BridgeEngine {
             .await
             .ok();
 
+            let is_discourse_oops = probe
+                .as_ref()
+                .and_then(|p| p.get("isDiscourseOops")?.as_bool())
+                .unwrap_or(false);
+            let explicit_challenge = probe
+                .as_ref()
+                .and_then(|p| p.get("explicitChallenge")?.as_bool())
+                .unwrap_or(false);
+            let is_origin_404 = probe
+                .as_ref()
+                .and_then(|p| p.get("isOrigin404")?.as_bool())
+                .unwrap_or(false);
             let in_challenge = probe
                 .as_ref()
                 .and_then(|p| p.get("challenge")?.as_bool())
                 .unwrap_or(false);
+            let ready = probe
+                .as_ref()
+                .map(|p| {
+                    p.get("site").and_then(|v| v.as_bool()) == Some(true)
+                        && p.get("domReady").and_then(|v| v.as_bool()) == Some(true)
+                        && p.get("hasCsrf").and_then(|v| v.as_bool()) == Some(true)
+                        && p.get("hasDiscourseDom").and_then(|v| v.as_bool()) == Some(true)
+                        && p.get("isOtpPage").and_then(|v| v.as_bool()) != Some(true)
+                })
+                .unwrap_or(false);
+
+            if is_discourse_oops {
+                // Reaching Discourse's origin 500 ("Oops") page after Turnstile proves Cloudflare has already passed!
+                let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+                if !oops_reloaded {
+                    oops_reloaded = true;
+                    let clean_url = if requested_login {
+                        "https://linux.do/login"
+                    } else {
+                        "https://linux.do/challenge"
+                    };
+                    let _ = native_call("navigate", json!({ "url": clean_url }), 8).await;
+                    continue;
+                }
+                if !login && !requested_login {
+                    {
+                        let mut rt = self.inner.lock().unwrap();
+                        rt.last_challenge_url = None;
+                        rt.fg_challenge_until = None;
+                        rt.bg_challenge_until = None;
+                        rt.bootstrap_challenged = false;
+                        rt.silent_revalidate_until = None;
+                    }
+                    let _ = native_call("hide", json!({}), 5).await;
+                    let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
+                    let _ = app.emit("lindo://verified", ());
+                    return Ok(true);
+                }
+                if user_cancelled {
+                    return Ok(false);
+                }
+                continue;
+            }
+
+            if user_cancelled {
+                if !login && !requested_login && (ready || is_origin_404) && !in_challenge {
+                    // User closed the panel right as verification completed: treat as verified!
+                } else {
+                    return Ok(false);
+                }
+            }
+
             if in_challenge {
+                quiet_rounds = 0;
                 challenge_ticks += 1;
-                if challenge_ticks >= 1 && !panel_shown {
+                // Give non-interactive JS challenges ~520ms (2 ticks) to pass invisibly before opening the panel!
+                if challenge_ticks >= 2 && !panel_shown {
                     panel_shown = true;
-                    let _ = native_call("show", json!({ "dark": is_dark }), 8).await;
+                    let _ = native_call("show", json!({ "dark": is_dark, "login": login }), 8).await;
+                }
+                // Reveal the WebView ONLY when interactive challenge DOM is genuinely present (`explicit_challenge`)
+                if explicit_challenge && mask_visible {
+                    mask_visible = false;
+                    let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
                 }
                 continue;
             }
             challenge_ticks = 0;
+
+            // Pure verification flow (`/challenge`):
+            // Immediately cover any non-challenge page (e.g. Discourse `/challenge` 404 or forum chrome) with the native mask
+            // so zero frames of `404` or `Log In` ever flash on screen, confirm fresh `cf_clearance` / origin reach, and close!
+            if !login && !requested_login {
+                if !mask_visible && (is_origin_404 || ready) {
+                    mask_visible = true;
+                    let _ = native_call(
+                        "setVerifyMask",
+                        json!({
+                            "visible": true,
+                            "dark": is_dark,
+                            "message": "安全验证已完成，正在恢复连接…"
+                        }),
+                        4,
+                    )
+                    .await;
+                }
+
+                let current_cfs = self.browser_cf_clearances().await;
+                let has_fresh_cf = {
+                    let auth = self.cf_authority.lock().unwrap();
+                    current_cfs
+                        .iter()
+                        .any(|c| !stale_cf.contains(c) && !auth.is_challenged(c))
+                };
+
+                if has_fresh_cf || is_origin_404 || ready {
+                    quiet_rounds += 1;
+                } else {
+                    quiet_rounds = 0;
+                    if !panel_shown && loop_started.elapsed() >= Duration::from_millis(1400) {
+                        panel_shown = true;
+                        let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
+                    }
+                    continue;
+                }
+
+                // Require 2 consecutive quiet rounds (~520ms) without challenge markers so CF's Set-Cookie settles cleanly
+                if quiet_rounds < 2 {
+                    continue;
+                }
+
+                let has_preloaded = probe
+                    .as_ref()
+                    .and_then(|p| p.get("hasPreloaded")?.as_bool())
+                    .unwrap_or(false);
+                let preloaded_user = probe
+                    .as_ref()
+                    .and_then(|p| p.get("preloadedUserJson")?.as_str())
+                    .and_then(Self::extract_current_user);
+
+                // Self-heal zombie local session if Discourse's own `data-preloaded` proves `_t` is unauthenticated (`currentUser == null`)
+                if has_preloaded && preloaded_user.is_none() {
+                    let mut expired_changed = false;
+                    {
+                        let mut st = self.state.lock().unwrap();
+                        if let Some(prev) = st.current_user.take() {
+                            st.expired_username = Some(prev.username.clone());
+                            Self::upsert_saved_account(&mut st, prev, String::new(), true);
+                            let cf_only: Vec<String> = st
+                                .raw_cookies
+                                .split(';')
+                                .map(|s| s.trim())
+                                .filter(|s| {
+                                    !s.is_empty()
+                                        && !s.starts_with("_t=")
+                                        && !s.starts_with("_forum_session=")
+                                })
+                                .map(|s| s.to_string())
+                                .collect();
+                            st.raw_cookies = cf_only.join("; ");
+                            st.unread_notifications = 0;
+                            save_state(&st);
+                            expired_changed = true;
+                        }
+                    }
+                    if expired_changed {
+                        self.sweep_auth_cookies(true, None).await;
+                        self.inner.lock().unwrap().last_seeded_token = String::new();
+                        let _ = app.emit("lindo://state-updated", ());
+                    }
+                } else if let Some(profile) = preloaded_user {
+                    let _ = self.sync_cookies_from_webkit_verified(true, true).await;
+                    self.commit_authenticated_user(app, profile).await;
+                }
+
+                let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+                {
+                    let mut rt = self.inner.lock().unwrap();
+                    rt.last_challenge_url = None;
+                    rt.fg_challenge_until = None;
+                    rt.bg_challenge_until = None;
+                    rt.bootstrap_challenged = false;
+                    rt.rate_limit_until = None;
+                    rt.silent_revalidate_until = None;
+                    rt.last_silent_cleared_at = Some(Instant::now());
+                    rt.challenge_429_streak = 0;
+                }
+                let _ = native_call("hide", json!({}), 5).await;
+                // Restore clean `/about` origin document in the hidden bridge WebView and invalidate stale CSRF
+                let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
+                let _ = native_call(
+                    "evaluate",
+                    json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                    4,
+                )
+                .await;
+                self.inner.lock().unwrap().origin_ready = true;
+                let _ = app.emit("lindo://verified", ());
+                return Ok(true);
+            }
 
             let is_otp_page_ready = probe
                 .as_ref()
@@ -1872,43 +2759,12 @@ impl BridgeEngine {
                 continue;
             }
 
-            let ready = probe
-                .as_ref()
-                .map(|p| {
-                    p.get("site").and_then(|v| v.as_bool()) == Some(true)
-                        && p.get("domReady").and_then(|v| v.as_bool()) == Some(true)
-                        && p.get("hasCsrf").and_then(|v| v.as_bool()) == Some(true)
-                        && p.get("hasPreloaded").and_then(|v| v.as_bool()) == Some(true)
-                        && p.get("isOtpPage").and_then(|v| v.as_bool()) != Some(true)
-                })
-                .unwrap_or(false);
             if !ready {
-                continue;
-            }
-
-            // 1. 纯站点验证流：一旦真实 Discourse 页面（含 meta csrf-token + data-preloaded 且无挑战节点）加载完毕，同步 CSRF 并直接放行
-            let has_preloaded = probe
-                .as_ref()
-                .and_then(|p| p.get("hasPreloaded")?.as_bool())
-                .unwrap_or(false);
-            if !login && !requested_login && has_preloaded {
-                let _ = self.sync_cookies_from_webkit_verified(false, true).await;
-                let _ = native_call(
-                    "evaluate",
-                    json!({ "script": "window.__lindoCsrf = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; window.__lindoIgnoreDomCsrf = false;" }),
-                    4,
-                )
-                .await;
-                {
-                    let mut rt = self.inner.lock().unwrap();
-                    rt.last_challenge_url = None;
-                    rt.fg_challenge_until = None;
-                    rt.bg_challenge_until = None;
-                    rt.bootstrap_challenged = false;
+                if !panel_shown && !is_otp_flow && loop_started.elapsed() >= Duration::from_millis(1050) {
+                    panel_shown = true;
+                    let _ = native_call("show", json!({ "dark": is_dark, "login": login }), 8).await;
                 }
-                let _ = native_call("hide", json!({}), 5).await;
-                let _ = app.emit("lindo://verified", ());
-                return Ok(true);
+                continue;
             }
 
             // 2. 登录 / OTP 流：优先直接从页面 data-preloaded 提取已登录用户（零额外请求），若缺失再兜底请求 /session/current.json
@@ -1921,7 +2777,7 @@ impl BridgeEngine {
                         let _ = self.sync_cookies_from_webkit_verified(true, true).await;
                         let _ = native_call(
                             "evaluate",
-                            json!({ "script": "window.__lindoCsrf = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; window.__lindoIgnoreDomCsrf = false;" }),
+                            json!({ "script": "(() => { window.__lindoCsrf = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; window.__lindoIgnoreDomCsrf = false; return true; })()" }),
                             4,
                         )
                         .await;
@@ -1951,16 +2807,22 @@ impl BridgeEngine {
             let target = if requested_login {
                 "https://linux.do/session/current.json"
             } else {
-                recovery_url.as_str()
+                probe_get_url.as_str()
             };
             let Ok(resp) = self
                 .request_unlocked(app, target, "GET", None, None, true)
                 .await
             else {
+                if user_cancelled {
+                    return Ok(false);
+                }
                 continue;
             };
 
             if resp.is_challenge {
+                if user_cancelled {
+                    return Ok(false);
+                }
                 if !panel_shown {
                     panel_shown = true;
                     let _ = native_call("show", json!({ "dark": is_dark }), 8).await;
@@ -1969,12 +2831,22 @@ impl BridgeEngine {
                 continue;
             }
 
-            if !login && !requested_login && (200..300).contains(&resp.status) && !resp.body.trim().starts_with('<') {
+            if !login && !requested_login && resp.status != 429 && !resp.body.trim().starts_with('<') {
                 let _ = self.sync_cookies_from_webkit_verified(false, true).await;
-                self.inner.lock().unwrap().last_challenge_url = None;
+                {
+                    let mut rt = self.inner.lock().unwrap();
+                    rt.last_challenge_url = None;
+                    rt.fg_challenge_until = None;
+                    rt.bg_challenge_until = None;
+                    rt.bootstrap_challenged = false;
+                }
                 let _ = native_call("hide", json!({}), 5).await;
                 let _ = app.emit("lindo://verified", ());
                 return Ok(true);
+            }
+
+            if user_cancelled {
+                return Ok(false);
             }
 
             if requested_login && (200..300).contains(&resp.status) {
@@ -1982,7 +2854,7 @@ impl BridgeEngine {
                     let _ = self.sync_cookies_from_webkit_verified(true, true).await;
                     let _ = native_call(
                         "evaluate",
-                        json!({ "script": "window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true;" }),
+                        json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
                         4,
                     )
                     .await;
@@ -2052,6 +2924,7 @@ impl BridgeEngine {
     }
 
     async fn commit_authenticated_user(&self, app: &AppHandle, profile: UserProfile) {
+        let logged_username = profile.username.clone();
         {
             let mut rt = self.inner.lock().unwrap();
             rt.last_login_at = Some(Instant::now());
@@ -2074,7 +2947,25 @@ impl BridgeEngine {
             Self::upsert_saved_account(&mut st, profile, auth_cookies, false);
             save_state(&st);
         }
+        emit_diag(
+            app,
+            "INFO",
+            "AUTH",
+            "AuthSuccess",
+            &format!("登录会话已就绪 · @{}", logged_username),
+            None,
+        );
+        let _ = app.emit("lindo://auth-completing", false);
         let _ = app.emit("lindo://state-updated", ());
+        // After external browser OTP/OAuth login, WebKit may hold `_t` without `cf_clearance`:
+        // silently prewarm `/challenge` in the background once initial post-login GETs settle!
+        if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
+            let eng_clone = Arc::clone(&eng);
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(1800)).await;
+                let _ = eng_clone.prewarm_cf_clearance_if_needed().await;
+            });
+        }
     }
 
     pub async fn start_browser_one_click_auth(&self) -> Result<String, String> {
@@ -2166,14 +3057,13 @@ impl BridgeEngine {
             let _ = w.show();
             let _ = w.set_focus();
         }
-        let _ = app.emit(
-            "lindo://diag-event",
-            json!({
-                "level": "INFO",
-                "category": "AUTH",
-                "tag": "BrowserAuth",
-                "summary": "收到系统浏览器授权回调，正在安全兑换登录会话"
-            }),
+        emit_diag(
+            app,
+            "INFO",
+            "AUTH",
+            "AuthPending",
+            "收到默认浏览器授权回调，正在校验并兑换登录会话",
+            None,
         );
 
         // Peek pending RSA grant without destroying it until payload & nonce pass verification
@@ -2185,9 +3075,17 @@ impl BridgeEngine {
             })
         });
         let Some(grant) = grant else {
+            emit_diag(
+                app,
+                "WARN",
+                "AUTH",
+                "BrowserAuth",
+                "未找到待确认的浏览器授权会话（可能已完成或已重置）",
+                None,
+            );
             let _ = app.emit(
                 "lindo://auth-notice",
-                "未找到待确认的授权请求，请重新点击「浏览器授权」",
+                "未找到待确认的授权请求，请重新点击「使用默认浏览器一键授权」",
             );
             return Ok(false);
         };
@@ -2198,9 +3096,17 @@ impl BridgeEngine {
             .as_millis() as u64;
         if now_ms.saturating_sub(grant.created_at_ms) > 900_000 {
             clear_pending_rsa();
+            emit_diag(
+                app,
+                "WARN",
+                "AUTH",
+                "BrowserAuth",
+                "浏览器授权链接已超过 15 分钟有效期",
+                None,
+            );
             let _ = app.emit(
                 "lindo://auth-notice",
-                "授权链接已超过 15 分钟有效期，请重新点击「浏览器授权」",
+                "授权链接已超过 15 分钟有效期，请重新发起浏览器授权",
             );
             return Ok(false);
         }
@@ -2220,6 +3126,14 @@ impl BridgeEngine {
         };
 
         let Some(payload_cipher) = params.get("payload").filter(|s| !s.trim().is_empty()) else {
+            emit_diag(
+                app,
+                "ERROR",
+                "AUTH",
+                "BrowserAuth",
+                "浏览器授权回调缺少 payload 参数",
+                None,
+            );
             let _ = app.emit("lindo://auth-notice", "授权回调缺少 payload 参数，请重试");
             return Ok(false);
         };
@@ -2228,7 +3142,15 @@ impl BridgeEngine {
             &normalize_b64(payload_cipher),
         ) {
             Ok(plain) => plain,
-            Err(_) => {
+            Err(dec_err) => {
+                emit_diag(
+                    app,
+                    "WARN",
+                    "AUTH",
+                    "BrowserAuth",
+                    "回调密钥不匹配（可能点击了旧的浏览器授权标签页）",
+                    Some(&dec_err),
+                );
                 let _ = app.emit(
                     "lindo://auth-notice",
                     "收到的是旧授权页回调，请在最新打开的浏览器授权页点击「授权」",
@@ -2237,6 +3159,14 @@ impl BridgeEngine {
             }
         };
         let Ok(payload_json) = serde_json::from_str::<Value>(&plain_payload) else {
+            emit_diag(
+                app,
+                "ERROR",
+                "AUTH",
+                "BrowserAuth",
+                "浏览器授权回调载荷 JSON 解析失败",
+                None,
+            );
             let _ = app.emit("lindo://auth-notice", "授权载荷解析失败，请重试");
             return Ok(false);
         };
@@ -2245,6 +3175,14 @@ impl BridgeEngine {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if returned_nonce != grant.nonce {
+            emit_diag(
+                app,
+                "WARN",
+                "AUTH",
+                "BrowserAuth",
+                "浏览器授权回调 nonce 不匹配，请使用最新打开的授权页",
+                None,
+            );
             let _ = app.emit(
                 "lindo://auth-notice",
                 "收到的是较早一次授权页的回调，请使用最新打开的授权页",
@@ -2268,6 +3206,14 @@ impl BridgeEngine {
         };
 
         let Some(otp_token) = otp.filter(|s| !s.is_empty()) else {
+            emit_diag(
+                app,
+                "ERROR",
+                "AUTH",
+                "BrowserAuth",
+                "授权回调未包含有效的一次性登录令牌 (OTP)",
+                None,
+            );
             let _ = app.emit("lindo://auth-notice", "未获取到一次性登录令牌，请重试");
             return Ok(false);
         };
@@ -2286,14 +3232,29 @@ impl BridgeEngine {
         }
         clear_pending_rsa();
 
+        // Hold `verify_lock` + `rt.verifying = true` across the ENTIRE OTP redemption & user commit sequence:
+        // guarantees background `silent_revalidate_challenge` or `seed_session` NEVER navigates `gHost.web`
+        // or calls `sweep_auth_cookies` on the newly redeemed `_t` before `commit_authenticated_user` finishes!
+        let _verify_guard = self.verify_lock.lock().await;
+        let _verifying_flag = VerifyingFlagGuard::enter(&self.inner);
+
         let _ = app.emit("lindo://auth-completing", true);
 
-        // 1. 确保同源 WebKit 就绪并清理任何历史残留的死 _t / _forum_session（100% 保留 cf_clearance）
-        if let Err(e) = self.ensure_ready(false).await {
+        // 1. 初始化桥接并清理任何历史残留的死 _t / _forum_session（100% 保留 cf_clearance），然后等待同源 `/about` 稳定就绪
+        if let Err(e) = native_call("init", json!({}), 10).await {
             let _ = app.emit("lindo://auth-completing", false);
+            emit_diag(
+                app,
+                "ERROR",
+                "AUTH",
+                "BrowserAuth",
+                "初始化本地安全桥接失败",
+                Some(&e),
+            );
             let _ = app.emit("lindo://auth-notice", format!("初始化安全会话失败：{e}"));
             return Ok(false);
         }
+        self.inner.lock().unwrap().initialized = true;
         self.sweep_auth_cookies(true, None).await;
         {
             let mut st = self.state.lock().unwrap();
@@ -2308,75 +3269,221 @@ impl BridgeEngine {
         }
         self.inner.lock().unwrap().last_seeded_token = String::new();
 
-        // 2. 单次 OTP 极其珍贵：兑换前先探测 /session/csrf.json 确认 WebKit 未被 Cloudflare 拦截；
-        //    若新装首次无 cf_clearance 遇到挑战，先在主站完成验证放行（绝不提前消耗 OTP！），再执行兑换。
+        // Helper closure: ensure `gHost.web` is settled on `https://linux.do` and NOT mid-navigation before running JS fetch!
+        let settle_origin = async {
+            let cur = native_call(
+                "evaluate",
+                json!({
+                    "isolated": true,
+                    "script": "({ origin: location.origin, ready: document.readyState === 'complete' || document.readyState === 'interactive' })"
+                }),
+                5,
+            )
+            .await
+            .ok();
+            let st_loading = native_call("status", json!({}), 4)
+                .await
+                .ok()
+                .and_then(|s| s.get("loading")?.as_bool())
+                .unwrap_or(false);
+            let already_settled = !st_loading
+                && cur
+                    .as_ref()
+                    .map(|c| {
+                        c.get("origin").and_then(|v| v.as_str()) == Some("https://linux.do")
+                            && c.get("ready").and_then(|v| v.as_bool()) == Some(true)
+                    })
+                    .unwrap_or(false);
+            if !already_settled {
+                let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 8).await;
+                let wait_until = Instant::now() + Duration::from_secs(8);
+                while Instant::now() < wait_until {
+                    tokio::time::sleep(Duration::from_millis(85)).await;
+                    let loading_now = native_call("status", json!({}), 4)
+                        .await
+                        .ok()
+                        .and_then(|s| s.get("loading")?.as_bool())
+                        .unwrap_or(false);
+                    let ok = native_call(
+                        "evaluate",
+                        json!({
+                            "isolated": true,
+                            "script": "location.origin === 'https://linux.do' && document.readyState === 'complete'"
+                        }),
+                        4,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                    if ok && !loading_now {
+                        break;
+                    }
+                }
+            }
+        };
+        settle_origin.await;
+
+        // 2. 单次 OTP 极其珍贵：兑换前用 `in_verification = true` 探测 `/session/csrf.json` 确认未被 Cloudflare 拦截；
+        //    若首次无 `cf_clearance` 遇到挑战，先完成站点验证放行并等待 `/about` 彻底落稳（绝不提前消耗或中途打断 OTP！）。
         let is_dark = { self.state.lock().unwrap().preferences.appearance != "light" };
         let csrf_probe = self
-            .request(app, "https://linux.do/session/csrf.json", "GET", None, None)
+            .request_unlocked(app, "https://linux.do/session/csrf.json", "GET", None, None, true)
             .await;
         let pre_challenged = match &csrf_probe {
             Ok(r) => r.is_challenge || !(200..300).contains(&r.status),
             Err(_) => true,
         };
         if pre_challenged {
+            emit_diag(
+                app,
+                "WARN",
+                "AUTH",
+                "AuthPending",
+                "兑换登录令牌前需完成站点安全验证，正在打开安全验证面板",
+                None,
+            );
             let _ = app.emit("lindo://auth-completing", false);
-            let verified = self.verify_or_login(app, false, is_dark).await.unwrap_or(false);
+            let verified = self
+                .run_verify_loop(app, false, is_dark, None)
+                .await
+                .unwrap_or(false);
+            let _ = native_call("hide", json!({}), 5).await;
             if !verified {
+                emit_diag(
+                    app,
+                    "WARN",
+                    "AUTH",
+                    "BrowserAuth",
+                    "站点安全验证未完成，已中止本次授权令牌兑换",
+                    None,
+                );
                 let _ = app.emit("lindo://auth-notice", "请先完成站点验证后再完成授权登录");
                 return Ok(false);
             }
             let _ = app.emit("lindo://auth-completing", true);
+            // Wait for `run_verify_loop`'s trailing `/about` navigation to finish completely before `otp_eval`!
+            let settle_deadline = Instant::now() + Duration::from_secs(6);
+            while Instant::now() < settle_deadline {
+                let loading_now = native_call("status", json!({}), 4)
+                    .await
+                    .ok()
+                    .and_then(|s| s.get("loading")?.as_bool())
+                    .unwrap_or(false);
+                let ok = native_call(
+                    "evaluate",
+                    json!({
+                        "isolated": true,
+                        "script": "location.origin === 'https://linux.do' && document.readyState === 'complete'"
+                    }),
+                    4,
+                )
+                .await
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+                if ok && !loading_now {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
         }
 
         // 3. 在同源 WebKit 内原子获取最新 CSRF 并以 redirect:'manual' 提交 POST /session/otp/{otp}（直接落盘 Set-Cookie: _t=...）
         let otp_cfg = json!({ "otp": otp_token });
         let otp_script = format!(
             r#"(async () => {{
-                if (location.origin !== 'https://linux.do') return {{ status: 0 }};
-                const cfg = {otp_cfg};
-                const cr = await fetch('/session/csrf.json', {{
-                    credentials: 'include',
-                    cache: 'no-store',
-                    headers: {{ 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }},
-                    signal: AbortSignal.timeout(12000)
-                }});
-                if (!cr.ok) {{
-                    return {{ status: cr.status, challenge: cr.headers.get('cf-mitigated') || '' }};
+                try {{
+                    if (location.origin !== 'https://linux.do') return {{ status: 0, otpSent: false, err: 'origin_mismatch' }};
+                    const cfg = {otp_cfg};
+                    const cr = await fetch('/session/csrf.json', {{
+                        credentials: 'include',
+                        cache: 'no-store',
+                        headers: {{ 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }},
+                        signal: AbortSignal.timeout(12000)
+                    }});
+                    if (!cr.ok) {{
+                        return {{ status: cr.status, otpSent: false, challenge: cr.headers.get('cf-mitigated') || '' }};
+                    }}
+                    const csrf = (await cr.json()).csrf;
+                    if (!csrf) return {{ status: 422, otpSent: false, err: 'empty_csrf' }};
+                    window.__lindoCsrf = csrf;
+                    const r = await fetch('/session/otp/' + encodeURIComponent(cfg.otp), {{
+                        method: 'POST',
+                        credentials: 'include',
+                        redirect: 'manual',
+                        headers: {{
+                            'X-CSRF-Token': csrf,
+                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                        }},
+                        body: '',
+                        signal: AbortSignal.timeout(15000)
+                    }});
+                    return {{
+                        status: r.type === 'opaqueredirect' ? 302 : r.status,
+                        otpSent: true,
+                        challenge: (r.headers && r.headers.get('cf-mitigated')) || ''
+                    }};
+                }} catch (e) {{
+                    return {{ status: 0, otpSent: false, err: String((e && e.message) || e) }};
                 }}
-                const csrf = (await cr.json()).csrf;
-                if (!csrf) return {{ status: 422 }};
-                window.__lindoCsrf = csrf;
-                const r = await fetch('/session/otp/' + encodeURIComponent(cfg.otp), {{
-                    method: 'POST',
-                    credentials: 'include',
-                    redirect: 'manual',
-                    headers: {{
-                        'X-CSRF-Token': csrf,
-                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-                    }},
-                    body: '',
-                    signal: AbortSignal.timeout(15000)
-                }});
-                return {{
-                    status: r.type === 'opaqueredirect' ? 302 : r.status,
-                    challenge: (r.headers && r.headers.get('cf-mitigated')) || ''
-                }};
             }})()"#
         );
 
         let otp_eval = native_call("evaluate", json!({ "script": otp_script }), 22)
             .await
-            .unwrap_or_else(|_| json!({ "status": 0 }));
+            .unwrap_or_else(|e| json!({ "status": 0, "otpSent": false, "err": e }));
         let otp_status = otp_eval.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+        let otp_sent = otp_eval.get("otpSent").and_then(|v| v.as_bool()).unwrap_or(false);
         let otp_challenged = otp_eval.get("challenge").and_then(|v| v.as_str()) == Some("challenge");
 
-        if otp_challenged {
+        if !otp_sent && otp_challenged {
             let _ = app.emit("lindo://auth-completing", false);
-            return self.verify_with_otp(app, &otp_token, is_dark).await;
+            let ok = self
+                .run_verify_loop(app, false, is_dark, Some(&otp_token))
+                .await
+                .unwrap_or(false);
+            let _ = native_call("hide", json!({}), 5).await;
+            return Ok(ok);
         }
 
-        if (200..400).contains(&otp_status) || otp_status == 0 {
-            // 4. 重载隐藏主站 DOM，使 meta csrf-token 与 data-preloaded 同步至新登录态
+        if otp_sent && ((200..400).contains(&otp_status) || otp_status == 0) {
+            // Allow WKHTTPCookieStore 150ms to flush Set-Cookie: _t=... before reading `/session/current.json`
+            tokio::time::sleep(Duration::from_millis(150)).await;
+
+            // 4A. 快速通道：直接通过 `request_unlocked(..., true)` 读取 `/session/current.json`（不触发 `seed_session` 删 Cookie，也不加载重型首页）
+            for attempt in 0..3 {
+                if attempt > 0 {
+                    tokio::time::sleep(Duration::from_millis(450)).await;
+                }
+                if let Ok(me) = self
+                    .request_unlocked(
+                        app,
+                        "https://linux.do/session/current.json",
+                        "GET",
+                        None,
+                        None,
+                        true,
+                    )
+                    .await
+                {
+                    if let Some(profile) = Self::extract_current_user(&me.body) {
+                        let _ = self.sync_cookies_from_webkit_verified(true, true).await;
+                        let _ = native_call(
+                            "evaluate",
+                            json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                            4,
+                        )
+                        .await;
+                        self.inner.lock().unwrap().origin_ready = true;
+                        self.commit_authenticated_user(app, profile).await;
+                        let _ = app.emit("lindo://auth-notice", "");
+                        return Ok(true);
+                    }
+                }
+            }
+
+            // 4B. 兜底通道：若 `/session/current.json` 偶发限流，从主站 HTML `data-preloaded` 提取当前用户并恢复 `/about`
             let _ = native_call("navigate", json!({ "url": "https://linux.do/" }), 10).await;
             let nav_deadline = Instant::now() + Duration::from_secs(8);
             let mut preloaded_profile: Option<UserProfile> = None;
@@ -2385,13 +3492,12 @@ impl BridgeEngine {
                 let dom_check = native_call(
                     "evaluate",
                     json!({
+                        "isolated": true,
                         "script": r#"(() => {
                             const domReady = document.readyState === 'interactive' || document.readyState === 'complete';
                             if (location.origin !== 'https://linux.do' || !domReady) return null;
                             const el = document.getElementById('data-preloaded');
                             if (!el) return document.readyState === 'complete' ? { ready: true, userJson: null } : null;
-                            const csrf = document.querySelector('meta[name="csrf-token"]')?.content || null;
-                            if (csrf) { window.__lindoCsrf = csrf; window.__lindoIgnoreDomCsrf = false; }
                             try {
                                 const raw = el.getAttribute('data-preloaded') || el.textContent || '';
                                 const outer = raw ? JSON.parse(raw) : null;
@@ -2418,53 +3524,49 @@ impl BridgeEngine {
                 }
             }
 
-            let _ = self.sync_cookies_from_webkit(true).await;
+            let _ = self.sync_cookies_from_webkit_verified(true, true).await;
+            let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
+            let _ = native_call(
+                "evaluate",
+                json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                4,
+            )
+            .await;
+            self.inner.lock().unwrap().origin_ready = true;
+
             if let Some(profile) = preloaded_profile {
                 self.commit_authenticated_user(app, profile).await;
-                let _ = app.emit("lindo://auth-completing", false);
                 let _ = app.emit("lindo://auth-notice", "");
-                let app2 = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    let _ = app2.emit("lindo://state-updated", ());
-                });
                 return Ok(true);
-            }
-
-            for attempt in 0..4 {
-                if attempt > 0 {
-                    tokio::time::sleep(Duration::from_millis(550)).await;
-                }
-                if let Ok(me) = self
-                    .request(
-                        app,
-                        "https://linux.do/session/current.json",
-                        "GET",
-                        None,
-                        None,
-                    )
-                    .await
-                {
-                    if let Some(profile) = Self::extract_current_user(&me.body) {
-                        let _ = self.sync_cookies_from_webkit(true).await;
-                        self.commit_authenticated_user(app, profile).await;
-                        let _ = app.emit("lindo://auth-completing", false);
-                        let _ = app.emit("lindo://auth-notice", "");
-                        let app2 = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            let _ = app2.emit("lindo://state-updated", ());
-                        });
-                        return Ok(true);
-                    }
-                }
             }
         }
 
-        // 兜底：若 fetch POST 未能直接种下会话（且 OTP 尚未被消费），通过可视化表单确认完成兑换
+        // 兜底：仅当 fetch POST 尚未消耗单次 OTP 时，通过可视化表单确认完成兑换
         let _ = app.emit("lindo://auth-completing", false);
-        let fallback_ok = self.verify_with_otp(app, &otp_token, is_dark).await.unwrap_or(false);
+        let fallback_ok = if !otp_sent {
+            let ok = self
+                .run_verify_loop(app, false, is_dark, Some(&otp_token))
+                .await
+                .unwrap_or(false);
+            let _ = native_call("hide", json!({}), 5).await;
+            ok
+        } else {
+            false
+        };
+
         if !fallback_ok {
+            let err_detail = otp_eval
+                .get("err")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            emit_diag(
+                app,
+                "ERROR",
+                "AUTH",
+                "BrowserAuth",
+                &format!("浏览器授权回调兑换会话未成功 (HTTP {otp_status})"),
+                if err_detail.is_empty() { None } else { Some(err_detail) },
+            );
             let _ = app.emit(
                 "lindo://auth-notice",
                 "浏览器授权回调未能完成会话兑换，请再试一次或使用内置登录",
@@ -2544,7 +3646,7 @@ impl BridgeEngine {
         }
         let _ = native_call(
             "evaluate",
-            json!({ "script": "window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true;" }),
+            json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
             4,
         )
         .await;
@@ -2734,7 +3836,7 @@ impl BridgeEngine {
             native_call("init", json!({}), 10).await?;
             self.inner.lock().unwrap().initialized = true;
         }
-        let _ = self.seed_session().await;
+        let _ = self.seed_session_verified(true).await;
         native_call("openBrowser", json!({ "url": url, "dark": is_dark }), 10).await?;
         Ok(())
     }
@@ -2745,7 +3847,7 @@ impl BridgeEngine {
             native_call("init", json!({}), 10).await?;
             self.inner.lock().unwrap().initialized = true;
         }
-        let _ = self.seed_session().await;
+        let _ = self.seed_session_verified(true).await;
         let res = native_call("fetchConnectHtml", json!({}), 12).await?;
         Ok(res
             .get("html")
@@ -2826,5 +3928,87 @@ mod tests {
             false,
             now
         ));
+    }
+
+    #[test]
+    fn challenge_url_routes_to_dedicated_challenge_endpoint_and_probe_path() {
+        assert_eq!(
+            BridgeEngine::challenge_url_to_html_url(
+                "https://linux.do/t/1895432.json?track_visit=true&forceLoad=true"
+            ),
+            "https://linux.do/challenge"
+        );
+        assert_eq!(
+            BridgeEngine::challenge_url_to_probe_get_url(
+                "https://linux.do/t/1895432/posts.json?post_ids%5B%5D=99123"
+            ),
+            "https://linux.do/t/1895432.json?track_visit=false"
+        );
+        assert_eq!(
+            BridgeEngine::challenge_url_to_html_url("https://linux.do/latest.json?page=1"),
+            "https://linux.do/challenge"
+        );
+        assert_eq!(
+            BridgeEngine::challenge_url_to_probe_get_url("https://linux.do/posts.json"),
+            "https://linux.do/latest.json?no_definitions=true"
+        );
+
+        // Bounded challenged_history rejects all previously invalidated clearances, not just the latest one
+        let now = 1_700_000_000_000u64;
+        let mut auth = CfClearanceAuthority::default();
+        auth.note_challenged(Some("dead_1"));
+        auth.note_challenged(Some("dead_2"));
+        assert!(auth.is_challenged("dead_1"));
+        assert!(auth.is_challenged("dead_2"));
+        let candidates = vec![
+            ("dead_1".to_string(), false),
+            ("dead_2".to_string(), false),
+            ("fresh_3".to_string(), false),
+        ];
+        assert_eq!(
+            auth.select_winner(&candidates, true, now).as_deref(),
+            Some("fresh_3")
+        );
+    }
+
+    #[test]
+    fn verifying_flag_guard_and_discourse_url_encoded_rsa_callback_roundtrip() {
+        let eng = BridgeEngine::new(PersistedState::default());
+        assert!(!eng.inner.lock().unwrap().verifying);
+        {
+            let _g = VerifyingFlagGuard::enter(&eng.inner);
+            assert!(eng.inner.lock().unwrap().verifying);
+        }
+        assert!(!eng.inner.lock().unwrap().verifying);
+
+        // Simulate Ruby Discourse CGI.escape(Base64.encode64(...)) with 60-col `%0A` line wraps and `+`/`/`/`=`
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine;
+        use rand::rngs::OsRng;
+        use rsa::pkcs8::DecodePublicKey;
+        use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+
+        let (pub_pem, priv_b64) = crate::crypto_rsa::generate_rsa_keypair().unwrap();
+        let pub_key = RsaPublicKey::from_public_key_pem(&pub_pem).unwrap();
+        let raw_json = r#"{"nonce":"nonce_7788","one_time_password":"otp_token_991122"}"#;
+        let cipher = pub_key
+            .encrypt(&mut OsRng, Pkcs1v15Encrypt, raw_json.as_bytes())
+            .unwrap();
+        let wrapped_b64 = B64
+            .encode(&cipher)
+            .as_bytes()
+            .chunks(60)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let cgi_escaped = wrapped_b64
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D")
+            .replace('\n', "%0A");
+        let decoded = BridgeEngine::url_decode(&cgi_escaped);
+        let plain = crate::crypto_rsa::decrypt_rsa_pkcs1v15(&priv_b64, &decoded).unwrap();
+        assert_eq!(plain, raw_json);
     }
 }

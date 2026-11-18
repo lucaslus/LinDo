@@ -108,7 +108,7 @@ internal fun LinDoConfirmDialog(
                             if (needsVerify) {
                                 TextButton(
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    onClick = { openWebUrl?.invoke("https://linux.do/") }
+                                    onClick = { openWebUrl?.invoke("https://linux.do/challenge#lindo-verify") }
                                 ) {
                                     Text(LinDoCommonCopy.GO_VERIFY.text, color = palette.activeChipText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                 }

@@ -653,6 +653,45 @@ pub async fn native_call(
             }
             Ok(json!({ "html": extracted }))
         }
+        "setVerifyMask" => {
+            let visible = params.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
+            let dark = params.get("dark").and_then(|v| v.as_bool()).unwrap_or(true);
+            let msg = params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("正在连接安全验证服务…");
+            if let Ok(wv) = ensure_bridge_window(&app) {
+                let bg = if dark { "#101218" } else { "#F7F8FA" };
+                let fg = if dark { "#A1A8B5" } else { "#525866" };
+                let msg_json = json!(msg).to_string();
+                let js = if visible {
+                    format!(
+                        r#"(() => {{
+  const root = document.body || document.documentElement;
+  if (!root) return true;
+  let m = document.getElementById('__lindoVerifyMask');
+  if (!m) {{
+    m = document.createElement('div');
+    m.id = '__lindoVerifyMask';
+    root.appendChild(m);
+  }}
+  m.style.cssText = 'position:fixed!important;inset:0!important;z-index:2147483647!important;display:flex!important;align-items:center!important;justify-content:center!important;background:{bg}!important;color:{fg}!important;font:500 13.5px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;pointer-events:auto!important;';
+  m.textContent = {msg_json};
+  return true;
+}})()"#
+                    )
+                } else {
+                    r#"(() => {
+  const m = document.getElementById('__lindoVerifyMask');
+  if (m) m.style.display = 'none';
+  return true;
+})()"#
+                        .to_string()
+                };
+                let _ = wv.eval(js);
+            }
+            Ok(json!({}))
+        }
         _ => Err(format!("Unsupported bridge command: {method}")),
     }
 }

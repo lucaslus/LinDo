@@ -8,8 +8,10 @@ internal enum class WebPagePurpose { LOGIN, VERIFICATION, BROWSE }
 internal fun webPagePurpose(url: String): WebPagePurpose {
     val uri = runCatching { URI(url) }.getOrNull() ?: return WebPagePurpose.BROWSE
     if (uri.scheme != "https" || !uri.host.equals("linux.do", true)) return WebPagePurpose.BROWSE
-    if (uri.fragment == "lindo-verify") return WebPagePurpose.VERIFICATION
     val path = uri.path.orEmpty()
+    if (uri.fragment == "lindo-verify" || path == "/challenge" || path.startsWith("/challenge/")) {
+        return WebPagePurpose.VERIFICATION
+    }
     return if (path == "/login" || path.startsWith("/login/") ||
         path.startsWith("/session/otp/") || path.startsWith("/user-api-key/")) {
         WebPagePurpose.LOGIN

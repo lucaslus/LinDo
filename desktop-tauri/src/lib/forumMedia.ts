@@ -98,12 +98,10 @@ export function fetchForumMediaBlobUrl(rawUrl: string): Promise<string | null> {
       ) {
         return null;
       }
-      const binStr = atob(payload.dataBase64);
-      const bytes = new Uint8Array(binStr.length);
-      for (let i = 0; i < binStr.length; i++) {
-        bytes[i] = binStr.charCodeAt(i);
-      }
-      const blob = new Blob([bytes], { type: payload.contentType || "image/png" });
+      const mime = payload.contentType || "image/png";
+      // Off-main-thread native C++ base64 decode via `fetch(data:...)` instead of synchronous JS `atob` + multi-million charCodeAt loop
+      const dataResp = await fetch(`data:${mime};base64,${payload.dataBase64}`);
+      const blob = await dataResp.blob();
       const blobUrl = URL.createObjectURL(blob);
       putCachedForumMediaBlobUrl(cleanUrl, blobUrl);
       return blobUrl;

@@ -1,37 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import {
-  ArrowLeft,
-  BookmarkSimple,
-  DotsThree,
-  Sparkle,
-  Heart,
-  Smiley,
-  LinkSimple,
-  Quotes,
-  ArrowBendUpLeft,
-  PencilSimple,
-  RocketLaunch,
-  User,
-  Bell,
-  ArrowSquareOut,
-  CaretRight,
-  CaretDown,
-  CaretUp,
-  PaperPlaneRight,
-  Trash,
-  Check,
-  ShieldCheck,
-  CheckCircle,
-  ChartBar,
-  ChatCircle,
-  Lock,
-  AppleLogo,
-  PushPin,
-  Archive,
-  Flag,
-  X,
-} from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  LinDoCategoryBadge,
+  LinDoIcons,
+  LinDoTopicTagChip,
+} from "./LinDoIcons";
 import type {
   ComposerLaunchRequest,
   GrantedBadge,
@@ -46,6 +19,7 @@ import {
   archivePrivateMessage,
   deletePostBoost,
   deletePostFloor,
+  fetchPostByNumber,
   fetchPostReplies,
   fetchPostsByIds,
   fetchTopicAiSummary,
@@ -63,11 +37,12 @@ import {
 import {
   classifyExternalUrl,
   type ExternalUrlAssessment,
+  extractPostReplyPreview,
   parseInternalTopicLink,
   prepareCookedHtml,
   rememberTrustedExternalHost,
 } from "../lib/cooked";
-import { observeCookedForumImages } from "../lib/forumMedia";
+import { observeCookedForumImages, useForumImageSrc } from "../lib/forumMedia";
 import {
   computeBoostStats,
   formatCompactCount,
@@ -98,6 +73,8 @@ interface TopicReaderPaneProps {
   currentUser: UserProfile | null;
   confirmedReadFloor?: number;
   showBackButton: boolean;
+  feedCollapsed?: boolean;
+  onToggleFeedCollapse?: () => void;
   hideQuickReplyBar?: boolean;
   emptyPlaceholderText?: string;
   onBack: () => void;
@@ -198,6 +175,45 @@ const NOTIFICATION_LEVELS: Array<{ level: number; label: string; desc: string }>
   { level: 0, label: "免扰", desc: "屏蔽此话题通知" },
 ];
 
+const ReplyThumbPreview = React.memo<{
+  url: string;
+  onOpenLightbox: (src: string) => void;
+}>(({ url, onOpenLightbox }) => {
+  const src = useForumImageSrc(url);
+  if (!src) return null;
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      title="点击预览原楼配图"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpenLightbox(url);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          onOpenLightbox(url);
+        }
+      }}
+      className="ml-2 h-9 w-9 shrink-0 overflow-hidden rounded-lg transition-transform hover:scale-[1.04] cursor-zoom-in"
+      style={{
+        backgroundColor: "var(--subtle-surface)",
+        border: "0.5px solid var(--hairline)",
+      }}
+    >
+      <img
+        src={src}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        className="h-full w-full object-cover"
+      />
+    </span>
+  );
+});
+
 /**
  * Memoized post HTML body so scrolling, visible-floor updates, or quote popovers NEVER re-run
  * `prepareCookedHtml` or `dangerouslySetInnerHTML`, keeping native text selection 100% intact & 120fps smooth.
@@ -206,8 +222,9 @@ const MemoizedCookedBody = React.memo<{
   rawHtml: string;
   stripPolls: boolean;
   onCookedClick: (e: React.MouseEvent<HTMLDivElement>) => void;
+  className?: string;
 }>(
-  ({ rawHtml, stripPolls, onCookedClick }) => {
+  ({ rawHtml, stripPolls, onCookedClick, className = "lindo-cooked mt-3" }) => {
     const bodyRef = useRef<HTMLDivElement | null>(null);
     const sanitized = useMemo(
       () => prepareCookedHtml(rawHtml, { stripPolls }),
@@ -219,13 +236,16 @@ const MemoizedCookedBody = React.memo<{
     return (
       <div
         ref={bodyRef}
-        className="lindo-cooked mt-3"
+        className={className}
         onClick={onCookedClick}
         dangerouslySetInnerHTML={{ __html: sanitized }}
       />
     );
   },
-  (prev, next) => prev.rawHtml === next.rawHtml && prev.stripPolls === next.stripPolls
+  (prev, next) =>
+    prev.rawHtml === next.rawHtml &&
+    prev.stripPolls === next.stripPolls &&
+    prev.className === next.className
 );
 
 export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
@@ -240,6 +260,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   currentUser,
   confirmedReadFloor = 0,
   showBackButton,
+  feedCollapsed = false,
+  onToggleFeedCollapse,
   hideQuickReplyBar = false,
   emptyPlaceholderText = "选择左侧话题开始阅读",
   onBack,
@@ -272,7 +294,11 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   const [loadingMoreBottom, setLoadingMoreBottom] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [activeReactionPickerPostId, setActiveReactionPickerPostId] = useState<number | null>(null);
+  const [hoverReactionPostId, setHoverReactionPostId] = useState<number | null>(null);
+  const [activeFloorMorePostId, setActiveFloorMorePostId] = useState<number | null>(null);
+  const reactionHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [activeBoostComposerPostId, setActiveBoostComposerPostId] = useState<number | null>(null);
+  const [boostEmojiOpen, setBoostEmojiOpen] = useState(false);
   const [boostDraftText, setBoostDraftText] = useState("");
   const [boostSubmitting, setBoostSubmitting] = useState(false);
   const [expandedBoostId, setExpandedBoostId] = useState<number | null>(null);
@@ -284,6 +310,16 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     useState<ExternalUrlAssessment | null>(null);
   const [expandedRepliesMap, setExpandedRepliesMap] = useState<Record<number, PostItemModel[]>>({});
   const [loadingRepliesPostId, setLoadingRepliesPostId] = useState<number | null>(null);
+  const [resolvedParentMap, setResolvedParentMap] = useState<Record<number, PostItemModel>>({});
+  const [loadingParentFloors, setLoadingParentFloors] = useState<Set<number>>(() => new Set());
+  const [expandedParentPreviewIds, setExpandedParentPreviewIds] = useState<Set<number>>(
+    () => new Set()
+  );
+  const [returnFloor, setReturnFloor] = useState<number | null>(null);
+  const attemptedParentFloorsRef = useRef<Set<number>>(new Set());
+  const jumpToFloorRef = useRef<(floorNum: number, returnFromFloor?: number, clearReturn?: boolean) => void>(
+    () => {}
+  );
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [locallyViewedFloors, setLocallyViewedFloors] = useState<Set<number>>(() => new Set());
   const locallyViewedRef = useRef<Set<number>>(new Set());
@@ -299,6 +335,122 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     }
     return map;
   }, [detail?.posts]);
+
+  const postsByFloor = useMemo(() => {
+    const map = new Map<number, PostItemModel>();
+    for (const [fStr, p] of Object.entries(resolvedParentMap)) {
+      const f = Number(fStr);
+      if (f > 0 && p) map.set(f, p);
+    }
+    for (const p of detail?.posts ?? []) {
+      if (p.postNumber > 0) map.set(p.postNumber, p);
+    }
+    return map;
+  }, [detail?.posts, resolvedParentMap]);
+
+  const directChildRepliesByFloor = useMemo(() => {
+    const map = new Map<number, PostItemModel[]>();
+    for (const p of detail?.posts ?? []) {
+      if (p.replyToPostNumber && p.replyToPostNumber > 0 && !p.isDeletedTombstone && !p.isSmallAction) {
+        const arr = map.get(p.replyToPostNumber) ?? [];
+        arr.push(p);
+        map.set(p.replyToPostNumber, arr);
+      }
+    }
+    return map;
+  }, [detail?.posts]);
+
+  // Automatically resolve any unloaded parent `replyToPostNumber` floors in a single background batch
+  // so every reply floor on PC always shows the parent floor's core content snippet!
+  useEffect(() => {
+    if (!detail || detail.posts.length === 0) return;
+    const loadedSet = new Set<number>();
+    for (const p of detail.posts) loadedSet.add(p.postNumber);
+    for (const k of Object.keys(resolvedParentMap)) loadedSet.add(Number(k));
+
+    const missingFloors: number[] = [];
+    for (const p of detail.posts) {
+      const rf = p.replyToPostNumber;
+      if (
+        rf &&
+        rf > 0 &&
+        !loadedSet.has(rf) &&
+        !attemptedParentFloorsRef.current.has(rf)
+      ) {
+        attemptedParentFloorsRef.current.add(rf);
+        missingFloors.push(rf);
+      }
+    }
+    if (missingFloors.length === 0) return;
+
+    let cancelled = false;
+    setLoadingParentFloors((prev) => {
+      const next = new Set(prev);
+      missingFloors.forEach((f) => next.add(f));
+      return next;
+    });
+
+    const candidateIds = Array.from(
+      new Set(
+        missingFloors
+          .map((f) => detail.streamIds[f - 1])
+          .filter((id): id is number => Boolean(id && id > 0))
+      )
+    ).slice(0, 20);
+
+    (async () => {
+      const resolvedBatch = new Map<number, PostItemModel>();
+      try {
+        if (candidateIds.length > 0) {
+          const fetched = await fetchPostsByIds(
+            detail.id,
+            candidateIds,
+            knownAuthorBadges,
+            detail.lastReadPostNumber,
+            true
+          );
+          for (const item of fetched) {
+            if (item.postNumber > 0) resolvedBatch.set(item.postNumber, item);
+          }
+        }
+        const stillMissing = missingFloors
+          .filter((f) => !resolvedBatch.has(f))
+          .slice(0, 4);
+        if (stillMissing.length > 0) {
+          const singles = await Promise.all(
+            stillMissing.map((f) =>
+              fetchPostByNumber(detail.id, f, knownAuthorBadges).catch(() => null)
+            )
+          );
+          for (const s of singles) {
+            if (s && s.postNumber > 0) resolvedBatch.set(s.postNumber, s);
+          }
+        }
+      } catch {
+        // ignore background parent preview errors
+      } finally {
+        if (cancelled) return;
+        if (resolvedBatch.size > 0) {
+          setResolvedParentMap((prev) => {
+            const next = { ...prev };
+            resolvedBatch.forEach((val, floor) => {
+              next[floor] = val;
+            });
+            return next;
+          });
+        }
+        setLoadingParentFloors((prev) => {
+          const next = new Set(prev);
+          missingFloors.forEach((f) => next.delete(f));
+          return next;
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detail?.id, detail?.posts, detail?.streamIds, knownAuthorBadges, resolvedParentMap]);
 
   // Floating selection "引用并回复" state
   const [selectionQuote, setSelectionQuote] = useState<{
@@ -322,6 +474,22 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   const handleCookedClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target as HTMLElement;
+      const quoteJumpBtn = target.closest<HTMLButtonElement>("[data-quote-jump-floor]");
+      if (quoteJumpBtn) {
+        e.preventDefault();
+        const targetPostNum = Number(quoteJumpBtn.getAttribute("data-quote-jump-floor") || 0);
+        const quoteTopicId = Number(quoteJumpBtn.getAttribute("data-quote-jump-topic") || 0);
+        const currentArticle = target.closest<HTMLElement>("[data-floor]");
+        const fromFloor = Number(currentArticle?.getAttribute("data-floor") || 0) || undefined;
+        if (targetPostNum > 0) {
+          if (quoteTopicId > 0 && summary?.id && quoteTopicId !== summary.id) {
+            onNavigateTopicLink(quoteTopicId, targetPostNum);
+          } else {
+            jumpToFloorRef.current(targetPostNum, fromFloor);
+          }
+        }
+        return;
+      }
       const copyBtn = target.closest<HTMLButtonElement>("[data-copy-code]");
       if (copyBtn) {
         e.preventDefault();
@@ -399,7 +567,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         setPendingExternalLink(assessment);
       }
     },
-    [onOpenImageLightbox, onInspectUser, onNavigateTopicLink, onOpenInAppUrl]
+      [onOpenImageLightbox, onInspectUser, onNavigateTopicLink, onOpenInAppUrl, summary?.id]
   );
 
   useEffect(() => {
@@ -409,10 +577,40 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     setAiSummaryText(null);
     setFloorNavOpen(false);
     setSelectionQuote(null);
+    setActiveReactionPickerPostId(null);
+    setHoverReactionPostId(null);
+    setActiveFloorMorePostId(null);
     setExpandedRepliesMap({});
+    setResolvedParentMap({});
+    setLoadingParentFloors(new Set());
+    setExpandedParentPreviewIds(new Set());
+    setReturnFloor(null);
+    attemptedParentFloorsRef.current = new Set();
     locallyViewedRef.current = new Set();
     setLocallyViewedFloors(new Set());
   }, [summary?.id]);
+
+  useEffect(() => {
+    if (activeFloorMorePostId === null && activeReactionPickerPostId === null) return;
+    const onDocDown = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest("[data-floor-popover]")) return;
+      setActiveFloorMorePostId(null);
+      setActiveReactionPickerPostId(null);
+    };
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") {
+        setActiveFloorMorePostId(null);
+        setActiveReactionPickerPostId(null);
+      }
+    };
+    document.addEventListener("mousedown", onDocDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [activeFloorMorePostId, activeReactionPickerPostId]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -700,8 +898,17 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     };
   }, [summary?.id]);
 
-  const jumpToFloor = async (floorNum: number) => {
+  const jumpToFloor = async (
+    floorNum: number,
+    returnFromFloor?: number,
+    clearReturn = false
+  ) => {
     if (!detail) return;
+    if (clearReturn) {
+      setReturnFloor(null);
+    } else if (returnFromFloor && returnFromFloor > 0 && returnFromFloor !== floorNum) {
+      setReturnFloor(returnFromFloor);
+    }
     const container = scrollContainerRef.current;
     const existing = container?.querySelector<HTMLElement>(`[data-floor="${floorNum}"]`);
     if (existing) {
@@ -738,6 +945,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       }
     }
   };
+  jumpToFloorRef.current = jumpToFloor;
 
   const missingEarlierIds = useMemo(() => {
     if (!detail || detail.posts.length === 0 || onlyOpFilter) return [];
@@ -783,12 +991,28 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       });
       return;
     }
+    const localDirect = directChildRepliesByFloor.get(post.postNumber) ?? [];
+    if (localDirect.length > 0 && localDirect.length >= post.replyCount) {
+      setExpandedRepliesMap((prev) => ({ ...prev, [post.id]: localDirect }));
+      return;
+    }
+    if (localDirect.length > 0) {
+      setExpandedRepliesMap((prev) => ({ ...prev, [post.id]: localDirect }));
+    }
     setLoadingRepliesPostId(post.id);
     try {
       const replies = await fetchPostReplies(post.id, summary.id);
-      setExpandedRepliesMap((prev) => ({ ...prev, [post.id]: replies }));
+      const mergedMap = new Map<number, PostItemModel>();
+      for (const r of localDirect) mergedMap.set(r.id, r);
+      for (const r of replies) mergedMap.set(r.id, r);
+      const merged = Array.from(mergedMap.values()).sort(
+        (a, b) => a.postNumber - b.postNumber
+      );
+      setExpandedRepliesMap((prev) => ({ ...prev, [post.id]: merged }));
     } catch (err: any) {
-      setToastMsg(err?.message || "加载回复列表失败");
+      if (localDirect.length === 0) {
+        setToastMsg(err?.message || "加载回复列表失败");
+      }
     } finally {
       setLoadingRepliesPostId(null);
     }
@@ -830,31 +1054,69 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       className="relative flex h-full flex-1 flex-col min-w-0"
       style={{ backgroundColor: "var(--canvas)" }}
     >
-      {/* 1. 阅读器沉浸式顶栏（仅顶栏 50px 响应窗口拖拽，绝不干扰正文拖拽与截图） */}
+      {/* 1. 阅读器轻量面包屑顶栏（去掉生硬「话题」二字，展示分类面包屑与 #ID；仅顶栏 48px 响应窗口拖拽） */}
       <header
         onMouseDown={handleTitlebarMouseDown}
-        className="lindo-hairline-b flex h-[50px] shrink-0 items-center justify-between px-4"
-        style={{ backgroundColor: "var(--card-surface)" }}
+        className="flex h-[48px] shrink-0 items-center justify-between px-6"
+        style={{
+          backgroundColor: "var(--canvas)",
+          borderBottom: "0.5px solid var(--hairline-soft)",
+        }}
       >
         <div className="flex min-w-0 items-center gap-2">
           {showBackButton && (
             <button
               type="button"
               onClick={onBack}
-              className="lindo-no-drag lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
+              className="lindo-no-drag lindo-interactive -ml-1.5 flex h-8 w-8 items-center justify-center rounded-full"
               style={{ color: "var(--ink-primary)" }}
             >
-              <ArrowLeft size={18} />
+              <LinDoIcons.ArrowLeft size={18} />
             </button>
           )}
-          <span className="text-[14.5px] font-semibold" style={{ color: "var(--ink-primary)" }}>
-            话题
+
+          {detail?.archetype === "private_message" ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-1.5 text-[12.5px] font-medium"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              <LinDoIcons.Mail size={13.5} />
+              <span>私信</span>
+            </span>
+          ) : detail?.categoryName || summary.categoryName ? (
+            <LinDoCategoryBadge
+              name={detail?.categoryName || summary.categoryName}
+              fallbackColor={catVis.dotColor}
+              iconSize={12.5}
+              className="text-[12.5px]"
+            />
+          ) : (
+            <span
+              className="text-[12.5px] font-medium"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              话题
+            </span>
+          )}
+
+          <span
+            className="text-[12px] opacity-40 select-none"
+            style={{ color: "var(--ink-tertiary)" }}
+          >
+            /
           </span>
+          <span
+            className="text-[12.2px] tabular-nums"
+            style={{ color: "var(--ink-tertiary)" }}
+          >
+            #{summary.id}
+          </span>
+
           {onlyOpFilter && (
             <button
               type="button"
               onClick={onToggleOnlyOp}
-              className="lindo-no-drag rounded-full px-2 py-0.5 text-[11px] font-semibold cursor-pointer"
+              className="lindo-no-drag ml-1 rounded-full px-2 py-0.5 text-[11px] font-semibold cursor-pointer"
               style={{
                 backgroundColor: "var(--active-chip-bg)",
                 color: "var(--active-chip-text)",
@@ -867,19 +1129,19 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             <button
               type="button"
               onClick={() => jumpToFloor(detail.acceptedAnswerPostNumber!)}
-              className="lindo-no-drag inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold cursor-pointer"
+              className="lindo-no-drag ml-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold cursor-pointer"
               style={{
                 backgroundColor: "rgba(16, 185, 129, 0.14)",
                 color: "#10B981",
               }}
             >
-              <CheckCircle size={12} weight="fill" />
+              <LinDoIcons.CheckCircleFilled size={12} />
               <span>已解答 · #{detail.acceptedAnswerPostNumber}</span>
             </button>
           )}
         </div>
 
-        <div className="lindo-no-drag flex items-center gap-1">
+        <div className="lindo-no-drag flex items-center gap-1.5">
           {detail?.hasSummary && (
             <button
               type="button"
@@ -899,12 +1161,14 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 }
               }}
               title="AI 总结"
-              className="lindo-interactive flex h-8 items-center gap-1 rounded-full px-2.5 text-[12.5px] font-medium"
+              className="lindo-interactive flex h-[30px] items-center gap-1.5 rounded-full px-3 text-[12.2px] font-medium"
               style={{
+                backgroundColor: aiSummaryOpen ? "var(--active-chip-bg)" : "var(--subtle-surface)",
+                border: "0.5px solid var(--hairline)",
                 color: aiSummaryOpen ? "var(--brand-gold)" : "var(--ink-secondary)",
               }}
             >
-              <Sparkle size={15} weight={aiSummaryOpen ? "fill" : "regular"} />
+              <LinDoIcons.Sparkles size={14} style={{ color: "var(--brand-gold)" }} />
               <span>总结</span>
             </button>
           )}
@@ -929,24 +1193,28 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               }
             }}
             title="收藏主帖"
-            className="lindo-interactive flex h-9 w-9 items-center justify-center rounded-full"
+            className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
             style={{
               color: firstPost?.bookmarked ? "var(--brand-gold)" : "var(--ink-secondary)",
             }}
           >
-            <BookmarkSimple size={18.5} weight={firstPost?.bookmarked ? "fill" : "regular"} />
+            {firstPost?.bookmarked ? (
+              <LinDoIcons.BookmarkFilled size={17.5} />
+            ) : (
+              <LinDoIcons.Bookmark size={17.5} />
+            )}
           </button>
 
           <button
             type="button"
             onClick={() => setMoreMenuOpen((v) => !v)}
             title="更多操作"
-            className="lindo-interactive flex h-9 w-9 items-center justify-center rounded-full"
+            className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
             style={{
               color: moreMenuOpen ? "var(--brand-gold)" : "var(--ink-secondary)",
             }}
           >
-            <DotsThree size={21} weight="bold" />
+            <LinDoIcons.MoreHoriz size={18.5} />
           </button>
         </div>
       </header>
@@ -966,7 +1234,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             className="lindo-interactive flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1"
             style={{ color: onlyOpFilter ? "var(--brand-gold)" : "var(--ink-primary)" }}
           >
-            <User size={14} />
+            <LinDoIcons.User size={14} />
             <span>{onlyOpFilter ? "查看全部楼层" : "只看楼主"}</span>
           </button>
 
@@ -993,9 +1261,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     : "var(--ink-primary)",
               }}
             >
-              <Bell size={14} />
+              <LinDoIcons.Bell size={14} />
               <span>订阅：{currentNotifLabel}</span>
-              <CaretDown size={11} />
+              <LinDoIcons.ChevronDown size={11.5} />
             </button>
           </div>
 
@@ -1050,7 +1318,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               className="lindo-interactive flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1"
               style={{ color: "var(--ink-primary)" }}
             >
-              {detail.archived ? <ArrowBendUpLeft size={14} /> : <Archive size={14} />}
+              {detail.archived ? <LinDoIcons.Reply size={14} /> : <LinDoIcons.Archive size={14} />}
               <span>{detail.archived ? "移回收件箱" : "归档私信"}</span>
             </button>
           )}
@@ -1065,7 +1333,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             className="lindo-interactive flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1"
             style={{ color: copiedLink ? "var(--brand-gold)" : "var(--ink-primary)" }}
           >
-            {copiedLink ? <Check size={14} /> : <LinkSimple size={14} />}
+            {copiedLink ? <LinDoIcons.Check size={14} /> : <LinDoIcons.Link size={14} />}
             <span>{copiedLink ? "已复制链接" : "复制链接"}</span>
           </button>
 
@@ -1078,7 +1346,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             className="lindo-interactive flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1"
             style={{ color: "var(--ink-primary)" }}
           >
-            <ArrowSquareOut size={14} />
+            <LinDoIcons.ExternalLink size={14} />
             <span>浏览器打开</span>
           </button>
 
@@ -1097,19 +1365,23 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         </div>
       )}
 
-      {/* 2. 主阅读滚动视口 */}
+      {/* 2. 主阅读滚动视口（全宽滚轮响应 + 820px 居中舒适阅读版心） */}
       <div
         ref={scrollContainerRef}
         className={`lindo-scroll relative flex-1 min-h-0 ${hideQuickReplyBar ? "pb-12" : "pb-20"}`}
       >
+        <div className="mx-auto w-full max-w-[820px] px-7">
         {/* 话题大标题与元数据区 */}
-        <div className="lindo-hairline-b px-6 pt-5 pb-4">
+        <div
+          className="pt-5 pb-4"
+          style={{ borderBottom: "0.5px solid var(--hairline)" }}
+        >
           <h1
-            className="lindo-selectable select-text text-[20px] font-semibold leading-[1.4]"
+            className="lindo-selectable select-text text-[21px] font-semibold leading-[1.42] tracking-[-0.01em]"
             style={{ color: "var(--ink-primary)" }}
           >
             {(detail?.closed ?? summary.closed) && (
-              <Lock
+              <LinDoIcons.Lock
                 size={16}
                 className="mr-1.5 inline-block align-[-2px]"
                 style={{ color: "var(--ink-tertiary)" }}
@@ -1118,46 +1390,35 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             {detail?.title || summary.title}
           </h1>
 
-          <div className="mt-2.5 flex flex-wrap items-center gap-2">
-            {(detail?.categoryName || summary.categoryName) && (
-              <span
-                className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[12px] font-medium"
-                style={{
-                  backgroundColor: "var(--subtle-surface)",
-                  color: "var(--ink-secondary)",
-                }}
-              >
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: catVis.dotColor }} />
-                <span>{detail?.categoryName || summary.categoryName}</span>
-              </span>
-            )}
-            {(detail?.tags ?? summary.tags).map((tg) => (
-              <span
-                key={tg}
-                className="rounded-md px-2 py-0.5 text-[11.5px] font-medium"
-                style={{
-                  backgroundColor: "var(--tonal-pill)",
-                  color: "var(--ink-secondary)",
-                }}
-              >
-                #{tg}
-              </span>
-            ))}
-          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {(detail?.categoryName || summary.categoryName) && (
+                <LinDoCategoryBadge
+                  name={detail?.categoryName || summary.categoryName}
+                  fallbackColor={catVis.dotColor}
+                  iconSize={12.5}
+                  className="mr-0.5 text-[12.2px]"
+                />
+              )}
+              {(detail?.tags ?? summary.tags).map((tg) => (
+                <LinDoTopicTagChip key={tg} tag={tg} />
+              ))}
+            </div>
 
-          <div
-            className="mt-2.5 flex items-center gap-2 text-[12px] tabular-nums"
-            style={{ color: "var(--ink-tertiary)" }}
-          >
-            <span>{formatCompactCount(detail?.views ?? summary.views)} 次浏览</span>
-            <span>·</span>
-            <span>{Math.max(0, totalFloors - 1)} 条回复</span>
-            {(detail?.likeCount ?? summary.likeCount) > 0 && (
-              <>
-                <span>·</span>
-                <span>{formatCompactCount(detail?.likeCount ?? summary.likeCount)} 次赞</span>
-              </>
-            )}
+            <div
+              className="flex shrink-0 items-center gap-1.5 text-[12px] tabular-nums"
+              style={{ color: "var(--ink-tertiary)" }}
+            >
+              <span>{formatCompactCount(detail?.views ?? summary.views)} 次浏览</span>
+              <span>·</span>
+              <span>{Math.max(0, totalFloors - 1)} 条回复</span>
+              {(detail?.likeCount ?? summary.likeCount) > 0 && (
+                <>
+                  <span>·</span>
+                  <span>{formatCompactCount(detail?.likeCount ?? summary.likeCount)} 次赞</span>
+                </>
+              )}
+            </div>
           </div>
 
           {/* AI 总结卡片 */}
@@ -1173,7 +1434,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold"
                 style={{ color: "var(--brand-gold)" }}
               >
-                <Sparkle size={14} weight="fill" />
+                <LinDoIcons.Sparkles size={14} />
                 <span>AI 话题总结</span>
               </div>
               <p className="whitespace-pre-wrap" style={{ color: "var(--ink-primary)" }}>
@@ -1185,7 +1446,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
         {/* 加载态 / 错误态 / 楼层流 */}
         {isLoading && (!detail || detail.posts.length === 0) ? (
-          <div className="space-y-6 px-6 py-6">
+          <div className="space-y-6 py-6">
             {Array.from({ length: 4 }).map((_, i) => (
               <div key={i} className="space-y-3">
                 <div className="flex items-center gap-3">
@@ -1198,7 +1459,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             ))}
           </div>
         ) : errorMessage && (!detail || detail.posts.length === 0) ? (
-          <div className="flex flex-col items-center justify-center py-20 px-6 text-center">
+          <div className="flex flex-col items-center justify-center py-20 text-center">
             <MascotExpression expression="surprised" sizePx={58} className="mb-3" />
             <p className="text-[13.5px]" style={{ color: "var(--ink-secondary)" }}>
               {errorMessage}
@@ -1219,7 +1480,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           <div>
             {/* 向上加载更早楼层按钮 */}
             {missingEarlierIds.length > 0 && (
-              <div className="lindo-hairline-b px-6 py-2.5">
+              <div className="py-2.5" style={{ borderBottom: "0.5px solid var(--hairline-soft)" }}>
                 <button
                   type="button"
                   onClick={handleLoadEarlier}
@@ -1230,7 +1491,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     color: "var(--active-chip-text)",
                   }}
                 >
-                  <CaretUp size={13} />
+                  <LinDoIcons.ChevronUp size={13} />
                   <span>
                     {loadingEarlier
                       ? "正在加载更早楼层..."
@@ -1240,7 +1501,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               </div>
             )}
 
-            {detail?.posts.map((post) => {
+            {detail?.posts.map((post, postIdx) => {
               const isTargetHighlight = highlightedFloor === post.postNumber;
 
               if (post.isDeletedTombstone) {
@@ -1248,8 +1509,11 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   <div
                     key={post.id}
                     data-floor={post.postNumber}
-                    className="lindo-hairline-b flex items-center justify-between gap-3 px-6 py-3 text-[12.5px]"
-                    style={{ color: "var(--ink-tertiary)" }}
+                    className="flex items-center justify-between gap-3 py-3 text-[12.5px]"
+                    style={{
+                      color: "var(--ink-tertiary)",
+                      borderBottom: "0.5px solid var(--hairline-soft)",
+                    }}
                   >
                     <div className="flex min-w-0 items-center gap-2">
                       <AvatarWithFlair
@@ -1272,19 +1536,19 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               if (post.isSmallAction) {
                 const actCode = (post.actionCode || "").toLowerCase();
                 const smallIcon = actCode.includes("close") || actCode.includes("open") ? (
-                  <Lock size={13.5} />
+                  <LinDoIcons.Lock size={13.5} />
                 ) : actCode.includes("pin") || actCode.includes("banner") ? (
-                  <PushPin size={13.5} />
+                  <LinDoIcons.Pin size={13.5} />
                 ) : actCode.includes("archive") ? (
-                  <Archive size={13.5} />
+                  <LinDoIcons.Archive size={13.5} />
                 ) : (
-                  <Bell size={13.5} />
+                  <LinDoIcons.Bell size={13.5} />
                 );
                 return (
                   <div
                     key={post.id}
                     data-floor={post.postNumber}
-                    className="lindo-hairline-b flex items-center justify-between gap-3 px-6 py-2.5 text-[12.5px]"
+                    className="my-1 flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[12.5px]"
                     style={{
                       backgroundColor: "color-mix(in srgb, var(--subtle-surface) 45%, transparent)",
                       color: "var(--ink-secondary)",
@@ -1348,6 +1612,45 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                       post.canDelete
                   ));
               const inlineReplies = expandedRepliesMap[post.id];
+              const localChildReplies = directChildRepliesByFloor.get(post.postNumber) ?? [];
+              const effectiveReplyCount = Math.max(post.replyCount, localChildReplies.length);
+              const targetReplyFloor =
+                post.replyToPostNumber && post.replyToPostNumber > 0 ? post.replyToPostNumber : null;
+              const repliedPost = targetReplyFloor ? postsByFloor.get(targetReplyFloor) : undefined;
+              const selfPreviewMeta = targetReplyFloor
+                ? extractPostReplyPreview(post.id, post.cookedHtml)
+                : null;
+              const alreadyQuotedSameFloor = Boolean(
+                targetReplyFloor &&
+                  selfPreviewMeta?.leadingQuotedFloor === targetReplyFloor &&
+                  (!selfPreviewMeta.leadingQuotedTopicId ||
+                    selfPreviewMeta.leadingQuotedTopicId === summary.id)
+              );
+              const parentPreviewMeta = repliedPost
+                ? extractPostReplyPreview(repliedPost.id, repliedPost.cookedHtml)
+                : null;
+              const isParentPreviewLoading = Boolean(
+                targetReplyFloor && !repliedPost && loadingParentFloors.has(targetReplyFloor)
+              );
+              const isParentExpanded = expandedParentPreviewIds.has(post.id);
+              const canExpandParent = Boolean(
+                repliedPost &&
+                  (parentPreviewMeta?.isLongOrRich ||
+                    (alreadyQuotedSameFloor && repliedPost.cookedHtml.length > 0))
+              );
+              const targetReplyUsername =
+                repliedPost?.username || post.replyToUsername || "";
+              const targetReplyDisplayName =
+                repliedPost?.displayName?.trim() ||
+                post.replyToDisplayName?.trim() ||
+                targetReplyUsername;
+              const targetReplyAvatar =
+                repliedPost?.avatarTemplate || post.replyToAvatarTemplate || "";
+              const targetReplyIsOp = Boolean(
+                targetReplyUsername &&
+                  detail.opUsername &&
+                  targetReplyUsername.toLowerCase() === detail.opUsername.toLowerCase()
+              );
               const boostStats =
                 activeBoostComposerPostId === post.id ? computeBoostStats(boostDraftText) : null;
 
@@ -1363,30 +1666,49 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     onRefresh();
                   }
                   setBoostDraftText("");
+                  setBoostEmojiOpen(false);
                   setActiveBoostComposerPostId(null);
                 } catch (err: any) {
-                  if (err instanceof SiteError && err.isVerification) onTriggerVerify();
-                  else setToastMsg(err?.message || "助力发送失败");
+                  if (err instanceof SiteError && err.isVerification) {
+                    onTriggerVerify();
+                  } else if (err instanceof SiteError && err.isAuthRequired) {
+                    onRequestGuestLogin(
+                      "登录状态已过期，请重新登录",
+                      "重新登录 LINUX DO 账号后即可继续发送助力与互动"
+                    );
+                  } else {
+                    setToastMsg(err?.message || "助力发送失败");
+                  }
                 } finally {
                   setBoostSubmitting(false);
                 }
               };
 
+              const isReplyFloor = post.postNumber > 1;
+              const isLastRenderedPost = postIdx === (detail?.posts.length ?? 1) - 1;
+
               return (
+                <React.Fragment key={post.id}>
                 <article
-                  key={post.id}
                   data-floor={post.postNumber}
-                  className={`lindo-hairline-b px-6 py-5 ${
-                    isTargetHighlight ? "transition-colors duration-700" : ""
-                  }`}
-                  style={{
-                    backgroundColor: isTargetHighlight
-                      ? "color-mix(in srgb, var(--brand-gold) 10%, transparent)"
-                      : "transparent",
-                  }}
+                  className={`${
+                    isReplyFloor
+                      ? "group/floor lindo-reply-floor -mx-3 rounded-xl px-3 py-[18px]"
+                      : "py-5"
+                  } ${
+                    Math.abs(post.postNumber - currentVisibleFloor) > 3 ? "lindo-offscreen-floor " : ""
+                  }${isTargetHighlight ? "transition-colors duration-700" : ""}`}
+                  style={
+                    isTargetHighlight
+                      ? {
+                          backgroundColor:
+                            "color-mix(in srgb, var(--brand-gold) 10%, transparent)",
+                        }
+                      : undefined
+                  }
                 >
-                  {/* 楼层作者双层头部（1:1 对齐移动端：头像+Flair / 第一行昵称+作者徽章+状态+楼主+时间楼层 / 第二行 @账号+头衔+Apple机型+首次解锁徽章+生辰纪念日） */}
-                  <div className="flex items-start gap-3">
+                  {/* 楼层作者双层头部（38px 头像 + 14px 间距 = 52px 黄金左轴） */}
+                  <div className="flex items-start gap-[14px]">
                     <button
                       type="button"
                       onClick={() => onInspectUser(post.username)}
@@ -1417,9 +1739,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
                           {(post.isAdmin || post.isModerator || post.isGroupModerator) && (
                             <span title={post.isAdmin ? "管理员" : "版主"}>
-                              <ShieldCheck
-                                size={14}
-                                weight="fill"
+                              <LinDoIcons.FaShieldHalved
+                                size={13}
                                 style={{
                                   color:
                                     post.isAdmin || post.isModerator
@@ -1475,7 +1796,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                 color: "#10B981",
                               }}
                             >
-                              <CheckCircle size={11.5} weight="fill" />
+                              <LinDoIcons.CheckCircleFilled size={11.5} />
                               <span>最佳解答</span>
                             </span>
                           )}
@@ -1543,7 +1864,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                               {(showDistinctHandle || post.userTitle) && (
                                 <span className="mr-0.5 opacity-60">·</span>
                               )}
-                              <AppleLogo size={12.5} weight="fill" className="shrink-0" />
+                              <LinDoIcons.AppleLogo size={12.5} className="shrink-0" />
                               <span>{post.iosDeviceName}</span>
                             </span>
                           )}
@@ -1595,34 +1916,140 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     </div>
                   </div>
 
-                  {/* 回复目标楼层跳转条 */}
-                  {post.replyToPostNumber && post.replyToPostNumber > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => jumpToFloor(post.replyToPostNumber!)}
-                      className="lindo-interactive mt-2.5 flex w-full items-center justify-between rounded-r-lg border-l-2 pl-2.5 pr-2 py-1 text-left text-[12px]"
+                  {/* 回帖双列同轴容器：主帖(#1)享受全宽 764px 版心，回帖(#2+)严格沿 52px 左轴与昵称对齐 */}
+                  <div className={isReplyFloor ? "pl-[52px]" : ""}>
+                  {/* 回复目标楼层上下文预览卡片（对齐移动端原楼摘要 + PC 宽屏双行核心内容、配图缩略图、原位展开全文与跳转返回） */}
+                  {targetReplyFloor && (
+                    <div
+                      onClick={() => {
+                        if (!isParentExpanded) {
+                          void jumpToFloor(targetReplyFloor, post.postNumber);
+                        }
+                      }}
+                      role={isParentExpanded ? undefined : "button"}
+                      tabIndex={isParentExpanded ? undefined : 0}
+                      onKeyDown={(e) => {
+                        if (!isParentExpanded && (e.key === "Enter" || e.key === " ")) {
+                          e.preventDefault();
+                          void jumpToFloor(targetReplyFloor, post.postNumber);
+                        }
+                      }}
+                      className={`mt-2.5 rounded-r-xl border-l-[2.5px] pl-3 pr-2.5 py-2 transition-colors ${
+                        isParentExpanded ? "" : "lindo-interactive cursor-pointer"
+                      }`}
                       style={{
-                        borderColor: "var(--brand-gold)",
-                        backgroundColor: "color-mix(in srgb, var(--subtle-surface) 70%, transparent)",
-                        color: "var(--ink-secondary)",
+                        borderLeftColor: "color-mix(in srgb, var(--brand-gold) 72%, var(--hairline))",
+                        backgroundColor: "color-mix(in srgb, var(--subtle-surface) 52%, transparent)",
                       }}
                     >
-                      <span className="flex items-center gap-1.5 truncate">
-                        <img
-                          src={resolveAvatarUrl(post.replyToAvatarTemplate, 96)}
-                          alt=""
-                          className="h-4 w-4 rounded-full object-cover"
+                      <div className="flex items-center justify-between gap-2 text-[12px]">
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <AvatarWithFlair
+                            username={targetReplyUsername || "linuxdo"}
+                            avatarTemplate={targetReplyAvatar}
+                            animatedAvatar={repliedPost?.animatedAvatar}
+                            primaryGroupName={repliedPost?.primaryGroupName}
+                            flair={repliedPost?.flair}
+                            sizePx={20}
+                            className="shrink-0"
+                          />
+                          <span className="shrink-0" style={{ color: "var(--ink-tertiary)" }}>
+                            回复
+                          </span>
+                          <span
+                            className="truncate font-semibold"
+                            style={{ color: "var(--ink-primary)" }}
+                          >
+                            {targetReplyDisplayName}
+                          </span>
+                          {targetReplyIsOp && (
+                            <span
+                              className="shrink-0 rounded px-1 py-[0.5px] text-[10px] font-semibold"
+                              style={{
+                                backgroundColor: "var(--active-chip-bg)",
+                                color: "var(--brand-gold)",
+                              }}
+                            >
+                              楼主
+                            </span>
+                          )}
+                          <span
+                            className="shrink-0 tabular-nums"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            · #{targetReplyFloor} 楼
+                          </span>
+                        </div>
+
+                        <div className="flex shrink-0 items-center gap-1">
+                          {canExpandParent && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedParentPreviewIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(post.id)) next.delete(post.id);
+                                  else next.add(post.id);
+                                  return next;
+                                });
+                              }}
+                              className="lindo-interactive inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11.2px] font-medium"
+                              style={{ color: "var(--ink-secondary)" }}
+                            >
+                              <span>{isParentExpanded ? "收起原楼" : "展开原楼"}</span>
+                              {isParentExpanded ? (
+                                <LinDoIcons.ChevronUp size={11} />
+                              ) : (
+                                <LinDoIcons.ChevronDown size={11} />
+                              )}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void jumpToFloor(targetReplyFloor, post.postNumber);
+                            }}
+                            title={`定位至 #${targetReplyFloor} 楼`}
+                            className="lindo-interactive inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11.2px] tabular-nums"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            {isParentExpanded && <span>跳转</span>}
+                            <LinDoIcons.ChevronRight size={11.5} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {isParentExpanded && repliedPost ? (
+                        <MemoizedCookedBody
+                          rawHtml={repliedPost.cookedHtml}
+                          stripPolls={false}
+                          onCookedClick={handleCookedClick}
+                          className="lindo-cooked lindo-hairline-t mt-2 pt-2 text-[13.8px]"
                         />
-                        <span>回复</span>
-                        <span className="font-medium" style={{ color: "var(--ink-primary)" }}>
-                          {post.replyToDisplayName || post.replyToUsername || ""}
-                        </span>
-                        <span style={{ color: "var(--ink-tertiary)" }}>
-                          · #{post.replyToPostNumber} 楼
-                        </span>
-                      </span>
-                      <CaretRight size={12} style={{ color: "var(--ink-tertiary)" }} />
-                    </button>
+                      ) : !alreadyQuotedSameFloor &&
+                        (parentPreviewMeta?.snippet ||
+                          parentPreviewMeta?.firstImageUrl ||
+                          isParentPreviewLoading) ? (
+                        <div className="mt-1 flex items-center justify-between gap-2 pl-[26px]">
+                          <p
+                            className="min-w-0 flex-1 line-clamp-2 text-[13px] leading-[1.55]"
+                            style={{ color: "var(--ink-secondary)" }}
+                          >
+                            {isParentPreviewLoading
+                              ? "正在加载原楼内容…"
+                              : parentPreviewMeta?.snippet || "[图片]"}
+                          </p>
+                          {parentPreviewMeta?.firstImageUrl && (
+                            <ReplyThumbPreview
+                              url={parentPreviewMeta.firstImageUrl}
+                              onOpenLightbox={onOpenImageLightbox}
+                            />
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
                   )}
 
                   {/* 正文富文本渲染（独立 Memo 隔离，滚动与悬浮引用绝不触发重绘与选区闪烁） */}
@@ -1742,7 +2169,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                 className="ml-0.5 inline-flex items-center gap-0.5 rounded-full px-1 py-0.5 text-[10.5px] opacity-75 hover:opacity-100 cursor-pointer"
                                 style={{ color: "#EF4444" }}
                               >
-                                <Trash size={11.5} />
+                                <LinDoIcons.Trash size={11.5} />
                                 {isBoostExpanded && <span>删除</span>}
                               </button>
                             )}
@@ -1752,117 +2179,161 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     </div>
                   )}
 
-                  {/* 双层小火箭助力面板（第一行全宽表情+快捷短语，第二行宽敞输入框+字数/表情校验+发送） */}
-                  {activeBoostComposerPostId === post.id && boostStats && (
-                    <div
-                      className="mt-3 rounded-2xl p-2.5 space-y-2"
-                      style={{
-                        backgroundColor: "var(--subtle-surface)",
-                        border: "0.5px solid var(--hairline)",
-                      }}
-                    >
-                      {/* 第一行：全部放到上一行的丰富表情矩阵 + 一键快捷助力短语 */}
-                      <div className="flex flex-wrap items-center justify-between gap-y-1.5 gap-x-2 pb-1.5 lindo-hairline-b">
-                        <div className="flex flex-wrap items-center gap-0.5">
-                          {BOOST_QUICK_EMOJIS.map((em) => (
-                            <button
-                              key={em}
-                              type="button"
-                              disabled={!boostStats.canAddEmoji}
-                              onClick={() =>
-                                setBoostDraftText((prev) => `${prev}${em}`)
-                              }
-                              className="flex h-7 w-7 items-center justify-center rounded-lg text-[15px] transition-transform hover:scale-115 hover:bg-white/5 disabled:opacity-35 cursor-pointer"
-                            >
-                              {em}
-                            </button>
-                          ))}
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-1">
-                          {BOOST_QUICK_PHRASES.map((phrase) => (
-                            <button
-                              key={phrase}
-                              type="button"
-                              onClick={() => setBoostDraftText(phrase)}
-                              className="lindo-interactive rounded-full px-2 py-0.5 text-[11px] font-medium"
-                              style={{
-                                backgroundColor: "var(--card-surface)",
-                                border: "0.5px solid var(--hairline)",
-                                color: "var(--ink-secondary)",
-                              }}
-                            >
-                              {phrase}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* 第二行：全宽输入框 + 精确可见长度/表情上限提示 + 发送 + 关闭 */}
-                      <div className="flex items-center gap-2 pl-1.5 pr-0.5">
-                        <input
-                          type="text"
-                          autoFocus
-                          value={boostDraftText}
-                          onChange={(e) => setBoostDraftText(e.target.value)}
-                          placeholder={`给 @${post.username} 助力一句（最多 16 字 / 5 个表情）...`}
-                          className="flex-1 bg-transparent text-[13px] outline-none"
-                          style={{ color: "var(--ink-primary)" }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.preventDefault();
-                              submitBoostNow(boostDraftText);
-                            } else if (e.key === "Escape") {
-                              setActiveBoostComposerPostId(null);
-                            }
-                          }}
-                        />
-
-                        {boostStats.exceedsEmojiLimit && (
-                          <span className="shrink-0 text-[11px] font-medium" style={{ color: "#EF4444" }}>
-                            最多 5 个表情
-                          </span>
+                  {/* 独立极简「小火箭 Boost」单行输入条（1:1 对齐移动端：默认仅单行清爽输入 + 左侧纯矢量表情按钮按需展开抽屉） */}
+                  {activeBoostComposerPostId === post.id && boostStats && (() => {
+                    const counterOverLimit =
+                      boostStats.exceedsLength || boostStats.exceedsEmojiLimit;
+                    const canSendNow = boostStats.canSubmit && !boostSubmitting;
+                    return (
+                      <div className="mt-3 space-y-1.5">
+                        {counterOverLimit && (
+                          <div className="px-1 text-[11.8px] font-medium" style={{ color: "#EF4444" }}>
+                            {boostStats.exceedsEmojiLimit
+                              ? `最多添加 ${boostStats.maxEmojiCount} 个表情`
+                              : `最多输入 ${boostStats.maxVisibleLength} 个字符`}
+                          </div>
                         )}
 
-                        <span
-                          className="shrink-0 text-[11.5px] tabular-nums"
+                        <div
+                          className="flex h-[38px] items-center gap-1.5 rounded-[10px] px-1.5"
                           style={{
-                            color:
-                              boostStats.exceedsLength || boostStats.exceedsEmojiLimit
-                                ? "#EF4444"
-                                : "var(--ink-tertiary)",
+                            backgroundColor: "var(--subtle-surface)",
+                            border: counterOverLimit
+                              ? "0.6px solid #EF4444"
+                              : "0.5px solid var(--hairline)",
                           }}
                         >
-                          {boostStats.visibleLength}/{boostStats.maxVisibleLength}
-                        </span>
+                          {/* 左侧：纯矢量表情与快捷短语抽屉切换按钮 */}
+                          <button
+                            type="button"
+                            title={boostEmojiOpen ? "收起表情与快捷短语" : "选择表情或快捷短语"}
+                            onClick={() => setBoostEmojiOpen((v) => !v)}
+                            className="lindo-interactive flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg"
+                            style={{
+                              backgroundColor: boostEmojiOpen
+                                ? "var(--active-chip-bg)"
+                                : "transparent",
+                              color: boostEmojiOpen
+                                ? "var(--brand-gold)"
+                                : "var(--ink-secondary)",
+                            }}
+                          >
+                            <LinDoIcons.Smile size={17} />
+                          </button>
 
-                        <button
-                          type="button"
-                          disabled={!boostStats.canSubmit || boostSubmitting}
-                          onClick={() => submitBoostNow(boostDraftText)}
-                          title="发送助力"
-                          className="flex h-7 px-2.5 items-center justify-center gap-1 rounded-full text-[11.5px] font-semibold cursor-pointer disabled:opacity-40"
-                          style={{
-                            backgroundColor: "var(--publish-btn-bg)",
-                            color: "var(--publish-btn-fg)",
-                          }}
-                        >
-                          <PaperPlaneRight size={12.5} weight="fill" />
-                          <span>助力</span>
-                        </button>
+                          <input
+                            type="text"
+                            autoFocus
+                            value={boostDraftText}
+                            onChange={(e) =>
+                              setBoostDraftText(e.target.value.replace(/\n/g, " "))
+                            }
+                            placeholder={`给 @${post.username} 助力…`}
+                            className="flex-1 bg-transparent px-1 text-[13px] outline-none"
+                            style={{ color: "var(--ink-primary)" }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                submitBoostNow(boostDraftText);
+                              } else if (e.key === "Escape") {
+                                setBoostEmojiOpen(false);
+                                setActiveBoostComposerPostId(null);
+                              }
+                            }}
+                          />
 
-                        <button
-                          type="button"
-                          title="收起助力面板"
-                          onClick={() => setActiveBoostComposerPostId(null)}
-                          className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-                          style={{ color: "var(--ink-tertiary)" }}
-                        >
-                          <X size={13.5} />
-                        </button>
+                          {/* 右侧：精简字数提示 + 纯矢量发送图标 + 关闭按钮 */}
+                          <span
+                            className="shrink-0 text-[11.8px] tabular-nums"
+                            style={{
+                              fontWeight: counterOverLimit ? 600 : 500,
+                              color: counterOverLimit ? "#EF4444" : "var(--ink-tertiary)",
+                            }}
+                          >
+                            {boostStats.visibleLength}/{boostStats.maxVisibleLength}
+                          </span>
+
+                          <button
+                            type="button"
+                            disabled={!canSendNow}
+                            onClick={() => submitBoostNow(boostDraftText)}
+                            title="发送小火箭助力"
+                            className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg transition-colors cursor-pointer disabled:cursor-default"
+                            style={{
+                              backgroundColor: canSendNow
+                                ? "var(--active-chip-bg)"
+                                : "transparent",
+                              color: canSendNow
+                                ? "var(--brand-gold)"
+                                : "color-mix(in srgb, var(--ink-tertiary) 45%, transparent)",
+                            }}
+                          >
+                            <LinDoIcons.Send size={15.5} />
+                          </button>
+
+                          <button
+                            type="button"
+                            title="收起小火箭助力"
+                            onClick={() => {
+                              setBoostEmojiOpen(false);
+                              setActiveBoostComposerPostId(null);
+                            }}
+                            className="lindo-interactive flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            <LinDoIcons.Close size={13.5} />
+                          </button>
+                        </div>
+
+                        {/* 按需展开的表情与快捷短语抽屉（默认隐藏，保持阅读流极度整洁） */}
+                        {boostEmojiOpen && (
+                          <div
+                            className="rounded-xl p-2.5 space-y-2"
+                            style={{
+                              backgroundColor: "var(--subtle-surface)",
+                              border: "0.5px solid var(--hairline-soft)",
+                            }}
+                          >
+                            <div className="flex flex-wrap items-center gap-1">
+                              {BOOST_QUICK_PHRASES.map((phrase) => (
+                                <button
+                                  key={phrase}
+                                  type="button"
+                                  onClick={() => setBoostDraftText(phrase)}
+                                  className="lindo-interactive rounded-full px-2.5 py-0.5 text-[11.2px] font-medium"
+                                  style={{
+                                    backgroundColor: "var(--canvas)",
+                                    border: "0.5px solid var(--hairline)",
+                                    color: "var(--ink-secondary)",
+                                  }}
+                                >
+                                  {phrase}
+                                </button>
+                              ))}
+                            </div>
+                            <div
+                              className="flex flex-wrap items-center gap-0.5 pt-1.5"
+                              style={{ borderTop: "0.5px solid var(--hairline-soft)" }}
+                            >
+                              {BOOST_QUICK_EMOJIS.map((em) => (
+                                <button
+                                  key={em}
+                                  type="button"
+                                  disabled={!boostStats.canAddEmoji}
+                                  onClick={() =>
+                                    setBoostDraftText((prev) => `${prev}${em}`)
+                                  }
+                                  className="flex h-7 w-7 items-center justify-center rounded-lg text-[15px] transition-transform hover:scale-115 hover:bg-white/5 disabled:opacity-35 cursor-pointer"
+                                >
+                                  {em}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* 底部操作栏：表情胶囊 + 展开子回复 + 点赞/表情/小火箭/收藏/采纳/编辑/删除/回复 */}
                   <div className="relative mt-3.5 flex flex-wrap items-center justify-between gap-2">
@@ -1920,394 +2391,741 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                         );
                       })}
 
-                      {/* 展开 N 条关联回复按钮 */}
-                      {post.replyCount > 0 && (
+                      {/* 展开 N 条关联回复按钮（1:1 对齐移动端柔和无框设计） */}
+                      {effectiveReplyCount > 0 && (
                         <button
                           type="button"
                           onClick={() => handleToggleInlineReplies(post)}
-                          className="lindo-interactive inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11.8px] font-medium"
-                          style={{ color: "var(--ink-secondary)" }}
+                          className="lindo-interactive inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[12.2px] font-medium"
+                          style={{
+                            color: inlineReplies ? "var(--brand-gold)" : "var(--ink-secondary)",
+                          }}
                         >
-                          <ChatCircle size={13} />
                           <span>
-                            {loadingRepliesPostId === post.id
+                            {loadingRepliesPostId === post.id && !inlineReplies
                               ? "加载中..."
                               : inlineReplies
-                                ? `收起 ${post.replyCount} 条回复`
-                                : `${post.replyCount} 条回复`}
+                                ? "收起回复"
+                                : `${effectiveReplyCount} 条回复`}
                           </span>
-                          {inlineReplies ? <CaretUp size={11} /> : <CaretDown size={11} />}
+                          {inlineReplies ? (
+                            <LinDoIcons.ChevronUp size={12.5} />
+                          ) : (
+                            <LinDoIcons.ChevronDown size={12.5} />
+                          )}
                         </button>
                       )}
                     </div>
 
-                    <div
-                      className="flex items-center gap-0.5"
-                      style={{ color: "var(--ink-secondary)" }}
-                    >
-                      {/* 点赞 */}
-                      <button
-                        type="button"
-                        title="点赞"
-                        onClick={async () => {
-                          if (!isAuthorized) {
-                            onRequestGuestLogin("登录后点赞", "登录后可为喜欢的回复送出赞同");
-                            return;
-                          }
-                          try {
-                            const updated = await togglePostReaction(post.id, "heart");
-                            if (updated) onAppendPosts([updated], "after");
-                          } catch (err: any) {
-                            if (err instanceof SiteError && err.isVerification) onTriggerVerify();
-                            else setToastMsg(err?.message || "点赞未完成");
-                          }
-                        }}
-                        className="lindo-interactive flex h-7 items-center gap-1 rounded-full px-2 text-[12px] tabular-nums"
-                        style={{
-                          color: post.liked ? "#F43F5E" : "var(--ink-secondary)",
-                        }}
-                      >
-                        <Heart size={15} weight={post.liked ? "fill" : "regular"} />
-                        {post.likeCount > 0 && post.reactions.length === 0 && (
-                          <span>{post.likeCount}</span>
-                        )}
-                      </button>
+                    {/* 右侧：1:1 对齐移动端克制 4 键布局（♡ 点赞/悬停表态 · 🚀 小火箭助力[本人隐藏] · ⋯ 更多操作 · ↩ 回复） */}
+                    {(() => {
+                      const isOwnPost = Boolean(
+                        currentUser?.username &&
+                          post.username.toLowerCase() === currentUser.username.toLowerCase()
+                      );
+                      const myBoost = currentUser?.username
+                        ? post.boosts.find(
+                            (b) => b.username.toLowerCase() === currentUser.username.toLowerCase()
+                          )
+                        : undefined;
+                      const activeReactionId =
+                        post.currentUserReaction || (post.liked ? "heart" : null);
+                      const showReactionBar =
+                        !isOwnPost &&
+                        (activeReactionPickerPostId === post.id ||
+                          hoverReactionPostId === post.id);
+                      const isMoreOpen = activeFloorMorePostId === post.id;
+                      const forceFloorActionsVisible =
+                        !isReplyFloor ||
+                        activeBoostComposerPostId === post.id ||
+                        isMoreOpen ||
+                        showReactionBar ||
+                        copiedFloorId === post.id;
+                      const quietSecondaryCls = forceFloorActionsVisible
+                        ? ""
+                        : "opacity-0 group-hover/floor:opacity-100 focus-visible:opacity-100 transition-opacity duration-150";
+                      const quietPrimaryCls = forceFloorActionsVisible
+                        ? ""
+                        : "opacity-55 group-hover/floor:opacity-100 focus-visible:opacity-100 transition-opacity duration-150";
 
-                      {/* 表情回应选择器 */}
-                      <div className="relative">
-                        <button
-                          type="button"
-                          title="表情回应"
-                          onClick={() => {
-                            if (!isAuthorized) {
-                              onRequestGuestLogin(
-                                "登录后发送表情回应",
-                                "登录后可使用全部社区表情回应"
-                              );
-                              return;
-                            }
-                            setActiveReactionPickerPostId((prev) =>
-                              prev === post.id ? null : post.id
-                            );
-                          }}
-                          className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-                        >
-                          <Smiley size={15.5} />
-                        </button>
-                        {activeReactionPickerPostId === post.id && (
-                          <div
-                            className="absolute bottom-8 right-0 z-30 flex items-center gap-1 rounded-full px-2.5 py-1 shadow-xl"
-                            style={{
-                              backgroundColor: "var(--subtle-surface)",
-                              border: "0.5px solid var(--hairline)",
-                            }}
-                          >
-                            {REACTION_CHOICES.map((rc) => (
-                              <button
-                                key={rc.id}
-                                type="button"
-                                title={rc.label}
-                                onClick={async () => {
-                                  setActiveReactionPickerPostId(null);
-                                  try {
-                                    const updated = await togglePostReaction(post.id, rc.id);
-                                    if (updated) onAppendPosts([updated], "after");
-                                  } catch (err: any) {
-                                    if (err instanceof SiteError && err.isVerification)
-                                      onTriggerVerify();
-                                    else setToastMsg(err?.message || "回应未成功");
-                                  }
-                                }}
-                                className="rounded-full p-1 text-[15px] transition-transform hover:scale-125 cursor-pointer"
-                              >
-                                {rc.emoji}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* 小火箭助力按钮 */}
-                      <button
-                        type="button"
-                        title="发送小火箭助力"
-                        onClick={() => {
-                          if (!isAuthorized) {
-                            onRequestGuestLogin(
-                              "登录后发送小火箭助力",
-                              "用一句话或表情为这层回复助力"
-                            );
-                            return;
-                          }
-                          setActiveBoostComposerPostId((prev) =>
-                            prev === post.id ? null : post.id
-                          );
-                          setBoostDraftText("");
-                        }}
-                        className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-                        style={{
-                          color:
-                            activeBoostComposerPostId === post.id
-                              ? "var(--brand-gold)"
-                              : "var(--ink-secondary)",
-                        }}
-                      >
-                        <RocketLaunch size={15} />
-                      </button>
-
-                      {/* 收藏当前楼层书签 */}
-                      {post.postNumber > 1 && (
-                        <button
-                          type="button"
-                          title={post.bookmarked ? "取消收藏本楼" : "收藏本楼"}
-                          onClick={async () => {
-                            if (!isAuthorized) {
-                              onRequestGuestLogin("登录后收藏回复", "可在我的书签随时直达该楼层");
-                              return;
-                            }
-                            try {
-                              const nextId = await togglePostBookmark(post.id, post.bookmarkId);
-                              onAppendPosts(
-                                [{ ...post, bookmarked: Boolean(nextId), bookmarkId: nextId }],
-                                "after"
-                              );
-                              setToastMsg(nextId ? "已收藏该楼层" : "已移除书签");
-                            } catch (e: any) {
-                              setToastMsg(e?.message || "书签操作失败");
-                            }
-                          }}
-                          className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-                          style={{
-                            color: post.bookmarked ? "var(--brand-gold)" : "var(--ink-secondary)",
-                          }}
-                        >
-                          <BookmarkSimple
-                            size={14.5}
-                            weight={post.bookmarked ? "fill" : "regular"}
-                          />
-                        </button>
-                      )}
-
-                      {/* 采纳最佳解答 */}
-                      {post.canAcceptAnswer && post.postNumber > 1 && (
-                        <button
-                          type="button"
-                          title={post.acceptedAnswer ? "取消采纳解答" : "采纳为最佳解答"}
-                          onClick={async () => {
-                            try {
-                              await acceptPostSolution(post.id, !post.acceptedAnswer);
-                              setToastMsg(post.acceptedAnswer ? "已取消采纳" : "已采纳为最佳解答");
-                              onRefresh();
-                            } catch (e: any) {
-                              setToastMsg(e?.message || "操作失败");
-                            }
-                          }}
-                          className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-                          style={{
-                            color: post.acceptedAnswer ? "#10B981" : "var(--ink-secondary)",
-                          }}
-                        >
-                          <CheckCircle size={15} weight={post.acceptedAnswer ? "fill" : "regular"} />
-                        </button>
-                      )}
-
-                      {/* 复制楼层链接 */}
-                      <button
-                        type="button"
-                        title="复制本楼链接"
-                        onClick={() => {
-                          navigator.clipboard.writeText(
-                            `https://linux.do/t/topic/${summary.id}/${post.postNumber}`
-                          );
-                          setCopiedFloorId(post.id);
-                          setTimeout(() => setCopiedFloorId(null), 1500);
-                        }}
-                        className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-                        style={{
-                          color:
-                            copiedFloorId === post.id
-                              ? "var(--brand-gold)"
-                              : "var(--ink-secondary)",
-                        }}
-                      >
-                        {copiedFloorId === post.id ? (
-                          <Check size={14} />
-                        ) : (
-                          <LinkSimple size={15} />
-                        )}
-                      </button>
-
-                      {/* 引用回复 */}
-                      <button
-                        type="button"
-                        title="引用本楼回复"
-                        onClick={() => {
-                          if (!isAuthorized) {
-                            onRequestGuestLogin("登录后回复话题", "登录后可引用楼层参与讨论");
-                            return;
-                          }
-                          const plain = post.cookedHtml
+                      const quoteThisFloor = () => {
+                        if (!isAuthorized) {
+                          onRequestGuestLogin("登录后回复话题", "登录后可引用楼层参与讨论");
+                          return;
+                        }
+                        const capturedSel =
+                          selectionQuote?.post.id === post.id ? selectionQuote.text : null;
+                        if (capturedSel) {
+                          setSelectionQuote(null);
+                          window.getSelection()?.removeAllRanges();
+                        }
+                        const plain =
+                          capturedSel ||
+                          extractPostReplyPreview(post.id, post.cookedHtml).snippet.slice(0, 180) ||
+                          post.cookedHtml
                             .replace(/<[^>]+>/g, " ")
                             .replace(/\s+/g, " ")
                             .trim()
                             .slice(0, 180);
-                          onOpenComposer({
-                            action: "REPLY",
-                            topicId: summary.id,
-                            topicTitle: detail?.title || summary.title,
-                            replyToPostNumber: post.postNumber,
-                            replyToUsername: post.username,
-                            replyToSnippet: plain,
-                            initialRaw: `[quote="${post.username}, post:${post.postNumber}, topic:${summary.id}"]\n${plain}\n[/quote]\n\n`,
-                          });
-                        }}
-                        className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-                      >
-                        <Quotes size={15} />
-                      </button>
+                        onOpenComposer({
+                          action: "REPLY",
+                          topicId: summary.id,
+                          topicTitle: detail?.title || summary.title,
+                          replyToPostNumber: post.postNumber,
+                          replyToUsername: post.username,
+                          replyToSnippet: plain,
+                          initialRaw: `[quote="${post.username}, post:${post.postNumber}, topic:${summary.id}"]\n${plain}\n[/quote]\n\n`,
+                        });
+                      };
 
-                      {/* 编辑本人帖子 */}
-                      {(post.canEdit || post.username === currentUser?.username) && (
-                        <button
-                          type="button"
-                          title="编辑楼层"
-                          onClick={() =>
-                            onOpenComposer({
-                              action: "EDIT",
-                              topicId: summary.id,
-                              topicTitle: detail?.title || summary.title,
-                              postId: post.id,
-                              postNumber: post.postNumber,
-                              initialCategoryId: detail?.categoryId ?? summary.categoryId,
-                              initialTitle:
-                                post.postNumber === 1
-                                  ? detail?.title || summary.title
-                                  : undefined,
-                              initialTags:
-                                post.postNumber === 1
-                                  ? detail?.tags || summary.tags
-                                  : undefined,
-                            })
-                          }
-                          className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
+                      const toggleBookmarkFloor = async () => {
+                        if (!isAuthorized) {
+                          onRequestGuestLogin("登录后收藏回复", "可在我的书签随时直达该楼层");
+                          return;
+                        }
+                        try {
+                          const nextId = await togglePostBookmark(post.id, post.bookmarkId);
+                          onAppendPosts(
+                            [{ ...post, bookmarked: Boolean(nextId), bookmarkId: nextId }],
+                            "after"
+                          );
+                          setToastMsg(nextId ? "已收藏该楼层" : "已移除书签");
+                        } catch (e: any) {
+                          setToastMsg(e?.message || "书签操作失败");
+                        }
+                      };
+
+                      return (
+                        <div
+                          className="flex items-center gap-0.5"
+                          style={{ color: "var(--ink-secondary)" }}
                         >
-                          <PencilSimple size={15} />
-                        </button>
-                      )}
+                          {/* 1. 点赞 / 悬停展开表情表态栏（本人楼层不触发自赞，对齐移动端） */}
+                          <div
+                            data-floor-popover="true"
+                            className="relative"
+                            onMouseEnter={() => {
+                              if (isOwnPost || !isAuthorized) return;
+                              if (reactionHoverTimerRef.current) {
+                                clearTimeout(reactionHoverTimerRef.current);
+                              }
+                              reactionHoverTimerRef.current = setTimeout(() => {
+                                setHoverReactionPostId(post.id);
+                              }, 240);
+                            }}
+                            onMouseLeave={() => {
+                              if (reactionHoverTimerRef.current) {
+                                clearTimeout(reactionHoverTimerRef.current);
+                              }
+                              reactionHoverTimerRef.current = setTimeout(() => {
+                                setHoverReactionPostId((prev) =>
+                                  prev === post.id ? null : prev
+                                );
+                              }, 200);
+                            }}
+                          >
+                            <button
+                              type="button"
+                              title={
+                                isOwnPost
+                                  ? "自己的发言"
+                                  : activeReactionId
+                                    ? "取消表态（悬停可切换表情）"
+                                    : "点赞（悬停可选择表情回应）"
+                              }
+                              onClick={async () => {
+                                if (isOwnPost) return;
+                                if (!isAuthorized) {
+                                  onRequestGuestLogin(
+                                    "登录后点赞",
+                                    "登录后可为喜欢的回复送出赞同或表情回应"
+                                  );
+                                  return;
+                                }
+                                setActiveReactionPickerPostId(null);
+                                setHoverReactionPostId(null);
+                                const targetReaction = activeReactionId || "heart";
+                                try {
+                                  const updated = await togglePostReaction(
+                                    post.id,
+                                    targetReaction
+                                  );
+                                  if (updated) onAppendPosts([updated], "after");
+                                } catch (err: any) {
+                                  if (err instanceof SiteError && err.isVerification)
+                                    onTriggerVerify();
+                                  else setToastMsg(err?.message || "点赞未完成");
+                                }
+                              }}
+                              className={`flex h-8 items-center gap-1 rounded-full px-2 text-[12px] tabular-nums ${
+                                isOwnPost
+                                  ? "cursor-default opacity-55"
+                                  : `lindo-interactive cursor-pointer ${
+                                      activeReactionId || post.liked ? "" : quietPrimaryCls
+                                    }`
+                              }`}
+                              style={{
+                                color:
+                                  activeReactionId === "heart" || post.liked
+                                    ? "#E11D48"
+                                    : showReactionBar
+                                      ? "var(--brand-gold)"
+                                      : "var(--ink-secondary)",
+                              }}
+                            >
+                              {activeReactionId && activeReactionId !== "heart" ? (
+                                <span className="text-[15px] leading-none">
+                                  {REACTION_EMOJI_MAP[activeReactionId] || "❤️"}
+                                </span>
+                              ) : activeReactionId === "heart" || post.liked ? (
+                                <LinDoIcons.HeartFilled size={16.5} />
+                              ) : (
+                                <LinDoIcons.Heart size={16.5} />
+                              )}
+                              {post.likeCount > 0 && post.reactions.length === 0 && (
+                                <span>{post.likeCount}</span>
+                              )}
+                            </button>
 
-                      {/* 删除本人回复楼层 */}
-                      {canDeleteThisFloor && (
-                        <button
-                          type="button"
-                          title="删除回复"
-                          onClick={() => setDeletingPost(post)}
-                          className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-                        >
-                          <Trash size={14.5} />
-                        </button>
-                      )}
+                            {showReactionBar && (
+                              <div
+                                className="absolute bottom-9 right-0 z-30 flex items-center gap-1 rounded-full px-2.5 py-1 shadow-xl"
+                                style={{
+                                  backgroundColor: "var(--subtle-surface)",
+                                  border: "0.5px solid var(--hairline)",
+                                }}
+                              >
+                                {REACTION_CHOICES.map((rc) => (
+                                  <button
+                                    key={rc.id}
+                                    type="button"
+                                    title={rc.label}
+                                    onClick={async () => {
+                                      setActiveReactionPickerPostId(null);
+                                      setHoverReactionPostId(null);
+                                      try {
+                                        const updated = await togglePostReaction(post.id, rc.id);
+                                        if (updated) onAppendPosts([updated], "after");
+                                      } catch (err: any) {
+                                        if (err instanceof SiteError && err.isVerification)
+                                          onTriggerVerify();
+                                        else setToastMsg(err?.message || "回应未成功");
+                                      }
+                                    }}
+                                    className="rounded-full p-1 text-[15.5px] transition-transform hover:scale-125 cursor-pointer"
+                                  >
+                                    {rc.emoji}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
 
-                      {/* 举报违规楼层（非本人且未删除楼层） */}
-                      {(!currentUser ||
-                        post.username.toLowerCase() !== currentUser.username.toLowerCase()) &&
-                        !post.isDeletedTombstone &&
-                        !post.isSmallAction && (
+                          {/* 2. 小火箭助力按钮（1:1 对齐移动端：本人帖子自动隐藏） */}
+                          {!isOwnPost && !post.isDeletedTombstone && !post.isSmallAction && (
+                            <button
+                              type="button"
+                              title={myBoost ? "查看我的小火箭助力" : "发送小火箭助力"}
+                              onClick={() => {
+                                if (!isAuthorized) {
+                                  onRequestGuestLogin(
+                                    "登录后发送小火箭助力",
+                                    "用一句话或表情为这层回复助力"
+                                  );
+                                  return;
+                                }
+                                if (myBoost) {
+                                  setExpandedBoostId((prev) =>
+                                    prev === myBoost.id ? null : myBoost.id
+                                  );
+                                } else {
+                                  setBoostEmojiOpen(false);
+                                  setActiveBoostComposerPostId((prev) =>
+                                    prev === post.id ? null : post.id
+                                  );
+                                  setBoostDraftText("");
+                                }
+                              }}
+                              className={`lindo-interactive flex h-8 w-8 items-center justify-center rounded-full ${
+                                myBoost ? "" : quietSecondaryCls
+                              }`}
+                              style={{
+                                color:
+                                  activeBoostComposerPostId === post.id || Boolean(myBoost)
+                                    ? "var(--brand-gold)"
+                                    : "var(--ink-secondary)",
+                              }}
+                            >
+                              <LinDoIcons.BoostRocket size={17} />
+                            </button>
+                          )}
+
+                          {/* 已收藏楼层显性金色书签标识（未收藏时收纳进 ⋯ 菜单，保持 99% 楼层极简清爽） */}
+                          {post.bookmarked && post.postNumber > 1 && (
+                            <button
+                              type="button"
+                              title="已收藏本楼（点击取消收藏）"
+                              onClick={() => void toggleBookmarkFloor()}
+                              className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
+                              style={{ color: "var(--brand-gold)" }}
+                            >
+                              <LinDoIcons.BookmarkFilled size={15.5} />
+                            </button>
+                          )}
+
+                          {/* 3. 更多操作 (`⋯`)：1:1 对齐移动端，收纳表情回应、引用、收藏、复制链接、采纳、编辑、举报与删除 */}
+                          <div data-floor-popover="true" className="relative">
+                            <button
+                              type="button"
+                              title="更多楼层操作"
+                              onClick={() => {
+                                setActiveReactionPickerPostId(null);
+                                setActiveFloorMorePostId((prev) =>
+                                  prev === post.id ? null : post.id
+                                );
+                              }}
+                              className={`lindo-interactive flex h-8 w-8 items-center justify-center rounded-full ${quietSecondaryCls}`}
+                              style={{
+                                color:
+                                  isMoreOpen || copiedFloorId === post.id
+                                    ? "var(--brand-gold)"
+                                    : "var(--ink-secondary)",
+                              }}
+                            >
+                              {copiedFloorId === post.id ? (
+                                <LinDoIcons.Check size={15.5} />
+                              ) : (
+                                <LinDoIcons.MoreHoriz size={17.5} />
+                              )}
+                            </button>
+
+                            {isMoreOpen && (
+                              <div
+                                className="absolute bottom-9 right-0 z-30 w-[164px] rounded-xl p-1.5 shadow-2xl"
+                                style={{
+                                  backgroundColor: "var(--card-surface)",
+                                  border: "0.5px solid var(--hairline)",
+                                }}
+                              >
+                                {!isOwnPost && !post.isDeletedTombstone && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setActiveFloorMorePostId(null);
+                                      if (!isAuthorized) {
+                                        onRequestGuestLogin(
+                                          "登录后发送表情回应",
+                                          "登录后可使用全部社区表情回应"
+                                        );
+                                        return;
+                                      }
+                                      setActiveReactionPickerPostId(post.id);
+                                    }}
+                                    className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                    style={{ color: "var(--ink-primary)" }}
+                                  >
+                                    <LinDoIcons.Smile
+                                      size={15}
+                                      style={{ color: "var(--ink-secondary)" }}
+                                    />
+                                    <span>表情回应</span>
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveFloorMorePostId(null);
+                                    quoteThisFloor();
+                                  }}
+                                  className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                  style={{ color: "var(--ink-primary)" }}
+                                >
+                                  <LinDoIcons.Quote
+                                    size={15}
+                                    style={{ color: "var(--ink-secondary)" }}
+                                  />
+                                  <span>引用本楼</span>
+                                </button>
+
+                                {post.postNumber > 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setActiveFloorMorePostId(null);
+                                      void toggleBookmarkFloor();
+                                    }}
+                                    className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                    style={{ color: "var(--ink-primary)" }}
+                                  >
+                                    {post.bookmarked ? (
+                                      <LinDoIcons.BookmarkFilled
+                                        size={15}
+                                        style={{ color: "var(--brand-gold)" }}
+                                      />
+                                    ) : (
+                                      <LinDoIcons.Bookmark
+                                        size={15}
+                                        style={{ color: "var(--ink-secondary)" }}
+                                      />
+                                    )}
+                                    <span>{post.bookmarked ? "取消收藏" : "收藏本楼"}</span>
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveFloorMorePostId(null);
+                                    navigator.clipboard.writeText(
+                                      `https://linux.do/t/topic/${summary.id}/${post.postNumber}`
+                                    );
+                                    setCopiedFloorId(post.id);
+                                    setTimeout(() => setCopiedFloorId(null), 1500);
+                                  }}
+                                  className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                  style={{ color: "var(--ink-primary)" }}
+                                >
+                                  <LinDoIcons.Link
+                                    size={15}
+                                    style={{ color: "var(--ink-secondary)" }}
+                                  />
+                                  <span>复制链接</span>
+                                </button>
+
+                                {post.canAcceptAnswer && post.postNumber > 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      setActiveFloorMorePostId(null);
+                                      try {
+                                        await acceptPostSolution(post.id, !post.acceptedAnswer);
+                                        setToastMsg(
+                                          post.acceptedAnswer
+                                            ? "已取消采纳"
+                                            : "已采纳为最佳解答"
+                                        );
+                                        onRefresh();
+                                      } catch (e: any) {
+                                        setToastMsg(e?.message || "操作失败");
+                                      }
+                                    }}
+                                    className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                    style={{
+                                      color: post.acceptedAnswer
+                                        ? "#10B981"
+                                        : "var(--ink-primary)",
+                                    }}
+                                  >
+                                    {post.acceptedAnswer ? (
+                                      <LinDoIcons.CheckCircleFilled
+                                        size={15}
+                                        style={{ color: "#10B981" }}
+                                      />
+                                    ) : (
+                                      <LinDoIcons.CheckCircle
+                                        size={15}
+                                        style={{ color: "var(--ink-secondary)" }}
+                                      />
+                                    )}
+                                    <span>
+                                      {post.acceptedAnswer ? "取消采纳解答" : "采纳最佳解答"}
+                                    </span>
+                                  </button>
+                                )}
+
+                                {(post.canEdit || isOwnPost) && post.canEdit && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setActiveFloorMorePostId(null);
+                                      onOpenComposer({
+                                        action: "EDIT",
+                                        topicId: summary.id,
+                                        topicTitle: detail?.title || summary.title,
+                                        postId: post.id,
+                                        postNumber: post.postNumber,
+                                        initialCategoryId:
+                                          detail?.categoryId ?? summary.categoryId,
+                                        initialTitle:
+                                          post.postNumber === 1
+                                            ? detail?.title || summary.title
+                                            : undefined,
+                                        initialTags:
+                                          post.postNumber === 1
+                                            ? detail?.tags || summary.tags
+                                            : undefined,
+                                      });
+                                    }}
+                                    className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                    style={{ color: "var(--ink-primary)" }}
+                                  >
+                                    <LinDoIcons.Edit
+                                      size={15}
+                                      style={{ color: "var(--ink-secondary)" }}
+                                    />
+                                    <span>{post.postNumber === 1 ? "编辑话题" : "编辑回复"}</span>
+                                  </button>
+                                )}
+
+                                {!isOwnPost && !post.isDeletedTombstone && !post.isSmallAction && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setActiveFloorMorePostId(null);
+                                      if (!isAuthorized) {
+                                        onRequestGuestLogin(
+                                          "登录后举报违规发言",
+                                          "登录后可向社区版主反馈垃圾广告或不当内容"
+                                        );
+                                        return;
+                                      }
+                                      setFlaggingPost(post);
+                                    }}
+                                    className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                    style={{ color: "var(--ink-primary)" }}
+                                  >
+                                    <LinDoIcons.Flag
+                                      size={15}
+                                      style={{ color: "var(--ink-secondary)" }}
+                                    />
+                                    <span>举报此楼</span>
+                                  </button>
+                                )}
+
+                                {canDeleteThisFloor && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setActiveFloorMorePostId(null);
+                                      setDeletingPost(post);
+                                    }}
+                                    className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                    style={{ color: "#EF4444" }}
+                                  >
+                                    <LinDoIcons.Trash size={15} style={{ color: "#EF4444" }} />
+                                    <span>删除回复</span>
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* 4. 回复本楼 (`↩` 纯图标，选中正文时自动带引用回复，1:1 对齐移动端) */}
                           <button
                             type="button"
-                            title="举报此楼"
+                            title={
+                              selectionQuote?.post.id === post.id
+                                ? "引用所选内容并回复"
+                                : `回复 #${post.postNumber} 楼`
+                            }
                             onClick={() => {
+                              if (selectionQuote?.post.id === post.id) {
+                                quoteThisFloor();
+                                return;
+                              }
                               if (!isAuthorized) {
                                 onRequestGuestLogin(
-                                  "登录后举报违规发言",
-                                  "登录后可向社区版主反馈垃圾广告或不当内容"
+                                  "登录后参与回复",
+                                  "登录后即可回复楼主或任意楼层"
                                 );
                                 return;
                               }
-                              setFlaggingPost(post);
+                              onOpenComposer({
+                                action: "REPLY",
+                                topicId: summary.id,
+                                topicTitle: detail?.title || summary.title,
+                                replyToPostNumber:
+                                  post.postNumber > 1 ? post.postNumber : undefined,
+                                replyToUsername: post.username,
+                                replyToSnippet: extractPostReplyPreview(
+                                  post.id,
+                                  post.cookedHtml
+                                ).snippet.slice(0, 120),
+                              });
                             }}
-                            className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
+                            className={`lindo-interactive flex h-8 w-8 items-center justify-center rounded-full ${quietPrimaryCls}`}
                           >
-                            <Flag size={14.5} />
+                            <LinDoIcons.Reply size={16.5} />
                           </button>
-                        )}
+                        </div>
+                      );
+                    })()}
+                  </div>
 
-                      {/* 回复此楼 */}
+                  {/* 内联展开的本楼下属回复线程（1:1 对齐移动端：去除沉重灰盒，采用左侧竖向导引线 + AvatarWithFlair + 完整富文本与快捷操作） */}
+                  {inlineReplies && inlineReplies.length > 0 && (
+                    <div
+                      className="mt-3.5 ml-3 border-l-[1.5px] pl-4 space-y-3"
+                      style={{
+                        borderColor: "color-mix(in srgb, var(--ink-tertiary) 28%, var(--hairline))",
+                      }}
+                    >
+                      {inlineReplies.map((rep, rIdx) => {
+                        const repIsOp =
+                          Boolean(detail.opUsername) &&
+                          rep.username.toLowerCase() === detail.opUsername.toLowerCase();
+                        return (
+                          <div
+                            key={rep.id}
+                            className={rIdx > 0 ? "lindo-hairline-t pt-3" : ""}
+                          >
+                            <div className="flex items-start gap-2.5">
+                              <button
+                                type="button"
+                                onClick={() => onInspectUser(rep.username)}
+                                className="mt-0.5 shrink-0 cursor-pointer transition-transform hover:scale-[1.04]"
+                              >
+                                <AvatarWithFlair
+                                  username={rep.username}
+                                  avatarTemplate={rep.avatarTemplate}
+                                  animatedAvatar={rep.animatedAvatar}
+                                  primaryGroupName={rep.primaryGroupName}
+                                  flair={rep.flair}
+                                  sizePx={26}
+                                />
+                              </button>
+
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex min-w-0 items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => onInspectUser(rep.username)}
+                                      className="truncate text-[13px] font-semibold hover:underline cursor-pointer"
+                                      style={{ color: "var(--ink-primary)" }}
+                                    >
+                                      {rep.displayName || rep.username}
+                                    </button>
+                                    {repIsOp && (
+                                      <span
+                                        className="shrink-0 rounded px-1.5 py-[0.5px] text-[10px] font-semibold"
+                                        style={{
+                                          backgroundColor: "var(--active-chip-bg)",
+                                          color: "var(--brand-gold)",
+                                        }}
+                                      >
+                                        楼主
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex shrink-0 items-center gap-1.5 text-[11.5px] tabular-nums">
+                                    <span style={{ color: "var(--ink-tertiary)" }}>
+                                      {formatRelativeTime(rep.createdAt)} · #{rep.postNumber}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!isAuthorized) {
+                                          onRequestGuestLogin(
+                                            "登录后参与回复",
+                                            "登录后即可回复楼主或任意楼层"
+                                          );
+                                          return;
+                                        }
+                                        const repMeta = extractPostReplyPreview(rep.id, rep.cookedHtml);
+                                        onOpenComposer({
+                                          action: "REPLY",
+                                          topicId: summary.id,
+                                          topicTitle: detail?.title || summary.title,
+                                          replyToPostNumber: rep.postNumber,
+                                          replyToUsername: rep.username,
+                                          replyToSnippet: repMeta.snippet.slice(0, 120),
+                                        });
+                                      }}
+                                      className="lindo-interactive rounded px-1.5 py-0.5 text-[11.2px] font-medium"
+                                      style={{ color: "var(--ink-secondary)" }}
+                                    >
+                                      回复
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void jumpToFloor(rep.postNumber, post.postNumber)}
+                                      className="lindo-interactive inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[11.2px] font-medium"
+                                      style={{ color: "var(--brand-gold)" }}
+                                    >
+                                      <span>跳转</span>
+                                      <LinDoIcons.ChevronRight size={11} />
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <MemoizedCookedBody
+                                  rawHtml={rep.cookedHtml}
+                                  stripPolls={false}
+                                  onCookedClick={handleCookedClick}
+                                  className="lindo-cooked mt-1.5 text-[13.6px]"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  </div>
+                </article>
+
+                {isReplyFloor && !isLastRenderedPost && (
+                  <div
+                    className="ml-[52px] h-[0.5px]"
+                    style={{ backgroundColor: "var(--hairline-soft)" }}
+                  />
+                )}
+
+                {post.postNumber === 1 && (totalFloors > 1 || onlyOpFilter) && (
+                  <div
+                    className="flex items-center justify-between py-3"
+                    style={{
+                      borderTop: "0.5px solid var(--hairline)",
+                      borderBottom: "0.5px solid var(--hairline-soft)",
+                    }}
+                  >
+                    <span
+                      className="text-[13px] font-semibold tabular-nums"
+                      style={{ color: "var(--ink-secondary)" }}
+                    >
+                      {onlyOpFilter
+                        ? "楼主发言"
+                        : `${Math.max(0, totalFloors - 1)} 条回复`}
+                    </span>
+                    <div
+                      className="inline-flex items-center rounded-lg p-[2px] text-[11.5px]"
+                      style={{ backgroundColor: "var(--subtle-surface)" }}
+                    >
                       <button
                         type="button"
-                        title={`回复 #${post.postNumber} 楼`}
                         onClick={() => {
-                          if (!isAuthorized) {
-                            onRequestGuestLogin(
-                              "登录后参与回复",
-                              "登录后即可回复楼主或任意楼层"
-                            );
-                            return;
-                          }
-                          onOpenComposer({
-                            action: "REPLY",
-                            topicId: summary.id,
-                            topicTitle: detail?.title || summary.title,
-                            replyToPostNumber: post.postNumber > 1 ? post.postNumber : undefined,
-                            replyToUsername: post.username,
-                            replyToSnippet: post.cookedHtml
-                              .replace(/<[^>]+>/g, " ")
-                              .replace(/\s+/g, " ")
-                              .trim()
-                              .slice(0, 120),
-                          });
+                          if (onlyOpFilter) onToggleOnlyOp();
                         }}
-                        className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
+                        className="rounded-[6px] px-2.5 py-0.5 transition-colors cursor-pointer"
+                        style={{
+                          backgroundColor: !onlyOpFilter ? "var(--canvas)" : "transparent",
+                          color: !onlyOpFilter ? "var(--ink-primary)" : "var(--ink-tertiary)",
+                          fontWeight: !onlyOpFilter ? 600 : 400,
+                        }}
                       >
-                        <ArrowBendUpLeft size={15} />
+                        全部
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!onlyOpFilter) onToggleOnlyOp();
+                        }}
+                        className="rounded-[6px] px-2.5 py-0.5 transition-colors cursor-pointer"
+                        style={{
+                          backgroundColor: onlyOpFilter ? "var(--canvas)" : "transparent",
+                          color: onlyOpFilter ? "var(--brand-gold)" : "var(--ink-tertiary)",
+                          fontWeight: onlyOpFilter ? 600 : 400,
+                        }}
+                      >
+                        只看楼主
                       </button>
                     </div>
                   </div>
-
-                  {/* 内联展开的子回复列表 */}
-                  {inlineReplies && inlineReplies.length > 0 && (
-                    <div
-                      className="mt-3 space-y-2.5 rounded-xl p-3"
-                      style={{
-                        backgroundColor: "var(--subtle-surface)",
-                        border: "0.5px solid var(--hairline)",
-                      }}
-                    >
-                      {inlineReplies.map((rep) => (
-                        <div key={rep.id} className="text-[13px]">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <img
-                                src={resolveAvatarUrl(rep.avatarTemplate, 96)}
-                                alt={rep.username}
-                                className="h-5 w-5 rounded-full object-cover"
-                              />
-                              <span
-                                className="font-semibold"
-                                style={{ color: "var(--ink-primary)" }}
-                              >
-                                {rep.displayName || rep.username}
-                              </span>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => jumpToFloor(rep.postNumber)}
-                              className="text-[11.5px] hover:underline cursor-pointer"
-                              style={{ color: "var(--brand-gold)" }}
-                            >
-                              跳转 #{rep.postNumber} 楼
-                            </button>
-                          </div>
-                          <div
-                            className="lindo-cooked mt-1 pl-7 text-[13px]"
-                            dangerouslySetInnerHTML={{
-                              __html: prepareCookedHtml(rep.cookedHtml),
-                            }}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </article>
+                )}
+                </React.Fragment>
               );
             })}
 
@@ -2321,6 +3139,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             )}
           </div>
         )}
+        </div>
       </div>
 
       {/* 划词悬浮「引用并回复」胶囊 */}
@@ -2358,24 +3177,25 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             }}
             className="flex items-center gap-1.5 text-[12px] font-medium text-white cursor-pointer"
           >
-            <Quotes size={13.5} style={{ color: "#FCD34D" }} weight="fill" />
+            <LinDoIcons.Quote size={13.5} style={{ color: "#FCD34D" }} />
             <span>引用并回复</span>
           </button>
         </div>
       )}
 
-      {/* 底部快捷回复栏 + 楼层进度导航器（抽屉打开时自动隐藏快捷回复条，仅保留悬浮楼层导航胶囊） */}
+      {/* 底部渐隐悬浮快捷回复栏 + 楼层进度导航器（去掉生硬横穿顶线，与侧栏收折耳扣像素级水平平行） */}
       <div
         className={
           hideQuickReplyBar
-            ? "pointer-events-none absolute inset-x-0 bottom-2.5 z-20 flex items-center justify-end px-5"
-            : "lindo-hairline-t absolute inset-x-0 bottom-0 z-20 flex items-center justify-between gap-3 px-5 py-2.5"
+            ? "pointer-events-none absolute inset-x-0 bottom-2.5 z-20 flex items-center justify-end px-6"
+            : "pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-center justify-between gap-3 px-6 py-2.5"
         }
         style={
           hideQuickReplyBar
             ? undefined
             : {
-                backgroundColor: "var(--card-surface)",
+                background:
+                  "linear-gradient(to top, var(--canvas) 74%, color-mix(in srgb, var(--canvas) 82%, transparent) 90%, transparent 100%)",
               }
         }
       >
@@ -2394,20 +3214,35 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 topicTitle: detail?.title || summary.title,
               });
             }}
-            className="flex h-[34px] max-w-[360px] flex-1 items-center gap-2 rounded-full px-4 text-[13px] transition-colors cursor-pointer disabled:opacity-55"
+            className="pointer-events-auto flex h-[34px] max-w-[340px] flex-1 items-center gap-2 rounded-full px-4 text-[13px] transition-colors cursor-pointer disabled:opacity-55"
             style={{
               backgroundColor: "var(--subtle-surface)",
               border: "0.5px solid var(--hairline)",
               color: "var(--ink-tertiary)",
             }}
           >
-            {detail?.closed ? <Lock size={14} /> : <PencilSimple size={14} />}
+            {detail?.closed ? <LinDoIcons.Lock size={14} /> : <LinDoIcons.Edit size={14} />}
             <span>{detail?.closed ? "话题已关闭回复" : "回复话题"}</span>
           </button>
         )}
 
-        {/* 楼层导航胶囊 */}
-        <div className="pointer-events-auto relative">
+        {/* 楼层导航胶囊 + 跨楼层跳转一键返回原楼胶囊 */}
+        <div className="pointer-events-auto relative flex items-center gap-2">
+          {returnFloor !== null && returnFloor !== currentVisibleFloor && (
+            <button
+              type="button"
+              onClick={() => void jumpToFloor(returnFloor, undefined, true)}
+              className="lindo-interactive flex h-[30px] items-center gap-1 rounded-full px-3 text-[12px] font-semibold tabular-nums"
+              style={{
+                backgroundColor: "var(--active-chip-bg)",
+                border: "0.5px solid color-mix(in srgb, var(--brand-gold) 42%, transparent)",
+                color: "var(--active-chip-text)",
+              }}
+            >
+              <LinDoIcons.Reply size={12.5} />
+              <span>返回 #{returnFloor} 楼</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -2417,20 +3252,16 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               setFloorNavOpen((v) => !v);
             }}
             className="lindo-interactive flex h-[30px] items-center gap-1 rounded-full px-3 text-[12px] font-medium tabular-nums"
-            style={
-              hideQuickReplyBar
-                ? {
-                    backgroundColor: "color-mix(in srgb, var(--subtle-surface) 92%, transparent)",
-                    border: "0.5px solid var(--hairline)",
-                    color: "var(--ink-secondary)",
-                  }
-                : { color: "var(--ink-secondary)" }
-            }
+            style={{
+              backgroundColor: "var(--subtle-surface)",
+              border: "0.5px solid var(--hairline)",
+              color: "var(--ink-secondary)",
+            }}
           >
             <span ref={floorBadgeTextRef}>
               {currentVisibleFloor} / {totalFloors} 楼
             </span>
-            <CaretUp size={11.5} />
+            <LinDoIcons.ChevronUp size={12} />
           </button>
 
           {floorNavOpen && (
@@ -2642,7 +3473,7 @@ const InteractivePollCard: React.FC<{
           className="flex items-center gap-1.5 font-semibold"
           style={{ color: "var(--ink-primary)" }}
         >
-          <ChartBar size={15} style={{ color: "var(--brand-gold)" }} />
+          <LinDoIcons.BarChartPoll size={15} style={{ color: "var(--brand-gold)" }} />
           <span>{poll.title || (isMulti ? "多选投票" : "单选投票")}</span>
         </span>
         <span className="text-[11.5px] tabular-nums" style={{ color: "var(--ink-tertiary)" }}>
@@ -2684,7 +3515,7 @@ const InteractivePollCard: React.FC<{
                 style={{ color: "var(--ink-primary)" }}
               >
                 {checked && (
-                  <Check size={13.5} weight="bold" style={{ color: "var(--brand-gold)" }} />
+                  <LinDoIcons.Check size={13.5} style={{ color: "var(--brand-gold)" }} />
                 )}
                 <span dangerouslySetInnerHTML={{ __html: prepareCookedHtml(opt.html) }} />
               </span>
@@ -2867,7 +3698,7 @@ const FlagPostModal: React.FC<{
             className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
             style={{ color: "var(--ink-secondary)" }}
           >
-            <X size={15} />
+            <LinDoIcons.Close size={15} />
           </button>
         </div>
 

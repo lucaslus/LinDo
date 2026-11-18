@@ -63,7 +63,8 @@ internal fun requireMutationObject(response: Pair<Int, String>?): JsonObject {
     val root = rawBody?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
     val rawErrorType = root?.get("error_type")?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
     val errorType = DiscourseErrorType.fromRaw(rawErrorType)
-    val isCfChallenge = errorType != DiscourseErrorType.NOT_LOGGED_IN && looksLikeCloudflareChallenge(rawBody)
+    // HTTP 429 属于限流信号，绝不可误判为站点验证失效而拉起验证页或拉黑健康的 cf_clearance
+    val isCfChallenge = status != 429 && errorType != DiscourseErrorType.NOT_LOGGED_IN && looksLikeCloudflareChallenge(rawBody)
     val isKeyOnlyJson403 = status == 403 &&
         !isCfChallenge &&
         !UserApiKeyAuthManager.hasValidWebSessionCookie() &&
@@ -153,7 +154,7 @@ internal fun readApiObject(response: Pair<Int, String>?): JsonObject {
             else -> emptyList()
         }.joinToString("；").let { if (it.isNotBlank()) org.jsoup.Jsoup.parse(it).text().take(200) else null }
 
-        val isCfChallenge = errorType != DiscourseErrorType.NOT_LOGGED_IN && looksLikeCloudflareChallenge(rawBody)
+        val isCfChallenge = status != 429 && errorType != DiscourseErrorType.NOT_LOGGED_IN && looksLikeCloudflareChallenge(rawBody)
         val isKeyOnlyJson403 = status == 403 &&
             !isCfChallenge &&
             !UserApiKeyAuthManager.hasValidWebSessionCookie() &&

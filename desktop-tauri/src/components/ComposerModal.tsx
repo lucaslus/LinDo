@@ -1,30 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CaretDown,
-  Plus,
-  X,
-  Image as ImageIcon,
-  Smiley,
-  At,
-  LinkSimple,
-  TextB,
-  Code,
-  Quotes,
-  ListBullets,
-  Table,
-  EyeSlash,
-  TextAa,
-  Check,
-  MagnifyingGlass,
-  Lock,
-  ChartBar,
-  Tag,
-  ArrowClockwise,
-  Users,
-  ArrowsOutSimple,
-  ArrowsInSimple,
-  Columns,
-} from "@phosphor-icons/react";
+  LinDoIcons,
+  resolveOfficialCategoryVisual,
+  resolveOfficialTagVisual,
+} from "./LinDoIcons";
 import type {
   CategoryMeta,
   ComposerLaunchRequest,
@@ -790,7 +769,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <X size={16} />
+              <LinDoIcons.Close size={16} />
             </button>
           )}
           <span
@@ -837,7 +816,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                     color: active ? "var(--ink-primary)" : "var(--ink-tertiary)",
                   }}
                 >
-                  {mode.key === "SPLIT" && <Columns size={12.5} />}
+                  {mode.key === "SPLIT" && <LinDoIcons.ColumnsSplit size={12.5} />}
                   <span>{mode.label}</span>
                 </button>
               );
@@ -852,7 +831,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              {isDrawer ? <ArrowsOutSimple size={15} /> : <ArrowsInSimple size={15} />}
+              {isDrawer ? <LinDoIcons.Maximize size={15} /> : <LinDoIcons.Minimize size={15} />}
             </button>
           )}
 
@@ -865,7 +844,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <X size={15} />
+              <LinDoIcons.Close size={15} />
             </button>
           )}
 
@@ -908,42 +887,61 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       {hasMetaControls && (
         <>
           <div className="lindo-hairline-b flex shrink-0 flex-wrap items-center gap-2.5 px-5 py-2.5">
-            {/* 版块选择器触发 */}
-            <button
-              type="button"
-              onClick={() => {
-                setFocusedParentId(activeCategory?.parentId ?? activeCategory?.id ?? 4);
-                setActivePicker((p) => (p === "CATEGORY" ? "NONE" : "CATEGORY"));
-              }}
-              className="lindo-interactive flex items-center gap-1.5 rounded-md px-2 py-1 text-[13.5px] font-semibold"
-              style={{ color: "var(--ink-primary)" }}
-            >
-              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: catVis.dotColor }} />
-              {activeCategory?.readRestricted && (
-                <Lock size={11.5} style={{ color: "var(--ink-secondary)" }} />
-              )}
-              <span>{activeCategory?.displayName || "选择版块"}</span>
-              <CaretDown size={12.5} style={{ color: "var(--ink-secondary)" }} />
-            </button>
+            {/* 版块选择器触发（1:1 对齐移动端 ComposerSheet 官方矢量版块图标） */}
+            {(() => {
+              const activeOffVis = resolveOfficialCategoryVisual(
+                activeCategory?.name || "",
+                catVis.dotColor,
+                undefined,
+                activeCategory?.readRestricted
+              );
+              const ActiveCatIcon = activeOffVis.Icon;
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFocusedParentId(activeCategory?.parentId ?? activeCategory?.id ?? 4);
+                    setActivePicker((p) => (p === "CATEGORY" ? "NONE" : "CATEGORY"));
+                  }}
+                  className="lindo-interactive flex items-center gap-1.5 rounded-md px-2 py-1 text-[13.5px] font-semibold"
+                  style={{ color: "var(--ink-primary)" }}
+                >
+                  <ActiveCatIcon size={13} style={{ color: activeOffVis.color }} />
+                  {activeCategory?.readRestricted && (
+                    <LinDoIcons.FaLock size={10.5} style={{ color: "var(--ink-secondary)" }} />
+                  )}
+                  <span>{activeCategory?.displayName || "选择版块"}</span>
+                  <LinDoIcons.ChevronDown size={12.5} style={{ color: "var(--ink-secondary)" }} />
+                </button>
+              );
+            })()}
 
             <span className="h-3.5 w-[0.5px]" style={{ backgroundColor: "var(--hairline)" }} />
 
-            {/* 已选标签 */}
-            {tags.map((tg) => (
-              <button
-                key={tg}
-                type="button"
-                onClick={() => setTags((prev) => prev.filter((x) => x !== tg))}
-                className="lindo-interactive flex items-center gap-1 rounded-md px-2 py-0.5 text-[12.5px] font-medium"
-                style={{
-                  backgroundColor: "var(--tonal-pill)",
-                  color: "var(--ink-primary)",
-                }}
-              >
-                <span>#{tg}</span>
-                <X size={11} style={{ color: "var(--ink-tertiary)" }} />
-              </button>
-            ))}
+            {/* 已选标签（1:1 对齐移动端官方矢量标签图标） */}
+            {tags.map((tg) => {
+              const tVis = resolveOfficialTagVisual(tg);
+              const TagIcon = tVis ? tVis.Icon : LinDoIcons.FaTag;
+              return (
+                <button
+                  key={tg}
+                  type="button"
+                  onClick={() => setTags((prev) => prev.filter((x) => x !== tg))}
+                  className="lindo-interactive flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[12px] font-medium"
+                  style={{
+                    backgroundColor: "var(--tonal-pill)",
+                    color: "var(--ink-primary)",
+                  }}
+                >
+                  <TagIcon
+                    size={10.5}
+                    style={{ color: tVis ? tVis.color : "var(--ink-tertiary)" }}
+                  />
+                  <span>{tg}</span>
+                  <LinDoIcons.Close size={11} style={{ color: "var(--ink-tertiary)" }} />
+                </button>
+              );
+            })}
 
             {/* 标签触发器胶囊 */}
             <button
@@ -957,7 +955,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                 fontWeight: showTagError ? 600 : 500,
               }}
             >
-              <Plus size={13} />
+              <LinDoIcons.Plus size={13} />
               <span>
                 {showTagError
                   ? tagErrorMsg
@@ -968,7 +966,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
           </div>
 
-          {/* 展开版块 Bento 3 列选择面板（1:1 对齐 ComposerPickers.kt：中文正统名称 + 只展示可发帖版块 + 顶部内联主版块/Lv1-Lv3 切换条） */}
+          {/* 展开版块 Bento 3 列选择面板（1:1 对齐 ComposerPickers.kt：官方矢量图标 + 中文正统名称 + 主版块/Lv1-Lv3 切换条） */}
           {activePicker === "CATEGORY" && (
             <div
               className="lindo-hairline-b shrink-0 px-5 py-3"
@@ -984,7 +982,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   className="lindo-interactive rounded-full p-1"
                   style={{ color: "var(--ink-secondary)" }}
                 >
-                  <X size={15} />
+                  <LinDoIcons.Close size={15} />
                 </button>
               </div>
 
@@ -1021,7 +1019,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                               : "var(--ink-primary)",
                         }}
                       >
-                        {focusedParent.readRestricted && <Lock size={10.5} />}
+                        {focusedParent.readRestricted && <LinDoIcons.FaLock size={10} />}
                         <span>主版块</span>
                       </span>
                       <span
@@ -1055,7 +1053,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                               color: subSelected ? "var(--active-chip-text)" : "var(--ink-primary)",
                             }}
                           >
-                            {(sub.readRestricted || sub.trustLevel != null) && <Lock size={10.5} />}
+                            {(sub.readRestricted || sub.trustLevel != null) && (
+                              <LinDoIcons.FaLock size={10} />
+                            )}
                             <span>{sub.subLabel || sub.name}</span>
                           </span>
                           <span
@@ -1088,6 +1088,13 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                         const activeSub = subs.find((s) => s.id === categoryId);
                         const selected = categoryId === cat.id || Boolean(activeSub);
                         const cv = resolveCategoryVisual(cat.name, cat.colorHex);
+                        const offVis = resolveOfficialCategoryVisual(
+                          cat.name,
+                          cv.dotColor,
+                          undefined,
+                          cat.readRestricted
+                        );
+                        const CatIcon = offVis.Icon;
                         const lvs = subs
                           .map((s) => s.trustLevel)
                           .filter((n): n is number => typeof n === "number")
@@ -1126,12 +1133,12 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                               }}
                             >
                               <span className="flex min-w-0 items-center gap-2">
-                                <span
-                                  className="h-2.5 w-2.5 shrink-0 rounded-full"
-                                  style={{ backgroundColor: cv.dotColor }}
-                                />
+                                <CatIcon size={12.5} style={{ color: offVis.color }} />
                                 {cat.readRestricted && (
-                                  <Lock size={11} style={{ color: "var(--ink-tertiary)" }} />
+                                  <LinDoIcons.FaLock
+                                    size={10}
+                                    style={{ color: "var(--ink-tertiary)" }}
+                                  />
                                 )}
                                 <span
                                   className="truncate text-[13.5px]"
@@ -1149,7 +1156,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                                   className="flex shrink-0 items-center gap-0.5 text-[11px] font-bold"
                                   style={{ color: "var(--active-chip-text)" }}
                                 >
-                                  {activeSub.readRestricted && <Lock size={9.5} />}
+                                  {activeSub.readRestricted && <LinDoIcons.FaLock size={9} />}
                                   <span>{activeSub.subLabel || activeSub.name}</span>
                                 </span>
                               ) : subHint ? (
@@ -1162,9 +1169,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                                   {subHint}
                                 </span>
                               ) : categoryId === cat.id ? (
-                                <Check
+                                <LinDoIcons.Check
                                   size={14}
-                                  weight="bold"
                                   style={{ color: "var(--active-chip-text)" }}
                                 />
                               ) : null}
@@ -1214,7 +1220,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   className="lindo-interactive rounded-full p-1"
                   style={{ color: "var(--ink-secondary)" }}
                 >
-                  <X size={15} />
+                  <LinDoIcons.Close size={15} />
                 </button>
               </div>
 
@@ -1225,7 +1231,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   border: "0.5px solid var(--hairline)",
                 }}
               >
-                <MagnifyingGlass size={14.5} style={{ color: "var(--ink-tertiary)" }} />
+                <LinDoIcons.Search size={14.5} style={{ color: "var(--ink-tertiary)" }} />
                 <input
                   type="text"
                   value={tagQuery}
@@ -1240,7 +1246,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                     onClick={() => setTagQuery("")}
                     className="rounded-full p-0.5 opacity-70 hover:opacity-100 cursor-pointer"
                   >
-                    <X size={12.5} style={{ color: "var(--ink-tertiary)" }} />
+                    <LinDoIcons.Close size={12.5} style={{ color: "var(--ink-tertiary)" }} />
                   </button>
                 )}
               </div>
@@ -1276,7 +1282,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                         color: "var(--publish-btn-fg)",
                       }}
                     >
-                      <ArrowClockwise size={12.5} />
+                      <LinDoIcons.Refresh size={12.5} />
                       <span>{tagsError.includes("验证") ? "去验证" : "重试"}</span>
                     </button>
                   </div>
@@ -1294,7 +1300,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                           className="lindo-interactive flex h-[42px] w-full items-center gap-2 px-3.5 text-left text-[13px] font-semibold"
                           style={{ color: "var(--brand-gold)" }}
                         >
-                          <Plus size={14} weight="bold" />
+                          <LinDoIcons.Plus size={14} />
                           <span>创建新标签「{cleanTagQuery.slice(0, 20)}」</span>
                         </button>
                         <div className="lindo-divider" />
@@ -1318,6 +1324,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                               const checked = tags.includes(opt.name);
                               const canClick =
                                 checked || (!opt.disabled && tags.length < MAX_TAGS);
+                              const tVis = resolveOfficialTagVisual(opt.name);
+                              const TagIcon = tVis ? tVis.Icon : LinDoIcons.FaTag;
                               return (
                                 <div key={opt.name} className="relative flex items-center">
                                   <button
@@ -1339,12 +1347,14 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                                     }}
                                   >
                                     <span className="flex min-w-0 items-center gap-1.5">
-                                      <Tag
-                                        size={12}
+                                      <TagIcon
+                                        size={11.5}
                                         style={{
                                           color: checked
                                             ? "var(--brand-gold)"
-                                            : "var(--ink-tertiary)",
+                                            : tVis
+                                              ? tVis.color
+                                              : "var(--ink-tertiary)",
                                         }}
                                       />
                                       <span
@@ -1361,9 +1371,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                                     </span>
 
                                     {checked ? (
-                                      <Check
+                                      <LinDoIcons.Check
                                         size={14}
-                                        weight="bold"
                                         style={{ color: "var(--brand-gold)" }}
                                       />
                                     ) : opt.count > 0 ? (
@@ -1451,7 +1460,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: uploading ? "var(--brand-gold)" : "var(--ink-secondary)" }}
             >
-              <ImageIcon size={17.5} />
+              <LinDoIcons.Image size={17.5} />
             </button>
             <button
               type="button"
@@ -1460,7 +1469,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: activePicker === "EMOJI" ? "var(--brand-gold)" : "var(--ink-secondary)" }}
             >
-              <Smiley size={17.5} />
+              <LinDoIcons.Smile size={17.5} />
             </button>
             <button
               type="button"
@@ -1471,7 +1480,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                 color: activePicker === "MENTION" ? "var(--brand-gold)" : "var(--ink-secondary)",
               }}
             >
-              <At size={17.5} />
+              <LinDoIcons.AtSign size={17.5} />
             </button>
             <button
               type="button"
@@ -1480,7 +1489,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: activePicker === "LINK" ? "var(--brand-gold)" : "var(--ink-secondary)" }}
             >
-              <LinkSimple size={17.5} />
+              <LinDoIcons.Link size={17.5} />
             </button>
             <button
               type="button"
@@ -1489,7 +1498,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <TextB size={17.5} />
+              <LinDoIcons.Bold size={17.5} />
             </button>
             <button
               type="button"
@@ -1498,7 +1507,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <Code size={17.5} />
+              <LinDoIcons.Code size={17.5} />
             </button>
             <button
               type="button"
@@ -1507,7 +1516,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <Quotes size={17.5} />
+              <LinDoIcons.Quote size={17.5} />
             </button>
             <button
               type="button"
@@ -1516,7 +1525,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <ListBullets size={17.5} />
+              <LinDoIcons.ListBullet size={17.5} />
             </button>
             <button
               type="button"
@@ -1529,7 +1538,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <Table size={17.5} />
+              <LinDoIcons.Table size={17.5} />
             </button>
             <button
               type="button"
@@ -1542,7 +1551,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <ChartBar size={17.5} />
+              <LinDoIcons.BarChartPoll size={17.5} />
             </button>
             <button
               type="button"
@@ -1551,7 +1560,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <EyeSlash size={17.5} />
+              <LinDoIcons.EyeOff size={17.5} />
             </button>
             <button
               type="button"
@@ -1560,7 +1569,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               className="lindo-interactive flex h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-[12px] font-medium"
               style={{ color: "var(--ink-secondary)" }}
             >
-              <TextAa size={16} />
+              <LinDoIcons.TypeAa size={16} />
               <span>中英空格</span>
             </button>
           </div>
@@ -1638,7 +1647,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               border: "0.5px solid var(--hairline)",
             }}
           >
-            <At size={14} style={{ color: "var(--brand-gold)" }} />
+            <LinDoIcons.AtSign size={14} style={{ color: "var(--brand-gold)" }} />
             <input
               type="text"
               autoFocus
@@ -1676,7 +1685,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   }}
                 >
                   {u.isGroup ? (
-                    <Users size={14} style={{ color: "var(--brand-gold)" }} />
+                    <LinDoIcons.Users size={14} style={{ color: "var(--brand-gold)" }} />
                   ) : (
                     <img
                       src={resolveAvatarUrl(u.avatarTemplate, 48)}
@@ -1793,7 +1802,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   border: "0.5px solid var(--hairline)",
                 }}
               >
-                <MagnifyingGlass size={14} style={{ color: "var(--ink-tertiary)" }} />
+                <LinDoIcons.Search size={14} style={{ color: "var(--ink-tertiary)" }} />
                 <input
                   type="text"
                   autoFocus
@@ -1855,7 +1864,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           style={{ backgroundColor: "var(--subtle-surface)" }}
         >
           <span className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
-            <Check size={13.5} style={{ color: "var(--brand-gold)" }} />
+            <LinDoIcons.Check size={13.5} style={{ color: "var(--brand-gold)" }} />
             <span>已插入图片 {uploadedImg.filename}</span>
           </span>
           <div className="flex items-center gap-1.5">
@@ -1882,7 +1891,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               onClick={() => setUploadedImg(null)}
               className="p-0.5 opacity-60 hover:opacity-100 cursor-pointer"
             >
-              <X size={13} />
+              <LinDoIcons.Close size={13} />
             </button>
           </div>
         </div>

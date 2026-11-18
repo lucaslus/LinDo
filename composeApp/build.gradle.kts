@@ -109,8 +109,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 69
-        versionName = "0.2.35"
+        versionCode = 74
+        versionName = "0.2.40"
     }
 
     packaging {

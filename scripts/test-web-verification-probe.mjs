@@ -4,14 +4,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 const source=readFileSync(new URL('../composeApp/src/commonMain/kotlin/do_/linux/lindo/core/network/WebVerificationProbe.kt',import.meta.url),'utf8').split('= """')[1].split('""".trimIndent()')[0];
 const flush=()=>new Promise(r=>setImmediate(r));
-function page({preload,legacy=false,challenge=false,csrf=true,body='',response,origin='https://linux.do'}={}) {
+function page({preload,legacy=false,challenge=false,csrf=true,body='',pathname='/',response,origin='https://linux.do'}={}) {
  let calls=0;
- const context=vm.createContext({location:{origin},document:{readyState:'complete',body:{innerText:body},
+ let lastUrl='';
+ const context=vm.createContext({location:{origin,pathname},document:{readyState:'complete',body:{innerText:body},
   querySelector:s=>s.includes('csrf-token')?(csrf?{}:null):(challenge?{}:null),
   getElementById:()=>preload?{textContent:legacy?'':JSON.stringify(preload),dataset:{preloaded:JSON.stringify(preload)}}:null},
-  AbortController,setTimeout:()=>1,clearTimeout:()=>{},fetch:async()=>{calls++;return response || {ok:true,headers:{get:()=>null},json:async()=>({topic_list:{topics:[]}})};}});
+  AbortController,setTimeout:()=>1,clearTimeout:()=>{},fetch:async(u)=>{calls++;lastUrl=u;return response || {ok:true,headers:{get:()=>null},json:async()=>({topic_list:{topics:[]}})};}});
  context.window=context;
- return {poll:()=>JSON.parse(vm.runInContext(source,context)),get calls(){return calls;},context};
+ return {poll:()=>JSON.parse(vm.runInContext(source,context)),get calls(){return calls;},get lastUrl(){return lastUrl;},context};
 }
 test('real forum document finishes without sending another request (legacy and modern)',()=>{
  for(const legacy of [true,false]){const p=page({legacy,preload:{site:'{}'}});assert.equal(p.poll().ok,true);assert.equal(p.calls,0);}
@@ -33,4 +34,16 @@ test('unknown and other-origin pages never count as completion',()=>{
 });
 test('a rendered JSON response finishes without further requests',()=>{
  const p=page({body:JSON.stringify({topic_list:{topics:[]}})});assert.equal(p.poll().ok,true);assert.equal(p.calls,0);
+});
+test('topic path fallback probes exact topic json and resolves post_stream',async()=>{
+ const p=page({pathname:'/t/topic/1895432',response:{ok:true,headers:{get:()=>null},json:async()=>({post_stream:{posts:[{id:1}]}})}});
+ p.poll();await flush();assert.equal(p.lastUrl,'/t/1895432.json?track_visit=false');assert.equal(p.poll().ok,true);assert.equal(p.calls,1);
+});
+test('discourse origin 500 Oops page is not misclassified as challenge and recovers via json probe',async()=>{
+ const p=page({csrf:false,body:'Oops\nThe software powering this discussion forum encountered an unexpected problem.'});
+ const r1=p.poll();assert.equal(r1.challenge,undefined);await flush();assert.equal(p.poll().ok,true);assert.equal(p.calls,1);
+});
+test('/challenge origin 404 completes immediately with zero extra XHR probes',()=>{
+ const p=page({pathname:'/challenge',body:'Oops! That page doesn’t exist or is private.'});
+ const r=p.poll();assert.equal(r.ok,true);assert.equal(r.originReached,true);assert.equal(p.calls,0);
 });

@@ -8,12 +8,13 @@ export type Release = {
 
 export const CHANGELOG: Release[] = [
   {
-    date: "持续迭代中",
+    date: "2026-11-18",
+    version: "Android 0.2.40 · 桌面 1.0.52",
     wip: true,
     items: [
       "折叠屏与平板默认 50:50 居中分栏，底部导航固定在左栏下方",
       "新增移动端宽屏布局开关，可随时在「左右分栏」与「单栏扩宽」之间切换",
-      "精简登录过期提示条并避开底部悬浮导航",
+      "精简登录过期提示条并避开底部悬浮导航，优化站点验证恢复体验",
     ],
   },
   {
@@ -38,7 +39,7 @@ export const CHANGELOG: Release[] = [
     items: [
       "支持保存多个账号并一键切换",
       "统一各平台的主题色与阅读设置",
-      "新增「关于 Lindo」页面",
+      "新增「关于 LinDo」页面",
     ],
   },
   {
@@ -46,7 +47,7 @@ export const CHANGELOG: Release[] = [
     version: "0.2.31 ~ 0.2.32",
     items: [
       "安装包体积优化：macOS DMG 减小约 40%，Android APK 减小约 31%",
-      "新增 Windows MSI 安装包",
+      "新增 Windows 安装程序（EXE / MSI）",
       "桌面端支持鼠标滚轮平滑惯性滚动，菜单栏托盘显示未读数",
     ],
   },

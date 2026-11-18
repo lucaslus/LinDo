@@ -1,3 +1,5 @@
+import { flushSync } from "react-dom";
+
 export type BrandThemeKey =
   | "OFFICIAL_GOLD"
   | "GEEK_BLUE"
@@ -196,17 +198,25 @@ export function applyPaletteToDocument(isDark: boolean, optionKey: string, fontS
   root.style.setProperty("--font-scale", String(fontScale || 1));
 
   if (isDark) {
-    root.style.setProperty("--canvas", "#101217");
-    root.style.setProperty("--grouped-canvas", "#101217");
-    root.style.setProperty("--card-surface", "#101217");
-    root.style.setProperty("--subtle-surface", "#181B22");
-    root.style.setProperty("--nav-bar-surface", "#11141B");
-    root.style.setProperty("--tonal-pill", "#212631");
-    root.style.setProperty("--on-tonal-pill", "#F3F4F6");
-    root.style.setProperty("--ink-primary", "#F3F4F6");
-    root.style.setProperty("--ink-secondary", "#A1A8B5");
-    root.style.setProperty("--ink-tertiary", "#7D8594");
-    root.style.setProperty("--hairline", "#1E222B");
+    root.style.setProperty("--canvas", "#161A23");
+    root.style.setProperty("--grouped-canvas", "#161A23");
+    root.style.setProperty("--card-surface", "#161A23");
+    root.style.setProperty("--feed-surface", "#11141B");
+    root.style.setProperty("--selected-card-bg", "#1C212E");
+    root.style.setProperty(
+      "--selected-card-border",
+      `color-mix(in srgb, ${opt.darkChipText} 22%, rgba(255, 255, 255, 0.05))`
+    );
+    root.style.setProperty("--subtle-surface", "#1B202B");
+    root.style.setProperty("--nav-bar-surface", "#0C0E13");
+    root.style.setProperty("--tonal-pill", "#212735");
+    root.style.setProperty("--on-tonal-pill", "#F1F3F7");
+    root.style.setProperty("--ink-primary", "#F1F3F7");
+    root.style.setProperty("--ink-secondary", "#9BA3B2");
+    root.style.setProperty("--ink-tertiary", "#6E7787");
+    root.style.setProperty("--hairline", "rgba(255, 255, 255, 0.058)");
+    root.style.setProperty("--hairline-soft", "rgba(255, 255, 255, 0.042)");
+    root.style.setProperty("--hover-floor-bg", "rgba(255, 255, 255, 0.024)");
     root.style.setProperty("--accent", opt.darkChipText);
     root.style.setProperty("--brand-gold", opt.darkChipText);
     root.style.setProperty("--logo-do", "#F59E0B");
@@ -215,31 +225,92 @@ export function applyPaletteToDocument(isDark: boolean, optionKey: string, fontS
     root.style.setProperty("--active-chip-text", opt.darkChipText);
     root.style.setProperty("--publish-btn-bg", opt.darkChipText);
     root.style.setProperty("--publish-btn-fg", "#111827");
-    root.style.setProperty("--hover-overlay", "rgba(243, 244, 246, 0.048)");
-    root.style.setProperty("--press-overlay", "rgba(243, 244, 246, 0.085)");
+    root.style.setProperty("--hover-overlay", "rgba(241, 243, 247, 0.046)");
+    root.style.setProperty("--press-overlay", "rgba(241, 243, 247, 0.082)");
   } else {
     root.style.setProperty("--canvas", "#FFFFFF");
     root.style.setProperty("--grouped-canvas", "#FFFFFF");
     root.style.setProperty("--card-surface", "#FFFFFF");
-    root.style.setProperty("--subtle-surface", "#F3F4F6");
-    root.style.setProperty("--nav-bar-surface", "#FFFFFF");
-    root.style.setProperty("--tonal-pill", "#EEF1F5");
-    root.style.setProperty("--on-tonal-pill", "#111827");
-    root.style.setProperty("--ink-primary", "#111827");
-    root.style.setProperty("--ink-secondary", "#525866");
-    root.style.setProperty("--ink-tertiary", "#6B7280");
-    root.style.setProperty("--hairline", "#EBEEF2");
+    root.style.setProperty("--feed-surface", "#F6F7FA");
+    root.style.setProperty("--selected-card-bg", "#FFFFFF");
+    root.style.setProperty(
+      "--selected-card-border",
+      `color-mix(in srgb, ${opt.lightChipText} 24%, rgba(15, 23, 42, 0.06))`
+    );
+    root.style.setProperty("--subtle-surface", "#EEF1F6");
+    root.style.setProperty("--nav-bar-surface", "#EEF1F6");
+    root.style.setProperty("--tonal-pill", "#EAECEF");
+    root.style.setProperty("--on-tonal-pill", "#161920");
+    root.style.setProperty("--ink-primary", "#161920");
+    root.style.setProperty("--ink-secondary", "#5E6675");
+    root.style.setProperty("--ink-tertiary", "#8A93A3");
+    root.style.setProperty("--hairline", "rgba(15, 23, 42, 0.072)");
+    root.style.setProperty("--hairline-soft", "rgba(15, 23, 42, 0.05)");
+    root.style.setProperty("--hover-floor-bg", "rgba(15, 23, 42, 0.022)");
     root.style.setProperty("--accent", opt.lightChipText);
-    root.style.setProperty("--brand-gold", opt.key === "OFFICIAL_GOLD" ? "#936000" : opt.lightChipText);
-    root.style.setProperty("--logo-do", "#F59E0B");
+    root.style.setProperty("--brand-gold", opt.key === "OFFICIAL_GOLD" ? "#B45309" : opt.lightChipText);
+    root.style.setProperty("--logo-do", "#E58E09");
     root.style.setProperty("--tab-indicator", opt.lightChipText);
     root.style.setProperty("--active-chip-bg", opt.lightChipBg);
     root.style.setProperty("--active-chip-text", opt.lightChipText);
     root.style.setProperty("--publish-btn-bg", opt.key === "OFFICIAL_GOLD" ? opt.swatchColor : opt.lightChipText);
     root.style.setProperty("--publish-btn-fg", opt.key === "OFFICIAL_GOLD" ? "#111827" : "#FFFFFF");
-    root.style.setProperty("--hover-overlay", "rgba(17, 24, 39, 0.038)");
-    root.style.setProperty("--press-overlay", "rgba(17, 24, 39, 0.068)");
+    root.style.setProperty("--hover-overlay", "rgba(15, 23, 42, 0.038)");
+    root.style.setProperty("--press-overlay", "rgba(15, 23, 42, 0.068)");
   }
+}
+
+let themeSwitchCleanupRaf = 0;
+
+/**
+ * Executes a 100% atomic, zero-desync light/dark or accent theme switch:
+ * 1. Freezes all per-element CSS hover transitions (`html.lindo-theme-switching`) BEFORE mutating variables or React state
+ *    so search bars, quote headers, sort tabs, and quick-reply pills never lag 110–150ms behind the main canvas;
+ * 2. When WebKit/WebView2 supports `document.startViewTransition` and animations are enabled, performs a 155ms GPU
+ *    full-frame texture crossfade (`::view-transition-old/new(root)`) at native 120/144Hz.
+ */
+export function performSmoothThemeSwitch(
+  commitThemeChange: () => void,
+  enableAnimations = true
+): void {
+  const root = document.documentElement;
+  if (themeSwitchCleanupRaf) {
+    cancelAnimationFrame(themeSwitchCleanupRaf);
+    themeSwitchCleanupRaf = 0;
+  }
+  root.classList.add("lindo-theme-switching");
+
+  const releaseTransitions = () => {
+    themeSwitchCleanupRaf = requestAnimationFrame(() => {
+      themeSwitchCleanupRaf = requestAnimationFrame(() => {
+        themeSwitchCleanupRaf = 0;
+        root.classList.remove("lindo-theme-switching");
+      });
+    });
+  };
+
+  const docWithVt = document as Document & {
+    startViewTransition?: (cb: () => void) => { finished: Promise<unknown> };
+  };
+
+  if (enableAnimations && typeof docWithVt.startViewTransition === "function") {
+    try {
+      const vt = docWithVt.startViewTransition(() => {
+        flushSync(() => {
+          commitThemeChange();
+        });
+      });
+      vt.finished.finally(releaseTransitions);
+      return;
+    } catch {
+      // Fall through to atomic single-frame switch
+    }
+  }
+
+  flushSync(() => {
+    commitThemeChange();
+  });
+  releaseTransitions();
 }
 
 export function resolveCategoryVisual(name: string, colorHex?: string): { dotColor: string; bgAlpha: string } {

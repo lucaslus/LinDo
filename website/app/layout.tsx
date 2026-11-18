@@ -10,11 +10,31 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://lindo.app"),
+  metadataBase: new URL(SITE.url),
   title: { default: "LinDo · LINUX DO 第三方客户端", template: "%s · LinDo" },
   description: SITE.description,
-  icons: { icon: "/icon.png", apple: "/icon.png" },
-  openGraph: { title: "LinDo", description: SITE.description, images: ["/brand/lingdu-welcome.svg"] },
+  icons: {
+    icon: [
+      { url: "/favicon.png", sizes: "48x48", type: "image/png" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-icon.png", sizes: "180x180", type: "image/png" }],
+  },
+  openGraph: {
+    type: "website",
+    locale: "zh_CN",
+    siteName: "LinDo",
+    title: "LinDo · LINUX DO 第三方客户端",
+    description: SITE.description,
+    url: SITE.url,
+    images: [{ url: "/og.png", width: 1200, height: 630, alt: "LinDo · LINUX DO 第三方客户端" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "LinDo · LINUX DO 第三方客户端",
+    description: SITE.description,
+    images: ["/og.png"],
+  },
 };
 
 export const viewport: Viewport = {

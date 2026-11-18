@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#10B981" stop-opacity="0.15"/>
+      <stop offset="68%" stop-color="#F59E0B" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#10B981" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shieldBg" x1="36" y1="30" x2="92" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ECFDF5"/>
+      <stop offset="100%" stop-color="#D1FAE5"/>
+    </linearGradient>
+  </defs>
+
+  <circle cx="64" cy="64" r="62" fill="url(#halo)"/>
+  <path d="M 58.98 10.74 Q 64.00 8.00 69.02 10.74 Q 74.05 13.49 79.74 12.88 Q 85.43 12.26 89.02 16.72 Q 92.61 21.18 98.10 22.79 Q 103.60 24.40 105.21 29.90 Q 106.82 35.39 111.28 38.98 Q 115.74 42.57 115.12 48.26 Q 114.51 53.95 117.26 58.98 Q 120.00 64.00 117.26 69.02 Q 114.51 74.05 115.12 79.74 Q 115.74 85.43 111.28 89.02 Q 106.82 92.61 105.21 98.10 Q 103.60 103.60 98.10 105.21 Q 92.61 106.82 89.02 111.28 Q 85.43 115.74 79.74 115.12 Q 74.05 114.51 69.02 117.26 Q 64.00 120.00 58.98 117.26 Q 53.95 114.51 48.26 115.12 Q 42.57 115.74 38.98 111.28 Q 35.39 106.82 29.90 105.21 Q 24.40 103.60 22.79 98.10 Q 21.18 92.61 16.72 89.02 Q 12.26 85.43 12.88 79.74 Q 13.49 74.05 10.74 69.02 Q 8.00 64.00 10.74 58.98 Q 13.49 53.95 12.88 48.26 Q 12.26 42.57 16.72 38.98 Q 21.18 35.39 22.79 29.90 Q 24.40 24.40 29.90 22.79 Q 35.39 21.18 38.98 16.72 Q 42.57 12.26 48.26 12.88 Q 53.95 13.49 58.98 10.74 Z" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.4"/>
+  <circle cx="64" cy="64" r="47.5" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+  <line x1="107.20" y1="64.00" x2="109.80" y2="64.00" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="106.54" y1="71.50" x2="109.10" y2="71.95" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="104.59" y1="78.78" x2="107.04" y2="79.66" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="101.41" y1="85.60" x2="103.66" y2="86.90" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="97.09" y1="91.77" x2="99.08" y2="93.44" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="91.77" y1="97.09" x2="93.44" y2="99.08" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="85.60" y1="101.41" x2="86.90" y2="103.66" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="78.78" y1="104.59" x2="79.66" y2="107.04" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="71.50" y1="106.54" x2="71.95" y2="109.10" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="64.00" y1="107.20" x2="64.00" y2="109.80" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="56.50" y1="106.54" x2="56.05" y2="109.10" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="49.22" y1="104.59" x2="48.34" y2="107.04" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="42.40" y1="101.41" x2="41.10" y2="103.66" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="36.23" y1="97.09" x2="34.56" y2="99.08" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="30.91" y1="91.77" x2="28.92" y2="93.44" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="26.59" y1="85.60" x2="24.34" y2="86.90" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="23.41" y1="78.78" x2="20.96" y2="79.66" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="21.46" y1="71.50" x2="18.90" y2="71.95" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="20.80" y1="64.00" x2="18.20" y2="64.00" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="21.46" y1="56.50" x2="18.90" y2="56.05" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="23.41" y1="49.22" x2="20.96" y2="48.34" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="26.59" y1="42.40" x2="24.34" y2="41.10" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="30.91" y1="36.23" x2="28.92" y2="34.56" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="36.23" y1="30.91" x2="34.56" y2="28.92" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="42.40" y1="26.59" x2="41.10" y2="24.34" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="49.22" y1="23.41" x2="48.34" y2="20.96" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="56.50" y1="21.46" x2="56.05" y2="18.90" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="64.00" y1="20.80" x2="64.00" y2="18.20" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="71.50" y1="21.46" x2="71.95" y2="18.90" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="78.78" y1="23.41" x2="79.66" y2="20.96" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="85.60" y1="26.59" x2="86.90" y2="24.34" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="91.77" y1="30.91" x2="93.44" y2="28.92" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="97.09" y1="36.23" x2="99.08" y2="34.56" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="101.41" y1="42.40" x2="103.66" y2="41.10" stroke="#CBD5E1" stroke-width="1.4" stroke-linecap="round"/>
+  <line x1="104.59" y1="49.22" x2="107.04" y2="48.34" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="106.54" y1="56.50" x2="109.10" y2="56.05" stroke="#CBD5E1" stroke-width="0.9" stroke-linecap="round"/>
+
+  <!-- Dual-facet architectural shield -->
+  <path d="M64 29L37 39.8V61.6C37 79.9 48.4 95.1 64 100.5C79.6 95.1 91 79.9 91 61.6V39.8L64 29Z" fill="url(#shieldBg)"/>
+  <path d="M64 29V100.5C79.6 95.1 91 79.9 91 61.6V39.8L64 29Z" fill="#A7F3D0" fill-opacity="0.38"/>
+  <path d="M64 29L37 39.8V61.6C37 79.9 48.4 95.1 64 100.5C79.6 95.1 91 79.9 91 61.6V39.8L64 29Z" stroke="#059669" stroke-width="2.3" stroke-linejoin="round"/>
+
+  <!-- Subtle open-source code brackets < > -->
+  <path d="M49.5 57.5L44.5 63.5L49.5 69.5" stroke="#059669" stroke-opacity="0.65" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M78.5 57.5L83.5 63.5L78.5 69.5" stroke="#059669" stroke-opacity="0.65" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Central verified checkmark -->
+  <path d="M55 64L61.2 70.2L73.5 57" stroke="#047857" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Brand Gold seal crest dot -->
+  <circle cx="64" cy="42.5" r="4.2" fill="#FEF3C7"/>
+  <circle cx="64" cy="42.5" r="2.1" fill="#F59E0B"/>
+</svg>

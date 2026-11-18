@@ -351,6 +351,50 @@ object LinDoIcons {
         }
     }
 
+    val PanelLeftClose: ImageVector by lazy {
+        lucideIcon("PanelLeftClose") {
+            strokePath(1.85f) {
+                moveTo(5f, 4f)
+                horizontalLineTo(19f)
+                curveTo(20.1f, 4f, 21f, 4.9f, 21f, 6f)
+                verticalLineTo(18f)
+                curveTo(21f, 19.1f, 20.1f, 20f, 19f, 20f)
+                horizontalLineTo(5f)
+                curveTo(3.9f, 20f, 3f, 19.1f, 3f, 18f)
+                verticalLineTo(6f)
+                curveTo(3f, 4.9f, 3.9f, 4f, 5f, 4f)
+                close()
+                moveTo(9f, 4f)
+                verticalLineTo(20f)
+                moveTo(16f, 15f)
+                lineTo(13f, 12f)
+                lineTo(16f, 9f)
+            }
+        }
+    }
+
+    val PanelLeftOpen: ImageVector by lazy {
+        lucideIcon("PanelLeftOpen") {
+            strokePath(1.85f) {
+                moveTo(5f, 4f)
+                horizontalLineTo(19f)
+                curveTo(20.1f, 4f, 21f, 4.9f, 21f, 6f)
+                verticalLineTo(18f)
+                curveTo(21f, 19.1f, 20.1f, 20f, 19f, 20f)
+                horizontalLineTo(5f)
+                curveTo(3.9f, 20f, 3f, 19.1f, 3f, 18f)
+                verticalLineTo(6f)
+                curveTo(3f, 4.9f, 3.9f, 4f, 5f, 4f)
+                close()
+                moveTo(9f, 4f)
+                verticalLineTo(20f)
+                moveTo(14f, 9f)
+                lineTo(17f, 12f)
+                lineTo(14f, 15f)
+            }
+        }
+    }
+
     val Heart: ImageVector by lazy {
         lucideIcon("Heart") {
             strokePath(1.8f) {

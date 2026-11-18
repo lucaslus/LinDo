@@ -65,7 +65,11 @@ export async function siteRequest(
     const res = await invoke<SiteHttpResponse>("site_request", { url, method, form, headers });
     const ms = Math.round(performance.now() - t0);
     if (res.isChallenge) {
-      if (!silent) {
+      const isLocalGuardShortCircuit =
+        typeof res.body === "string" &&
+        (res.body.startsWith("<!--lindo-cf-challenge-->verifying") ||
+          res.body.startsWith("<!--lindo-cf-challenge-->cooldown"));
+      if (!silent && !isLocalGuardShortCircuit) {
         diagLog("WARN", "NETWORK", "Cloudflare", `${method} ${url} -> HTTP ${res.status} (站点验证挑战, ${ms}ms)`);
       }
     } else if (res.isUnauthenticated) {
@@ -92,14 +96,29 @@ export async function siteRequest(
 }
 
 export async function siteVerify(login: boolean, isDark: boolean): Promise<boolean> {
-  diagLog("INFO", "AUTH", "WebVerify", login ? "打开内置登录面板" : "打开站点验证面板");
+  diagLog(
+    "INFO",
+    "AUTH",
+    "AuthPending",
+    login ? "已打开内置登录窗口，等待完成登录" : "已打开站点安全验证窗口，等待完成验证"
+  );
   const ok = await invoke<boolean>("site_verify", { login, isDark });
-  diagLog(ok ? "INFO" : "WARN", "AUTH", "WebVerify", ok ? "验证/登录已完成" : "验证/登录面板关闭未完成");
+  diagLog(
+    ok ? "INFO" : "WARN",
+    "AUTH",
+    ok ? "AuthSuccess" : "WebVerify",
+    ok ? (login ? "内置窗口登录已完成" : "站点安全验证已通过") : "登录/验证窗口已关闭（未完成）"
+  );
   return ok;
 }
 
 export async function startBrowserOneClickAuth(): Promise<string> {
-  diagLog("INFO", "AUTH", "BrowserAuth", "发起系统浏览器 User-Api-Key 一键授权");
+  diagLog(
+    "INFO",
+    "AUTH",
+    "AuthPending",
+    "已打开默认浏览器授权页，等待点击「授权」返回应用"
+  );
   return invoke<string>("start_browser_auth");
 }
 
@@ -112,10 +131,12 @@ export async function clearExpiredNoticeInRust(): Promise<void> {
 }
 
 export async function switchSavedAccount(username: string): Promise<boolean> {
+  clearTopicDetailCache();
   return invoke<boolean>("switch_account", { username });
 }
 
 export async function logoutAccount(removeSaved = true): Promise<void> {
+  clearTopicDetailCache();
   return invoke("logout_account", { removeSaved });
 }
 
@@ -124,10 +145,12 @@ export async function removeSavedAccountInRust(username: string): Promise<void> 
 }
 
 export async function addAccountWebLoginInRust(isDark: boolean): Promise<boolean> {
+  clearTopicDetailCache();
   return invoke<boolean>("add_account_web_login", { isDark });
 }
 
 export async function importManualCredentialInRust(rawInput: string, isDark: boolean): Promise<boolean> {
+  clearTopicDetailCache();
   return invoke<boolean>("import_manual_credential", { rawInput, isDark });
 }
 
@@ -246,6 +269,7 @@ async function mutateJsonOrThrow(
   if (res.status < 200 || res.status >= 300) {
     throw new SiteError(extractDiscourseError(data) || `操作未成功 (${res.status})`, { status: res.status });
   }
+  clearTopicDetailCache();
   return data ?? {};
 }
 
@@ -1165,12 +1189,65 @@ function parsePostModel(
   };
 }
 
+const TOPIC_DETAIL_CACHE_TTL_MS = 90_000;
+const TOPIC_DETAIL_CACHE_MAX = 28;
+const topicDetailMemoryCache = new Map<number, { ts: number; detail: TopicDetailModel }>();
+let lastTopicTrackVisitAtMs = 0;
+
+export function clearTopicDetailCache(): void {
+  topicDetailMemoryCache.clear();
+}
+
+export function getCachedTopicDetail(topicId: number): TopicDetailModel | null {
+  const hit = topicDetailMemoryCache.get(topicId);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > TOPIC_DETAIL_CACHE_TTL_MS) {
+    topicDetailMemoryCache.delete(topicId);
+    return null;
+  }
+  topicDetailMemoryCache.delete(topicId);
+  topicDetailMemoryCache.set(topicId, hit);
+  return hit.detail;
+}
+
+export function putCachedTopicDetail(detail: TopicDetailModel): void {
+  if (!detail || detail.id <= 0 || detail.posts.length === 0) return;
+  topicDetailMemoryCache.delete(detail.id);
+  topicDetailMemoryCache.set(detail.id, { ts: Date.now(), detail });
+  while (topicDetailMemoryCache.size > TOPIC_DETAIL_CACHE_MAX) {
+    const oldestKey = topicDetailMemoryCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    topicDetailMemoryCache.delete(oldestKey);
+  }
+}
+
 export async function fetchTopicDetail(
   topicId: number,
-  opts: { targetPostNumber?: number | null; onlyOpUsername?: string | null; trackVisit?: boolean } = {}
+  opts: {
+    targetPostNumber?: number | null;
+    onlyOpUsername?: string | null;
+    trackVisit?: boolean;
+    forceRefresh?: boolean;
+  } = {}
 ): Promise<TopicDetailModel> {
+  const canUseCache =
+    !opts.forceRefresh &&
+    !opts.onlyOpUsername &&
+    (!opts.targetPostNumber || opts.targetPostNumber <= 1);
+  if (canUseCache) {
+    const cached = getCachedTopicDetail(topicId);
+    if (cached) return cached;
+  }
+
+  const nowMs = Date.now();
+  const shouldTrack =
+    opts.trackVisit !== false &&
+    (Boolean(opts.forceRefresh) || nowMs - lastTopicTrackVisitAtMs >= 1800);
+  if (shouldTrack) {
+    lastTopicTrackVisitAtMs = nowMs;
+  }
+
   const params = new URLSearchParams();
-  const shouldTrack = opts.trackVisit !== false;
   if (shouldTrack) params.set("track_visit", "true");
   if (opts.onlyOpUsername) params.set("username_filters", opts.onlyOpUsername);
 
@@ -1208,7 +1285,7 @@ export async function fetchTopicDetail(
     ? Number(data.accepted_answer.post_number)
     : posts.find((p) => p.acceptedAnswer)?.postNumber ?? null;
 
-  return {
+  const detail: TopicDetailModel = {
     id: Number(data.id || topicId),
     title: String(data.title || ""),
     archetype: String(data.archetype || "regular"),
@@ -1230,22 +1307,41 @@ export async function fetchTopicDetail(
     posts,
     hasSummary: Boolean(data.has_summary || data.summarizable),
   };
+  if (!opts.onlyOpUsername && (!opts.targetPostNumber || opts.targetPostNumber <= 1)) {
+    putCachedTopicDetail(detail);
+  }
+  return detail;
 }
 
 export async function fetchPostsByIds(
   topicId: number,
   postIds: number[],
   fallbackAuthorBadges?: Map<number, GrantedBadge[]>,
-  lastReadPostNumber?: number | null
+  lastReadPostNumber?: number | null,
+  background = false
 ): Promise<PostItemModel[]> {
   if (postIds.length === 0) return [];
   const batch = postIds.slice(0, 20);
   const qs = batch.map((id) => `post_ids[]=${encodeURIComponent(String(id))}`).join("&");
-  const data = await getJsonOrThrow(`https://linux.do/t/${topicId}/posts.json?${qs}`);
+  const data = await getJsonOrThrow(`https://linux.do/t/${topicId}/posts.json?${qs}`, background);
   const parsedMap = readTopicAuthorBadgesMap(data);
   const effectiveBadges = parsedMap.size > 0 ? parsedMap : fallbackAuthorBadges;
   const rawPosts: any[] = data?.post_stream?.posts ?? [];
   return rawPosts.map((p) => parsePostModel(p, topicId, effectiveBadges, lastReadPostNumber));
+}
+
+export async function fetchPostByNumber(
+  topicId: number,
+  postNumber: number,
+  fallbackAuthorBadges?: Map<number, GrantedBadge[]>
+): Promise<PostItemModel | null> {
+  if (!topicId || postNumber <= 0) return null;
+  const data = await getJsonOrThrow(
+    `https://linux.do/posts/by_number/${topicId}/${postNumber}.json`,
+    true
+  );
+  if (!data || !data.id) return null;
+  return parsePostModel(data, topicId, fallbackAuthorBadges);
 }
 
 export async function fetchPostReplies(postId: number, fallbackTopicId: number): Promise<PostItemModel[]> {
@@ -2514,6 +2610,35 @@ export async function downloadAndInstallUpdateInRust(info: DesktopUpdateInfo): P
     dmgUrl: info.dmgUrl,
     expectedSha256: info.sha256,
   });
+}
+
+export async function requestUserArchive(): Promise<void> {
+  const res = await siteRequest("https://linux.do/export_csv/export_entity.json", "POST", {
+    entity: "user_archive",
+  });
+  if (res.isChallenge) {
+    throw new SiteError("需要完成站点安全验证", { isVerification: true, status: res.status });
+  }
+  if (res.isUnauthenticated) {
+    throw new SiteError("登录状态已过期，请重新登录", { isAuthRequired: true, status: res.status });
+  }
+  let parsed: any = null;
+  try {
+    parsed = res.body ? JSON.parse(res.body) : null;
+  } catch {}
+  const errs = Array.isArray(parsed?.errors)
+    ? parsed.errors.filter(Boolean).join("；")
+    : typeof parsed?.errors === "string"
+      ? parsed.errors
+      : typeof parsed?.error === "string"
+        ? parsed.error
+        : "";
+  if (errs) {
+    throw new SiteError(errs, { status: res.status });
+  }
+  if (res.status < 200 || res.status >= 300) {
+    throw new SiteError(`导出申请未成功 (HTTP ${res.status})`, { status: res.status });
+  }
 }
 
 /**

@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { X } from "@phosphor-icons/react";
+import { LinDoIcons } from "./components/LinDoIcons";
 import type {
   CategoryMeta,
   ComposerLaunchRequest,
@@ -29,6 +29,7 @@ import {
   fetchTopicDetail,
   fetchTopicFeed,
   getCachedCategories,
+  getCachedTopicDetail,
   importManualCredentialInRust,
   logoutAccount,
   openInAppForumPanel,
@@ -42,8 +43,8 @@ import {
   startBrowserOneClickAuth,
   switchSavedAccount,
 } from "./lib/api";
-import { applyPaletteToDocument } from "./lib/palette";
-import { diagLog, installGlobalDiagHooks } from "./lib/diagnostics";
+import { applyPaletteToDocument, performSmoothThemeSwitch } from "./lib/palette";
+import { DESKTOP_APP_VERSION, diagLog, installGlobalDiagHooks } from "./lib/diagnostics";
 import { installSmoothWheelAndScrollOptimizer } from "./lib/smoothWheel";
 import { SideRail } from "./components/SideRail";
 import { HomeFeedPane } from "./components/HomeFeedPane";
@@ -135,6 +136,7 @@ export const App: React.FC = () => {
   const [authModalStartAdding, setAuthModalStartAdding] = useState(false);
   const [authStatusHint, setAuthStatusHint] = useState<string | null>(null);
   const [authCompleting, setAuthCompleting] = useState(false);
+  const browserAuthWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [switchingBusy, setSwitchingBusy] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [guestPrompt, setGuestPrompt] = useState<{ title: string; subtitle: string } | null>(null);
@@ -148,12 +150,31 @@ export const App: React.FC = () => {
   const composerReqRef = useRef<ComposerLaunchRequest | null>(null);
   composerReqRef.current = composerReq;
   const composerExitGuardRef = useRef<((proceed: () => void) => void) | null>(null);
+  const topicReqSeqRef = useRef(0);
+  const msgReqSeqRef = useRef(0);
+  const lastTopicClickMsRef = useRef(0);
+  const activeSummaryRef = useRef<TopicSummary | null>(null);
+  activeSummaryRef.current = activeSummary;
+  const readerErrorRef = useRef<string | null>(null);
+  readerErrorRef.current = readerError;
+  const targetFloorRef = useRef<number | null>(null);
+  targetFloorRef.current = targetFloor;
+  const msgSummaryRef = useRef<TopicSummary | null>(null);
+  msgSummaryRef.current = msgSummary;
+  const msgReaderErrorRef = useRef<string | null>(null);
+  msgReaderErrorRef.current = msgReaderError;
+  const msgTargetFloorRef = useRef<number | null>(null);
+  msgTargetFloorRef.current = msgTargetFloor;
   const [inspectedUsername, setInspectedUsername] = useState<string | null>(null);
   const [inspectedBadge, setInspectedBadge] = useState<GrantedBadge | null>(null);
   const [showConnectModal, setShowConnectModal] = useState(false);
   const [pmRefreshNonce, setPmRefreshNonce] = useState(0);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [globalNotice, setGlobalNotice] = useState<string | null>(null);
+  const [feedCollapsed, setFeedCollapsed] = useState(false);
+  const [isDraggingSplit, setIsDraggingSplit] = useState(false);
+  const lastFeedSyncedAtRef = useRef<number>(Date.now());
+  const backgroundPollInFlightRef = useRef(false);
 
   // Smooth Check-for-Updates & One-Click Upgrade state
   const [updateInfo, setUpdateInfo] = useState<DesktopUpdateInfo | null>(null);
@@ -172,7 +193,7 @@ export const App: React.FC = () => {
   const isWideLayout = windowWidth >= 860;
   const inMainApp = isAuthorized || isGuestMode;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     applyPaletteToDocument(isDark, preferences.themeOption, preferences.fontScale);
   }, [isDark, preferences.themeOption, preferences.fontScale]);
 
@@ -251,6 +272,7 @@ export const App: React.FC = () => {
         setTopics(res.topics);
         setFeedPage(0);
         setHasMoreTopics(res.hasMore);
+        lastFeedSyncedAtRef.current = Date.now();
       } catch (err: any) {
         setFeedError(err?.message || "加载动态失败，请重试");
       } finally {
@@ -330,9 +352,16 @@ export const App: React.FC = () => {
           ? null
           : prev
       );
+      const seq = ++topicReqSeqRef.current;
       const nextOnlyOp = opts?.onlyOp ?? false;
       const desiredFloor = opts?.floor ?? null;
       const shouldTrack = opts?.trackVisit !== false;
+      const canHitCache =
+        !opts?.forceRefresh &&
+        !nextOnlyOp &&
+        (!desiredFloor || desiredFloor <= 1);
+      const instantCached = canHitCache ? getCachedTopicDetail(topic.id) : null;
+
       setActiveSummary(topic);
       setOnlyOpFilter(nextOnlyOp);
       setTargetFloor(desiredFloor);
@@ -353,17 +382,34 @@ export const App: React.FC = () => {
         });
       }
 
+      if (instantCached) {
+        setReaderLoading(false);
+        setActiveDetail(instantCached);
+        setTargetJumpNonce((n) => n + 1);
+        return;
+      }
+
       if (opts?.forceRefresh || activeDetail?.id !== topic.id) {
         setActiveDetail(null);
       }
       setReaderLoading(true);
 
+      const nowClickMs = Date.now();
+      const prevClickMs = lastTopicClickMsRef.current;
+      lastTopicClickMsRef.current = nowClickMs;
+
       try {
+        if (!opts?.forceRefresh && prevClickMs > 0 && nowClickMs - prevClickMs < 320) {
+          await new Promise((r) => setTimeout(r, 95));
+          if (seq !== topicReqSeqRef.current) return;
+        }
         const detail = await fetchTopicDetail(topic.id, {
           targetPostNumber: desiredFloor,
           onlyOpUsername: nextOnlyOp ? topic.originalPoster.username : null,
           trackVisit: shouldTrack,
+          forceRefresh: opts?.forceRefresh,
         });
+        if (seq !== topicReqSeqRef.current) return;
         const opPost = detail.posts.find((p) => p.postNumber === 1) ?? detail.posts[0];
         if (shouldTrack) {
           recordLocalTopicVisit({
@@ -382,9 +428,12 @@ export const App: React.FC = () => {
         setActiveDetail(detail);
         setTargetJumpNonce((n) => n + 1);
       } catch (err: any) {
+        if (seq !== topicReqSeqRef.current) return;
         setReaderError(err?.message || "帖子加载失败，请重试");
       } finally {
-        setReaderLoading(false);
+        if (seq === topicReqSeqRef.current) {
+          setReaderLoading(false);
+        }
       }
     },
     [activeDetail?.id, activeSummary?.id, currentTab, isWideLayout, readerError]
@@ -431,6 +480,7 @@ export const App: React.FC = () => {
           ? null
           : prev
       );
+      const seq = ++msgReqSeqRef.current;
       const nextOnlyOp = opts?.onlyOp ?? false;
       const desiredFloor = opts?.floor ?? null;
       setMsgSummary(topic);
@@ -461,7 +511,9 @@ export const App: React.FC = () => {
           targetPostNumber: desiredFloor,
           onlyOpUsername: nextOnlyOp ? topic.originalPoster.username : null,
           trackVisit: true,
+          forceRefresh: opts?.forceRefresh,
         });
+        if (seq !== msgReqSeqRef.current) return;
         const opPost = detail.posts.find((p) => p.postNumber === 1) ?? detail.posts[0];
         recordLocalTopicVisit({
           topicId: detail.id,
@@ -478,13 +530,21 @@ export const App: React.FC = () => {
         setMsgDetail(detail);
         setMsgJumpNonce((n) => n + 1);
       } catch (err: any) {
+        if (seq !== msgReqSeqRef.current) return;
         setMsgReaderError(err?.message || "消息内容加载失败，请重试");
       } finally {
-        setMsgReaderLoading(false);
+        if (seq === msgReqSeqRef.current) {
+          setMsgReaderLoading(false);
+        }
       }
     },
     [msgDetail?.id, msgSummary?.id, currentTab, isWideLayout, msgReaderError]
   );
+
+  const openTopicRef = useRef(openTopic);
+  openTopicRef.current = openTopic;
+  const openMessageTopicRef = useRef(openMessageTopic);
+  openMessageTopicRef.current = openMessageTopic;
 
   const makeSummaryById = useCallback(
     (topicId: number, fallbackTitle: string, postNumber?: number): TopicSummary => {
@@ -553,8 +613,16 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (initializedRef.current) return;
     initializedRef.current = true;
-    installGlobalDiagHooks("1.0.45");
+    installGlobalDiagHooks(DESKTOP_APP_VERSION);
     installSmoothWheelAndScrollOptimizer();
+
+    const onGlobalDragStart = (ev: DragEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target || !target.closest("input, textarea, [contenteditable='true']")) {
+        ev.preventDefault();
+      }
+    };
+    window.addEventListener("dragstart", onGlobalDragStart, true);
 
     let cancelled = false;
     const unsubs: Array<() => void> = [];
@@ -564,10 +632,18 @@ export const App: React.FC = () => {
         listen("lindo://state-updated", () => {
           syncFromRustState().then((b) => {
             if (b.isAuthorized) {
+              if (browserAuthWatchdogRef.current) {
+                clearTimeout(browserAuthWatchdogRef.current);
+                browserAuthWatchdogRef.current = null;
+              }
               setAuthCompleting(false);
               setAuthStatusHint(null);
+              setAuthModalStartAdding(false);
               setShowAuthModal(false);
               setGuestPrompt(null);
+              if (b.state.currentUser?.username) {
+                setGlobalNotice(`已登录 @${b.state.currentUser.username}`);
+              }
               fetchSiteCategories(true)
                 .then(setCategories)
                 .catch(() => {});
@@ -576,6 +652,12 @@ export const App: React.FC = () => {
           });
         }),
         listen("lindo://verified", () => {
+          const hadReaderErr = Boolean(readerErrorRef.current);
+          const curSummary = activeSummaryRef.current;
+          const curFloor = targetFloorRef.current;
+          const hadMsgErr = Boolean(msgReaderErrorRef.current);
+          const curMsgSummary = msgSummaryRef.current;
+          const curMsgFloor = msgTargetFloorRef.current;
           setFeedError(null);
           setLoadMoreError(null);
           setReaderError(null);
@@ -586,6 +668,15 @@ export const App: React.FC = () => {
               .catch(() => {});
             if (b.isAuthorized || isGuestMode) {
               loadFeed({ silent: true });
+              if (hadReaderErr && curSummary) {
+                void openTopicRef.current(curSummary, { floor: curFloor, forceRefresh: true });
+              }
+              if (hadMsgErr && curMsgSummary) {
+                void openMessageTopicRef.current(curMsgSummary, {
+                  floor: curMsgFloor,
+                  forceRefresh: true,
+                });
+              }
             }
           });
         }),
@@ -594,6 +685,13 @@ export const App: React.FC = () => {
           (ev) => {
             const p = ev.payload;
             if (p?.summary) {
+              if (
+                browserAuthWatchdogRef.current &&
+                (p.summary.includes("收到默认浏览器授权回调") || p.tag === "AuthSuccess")
+              ) {
+                clearTimeout(browserAuthWatchdogRef.current);
+                browserAuthWatchdogRef.current = null;
+              }
               diagLog(
                 (p.level as any) || "INFO",
                 (p.category as any) || "AUTH",
@@ -658,6 +756,11 @@ export const App: React.FC = () => {
 
     return () => {
       cancelled = true;
+      window.removeEventListener("dragstart", onGlobalDragStart, true);
+      if (browserAuthWatchdogRef.current) {
+        clearTimeout(browserAuthWatchdogRef.current);
+        browserAuthWatchdogRef.current = null;
+      }
       unsubs.forEach((u) => u());
     };
   }, [syncFromRustState, loadFeed, isGuestMode]);
@@ -688,47 +791,153 @@ export const App: React.FC = () => {
     }
   }, [inMainApp, isWideLayout, activeSummary, topics, currentTab, openTopic]);
 
-  // Background poll for new topics (`N 条新动态` capsule) & unread notifications (calm 3-min cadence to avoid Cloudflare 429)
+  const feedPollCtxRef = useRef({
+    currentTab,
+    currentSort,
+    selectedCategoryId,
+    selectedTag,
+    topics,
+    isAuthorized,
+    feedError,
+    readerError,
+    feedLoading,
+  });
+  feedPollCtxRef.current = {
+    currentTab,
+    currentSort,
+    selectedCategoryId,
+    selectedTag,
+    topics,
+    isAuthorized,
+    feedError,
+    readerError,
+    feedLoading,
+  };
+
+  const checkPendingNewFeedSilently = useCallback(async () => {
+    if (document.hidden || backgroundPollInFlightRef.current) return;
+    const ctx = feedPollCtxRef.current;
+    if (ctx.currentTab !== "HOME" || (ctx.currentSort !== "latest" && ctx.currentSort !== "new")) {
+      return;
+    }
+    if (ctx.feedLoading || ctx.feedError || ctx.readerError || ctx.topics.length === 0) {
+      return;
+    }
+    backgroundPollInFlightRef.current = true;
+    try {
+      const latest = await fetchTopicFeed({
+        sort: ctx.currentSort,
+        page: 0,
+        categoryId: ctx.selectedCategoryId,
+        tag: ctx.selectedTag,
+        background: true,
+      });
+      lastFeedSyncedAtRef.current = Date.now();
+      const latestCtx = feedPollCtxRef.current;
+      if (
+        latestCtx.currentSort === ctx.currentSort &&
+        latestCtx.selectedCategoryId === ctx.selectedCategoryId &&
+        latestCtx.selectedTag === ctx.selectedTag &&
+        latestCtx.topics.length > 0 &&
+        latest.topics.length > 0
+      ) {
+        const currentIds = new Set(
+          latestCtx.topics.slice(0, 40).map((t) => `${t.id}:${t.highestPostNumber}`)
+        );
+        const changed = latest.topics.filter(
+          (t) => !t.pinned && !currentIds.has(`${t.id}:${t.highestPostNumber}`)
+        );
+        if (changed.length > 0) {
+          setPendingNewTopics(latest.topics);
+        }
+      }
+      if (latestCtx.isAuthorized) {
+        const me = await refreshCurrentUserSession();
+        if (me.profile) setUnreadCount(me.unread);
+      }
+    } catch {
+      // silent background check
+    } finally {
+      backgroundPollInFlightRef.current = false;
+    }
+  }, []);
+
+  // Stable 75s background poll for `N 条新动态` capsule & unread notifications (never reset by pagination or topic clicks!)
   useEffect(() => {
     if (!inMainApp) return;
-    const timer = setInterval(async () => {
-      if (document.hidden || currentTab !== "HOME" || currentSort !== "latest") return;
-      if (feedError || readerError) return;
-      try {
-        const latest = await fetchTopicFeed({
-          sort: "latest",
-          page: 0,
-          categoryId: selectedCategoryId,
-          tag: selectedTag,
-          background: true,
-        });
-        if (topics.length > 0 && latest.topics.length > 0) {
-          const currentIds = new Set(
-            topics.slice(0, 30).map((t) => `${t.id}:${t.highestPostNumber}`)
-          );
-          const changed = latest.topics.filter(
-            (t) => !t.pinned && !currentIds.has(`${t.id}:${t.highestPostNumber}`)
-          );
-          if (changed.length > 0) {
-            setPendingNewTopics(latest.topics);
-          }
-        }
-        if (isAuthorized) {
-          const me = await refreshCurrentUserSession();
-          if (me.profile) setUnreadCount(me.unread);
-        }
-      } catch {
-        // silent background check
+    const timer = setInterval(() => {
+      void checkPendingNewFeedSilently();
+    }, 75000);
+    const onVisibility = () => {
+      if (!document.hidden && Date.now() - lastFeedSyncedAtRef.current >= 60000) {
+        void checkPendingNewFeedSilently();
       }
-    }, 180000);
-    return () => clearInterval(timer);
-  }, [inMainApp, currentTab, currentSort, selectedCategoryId, selectedTag, topics, isAuthorized, feedError, readerError]);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [inMainApp, checkPendingNewFeedSilently]);
+
+  // Also check quietly when switching back to HOME tab after >= 60s
+  useEffect(() => {
+    if (!inMainApp || currentTab !== "HOME") return;
+    if (Date.now() - lastFeedSyncedAtRef.current >= 60000) {
+      const t = setTimeout(() => {
+        void checkPendingNewFeedSilently();
+      }, 450);
+      return () => clearTimeout(t);
+    }
+  }, [inMainApp, currentTab, checkPendingNewFeedSilently]);
+
+  const applyPendingNewTopicsNow = useCallback(() => {
+    if (pendingNewTopics && pendingNewTopics.length > 0) {
+      setTopics((prev) => {
+        const freshIds = new Set(pendingNewTopics.map((t) => t.id));
+        return [...pendingNewTopics, ...prev.filter((p) => !freshIds.has(p.id))];
+      });
+      setPendingNewTopics(null);
+      lastFeedSyncedAtRef.current = Date.now();
+    } else {
+      loadFeed();
+    }
+  }, [pendingNewTopics, loadFeed]);
+
+  const paneAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (paneAnimTimerRef.current) clearTimeout(paneAnimTimerRef.current);
+      document.documentElement.classList.remove("lindo-pane-animating");
+    };
+  }, []);
+
+  const toggleFeedCollapse = useCallback(() => {
+    if (paneAnimTimerRef.current) clearTimeout(paneAnimTimerRef.current);
+    document.documentElement.classList.add("lindo-pane-animating");
+    paneAnimTimerRef.current = setTimeout(() => {
+      paneAnimTimerRef.current = null;
+      document.documentElement.classList.remove("lindo-pane-animating");
+    }, 225);
+
+    setFeedCollapsed((prev) => {
+      const next = !prev;
+      if (next && currentTab === "HOME" && !activeSummary && topics.length > 0) {
+        const first = topics.find((t) => !t.pinned) ?? topics[0];
+        if (first) void openTopic(first, { trackVisit: false });
+      }
+      return next;
+    });
+  }, [currentTab, activeSummary, topics, openTopic]);
 
   // Global keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key.toLowerCase() === "k" && inMainApp) {
+      if (mod && e.key === "\\" && inMainApp && isWideLayout && (currentTab === "HOME" || currentTab === "MESSAGES")) {
+        e.preventDefault();
+        toggleFeedCollapse();
+      } else if (mod && e.key.toLowerCase() === "k" && inMainApp) {
         e.preventDefault();
         setShowGlobalSearch((v) => !v);
       } else if (mod && e.key.toLowerCase() === "n" && inMainApp) {
@@ -785,9 +994,15 @@ export const App: React.FC = () => {
     guestPrompt,
     showLogoutConfirm,
     showAuthModal,
+    isWideLayout,
+    toggleFeedCollapse,
   ]);
 
   const handlePrimaryWebLogin = useCallback(async () => {
+    if (browserAuthWatchdogRef.current) {
+      clearTimeout(browserAuthWatchdogRef.current);
+      browserAuthWatchdogRef.current = null;
+    }
     setGuestPrompt(null);
     setShowAuthModal(false);
     setAuthStatusHint(null);
@@ -831,16 +1046,36 @@ export const App: React.FC = () => {
 
   const handleBrowserOneClickAuth = useCallback(async () => {
     setGuestPrompt(null);
-    setShowAuthModal(false);
+    if (inMainApp) {
+      setAuthModalStartAdding(true);
+      setShowAuthModal(true);
+    }
+    if (browserAuthWatchdogRef.current) {
+      clearTimeout(browserAuthWatchdogRef.current);
+      browserAuthWatchdogRef.current = null;
+    }
     try {
       await startBrowserOneClickAuth();
-      setAuthStatusHint("已在系统浏览器打开授权页，点击「批准」后将自动完成登录");
-      setGlobalNotice("已在系统浏览器打开授权页，点击「批准」即可自动返回");
+      setAuthStatusHint("已在默认浏览器打开授权页，点击「授权」并在弹窗确认「打开 Lindo」即可自动完成登录");
+      setGlobalNotice("已在默认浏览器打开授权页，点击「授权」即可返回");
+      browserAuthWatchdogRef.current = setTimeout(() => {
+        browserAuthWatchdogRef.current = null;
+        diagLog(
+          "WARN",
+          "AUTH",
+          "BrowserAuth",
+          "超过 45 秒未收到浏览器 discourse:// 授权回调（浏览器可能未放行打开应用弹窗）",
+          "请在浏览器弹窗点击「打开 Lindo」，或在登录窗点击「粘贴回调链接或 _t 完成登录」"
+        );
+        setAuthStatusHint(
+          "暂未收到浏览器回调：请在浏览器弹窗点击「打开 Lindo」，或点击下方手动粘贴回调链接完成登录"
+        );
+      }, 45000);
     } catch (err: any) {
       setAuthStatusHint(err?.message || "无法打开系统浏览器授权");
       setShowAuthModal(true);
     }
-  }, []);
+  }, [inMainApp]);
 
   const handleSwitchSavedAccount = useCallback(
     async (uname: string) => {
@@ -943,10 +1178,29 @@ export const App: React.FC = () => {
     currentUser?.username,
   ]);
 
-  const updatePreferences = useCallback((next: UserPreferences) => {
-    setPreferences(next);
-    savePreferencesToRust(next).catch(() => {});
-  }, []);
+  const updatePreferences = useCallback(
+    (next: UserPreferences) => {
+      const themeChanged =
+        next.appearance !== preferences.appearance ||
+        next.themeOption !== preferences.themeOption;
+      if (themeChanged) {
+        performSmoothThemeSwitch(() => {
+          const nextDark =
+            next.appearance === "light"
+              ? false
+              : next.appearance === "dark"
+                ? true
+                : systemPrefersDark;
+          applyPaletteToDocument(nextDark, next.themeOption, next.fontScale);
+          setPreferences(next);
+        }, next.enableAnimations);
+      } else {
+        setPreferences(next);
+      }
+      savePreferencesToRust(next).catch(() => {});
+    },
+    [preferences, systemPrefersDark]
+  );
 
   const toggleDarkPref = useCallback(() => {
     updatePreferences({
@@ -1020,17 +1274,28 @@ export const App: React.FC = () => {
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const leftPaneRef = useRef<HTMLDivElement | null>(null);
   const startSplitDrag = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
     e.preventDefault();
     const container = splitContainerRef.current;
     const leftEl = leftPaneRef.current;
     if (!container || !leftEl) return;
+    const startX = e.clientX;
     const rect = container.getBoundingClientRect();
     let latestFraction = preferences.splitFraction;
+    let engaged = false;
     let rafId = 0;
 
-    document.body.style.cursor = "col-resize";
-
     const onMove = (ev: MouseEvent) => {
+      if ((ev.buttons & 1) === 0) {
+        onUp();
+        return;
+      }
+      if (!engaged) {
+        if (Math.abs(ev.clientX - startX) < 3) return;
+        engaged = true;
+        setIsDraggingSplit(true);
+        document.body.style.cursor = "col-resize";
+      }
       const raw = (ev.clientX - rect.left) / Math.max(1, rect.width);
       latestFraction = Math.max(0.28, Math.min(0.62, raw));
       if (rafId === 0) {
@@ -1046,8 +1311,11 @@ export const App: React.FC = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       if (rafId !== 0) cancelAnimationFrame(rafId);
-      document.body.style.cursor = "";
-      updatePreferences({ ...preferences, splitFraction: latestFraction });
+      if (engaged) {
+        document.body.style.cursor = "";
+        setIsDraggingSplit(false);
+        updatePreferences({ ...preferences, splitFraction: latestFraction });
+      }
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -1248,9 +1516,13 @@ export const App: React.FC = () => {
             unreadCount={unreadCount}
             hasUpdate={Boolean(updateInfo?.hasUpdate)}
             isMacos={platform === "macos"}
+            showFeedToggle={isWideLayout && (currentTab === "HOME" || currentTab === "MESSAGES")}
+            feedCollapsed={feedCollapsed}
+            onToggleFeedCollapse={toggleFeedCollapse}
             onSelectTab={(tab) => {
               if (tab === currentTab) {
                 setNarrowShowingReader(false);
+                if (feedCollapsed) setFeedCollapsed(false);
                 return;
               }
               if (isDrawerComposer && composerExitGuardRef.current) {
@@ -1360,15 +1632,48 @@ export const App: React.FC = () => {
                   setUpdateError(null);
                   setShowUpdateModal(true);
                 }}
+                onOpenMessages={() => setCurrentTab("MESSAGES")}
               />
             ) : isWideLayout ? (
               <>
-                {/* 宽屏左栏：首页话题流 或 消息中心 */}
+                {/* 宽屏左栏：首页话题流 或 消息中心（收起时锁定内部像素宽度 + GPU 位移，零文字重排、144Hz 满帧丝滑） */}
                 <div
                   ref={leftPaneRef}
-                  className="relative h-full shrink-0"
-                  style={{ width: `${Math.round(preferences.splitFraction * 1000) / 10}%` }}
+                  className={`relative h-full shrink-0 overflow-hidden ${
+                    feedCollapsed ? "pointer-events-none" : ""
+                  }`}
+                  style={{
+                    width: feedCollapsed
+                      ? "0px"
+                      : `${Math.round(preferences.splitFraction * 1000) / 10}%`,
+                    opacity: feedCollapsed ? 0 : 1,
+                    willChange: isDraggingSplit ? "auto" : "width, opacity",
+                    transition: isDraggingSplit
+                      ? "none"
+                      : "width 205ms cubic-bezier(0.22, 1, 0.36, 1), opacity 165ms ease-out",
+                  }}
                 >
+                  <div
+                    className="relative h-full"
+                    style={
+                      isDraggingSplit
+                        ? { width: "100%", minWidth: 320 }
+                        : {
+                            width: `${Math.max(
+                              320,
+                              Math.round(
+                                (windowWidth - (platform === "macos" ? 76 : 72)) *
+                                  preferences.splitFraction
+                              )
+                            )}px`,
+                            transform: feedCollapsed
+                              ? "translate3d(-24px, 0, 0)"
+                              : "translate3d(0, 0, 0)",
+                            transition: "transform 205ms cubic-bezier(0.22, 1, 0.36, 1)",
+                            contain: "layout paint",
+                          }
+                    }
+                  >
                   {currentTab === "MESSAGES" ? (
                     <MessagesView
                       isAuthorized={isAuthorized}
@@ -1453,14 +1758,7 @@ export const App: React.FC = () => {
                       onSelectTag={setSelectedTag}
                       onSelectTopic={(t, resumeFloor) => openTopic(t, { floor: resumeFloor ?? null })}
                       onRefresh={() => loadFeed()}
-                      onApplyPendingNew={() => {
-                        if (pendingNewTopics) {
-                          setTopics(pendingNewTopics);
-                          setPendingNewTopics(null);
-                        } else {
-                          loadFeed();
-                        }
-                      }}
+                      onApplyPendingNew={applyPendingNewTopicsNow}
                       onLoadMore={handleLoadMoreTopics}
                       onToggleCompact={() =>
                         updatePreferences({
@@ -1483,17 +1781,20 @@ export const App: React.FC = () => {
                   )}
 
                   {/* 分栏可拖拽分隔手柄（双击恢复默认比例） */}
-                  <div
-                    onMouseDown={startSplitDrag}
-                    onDoubleClick={() =>
-                      updatePreferences({ ...preferences, splitFraction: 0.42 })
-                    }
-                    className="group absolute top-0 -right-[3px] z-30 h-full w-[6px] cursor-col-resize"
-                  >
+                  {!feedCollapsed && (
                     <div
-                      className="mx-auto h-full w-[1px] opacity-0 transition-opacity group-hover:opacity-100"
-                      style={{ backgroundColor: "var(--brand-gold)" }}
-                    />
+                      onMouseDown={startSplitDrag}
+                      onDoubleClick={() =>
+                        updatePreferences({ ...preferences, splitFraction: 0.42 })
+                      }
+                      className="group absolute top-0 right-0 z-30 h-full w-[5px] cursor-col-resize"
+                    >
+                      <div
+                        className="ml-auto h-full w-[1px] opacity-0 transition-opacity group-hover:opacity-100"
+                        style={{ backgroundColor: "var(--brand-gold)" }}
+                      />
+                    </div>
+                  )}
                   </div>
                 </div>
 
@@ -1693,7 +1994,22 @@ export const App: React.FC = () => {
                 isAuthorized={isAuthorized}
                 currentUser={currentUser}
                 unreadNotificationCount={unreadCount}
-                pendingNewCount={0}
+                pendingNewCount={
+                  pendingNewTopics
+                    ? Math.max(
+                        1,
+                        pendingNewTopics.filter(
+                          (nt) =>
+                            !nt.pinned &&
+                            !topics.some(
+                              (t) =>
+                                t.id === nt.id &&
+                                t.highestPostNumber === nt.highestPostNumber
+                            )
+                        ).length
+                      )
+                    : 0
+                }
                 isLoading={feedLoading}
                 isLoadingMore={loadingMoreTopics}
                 hasMore={hasMoreTopics}
@@ -1708,7 +2024,7 @@ export const App: React.FC = () => {
                 onSelectTag={setSelectedTag}
                 onSelectTopic={(t, resumeFloor) => openTopic(t, { floor: resumeFloor ?? null })}
                 onRefresh={() => loadFeed()}
-                onApplyPendingNew={() => loadFeed()}
+                onApplyPendingNew={applyPendingNewTopicsNow}
                 onLoadMore={handleLoadMoreTopics}
                 onToggleCompact={() =>
                   updatePreferences({ ...preferences, compactFeed: !preferences.compactFeed })
@@ -1763,7 +2079,7 @@ export const App: React.FC = () => {
             className="lindo-interactive flex h-6 w-6 items-center justify-center rounded-full"
             style={{ color: "var(--ink-tertiary)" }}
           >
-            <X size={13.5} />
+            <LinDoIcons.Close size={13.5} />
           </button>
         </div>
       )}
@@ -1797,6 +2113,10 @@ export const App: React.FC = () => {
             await syncFromRustState();
           }}
           onManualImported={async () => {
+            if (browserAuthWatchdogRef.current) {
+              clearTimeout(browserAuthWatchdogRef.current);
+              browserAuthWatchdogRef.current = null;
+            }
             await syncFromRustState();
             fetchSiteCategories(true)
               .then(setCategories)

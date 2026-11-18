@@ -76,6 +76,28 @@ export function prepareCookedHtml(rawHtml: string, opts?: { stripPolls?: boolean
     }
   });
 
+  // Enhance Discourse `<aside class="quote" data-post="N">` headers with a clean floor jump badge
+  doc.querySelectorAll("aside.quote").forEach((aside) => {
+    const postNum = aside.getAttribute("data-post");
+    const topicAttr = aside.getAttribute("data-topic") || "";
+    const titleEl = aside.querySelector(".title");
+    if (postNum && Number(postNum) > 0 && titleEl && !titleEl.querySelector("[data-quote-jump-floor]")) {
+      titleEl.querySelectorAll(".quote-controls").forEach((c) => c.remove());
+      const jumpBtn = doc.createElement("button");
+      jumpBtn.setAttribute("type", "button");
+      jumpBtn.setAttribute("data-quote-jump-floor", postNum);
+      if (topicAttr) {
+        jumpBtn.setAttribute("data-quote-jump-topic", topicAttr);
+      }
+      jumpBtn.textContent = `#${postNum} 楼 ›`;
+      jumpBtn.setAttribute(
+        "style",
+        "margin-left:auto;padding:1px 6px;font-size:11.5px;font-weight:500;border-radius:6px;color:var(--ink-tertiary);background:transparent;border:none;cursor:pointer;"
+      );
+      titleEl.appendChild(jumpBtn);
+    }
+  });
+
   // Add one-click copy button (and language badge if present) to every <pre> code block
   doc.querySelectorAll("pre").forEach((pre) => {
     const codeEl = pre.querySelector("code");
@@ -94,6 +116,149 @@ export function prepareCookedHtml(rawHtml: string, opts?: { stripPolls?: boolean
   });
 
   return doc.body.innerHTML;
+}
+
+export interface PostReplyPreviewMeta {
+  snippet: string;
+  hasCode: boolean;
+  hasPoll: boolean;
+  hasTable: boolean;
+  imageCount: number;
+  firstImageUrl: string | null;
+  isLongOrRich: boolean;
+  leadingQuotedFloor: number | null;
+  leadingQuotedTopicId: number | null;
+}
+
+const replyPreviewCache = new Map<string, PostReplyPreviewMeta>();
+
+/**
+ * Extracts a clean, human-readable core content preview from a Discourse `cooked` HTML post
+ * (aligned with Mobile `CommunityPostContent` + enriched for Desktop wide-screen reading).
+ * Cached in-memory by `postId + html.length` for O(1) zero-reflow 144Hz scrolling!
+ */
+export function extractPostReplyPreview(postId: number, rawHtml: string): PostReplyPreviewMeta {
+  if (!rawHtml) {
+    return {
+      snippet: "",
+      hasCode: false,
+      hasPoll: false,
+      hasTable: false,
+      imageCount: 0,
+      firstImageUrl: null,
+      isLongOrRich: false,
+      leadingQuotedFloor: null,
+      leadingQuotedTopicId: null,
+    };
+  }
+  const cacheKey = `${postId}:${rawHtml.length}`;
+  const hit = replyPreviewCache.get(cacheKey);
+  if (hit) return hit;
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(rawHtml, "text/html");
+
+  // Check if the post's very first block is a Discourse `<aside class="quote" data-post="N">`
+  let leadingQuotedFloor: number | null = null;
+  let leadingQuotedTopicId: number | null = null;
+  const firstEl = doc.body.firstElementChild;
+  if (firstEl && firstEl.tagName === "ASIDE" && firstEl.classList.contains("quote")) {
+    const dp = Number(firstEl.getAttribute("data-post") || 0);
+    const dt = Number(firstEl.getAttribute("data-topic") || 0);
+    if (dp > 0) leadingQuotedFloor = dp;
+    if (dt > 0) leadingQuotedTopicId = dt;
+  }
+
+  // Work on body without nested quotes first so we preview what the target floor ITSELF wrote
+  const clone = doc.body.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll("script, style, .meta, .quote-controls").forEach((el) => el.remove());
+
+  const cloneWithoutQuotes = clone.cloneNode(true) as HTMLElement;
+  cloneWithoutQuotes.querySelectorAll("aside.quote").forEach((q) => q.remove());
+
+  const targetRoot =
+    (cloneWithoutQuotes.textContent || "").trim().length > 0 ||
+    cloneWithoutQuotes.querySelectorAll("img:not(.emoji):not(.avatar), pre, .poll, table").length > 0
+      ? cloneWithoutQuotes
+      : clone;
+
+  let imageCount = 0;
+  let firstImageUrl: string | null = null;
+  targetRoot.querySelectorAll("img").forEach((img) => {
+    if (img.classList.contains("avatar")) {
+      img.remove();
+      return;
+    }
+    if (img.classList.contains("emoji")) {
+      const alt = img.getAttribute("alt") || img.getAttribute("title") || "";
+      img.replaceWith(doc.createTextNode(alt));
+      return;
+    }
+    const rawSrc =
+      img.getAttribute("src") ||
+      img.getAttribute("data-orig-src") ||
+      img.getAttribute("data-small-upload") ||
+      "";
+    if (rawSrc) {
+      imageCount += 1;
+      if (!firstImageUrl) {
+        firstImageUrl = resolveForumAssetUrl(rawSrc);
+      }
+    }
+    img.remove();
+  });
+
+  const hasPoll = Boolean(targetRoot.querySelector("div.poll"));
+  targetRoot.querySelectorAll("div.poll").forEach((p) => p.remove());
+
+  const hasTable = Boolean(targetRoot.querySelector("table"));
+  const hasCode = Boolean(targetRoot.querySelector("pre"));
+  targetRoot.querySelectorAll("pre").forEach((pre) => {
+    const firstLine = (pre.textContent || "")
+      .trim()
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .find(Boolean);
+    pre.replaceWith(doc.createTextNode(firstLine ? ` \`${firstLine.slice(0, 48)}\` ` : " "));
+  });
+
+  // Insert spaces around block boundaries so adjacent paragraphs don't glue together
+  targetRoot.querySelectorAll("p, br, li, div, h1, h2, h3, h4, blockquote, tr").forEach((b) => {
+    b.appendChild(doc.createTextNode(" "));
+  });
+
+  const cleanText = (targetRoot.textContent || "").replace(/\s+/g, " ").trim();
+  const tags: string[] = [];
+  if (hasPoll) tags.push("[投票]");
+  if (hasCode) tags.push("[代码块]");
+  if (hasTable) tags.push("[表格]");
+  if (imageCount > 1) tags.push(`[${imageCount}张图片]`);
+  else if (imageCount === 1 && !cleanText) tags.push("[图片]");
+
+  const prefix = tags.length > 0 ? `${tags.join(" ")} ` : "";
+  const combined = `${prefix}${cleanText}`.trim();
+  const snippet = combined.slice(0, 240);
+  const isLongOrRich =
+    cleanText.length > 108 || imageCount > 0 || hasCode || hasPoll || hasTable;
+
+  const meta: PostReplyPreviewMeta = {
+    snippet,
+    hasCode,
+    hasPoll,
+    hasTable,
+    imageCount,
+    firstImageUrl,
+    isLongOrRich,
+    leadingQuotedFloor,
+    leadingQuotedTopicId,
+  };
+
+  if (replyPreviewCache.size >= 600) {
+    const oldest = replyPreviewCache.keys().next().value;
+    if (oldest) replyPreviewCache.delete(oldest);
+  }
+  replyPreviewCache.set(cacheKey, meta);
+  return meta;
 }
 
 /** Parse internal linux.do topic links like https://linux.do/t/slug/12345/6 */

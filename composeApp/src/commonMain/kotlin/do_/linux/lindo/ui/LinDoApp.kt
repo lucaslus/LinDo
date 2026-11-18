@@ -66,6 +66,8 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -1881,17 +1883,35 @@ internal fun LinDoApp(
             putAll(LinuxDoRepository.getReadTopicSnapshot())
         }
     }
+    val topicDetailUiCache = remember {
+        LinkedHashMap<Int, Pair<Long, TopicDetailModel>>(32, 0.75f, true)
+    }
+    var lastTopicOpenDispatchedAtMs by remember { mutableStateOf(0L) }
+    var lastTopicVisitTrackedAtMs by remember { mutableStateOf(0L) }
+    var lastTopicsSyncedAtMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    var isFeedPaneCollapsed by remember { mutableStateOf(false) }
+    var pendingVerifyTargetUrl by remember { mutableStateOf("https://linux.do/challenge#lindo-verify") }
+    LaunchedEffect(authVersion) {
+        topicDetailUiCache.clear()
+    }
 
     fun openWebPage(url: String) {
         rootKeyboardController?.hide()
         guestLoginPrompt = null
-        val isSiteRecovery = url.trim().trimEnd('/').equals("https://linux.do", ignoreCase = true)
-        if (isSiteRecovery) {
+        val trimmed = url.trim()
+        val isExplicitVerifyTarget = trimmed.endsWith("#lindo-verify", ignoreCase = true)
+        val isSiteRecovery = trimmed.trimEnd('/').equals("https://linux.do", ignoreCase = true)
+        if (isExplicitVerifyTarget) {
+            // 统一将所有站点验证入口路由至轻量 /challenge 端点（Cloudflare WAF 必拦截签发读写级 cf_clearance，且通过后仅落入轻量 404 而非重型主站或 Rails Oops）
+            pendingVerifyTargetUrl = "https://linux.do/challenge#lindo-verify"
+            showSiteVerifySheet = true
+        } else if (isSiteRecovery) {
+            pendingVerifyTargetUrl = "https://linux.do/challenge#lindo-verify"
             showSiteVerifySheet = true
         } else if (hasEmbeddedWebLogin) {
             activeWebLoginUrl = url
         } else {
-            val normalized = url.trim().trimEnd('/')
+            val normalized = trimmed.trimEnd('/')
             if (normalized.equals("https://linux.do", ignoreCase = true)) {
                 showSiteVerifySheet = true
             } else {
@@ -2158,6 +2178,7 @@ internal fun LinDoApp(
             topics = normalizeReadTopics(pendingNewTopics)
             pendingNewTopics = emptyList()
             pendingNewCount = 0
+            lastTopicsSyncedAtMs = System.currentTimeMillis()
             if (currentPage < 0) currentPage = 0
             hasMoreTopics = true
             scope.launch {
@@ -2216,6 +2237,7 @@ internal fun LinDoApp(
                         fetched.first().postsCount == previousTopPostsCount
                     val filtered = if (excludedTopicId == null) fetched else fetched.filterNot { it.id == excludedTopicId }
                     topics = normalizeReadTopics(filtered)
+                    lastTopicsSyncedAtMs = System.currentTimeMillis()
                     hasMoreTopics = LinuxDoRepository.computeHasMoreTopics(sort.apiPath, currentPage, fetched.size)
                     if (isUnchanged) {
                         refreshUpToDateNotice = true
@@ -2307,6 +2329,13 @@ internal fun LinDoApp(
     }
 
     fun syncUpdatedTopicDetail(updated: TopicDetailModel) {
+        if (updated.loadError == null && updated.posts.isNotEmpty()) {
+            topicDetailUiCache[updated.id] = System.currentTimeMillis() to updated
+            while (topicDetailUiCache.size > 28) {
+                val eldestKey = topicDetailUiCache.keys.firstOrNull() ?: break
+                topicDetailUiCache.remove(eldestKey)
+            }
+        }
         if (activeTopicSummary?.id == updated.id) {
             activeTopicDetail = updated
             activeTopicSummary = activeTopicSummary?.let { cur ->
@@ -2374,6 +2403,24 @@ internal fun LinDoApp(
         detailLoadJob?.cancel()
         // Dismiss any full-screen overlay sheets so the Topic Reader is never hidden underneath (C5)
         dismissCoveringSheets()
+        val nowOpenMs = System.currentTimeMillis()
+        if (!isManualRetry && !hadDetailError && targetPostNumber == null) {
+            val cachedEntry = topicDetailUiCache[topic.id]
+            if (cachedEntry != null &&
+                nowOpenMs - cachedEntry.first <= 90_000L &&
+                cachedEntry.second.loadError == null &&
+                cachedEntry.second.posts.isNotEmpty()
+            ) {
+                targetFloorJumpNonce++
+                activeTopicSummary = topic
+                activeTargetPostNumber = null
+                activeTopicDetail = cachedEntry.second
+                isLoadingDetail = false
+                currentTab = MainTab.HOME
+                mobileShowingDetail = true
+                return
+            }
+        }
         val keepReader = isManualRetry && activeTopicSummary?.id == topic.id && activeTopicDetail?.posts?.isNotEmpty() == true
         if (!keepReader) {
             targetFloorJumpNonce++
@@ -2383,20 +2430,38 @@ internal fun LinDoApp(
         activeTargetPostNumber = targetPostNumber
         currentTab = MainTab.HOME
         mobileShowingDetail = true
+        val prevOpenMs = lastTopicOpenDispatchedAtMs
+        lastTopicOpenDispatchedAtMs = nowOpenMs
         detailLoadJob = scope.launch {
             isLoadingDetail = true
             try {
+                if (!isManualRetry && !hadDetailError && prevOpenMs > 0L && nowOpenMs - prevOpenMs < 320L) {
+                    delay(95L)
+                }
                 if (isManualRetry || hadDetailError) {
                     LinuxDoRepository.prepareForManualRecovery()
+                }
+                val dispatchNowMs = System.currentTimeMillis()
+                val shouldTrackVisit = isManualRetry || (dispatchNowMs - lastTopicVisitTrackedAtMs >= 1_800L)
+                if (shouldTrackVisit) {
+                    lastTopicVisitTrackedAtMs = dispatchNowMs
                 }
                 val result = LinuxDoRepository.fetchTopicDetail(
                     topicId = topic.id,
                     summaryFallback = topic,
+                    trackVisit = shouldTrackVisit,
                     targetPostNumber = targetPostNumber
                 )
                 val loaded = if (result.unavailable && targetPostNumber != null && targetPostNumber > 1) {
-                    LinuxDoRepository.fetchTopicDetail(topic.id, topic)
+                    LinuxDoRepository.fetchTopicDetail(topic.id, topic, trackVisit = false)
                 } else result
+                if (!loaded.unavailable && loaded.loadError == null && loaded.posts.isNotEmpty() && targetPostNumber == null) {
+                    topicDetailUiCache[topic.id] = System.currentTimeMillis() to loaded
+                    while (topicDetailUiCache.size > 28) {
+                        val eldestKey = topicDetailUiCache.keys.firstOrNull() ?: break
+                        topicDetailUiCache.remove(eldestKey)
+                    }
+                }
                 if (!loaded.unavailable) {
                     val refreshedHighest = maxOf(
                         topic.highestPostNumber,
@@ -2421,6 +2486,7 @@ internal fun LinDoApp(
     fun switchMainTabSafely(targetTab: MainTab) {
         if (currentTab == targetTab) {
             mobileShowingDetail = false
+            if (isFeedPaneCollapsed) isFeedPaneCollapsed = false
             return
         }
         if (isWideLayout && currentTab == MainTab.HOME) {
@@ -2496,6 +2562,23 @@ internal fun LinDoApp(
             !isLoadingDetail &&
             activeTopicDetail?.posts.isNullOrEmpty() &&
             isTransientRecoverableLoadError(currentDetailErr)
+        ) {
+            openTopic(currentSummary, activeTargetPostNumber, isManualRetry = true)
+        }
+    }
+
+    LaunchedEffect(siteVerificationRestoreVersion) {
+        if (siteVerificationRestoreVersion == 0) return@LaunchedEffect
+        LinuxDoRepository.clearChallengeCooldown()
+        if ((isAuthorized || isGuestMode) && feedError != null && !isLoadingTopics) {
+            feedError = null
+            loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+        }
+        val currentSummary = activeTopicSummary
+        if ((isAuthorized || isGuestMode) &&
+            currentSummary != null &&
+            !isLoadingDetail &&
+            activeTopicDetail?.loadError != null
         ) {
             openTopic(currentSummary, activeTargetPostNumber, isManualRetry = true)
         }
@@ -2707,7 +2790,7 @@ internal fun LinDoApp(
         }
         // Closing/cancelling a verification page is not proof that the challenge succeeded.
         // Only the verified callback may clear the cooldown and resume blocked operations.
-        if (closedUrl == "https://linux.do/#lindo-verify") return
+        if (closedUrl != null && do_.linux.lindo.core.network.webPagePurpose(closedUrl) == do_.linux.lindo.core.network.WebPagePurpose.VERIFICATION) return
         if (wasEditingProfile) syncUserProfile()
         if (wasLinuxDoPage) {
             scope.launch {
@@ -2864,7 +2947,7 @@ internal fun LinDoApp(
             }
         }
         val (forceWeb, cleanedWebUrl) = stripWebOneQueryParam(trimmed)
-        if (forceWeb) {
+        if (forceWeb || trimmed.endsWith("#lindo-verify", ignoreCase = true)) {
             openWebPage(cleanedWebUrl)
             return
         }
@@ -3062,44 +3145,59 @@ internal fun LinDoApp(
         }
     }
 
-    // 实时新帖子推送检测（LIST-024：在首页低频静默检测是否有新发布或新回复的话题，避免高频轮询触发 Cloudflare 429 挑战）
-    LaunchedEffect(currentTab, mobileShowingDetail, isWideLayout, currentSort, selectedCategoryId, selectedTag, currentTopPeriod) {
-        while (currentTab == MainTab.HOME && (!mobileShowingDetail || isWideLayout)) {
-            delay(180_000L)
-            if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) continue
-            if (activeWebLoginUrl != null ||
-                feedError.isSiteVerificationError() ||
-                LinuxDoRepository.isChallengeCooldownActive() ||
-                LinuxDoRepository.isRateLimitedNow()
-            ) continue
-            if (!isLoadingTopics && !isLoadingMoreTopics && topics.isNotEmpty() && searchQuery.isBlank()) {
-                val genBefore = feedGeneration
-                val fresh = try {
-                    LinuxDoRepository.fetchTopics(
-                        path = currentSort.apiPath,
-                        categoryId = selectedCategoryId,
-                        page = 0,
-                        tag = selectedTag,
-                        topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null,
-                        background = true
-                    )
-                } catch (_: Throwable) {
-                    emptyList()
+    suspend fun checkPendingNewTopicsOnce() {
+        if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) return
+        if (currentTab != MainTab.HOME || (mobileShowingDetail && !isWideLayout)) return
+        if (activeWebLoginUrl != null ||
+            feedError.isSiteVerificationError() ||
+            LinuxDoRepository.isChallengeCooldownActive() ||
+            LinuxDoRepository.isRateLimitedNow()
+        ) return
+        if (!isLoadingTopics && !isLoadingMoreTopics && topics.isNotEmpty() && searchQuery.isBlank()) {
+            val genBefore = feedGeneration
+            val fresh = try {
+                LinuxDoRepository.fetchTopics(
+                    path = currentSort.apiPath,
+                    categoryId = selectedCategoryId,
+                    page = 0,
+                    tag = selectedTag,
+                    topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null,
+                    background = true
+                )
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            if (fresh.isNotEmpty() && genBefore == feedGeneration && !isLoadingTopics) {
+                lastTopicsSyncedAtMs = System.currentTimeMillis()
+                val currentMap = topics.associateBy { it.id }
+                val changedCount = fresh.filterNot { it.pinned }.count { item ->
+                    val prev = currentMap[item.id]
+                    prev == null || item.postsCount > prev.postsCount || item.highestPostNumber > prev.highestPostNumber
                 }
-                if (fresh.isNotEmpty() && genBefore == feedGeneration && !isLoadingTopics) {
-                    val currentMap = topics.associateBy { it.id }
-                    val changedCount = fresh.filterNot { it.pinned }.count { item ->
-                        val prev = currentMap[item.id]
-                        prev == null || item.postsCount > prev.postsCount
-                    }
-                    if (changedCount > 0) {
-                        val freshIds = fresh.map { it.id }.toSet()
-                        val merged = normalizeReadTopics(fresh + topics.filterNot { it.id in freshIds })
-                        pendingNewTopics = merged
-                        pendingNewCount = changedCount
-                    }
+                if (changedCount > 0) {
+                    val freshIds = fresh.map { it.id }.toSet()
+                    val merged = normalizeReadTopics(fresh + topics.filterNot { it.id in freshIds })
+                    pendingNewTopics = merged
+                    pendingNewCount = changedCount
                 }
             }
+        }
+    }
+
+    // 实时新帖子推送检测（LIST-024：75s 稳定定时器，不因进出详情页或上滑分页重置；从详情返回首页超过 65s 时温和补检一次）
+    LaunchedEffect(isAuthorized, isGuestMode, currentSort, selectedCategoryId, selectedTag, currentTopPeriod) {
+        if (!isAuthorized && !isGuestMode) return@LaunchedEffect
+        while (true) {
+            delay(75_000L)
+            checkPendingNewTopicsOnce()
+        }
+    }
+    LaunchedEffect(currentTab, mobileShowingDetail, isWideLayout) {
+        if (currentTab == MainTab.HOME && (!mobileShowingDetail || isWideLayout) &&
+            pendingNewCount == 0 && System.currentTimeMillis() - lastTopicsSyncedAtMs >= 65_000L
+        ) {
+            delay(600L)
+            checkPendingNewTopicsOnce()
         }
     }
 
@@ -3129,6 +3227,7 @@ internal fun LinDoApp(
             showAboutSheet ||
             showConnectSheet ||
             (mobileShowingDetail && !isWideLayout) ||
+            (isFeedPaneCollapsed && isWideLayout && currentTab == MainTab.HOME) ||
             currentTab != MainTab.HOME
         BackNavigationBridge.canGoBack = canIntercept
         BackNavigationBridge.onBack = {
@@ -3232,6 +3331,10 @@ internal fun LinDoApp(
                     mobileShowingDetail = false
                     true
                 }
+                isFeedPaneCollapsed && isWideLayout && currentTab == MainTab.HOME -> {
+                    isFeedPaneCollapsed = false
+                    true
+                }
                 currentTab != MainTab.HOME -> {
                     currentTab = MainTab.HOME
                     true
@@ -3298,12 +3401,12 @@ internal fun LinDoApp(
         }
     }
 
-    val verificationActive = showSiteVerifySheet || activeWebLoginUrl == "https://linux.do/#lindo-verify"
+    val verificationActive = showSiteVerifySheet || activeWebLoginUrl?.endsWith("#lindo-verify", ignoreCase = true) == true
     SideEffect {
         PlatformSessionRecovery.verifying = verificationActive
         PlatformSessionRecovery.cancelVerification = {
             showSiteVerifySheet = false
-            if (activeWebLoginUrl == "https://linux.do/#lindo-verify") closeWebPage()
+            if (activeWebLoginUrl?.endsWith("#lindo-verify", ignoreCase = true) == true) closeWebPage()
         }
     }
     DisposableEffect(Unit) { onDispose {
@@ -3405,6 +3508,11 @@ internal fun LinDoApp(
                                 unreadCount = effectiveUnreadCount,
                                 compactWidth = isCompactWideRail,
                                 topWindowInset = macTitleBarInset,
+                                showFeedToggle = currentTab == MainTab.HOME,
+                                isFeedCollapsed = isFeedPaneCollapsed,
+                                onToggleFeedCollapse = {
+                                    isFeedPaneCollapsed = !isFeedPaneCollapsed
+                                },
                                 onSelectTab = ::switchMainTabSafely,
                                 onPublishClick = {
                                     if (isAuthorized) {
@@ -3454,97 +3562,120 @@ internal fun LinDoApp(
                                         modifier = Modifier.fillMaxSize()
                                     ) {
                                         val paneContainerWidthDp = maxWidth.value
+                                        val paneContainerHeightDp = maxHeight.value
                                         val leftPaneWidthDp = computeSplitPaneLeftWidthDp(
                                             availableContentWidthDp = paneContainerWidthDp,
                                             fraction = splitFraction
                                         )
                                         val leftPaneWidth = leftPaneWidthDp.dp
+                                        val animatedLeftPaneWidth by androidx.compose.animation.core.animateDpAsState(
+                                            targetValue = if (isFeedPaneCollapsed) 0.dp else leftPaneWidth,
+                                            animationSpec = if (isDraggingSplitter || !enableAnimations) {
+                                                androidx.compose.animation.core.snap()
+                                            } else {
+                                                tween(
+                                                    durationMillis = 205,
+                                                    easing = androidx.compose.animation.core.CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
+                                                )
+                                            },
+                                            label = "animatedLeftPaneWidth"
+                                        )
 
                                         Row(modifier = Modifier.fillMaxSize()) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(leftPaneWidth)
-                                                    .fillMaxHeight()
-                                            ) {
-                                                CommunityHomeFeedPane(
-                                                    topics = displayedTopics,
-                                                    listState = feedListState,
-                                                    selectedTopicId = activeTopicSummary?.id,
-                                                    selectedCategoryId = selectedCategoryId,
-                                                    selectedTag = selectedTag,
-                                                    currentSort = currentSort,
-                                                    currentTopPeriod = currentTopPeriod,
-                                                    searchQuery = searchQuery,
-                                                    isLoading = isLoadingTopics,
-                                                    isLoadingMore = isLoadingMoreTopics,
-                                                    hasMoreTopics = hasMoreTopics,
-                                                    loadMoreError = loadMoreError,
-                                                    loadMoreErrorMessage = loadMoreErrorMessage,
-                                                    reserveBottomNavSpace = mobileWideNav,
-                                                    errorMessage = feedError,
-                                                    refreshUpToDateNotice = refreshUpToDateNotice,
-                                                    pendingNewCount = pendingNewCount,
-                                                    enableAnimations = enableAnimations,
-                                                    fontScale = fontScale,
-                                                    isCompactFeed = isCompactFeed,
-                                                    defaultSearchExpanded = defaultSearchExpanded,
-                                                    isAuthorized = isAuthorized,
-                                                    currentUser = currentUser,
-                                                    unreadNotificationCount = effectiveUnreadCount,
-                                                    onRequestLogin = ::triggerPrimaryLogin,
-                                                    onSearchChange = { searchQuery = it },
-                                                    onOpenGlobalSearch = { showGlobalSearchSheet = true },
-                                                    onOpenCreateTopic = {
-                                                        if (isAuthorized) {
-                                                            pendingNewTopicDraft = null
-                                                            showCreateTopicSheet = true
-                                                        } else {
-                                                            requestGuestLogin(GuestGateScenario.PUBLISH_TOPIC)
+                                            if (animatedLeftPaneWidth > 0.5.dp) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(animatedLeftPaneWidth)
+                                                        .fillMaxHeight()
+                                                        .graphicsLayer { clip = true }
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .wrapContentWidth(Alignment.End, unbounded = true)
+                                                            .width(leftPaneWidth)
+                                                            .fillMaxHeight()
+                                                    ) {
+                                                        CommunityHomeFeedPane(
+                                                            topics = displayedTopics,
+                                                            listState = feedListState,
+                                                            selectedTopicId = activeTopicSummary?.id,
+                                                            selectedCategoryId = selectedCategoryId,
+                                                            selectedTag = selectedTag,
+                                                            currentSort = currentSort,
+                                                            currentTopPeriod = currentTopPeriod,
+                                                            searchQuery = searchQuery,
+                                                            isLoading = isLoadingTopics,
+                                                            isLoadingMore = isLoadingMoreTopics,
+                                                            hasMoreTopics = hasMoreTopics,
+                                                            loadMoreError = loadMoreError,
+                                                            loadMoreErrorMessage = loadMoreErrorMessage,
+                                                            reserveBottomNavSpace = mobileWideNav,
+                                                            errorMessage = feedError,
+                                                            refreshUpToDateNotice = refreshUpToDateNotice,
+                                                            pendingNewCount = pendingNewCount,
+                                                            enableAnimations = enableAnimations,
+                                                            fontScale = fontScale,
+                                                            isCompactFeed = isCompactFeed,
+                                                            defaultSearchExpanded = defaultSearchExpanded,
+                                                            isAuthorized = isAuthorized,
+                                                            currentUser = currentUser,
+                                                            unreadNotificationCount = effectiveUnreadCount,
+                                                            onRequestLogin = ::triggerPrimaryLogin,
+                                                            onSearchChange = { searchQuery = it },
+                                                            onOpenGlobalSearch = { showGlobalSearchSheet = true },
+                                                            onOpenCreateTopic = {
+                                                                if (isAuthorized) {
+                                                                    pendingNewTopicDraft = null
+                                                                    showCreateTopicSheet = true
+                                                                } else {
+                                                                    requestGuestLogin(GuestGateScenario.PUBLISH_TOPIC)
+                                                                }
+                                                            },
+                                                            onOpenNotifications = {
+                                                                switchMainTabSafely(MainTab.MESSAGES)
+                                                            },
+                                                            onToggleCompactMode = {
+                                                                updateCompactFeedMode(!isCompactFeed)
+                                                            },
+                                                            onSelectCategory = { catId ->
+                                                                selectCategoryWithGuestGuard(catId)
+                                                            },
+                                                            onSelectTag = { tag ->
+                                                                selectedTag = tag
+                                                                loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
+                                                            },
+                                                            onSelectSort = { sort ->
+                                                                currentSort = sort
+                                                                loadTopics(sort, selectedCategoryId, selectedTag, currentTopPeriod)
+                                                            },
+                                                            onSelectTopPeriod = { period ->
+                                                                currentTopPeriod = period
+                                                                loadTopics(FeedSortFilter.TOP, selectedCategoryId, selectedTag, period)
+                                                            },
+                                                            onApplyPendingNewTopics = { applyPendingNewTopics() },
+                                                            onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true) },
+                                                            onLoadMore = { loadNextPageTopics() },
+                                                            onClearLoadMoreError = { loadMoreError = false },
+                                                            onOpenWebUrl = { openWebPage(it) },
+                                                            onSelectTopic = { openTopic(it) },
+                                                            onAvatarClick = { switchMainTabSafely(MainTab.PROFILE) }
+                                                        )
+                                                        if (mobileWideNav) {
+                                                            mobileWideNavBar(Modifier.align(Alignment.BottomCenter))
                                                         }
-                                                    },
-                                                    onOpenNotifications = {
-                                                        switchMainTabSafely(MainTab.MESSAGES)
-                                                    },
-                                                    onToggleCompactMode = {
-                                                        updateCompactFeedMode(!isCompactFeed)
-                                                    },
-                                                    onSelectCategory = { catId ->
-                                                        selectCategoryWithGuestGuard(catId)
-                                                    },
-                                                    onSelectTag = { tag ->
-                                                        selectedTag = tag
-                                                        loadTopics(currentSort, selectedCategoryId, tag, currentTopPeriod)
-                                                    },
-                                                    onSelectSort = { sort ->
-                                                        currentSort = sort
-                                                        loadTopics(sort, selectedCategoryId, selectedTag, currentTopPeriod)
-                                                    },
-                                                    onSelectTopPeriod = { period ->
-                                                        currentTopPeriod = period
-                                                        loadTopics(FeedSortFilter.TOP, selectedCategoryId, selectedTag, period)
-                                                    },
-                                                    onApplyPendingNewTopics = { applyPendingNewTopics() },
-                                                    onRefresh = { loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true) },
-                                                    onLoadMore = { loadNextPageTopics() },
-                                                    onClearLoadMoreError = { loadMoreError = false },
-                                                    onOpenWebUrl = { openWebPage(it) },
-                                                    onSelectTopic = { openTopic(it) },
-                                                    onAvatarClick = { switchMainTabSafely(MainTab.PROFILE) }
-                                                )
-                                                if (mobileWideNav) {
-                                                    mobileWideNavBar(Modifier.align(Alignment.BottomCenter))
+                                                    }
                                                 }
-                                            }
 
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(if (isDraggingSplitter) 1.5.dp else 1.dp)
-                                                    .fillMaxHeight()
-                                                    .background(
-                                                        if (isDraggingSplitter) palette.tabIndicatorColor.copy(alpha = 0.85f)
-                                                        else palette.hairline
-                                                    )
-                                            )
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(if (isDraggingSplitter) 1.5.dp else 1.dp)
+                                                        .fillMaxHeight()
+                                                        .background(
+                                                            if (isDraggingSplitter) palette.tabIndicatorColor.copy(alpha = 0.85f)
+                                                            else palette.hairline
+                                                        )
+                                                )
+                                            }
 
                                             Box(
                                                 modifier = Modifier
@@ -3576,32 +3707,55 @@ internal fun LinDoApp(
                                             }
                                         }
 
-                                        LinDoResizableSplitHandleOverlay(
-                                            seamOffsetX = leftPaneWidth,
-                                            isActiveDrag = isDraggingSplitter,
-                                            onDragStart = { isDraggingSplitter = true },
-                                            onDragDeltaPx = { deltaPx ->
-                                                val deltaDp = with(splitDensity) { deltaPx.toDp().value }
-                                                val currentActualLeftDp = computeSplitPaneLeftWidthDp(
-                                                    availableContentWidthDp = paneContainerWidthDp,
-                                                    fraction = splitFraction
-                                                )
-                                                val nextFraction = computeUpdatedSplitFractionAfterDrag(
-                                                    availableContentWidthDp = paneContainerWidthDp,
-                                                    currentLeftWidthDp = currentActualLeftDp,
-                                                    dragDeltaDp = deltaDp
-                                                )
-                                                updateSplitFraction(nextFraction, persist = false)
-                                            },
-                                            onDragEnd = {
-                                                isDraggingSplitter = false
-                                                UserApiKeyAuthManager.updateSplitFractionPref(splitFraction)
-                                            },
-                                            onDoubleTapReset = {
-                                                isDraggingSplitter = false
-                                                updateSplitFraction(defaultSplitFractionForPlatform, persist = true)
+                                        if (!isFeedPaneCollapsed && animatedLeftPaneWidth >= leftPaneWidth - 1.dp) {
+                                            LinDoResizableSplitHandleOverlay(
+                                                seamOffsetX = leftPaneWidth,
+                                                isActiveDrag = isDraggingSplitter,
+                                                onDragStart = { isDraggingSplitter = true },
+                                                onDragDeltaPx = { deltaPx ->
+                                                    val deltaDp = with(splitDensity) { deltaPx.toDp().value }
+                                                    val currentActualLeftDp = computeSplitPaneLeftWidthDp(
+                                                        availableContentWidthDp = paneContainerWidthDp,
+                                                        fraction = splitFraction
+                                                    )
+                                                    val nextFraction = computeUpdatedSplitFractionAfterDrag(
+                                                        availableContentWidthDp = paneContainerWidthDp,
+                                                        currentLeftWidthDp = currentActualLeftDp,
+                                                        dragDeltaDp = deltaDp
+                                                    )
+                                                    updateSplitFraction(nextFraction, persist = false)
+                                                },
+                                                onDragEnd = {
+                                                    isDraggingSplitter = false
+                                                    UserApiKeyAuthManager.updateSplitFractionPref(splitFraction)
+                                                },
+                                                onDoubleTapReset = {
+                                                    isDraggingSplitter = false
+                                                    updateSplitFraction(defaultSplitFractionForPlatform, persist = true)
+                                                }
+                                            )
+                                        }
+
+                                        // 移动端折叠屏 / 平板分栏：沿底部与右侧评论输入栏平行位置生长的流线型收折耳扣（收起后贴左边缘探出）
+                                        if (mobileWideNav) {
+                                            val navBottomDp = with(splitDensity) {
+                                                WindowInsets.navigationBars.getBottom(this).toDp().value
                                             }
-                                        )
+                                            val earTopDp = (paneContainerHeightDp - navBottomDp - 53f).coerceAtLeast(72f)
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(
+                                                        x = animatedLeftPaneWidth,
+                                                        y = earTopDp.dp
+                                                    )
+                                            ) {
+                                                OrganicFeedCollapseEar(
+                                                    protrudeRight = true,
+                                                    isCollapsed = isFeedPaneCollapsed,
+                                                    onClick = { isFeedPaneCollapsed = !isFeedPaneCollapsed }
+                                                )
+                                            }
+                                        }
                                     }
                                 }
 
@@ -4453,7 +4607,7 @@ internal fun LinDoApp(
                         onOpenBrowserVerify = {
                             showSiteVerifySheet = false
                             if (hasEmbeddedWebLogin) {
-                                activeWebLoginUrl = "https://linux.do/#lindo-verify"
+                                activeWebLoginUrl = pendingVerifyTargetUrl
                             } else {
                                 UserApiKeyAuthManager.startBrowserOneClickAuth()
                             }
@@ -4881,6 +5035,9 @@ private fun DesktopSideRail(
     unreadCount: Int = 0,
     compactWidth: Boolean = false,
     topWindowInset: Dp = 0.dp,
+    showFeedToggle: Boolean = false,
+    isFeedCollapsed: Boolean = false,
+    onToggleFeedCollapse: (() -> Unit)? = null,
     onSelectTab: (MainTab) -> Unit,
     onPublishClick: () -> Unit = {},
     onToggleTheme: () -> Unit
@@ -5048,35 +5205,203 @@ private fun DesktopSideRail(
                     }
 
                     rightTabs.forEach { tab -> RailTabItem(tab) }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(20.dp)
+                            .height(0.5.dp)
+                            .background(palette.hairline)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .clickable { onToggleTheme() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isDarkTheme) LinDoIcons.Sun else LinDoIcons.Moon,
+                            contentDescription = LinDoFeedCopy.DARK_MODE_DESC.text,
+                            modifier = Modifier.size(18.dp),
+                            tint = palette.inkSecondary
+                        )
+                    }
                 }
 
-                if (!isCompactHeight) {
-                    Spacer(modifier = Modifier.height(24.dp))
-                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
 
-                Box(
+            if (showFeedToggle && onToggleFeedCollapse != null) {
+                Column(
                     modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .clickable { onToggleTheme() },
-                    contentAlignment = Alignment.Center
+                        .align(Alignment.TopEnd)
+                        .width(22.dp)
+                        .fillMaxHeight(),
+                    horizontalAlignment = Alignment.End
                 ) {
-                    Icon(
-                        imageVector = if (isDarkTheme) LinDoIcons.Sun else LinDoIcons.Moon,
-                        contentDescription = LinDoFeedCopy.DARK_MODE_DESC.text,
-                        modifier = Modifier.size(18.5.dp),
-                        tint = palette.inkSecondary
+                    Box(
+                        modifier = Modifier
+                            .width(0.5.dp)
+                            .weight(1f)
+                            .background(palette.hairline)
+                    )
+                    OrganicFeedCollapseEar(
+                        protrudeRight = false,
+                        isCollapsed = isFeedCollapsed,
+                        onClick = onToggleFeedCollapse
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(0.5.dp)
+                            .height(3.dp)
+                            .background(palette.hairline)
                     )
                 }
             }
         }
 
-        Box(
-            modifier = Modifier
-                .width(0.5.dp)
-                .fillMaxHeight()
-                .background(palette.hairline)
-        )
+        if (!showFeedToggle || onToggleFeedCollapse == null) {
+            Box(
+                modifier = Modifier
+                    .width(0.5.dp)
+                    .fillMaxHeight()
+                    .background(palette.hairline)
+            )
+        }
+    }
+}
+
+/**
+ * 与 Feed 流边缘一体成型的 S 型反圆角收折耳扣（支持向左探入侧栏或向右在折叠屏/平板分栏缝隙探出，无割裂底边线）
+ */
+@Composable
+private fun OrganicFeedCollapseEar(
+    protrudeRight: Boolean,
+    isCollapsed: Boolean,
+    onClick: () -> Unit
+) {
+    val palette = LocalPalette.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val hovered by interactionSource.collectIsHoveredAsState()
+    val pressed by interactionSource.collectIsPressedAsState()
+    val active = hovered || pressed
+
+    val tipSurface = when {
+        active -> androidx.compose.ui.graphics.lerp(palette.subtleSurface, palette.brandGold, 0.14f)
+        isCollapsed -> androidx.compose.ui.graphics.lerp(palette.cardSurface, palette.subtleSurface, 0.62f)
+        else -> androidx.compose.ui.graphics.lerp(palette.cardSurface, palette.subtleSurface, 0.44f)
+    }
+    val midStroke = when {
+        active -> androidx.compose.ui.graphics.lerp(palette.hairline, palette.brandGold, 0.62f)
+        isCollapsed -> androidx.compose.ui.graphics.lerp(palette.hairline, palette.brandGold, 0.40f)
+        else -> androidx.compose.ui.graphics.lerp(palette.hairline, palette.inkTertiary, 0.34f)
+    }
+    val chevronColor = if (active || isCollapsed) palette.brandGold else palette.inkTertiary
+
+    Box(
+        modifier = Modifier
+            .width(22.dp)
+            .height(48.dp)
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+    ) {
+        androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val fillPath = androidx.compose.ui.graphics.Path()
+            val strokePath = androidx.compose.ui.graphics.Path()
+
+            if (protrudeRight) {
+                val x0 = 0f
+                val x1 = w * 0.22f
+                val x2 = w * 0.55f
+                val x3 = w * 0.85f
+                fillPath.moveTo(-1f, 0f)
+                fillPath.lineTo(x0, 0f)
+                fillPath.cubicTo(x0, h * 0.145f, x1, h * 0.197f, x2, h * 0.255f)
+                fillPath.cubicTo(x3 * 0.90f, h * 0.297f, x3, h * 0.358f, x3, h * 0.50f)
+                fillPath.cubicTo(x3, h * 0.642f, x3 * 0.90f, h * 0.703f, x2, h * 0.745f)
+                fillPath.cubicTo(x1, h * 0.803f, x0, h * 0.855f, x0, h)
+                fillPath.lineTo(-1f, h)
+                fillPath.close()
+
+                strokePath.moveTo(x0, 0f)
+                strokePath.cubicTo(x0, h * 0.145f, x1, h * 0.197f, x2, h * 0.255f)
+                strokePath.cubicTo(x3 * 0.90f, h * 0.297f, x3, h * 0.358f, x3, h * 0.50f)
+                strokePath.cubicTo(x3, h * 0.642f, x3 * 0.90f, h * 0.703f, x2, h * 0.745f)
+                strokePath.cubicTo(x1, h * 0.803f, x0, h * 0.855f, x0, h)
+            } else {
+                val x0 = w - 0.5.dp.toPx()
+                val x1 = w * 0.78f
+                val x2 = w * 0.45f
+                val x3 = w * 0.15f
+                fillPath.moveTo(w + 1f, 0f)
+                fillPath.lineTo(x0, 0f)
+                fillPath.cubicTo(x0, h * 0.145f, x1, h * 0.197f, x2, h * 0.255f)
+                fillPath.cubicTo(w - (w - x3) * 0.90f, h * 0.297f, x3, h * 0.358f, x3, h * 0.50f)
+                fillPath.cubicTo(x3, h * 0.642f, w - (w - x3) * 0.90f, h * 0.703f, x2, h * 0.745f)
+                fillPath.cubicTo(x1, h * 0.803f, x0, h * 0.855f, x0, h)
+                fillPath.lineTo(w + 1f, h)
+                fillPath.close()
+
+                strokePath.moveTo(x0, 0f)
+                strokePath.cubicTo(x0, h * 0.145f, x1, h * 0.197f, x2, h * 0.255f)
+                strokePath.cubicTo(w - (w - x3) * 0.90f, h * 0.297f, x3, h * 0.358f, x3, h * 0.50f)
+                strokePath.cubicTo(x3, h * 0.642f, w - (w - x3) * 0.90f, h * 0.703f, x2, h * 0.745f)
+                strokePath.cubicTo(x1, h * 0.803f, x0, h * 0.855f, x0, h)
+            }
+
+            drawPath(
+                path = fillPath,
+                brush = if (protrudeRight) {
+                    Brush.horizontalGradient(listOf(palette.cardSurface, tipSurface))
+                } else {
+                    Brush.horizontalGradient(listOf(tipSurface, palette.cardSurface))
+                }
+            )
+            drawPath(
+                path = strokePath,
+                brush = Brush.verticalGradient(
+                    0f to palette.hairline,
+                    0.24f to midStroke,
+                    0.76f to midStroke,
+                    1f to palette.hairline
+                ),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 0.9.dp.toPx())
+            )
+
+            // 居中微箭头（‹ 收起 / › 展开）
+            val cx = if (protrudeRight) w * 0.43f else w * 0.57f
+            val cy = h * 0.50f
+            val halfH = 3.8.dp.toPx()
+            val halfW = 2.1.dp.toPx()
+            val chev = androidx.compose.ui.graphics.Path().apply {
+                if (isCollapsed) {
+                    moveTo(cx - halfW, cy - halfH)
+                    lineTo(cx + halfW, cy)
+                    lineTo(cx - halfW, cy + halfH)
+                } else {
+                    moveTo(cx + halfW, cy - halfH)
+                    lineTo(cx - halfW, cy)
+                    lineTo(cx + halfW, cy + halfH)
+                }
+            }
+            drawPath(
+                path = chev,
+                color = chevronColor,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = 1.65.dp.toPx(),
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                    join = androidx.compose.ui.graphics.StrokeJoin.Round
+                )
+            )
+        }
     }
 }
 
@@ -6548,7 +6873,9 @@ internal fun CommunityHomeFeedPane(
                                 tint = palette.brandGold
                             )
                             Text(
-                                text = LinDoFeedCopy.NEW_ACTIVITY_BANNER.format(pendingNewCount),
+                                text = LinDoFeedCopy.NEW_ACTIVITY_BANNER.format(
+                                    if (pendingNewCount >= 25) "20+" else pendingNewCount
+                                ),
                                 color = palette.brandGold,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium,
@@ -7091,22 +7418,20 @@ private fun CommunityTopicItem(
                     indication = null,
                     onClick = onClick
                 )
-                .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 11.dp),
-            verticalAlignment = Alignment.Top
+                .padding(horizontal = LinDoTokens.PageHorizontalPadding, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(modifier = Modifier.padding(top = 1.dp)) {
-                SmartAvatar(
-                    username = op.username,
-                    avatarTemplate = op.avatarTemplate,
-                    animatedAvatar = op.animatedAvatar,
-                    primaryGroupName = op.primaryGroupName,
-                    flair = null,
-                    size = 44.dp,
-                    enableAnimations = false
-                )
-            }
+            SmartAvatar(
+                username = op.username,
+                avatarTemplate = op.avatarTemplate,
+                animatedAvatar = op.animatedAvatar,
+                primaryGroupName = op.primaryGroupName,
+                flair = null,
+                size = 32.dp,
+                enableAnimations = false
+            )
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
             Column(
                 modifier = Modifier.weight(1f)
@@ -7115,22 +7440,22 @@ private fun CommunityTopicItem(
                     Text(
                         text = titleAnnotated,
                         inlineContent = titleInlineContent,
-                        fontSize = 16.sp,
-                        lineHeight = 21.5.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = FontWeight.Normal,
                         color = palette.inkPrimary,
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.fillMaxWidth()
                     )
                 } else {
                     Text(
                         text = topic.title,
-                        fontSize = 16.sp,
-                        lineHeight = 21.5.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = FontWeight.Normal,
                         color = palette.inkPrimary,
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -7437,6 +7762,8 @@ internal fun CommunityTopicReaderPane(
     isLoading: Boolean,
     enableAnimations: Boolean,
     showBackButton: Boolean,
+    isFeedPaneCollapsed: Boolean = false,
+    onToggleFeedPaneCollapse: (() -> Unit)? = null,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onUnavailable: () -> Unit = onBack,
@@ -7749,6 +8076,23 @@ internal fun CommunityTopicReaderPane(
                 floorLoadError = err.message?.takeIf { it.isNotBlank() } ?: LinDoReaderCopy.FLOOR_LOAD_FAILED.text
             } finally {
                 isLoadingMorePosts = false
+            }
+        }
+    }
+
+    LaunchedEffect(netRestoreVer, siteVerifyVer) {
+        val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
+        val activeNet = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
+        if (activeVerify) lastHandledSiteVerifyVer = siteVerifyVer
+        if (activeNet) lastHandledNetRestoreVer = netRestoreVer
+        if (!activeVerify && !activeNet) return@LaunchedEffect
+        if (activeVerify) {
+            if (loadMorePostsError || floorLoadError != null) {
+                loadMoreFloorBatch(20, earlier = loadingEarlierPosts, isManualRetry = true)
+            }
+            val jumpTarget = pendingJumpFloor
+            if (navigationError != null && jumpTarget != null) {
+                jumpToFloor(jumpTarget, returnTo = pendingReturnFloor, exact = pendingJumpRequiresExact, isManualRetry = true)
             }
         }
     }
@@ -8399,7 +8743,7 @@ internal fun CommunityTopicReaderPane(
                         needsVerification = loadingEarlierPosts && floorLoadError.isSiteVerificationError(),
                         onClick = {
                             if (loadingEarlierPosts && floorLoadError.isSiteVerificationError()) {
-                                onOpenWebUrl("https://linux.do/")
+                                onOpenWebUrl("https://linux.do/t/topic/${summary.id}#lindo-verify")
                             } else {
                                 loadMoreFloorBatch(20, earlier = true, isManualRetry = floorLoadError != null)
                             }
@@ -8437,7 +8781,7 @@ internal fun CommunityTopicReaderPane(
                             LinDoMascotState.NetworkError,
                             detail = detail.loadError,
                             onRetry = when {
-                                needsSiteVerify -> ({ onOpenWebUrl("https://linux.do/") })
+                                needsSiteVerify -> ({ onOpenWebUrl("https://linux.do/t/topic/${summary.id}#lindo-verify") })
                                 needsLogin -> ({
                                     requestGuestLogin?.invoke(
                                         GuestGateScenario.TOPIC_LOGIN_REQUIRED.titleCopy.text,
