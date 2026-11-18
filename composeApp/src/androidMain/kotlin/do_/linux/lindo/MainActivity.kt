@@ -641,6 +641,9 @@ class MainActivity : ComponentActivity() {
                     .apply()
             }
         }
+        UserApiKeyAuthManager.onPersistWideSplit = { enabled ->
+            runCatching { prefs.edit().putBoolean("ui_wide_split", enabled).apply() }
+        }
         UserApiKeyAuthManager.onPersistSplitFraction = { splitFraction ->
             runCatching {
                 prefs.edit()
@@ -2320,7 +2323,9 @@ class MainActivity : ComponentActivity() {
             UserApiKeyAuthManager.uiThemeAccent = prefs.getString("ui_theme_accent", "OFFICIAL_GOLD") ?: "OFFICIAL_GOLD"
             UserApiKeyAuthManager.uiCompactFeed = prefs.getBoolean("ui_compact_feed", false)
             UserApiKeyAuthManager.uiHomeSearchExpanded = prefs.getBoolean("ui_home_search_expanded", true)
-            UserApiKeyAuthManager.uiSplitFraction = prefs.getFloat("ui_split_fraction", 0.42f).coerceIn(0.28f, 0.62f)
+            // 移动端默认对半分栏：分隔线与折叠屏铰链对齐，仍可拖拽调整
+            UserApiKeyAuthManager.uiSplitFraction = prefs.getFloat("ui_split_fraction", 0.5f).coerceIn(0.28f, 0.62f)
+            UserApiKeyAuthManager.uiWideSplitEnabled = prefs.getBoolean("ui_wide_split", true)
             LinuxDoRepository.restoreReadTopics(prefs.getString("read_topic_posts", null))
 
             val savedApiKey = prefs.getString("api_key", null)
@@ -2392,48 +2397,9 @@ class MainActivity : ComponentActivity() {
             cookieManager.flush()
         }
 
-    private suspend fun sweepChallengedOrDuplicateCfClearanceInWebKit(
-        cookieManager: CookieManager,
-        verified: Boolean = false
-    ) = withContext(Dispatchers.Main) {
-        val snapshot = cookieManager.getCookie("https://linux.do").orEmpty()
-        if (snapshot.isBlank()) return@withContext
-        val cfValues = getAllCookieValues(snapshot, "cf_clearance")
-        if (cfValues.isEmpty()) return@withContext
-        val challengedVal = do_.linux.lindo.core.network.CfClearanceAuthority.challenged
-        val hasChallenged = !challengedVal.isNullOrBlank() && cfValues.any { it == challengedVal }
-        if (cfValues.size <= 1 && !hasChallenged) return@withContext
-
-        val winnerCf = do_.linux.lindo.core.network.CfClearanceAuthority.selectWinner(
-            observedValues = cfValues,
-            verified = verified
-        )
-        suspend fun setSpec(origin: String, cookieStr: String) = withTimeoutOrNull(3_000L) {
-            suspendCancellableCoroutine<Unit> { cont ->
-                cookieManager.setCookie(origin, cookieStr) {
-                    if (cont.isActive) cont.resume(Unit)
-                }
-            }
-        }
-        for (origin in listOf("https://linux.do", "https://www.linux.do")) {
-            setSpec(origin, "cf_clearance=; Max-Age=0; Path=/; Secure; HttpOnly")
-            setSpec(origin, "cf_clearance=; Max-Age=0; Path=/; Secure")
-            setSpec(origin, "cf_clearance=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
-            setSpec(origin, "cf_clearance=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly")
-            setSpec(origin, "cf_clearance=; Max-Age=0; Domain=.linux.do; Path=/; Secure")
-        }
-        if (!winnerCf.isNullOrBlank()) {
-            setSpec(
-                "https://linux.do",
-                "cf_clearance=$winnerCf; Domain=.linux.do; Path=/; Max-Age=86400; Secure; HttpOnly; SameSite=None"
-            )
-        }
-        cookieManager.flush()
-    }
-
     private suspend fun ensureAuthCookiesInWebKit(cookieManager: CookieManager): String =
         withContext(Dispatchers.Main) {
-            sweepChallengedOrDuplicateCfClearanceInWebKit(cookieManager, verified = false)
+            // 始终保持 Chromium CookieManager 原生管理 cf_clearance / __cf_bm / _cfuvid（保留真实 Partitioned / Expires 属性），严禁手动删改或合成重插。
             suspend fun setCanonicalHostCookie(value: String) = kotlinx.coroutines.withTimeout(5_000L) {
                 suspendCancellableCoroutine<Unit> { continuation ->
                     cookieManager.setCookie("https://linux.do", value) { accepted ->

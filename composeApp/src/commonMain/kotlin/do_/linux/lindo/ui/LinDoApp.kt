@@ -452,6 +452,14 @@ private fun resolveMorandiCategoryColors(categoryName: String, isDark: Boolean):
     }
 }
 
+/** Android 运行时（折叠屏 / 平板宽屏沿用移动端底部导航；桌面 JVM 保持侧栏）。 */
+internal val isAndroidRuntime: Boolean by lazy {
+    System.getProperty("java.vm.name")?.contains("Dalvik", ignoreCase = true) == true
+}
+
+/** 悬浮底栏占用高度（不含系统导航区）：外边距 10dp + 胶囊 58dp，再留 12dp 间距。 */
+internal val FloatingNavClearance = 80.dp
+
 private val LightPalette = buildLinDoPalette(isDark = false, option = BrandThemeOption.OFFICIAL_GOLD)
 private val DarkPalette = buildLinDoPalette(isDark = true, option = BrandThemeOption.OFFICIAL_GOLD)
 
@@ -1770,6 +1778,8 @@ internal fun LinDoApp(
         }
     }
     var isWideLayout by remember { mutableStateOf(false) }
+    var wideSplitEnabled by remember { mutableStateOf(UserApiKeyAuthManager.uiWideSplitEnabled) }
+    var windowSupportsWide by remember { mutableStateOf(false) }
 
     var currentTab by remember { mutableStateOf(MainTab.HOME) }
     var selectedCategoryId by remember { mutableStateOf<Int?>(null) }
@@ -1803,6 +1813,7 @@ internal fun LinDoApp(
     var pendingEditDraft by remember { mutableStateOf<CloudDraftItem?>(null) }
     var isLoadingDetail by remember { mutableStateOf(false) }
     var mobileShowingDetail by remember { mutableStateOf(false) }
+    val readerComposerExitInterceptor = remember { ComposerExitInterceptor() }
 
     // 全局官方功能抽屉状态
     var inspectedBadge by remember { mutableStateOf<GrantedBadge?>(null) }
@@ -2323,7 +2334,12 @@ internal fun LinDoApp(
         }
     }
 
-    fun openTopic(topic: TopicSummary, targetPostNumber: Int? = null, isManualRetry: Boolean = false) {
+    fun openTopic(
+        topic: TopicSummary,
+        targetPostNumber: Int? = null,
+        isManualRetry: Boolean = false,
+        bypassComposerGuard: Boolean = false
+    ) {
         if (topic.id <= 0) return
         if (!isAuthorized && topic.categoryId > 0) {
             val catMeta = LinuxDoRepository.findCategoryById(topic.categoryId)
@@ -2334,6 +2350,25 @@ internal fun LinDoApp(
                 )
                 return
             }
+        }
+        if (
+            !isManualRetry &&
+            targetPostNumber == null &&
+            isWideLayout &&
+            currentTab == MainTab.HOME &&
+            activeTopicSummary?.id == topic.id &&
+            activeTopicDetail != null &&
+            activeTopicDetail?.loadError == null &&
+            activeTopicDetail?.unavailable != true
+        ) {
+            return
+        }
+        if (!bypassComposerGuard && activeTopicSummary != null && activeTopicSummary?.id != topic.id) {
+            dismissCoveringSheets()
+            readerComposerExitInterceptor.guardNavigation {
+                openTopic(topic, targetPostNumber, isManualRetry, bypassComposerGuard = true)
+            }
+            return
         }
         val hadDetailError = activeTopicSummary?.id == topic.id && activeTopicDetail?.loadError != null
         detailLoadJob?.cancel()
@@ -2380,6 +2415,22 @@ internal fun LinDoApp(
                     isLoadingDetail = false
                 }
             }
+        }
+    }
+
+    fun switchMainTabSafely(targetTab: MainTab) {
+        if (currentTab == targetTab) {
+            mobileShowingDetail = false
+            return
+        }
+        if (isWideLayout && currentTab == MainTab.HOME) {
+            readerComposerExitInterceptor.guardNavigation {
+                mobileShowingDetail = false
+                currentTab = targetTab
+            }
+        } else {
+            mobileShowingDetail = false
+            currentTab = targetTab
         }
     }
 
@@ -3291,10 +3342,13 @@ internal fun LinDoApp(
                 color = palette.canvas
             ) {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                    val useWideLayout = shouldUseWideSplitLayout(maxWidth.value, maxHeight.value)
+                    val canUseWideLayout = shouldUseWideSplitLayout(maxWidth.value, maxHeight.value)
+                    // 移动端可在设置里改为单栏（按直板布局放宽）；桌面端始终分栏
+                    val useWideLayout = canUseWideLayout && (!isAndroidRuntime || wideSplitEnabled)
                     val isCompactWideRail = maxWidth < 760.dp
                     SideEffect {
                         isWideLayout = useWideLayout
+                        windowSupportsWide = canUseWideLayout
                     }
                     LaunchedEffect(useWideLayout, isAuthorized, isGuestMode, topics.isNotEmpty()) {
                         if (!useWideLayout || (!isAuthorized && !isGuestMode) || activeTopicSummary != null) return@LaunchedEffect
@@ -3342,17 +3396,16 @@ internal fun LinDoApp(
                             )
                         }
                     } else if (useWideLayout) {
+                        // 移动端宽屏（折叠屏内屏 / 平板）：不使用桌面侧栏，底部导航收在左侧 Feed 栏底部
+                        val mobileWideNav = isAndroidRuntime
                         Row(modifier = Modifier.fillMaxSize()) {
-                            DesktopSideRail(
+                            if (!mobileWideNav) DesktopSideRail(
                                 currentTab = currentTab,
                                 isDarkTheme = isDarkTheme,
                                 unreadCount = effectiveUnreadCount,
                                 compactWidth = isCompactWideRail,
                                 topWindowInset = macTitleBarInset,
-                                onSelectTab = {
-                                    mobileShowingDetail = false
-                                    currentTab = it
-                                },
+                                onSelectTab = ::switchMainTabSafely,
                                 onPublishClick = {
                                     if (isAuthorized) {
                                         pendingNewTopicDraft = null
@@ -3373,9 +3426,25 @@ internal fun LinDoApp(
                                     .windowInsetsPadding(
                                         WindowInsets.systemBars
                                             .union(WindowInsets.displayCutout)
-                                            .only(WindowInsetsSides.End)
+                                            .only(if (mobileWideNav) WindowInsetsSides.Horizontal else WindowInsetsSides.End)
                                     )
                             ) {
+                            val mobileWideNavBar: @Composable (Modifier) -> Unit = { navModifier ->
+                                GoogleM3NavigationBar(
+                                    currentTab = currentTab,
+                                    unreadCount = effectiveUnreadCount,
+                                    onSelectTab = ::switchMainTabSafely,
+                                    onPublishClick = {
+                                        if (isAuthorized) {
+                                            pendingNewTopicDraft = null
+                                            showCreateTopicSheet = true
+                                        } else {
+                                            requestGuestLogin(GuestGateScenario.PUBLISH_TOPIC)
+                                        }
+                                    },
+                                    modifier = navModifier
+                                )
+                            }
                             when (currentTab) {
                                 MainTab.HOME -> {
                                     var isDraggingSplitter by remember { mutableStateOf(false) }
@@ -3411,7 +3480,7 @@ internal fun LinDoApp(
                                                     hasMoreTopics = hasMoreTopics,
                                                     loadMoreError = loadMoreError,
                                                     loadMoreErrorMessage = loadMoreErrorMessage,
-                                                    reserveBottomNavSpace = false,
+                                                    reserveBottomNavSpace = mobileWideNav,
                                                     errorMessage = feedError,
                                                     refreshUpToDateNotice = refreshUpToDateNotice,
                                                     pendingNewCount = pendingNewCount,
@@ -3434,7 +3503,7 @@ internal fun LinDoApp(
                                                         }
                                                     },
                                                     onOpenNotifications = {
-                                                        currentTab = MainTab.MESSAGES
+                                                        switchMainTabSafely(MainTab.MESSAGES)
                                                     },
                                                     onToggleCompactMode = {
                                                         updateCompactFeedMode(!isCompactFeed)
@@ -3460,8 +3529,11 @@ internal fun LinDoApp(
                                                     onClearLoadMoreError = { loadMoreError = false },
                                                     onOpenWebUrl = { openWebPage(it) },
                                                     onSelectTopic = { openTopic(it) },
-                                                    onAvatarClick = { currentTab = MainTab.PROFILE }
+                                                    onAvatarClick = { switchMainTabSafely(MainTab.PROFILE) }
                                                 )
+                                                if (mobileWideNav) {
+                                                    mobileWideNavBar(Modifier.align(Alignment.BottomCenter))
+                                                }
                                             }
 
                                             Box(
@@ -3487,6 +3559,7 @@ internal fun LinDoApp(
                                                     isAuthorized = isAuthorized,
                                                     initialReplyDraft = pendingReplyDraft,
                                                     onConsumeReplyDraft = { pendingReplyDraft = null },
+                                                    composerExitInterceptor = readerComposerExitInterceptor,
                                                     isLoading = isLoadingDetail,
                                                     enableAnimations = enableAnimations,
                                                     showBackButton = false,
@@ -3526,7 +3599,7 @@ internal fun LinDoApp(
                                             },
                                             onDoubleTapReset = {
                                                 isDraggingSplitter = false
-                                                updateSplitFraction(DEFAULT_SPLIT_PANE_FRACTION, persist = true)
+                                                updateSplitFraction(defaultSplitFractionForPlatform, persist = true)
                                             }
                                         )
                                     }
@@ -3588,6 +3661,12 @@ internal fun LinDoApp(
                                 MainTab.PROFILE -> {
                                     CommunityProfileScreen(
                                         isDarkTheme = isDarkTheme,
+                                        wideSplitEnabled = wideSplitEnabled,
+                                        showWideLayoutOption = isAndroidRuntime && windowSupportsWide,
+                                        onToggleWideSplit = {
+                                            wideSplitEnabled = !wideSplitEnabled
+                                            UserApiKeyAuthManager.updateWideSplitPref(wideSplitEnabled)
+                                        },
                                         fontScale = fontScale,
                                         enableAnimations = enableAnimations,
                                         themeOption = themeOption,
@@ -3647,6 +3726,13 @@ internal fun LinDoApp(
                                     )
                                 }
                             }
+                            if (mobileWideNav && currentTab != MainTab.HOME) {
+                                mobileWideNavBar(
+                                    Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .widthIn(max = 480.dp)
+                                )
+                            }
                             }
                         }
                     } else {
@@ -3671,6 +3757,7 @@ internal fun LinDoApp(
                                 isAuthorized = isAuthorized,
                                 initialReplyDraft = pendingReplyDraft,
                                 onConsumeReplyDraft = { pendingReplyDraft = null },
+                                composerExitInterceptor = readerComposerExitInterceptor,
                                 isLoading = isLoadingDetail,
                                 enableAnimations = enableAnimations,
                                 showBackButton = true,
@@ -3806,6 +3893,12 @@ internal fun LinDoApp(
                                         MainTab.PROFILE -> {
                                             CommunityProfileScreen(
                                                 isDarkTheme = isDarkTheme,
+                                                wideSplitEnabled = wideSplitEnabled,
+                                                showWideLayoutOption = isAndroidRuntime && windowSupportsWide,
+                                                onToggleWideSplit = {
+                                                    wideSplitEnabled = !wideSplitEnabled
+                                                    UserApiKeyAuthManager.updateWideSplitPref(wideSplitEnabled)
+                                                },
                                                 fontScale = fontScale,
                                                 enableAnimations = enableAnimations,
                                                 themeOption = themeOption,
@@ -4402,7 +4495,8 @@ internal fun LinDoApp(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(bottom = if (isWideLayout) 28.dp else 92.dp, start = 20.dp, end = 20.dp),
+                            .then(if (isWideLayout && !isAndroidRuntime) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
+                            .padding(bottom = if (isWideLayout && !isAndroidRuntime) 28.dp else FloatingNavClearance, start = 20.dp, end = 20.dp),
                         contentAlignment = Alignment.BottomCenter
                     ) {
                         Row(
@@ -4432,53 +4526,51 @@ internal fun LinDoApp(
                     !isAuthorized && !showAuthSheet && activeWebLoginUrl == null && guestLoginPrompt == null
                 }
                 if (activeExpiredUser != null) {
-                    val bannerBg = if (palette.isDark) Color(0xFF1B202A) else palette.cardSurface
+                    // 轻量提示：中性底 + 细描边，主题色只用于「重新登录」文字操作；
+                    // 移动端避让悬浮底栏（系统导航区 + 底栏 10dp 外边距 + 58dp 胶囊 + 12dp 间距）。
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(bottom = if (isWideLayout) 24.dp else 92.dp, start = 16.dp, end = 16.dp),
+                            .then(if (isWideLayout && !isAndroidRuntime) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
+                            .padding(bottom = if (isWideLayout && !isAndroidRuntime) 24.dp else FloatingNavClearance, start = 20.dp, end = 20.dp),
                         contentAlignment = Alignment.BottomCenter
                     ) {
                         Row(
                             modifier = Modifier
                                 .shadow(
-                                    elevation = if (palette.isDark) 10.dp else 5.dp,
+                                    elevation = if (palette.isDark) 8.dp else 6.dp,
                                     shape = CircleShape,
                                     clip = false,
-                                    ambientColor = Color.Black.copy(alpha = 0.36f),
-                                    spotColor = Color.Black.copy(alpha = 0.50f)
+                                    ambientColor = Color.Black.copy(alpha = if (palette.isDark) 0.40f else 0.10f),
+                                    spotColor = Color.Black.copy(alpha = if (palette.isDark) 0.50f else 0.14f)
                                 )
-                                .background(bannerBg, CircleShape)
-                                .border(
-                                    width = 0.75.dp,
-                                    color = palette.brandGold.copy(alpha = if (palette.isDark) 0.38f else 0.32f),
-                                    shape = CircleShape
-                                )
-                                .padding(start = 15.dp, end = 8.dp, top = 7.dp, bottom = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                .background(if (palette.isDark) palette.subtleSurface else palette.cardSurface, CircleShape)
+                                .border(0.5.dp, palette.hairline, CircleShape)
+                                .height(44.dp)
+                                .padding(start = 16.dp, end = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "@$activeExpiredUser 登录已过期，当前为访客模式",
-                                color = palette.inkPrimary,
-                                fontSize = 12.8.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
+                                text = "登录已过期",
+                                color = palette.inkSecondary,
+                                fontSize = 13.sp,
+                                maxLines = 1
                             )
                             val reloginInteraction = remember { MutableInteractionSource() }
                             val reloginHovered by reloginInteraction.collectIsHoveredAsState()
                             val reloginPressed by reloginInteraction.collectIsPressedAsState()
-                            val reloginBg = when {
-                                reloginPressed -> palette.publishBtnBg.copy(alpha = 0.82f)
-                                reloginHovered -> androidx.compose.ui.graphics.lerp(palette.publishBtnBg, Color.White, 0.14f)
-                                else -> palette.publishBtnBg
-                            }
                             Box(
                                 modifier = Modifier
-                                    .height(26.dp)
-                                    .background(reloginBg, CircleShape)
+                                    .padding(start = 6.dp)
+                                    .height(36.dp)
+                                    .background(
+                                        when {
+                                            reloginPressed -> palette.brandGold.copy(alpha = 0.16f)
+                                            reloginHovered -> palette.brandGold.copy(alpha = 0.10f)
+                                            else -> Color.Transparent
+                                        },
+                                        CircleShape
+                                    )
                                     .pointerHoverIcon(PointerIcon.Hand)
                                     .clickable(
                                         interactionSource = reloginInteraction,
@@ -4494,29 +4586,38 @@ internal fun LinDoApp(
                                             showAuthSheet = true
                                         }
                                     }
-                                    .padding(horizontal = 11.dp),
+                                    .padding(horizontal = 10.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = "重新登录",
-                                    color = palette.publishBtnContent,
-                                    fontSize = 12.sp,
+                                    color = palette.brandGold,
+                                    fontSize = 13.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1
                                 )
                             }
+                            Box(
+                                modifier = Modifier
+                                    .padding(start = 2.dp)
+                                    .width(0.5.dp)
+                                    .height(16.dp)
+                                    .background(palette.hairline)
+                            )
                             val closeInteraction = remember { MutableInteractionSource() }
                             val closeHovered by closeInteraction.collectIsHoveredAsState()
                             val closePressed by closeInteraction.collectIsPressedAsState()
-                            val closeBg = when {
-                                closePressed -> palette.inkTertiary.copy(alpha = 0.20f)
-                                closeHovered -> palette.inkTertiary.copy(alpha = 0.12f)
-                                else -> Color.Transparent
-                            }
                             Box(
                                 modifier = Modifier
-                                    .size(26.dp)
-                                    .background(closeBg, CircleShape)
+                                    .size(36.dp)
+                                    .background(
+                                        when {
+                                            closePressed -> palette.inkTertiary.copy(alpha = 0.18f)
+                                            closeHovered -> palette.inkTertiary.copy(alpha = 0.10f)
+                                            else -> Color.Transparent
+                                        },
+                                        CircleShape
+                                    )
                                     .pointerHoverIcon(PointerIcon.Hand)
                                     .clickable(
                                         interactionSource = closeInteraction,
@@ -4626,6 +4727,13 @@ internal fun LinDoApp(
 }
 
 internal const val DEFAULT_SPLIT_PANE_FRACTION = 0.42f
+/** 移动端宽屏默认对半，分隔线落在折叠屏铰链位置 */
+internal val defaultSplitFractionForPlatform: Float get() = if (isAndroidRuntime) 0.5f else DEFAULT_SPLIT_PANE_FRACTION
+
+internal enum class WideLayoutMode(val split: Boolean, val label: String) {
+    SPLIT(true, "左右分栏"),
+    SINGLE(false, "单栏")
+}
 internal const val MIN_SPLIT_PANE_FRACTION = 0.28f
 internal const val MAX_SPLIT_PANE_FRACTION = 0.62f
 internal const val MIN_LEFT_PANE_WIDTH_DP = 280f
@@ -7325,6 +7433,7 @@ internal fun CommunityTopicReaderPane(
     isAuthorized: Boolean = UserApiKeyAuthManager.isAuthorized(),
     initialReplyDraft: CloudDraftItem? = null,
     onConsumeReplyDraft: () -> Unit = {},
+    composerExitInterceptor: ComposerExitInterceptor? = null,
     isLoading: Boolean,
     enableAnimations: Boolean,
     showBackButton: Boolean,
@@ -8686,6 +8795,7 @@ internal fun CommunityTopicReaderPane(
             initialCategoryId = detail?.categoryId ?: summary.categoryId,
             initialTags = detail?.tags ?: summary.tags,
             canEditTopicMeta = canEditMeta,
+            exitInterceptor = composerExitInterceptor,
             onDismiss = { editingPost = null },
             onPublished = { result ->
                 val updatedPost = result.post
@@ -8762,6 +8872,7 @@ internal fun CommunityTopicReaderPane(
             replyToContentSnippet = replyPreviewSnippet,
             initialRaw = if (replyCloudDraft != null) "" else replyInitialQuote,
             initialDraft = replyCloudDraft,
+            exitInterceptor = composerExitInterceptor,
             onDismiss = { showReplySheet = false },
             onPostCreated = { newPost ->
                 showReplySheet = false
@@ -11866,6 +11977,9 @@ private fun formatReadDuration(seconds: Int): String {
 @Composable
 internal fun CommunityProfileScreen(
     isDarkTheme: Boolean,
+    wideSplitEnabled: Boolean = true,
+    showWideLayoutOption: Boolean = false,
+    onToggleWideSplit: () -> Unit = {},
     themeOption: BrandThemeOption = BrandThemeOption.OFFICIAL_GOLD,
     isCompactFeed: Boolean = false,
     defaultSearchExpanded: Boolean = true,
@@ -12315,6 +12429,14 @@ internal fun CommunityProfileScreen(
                             optionVisual = { mode, tint -> Icon(if (mode.isCompact) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
                                 null, Modifier.size(16.dp), tint = tint) },
                             onSelect = { if (it.isCompact != isCompactFeed) onToggleCompactFeed() })
+                    }
+                    if (showWideLayoutOption) {
+                        val wideMode = if (wideSplitEnabled) WideLayoutMode.SPLIT else WideLayoutMode.SINGLE
+                        ExpandableSetting(LinDoIcons.KanbanBoard, "宽屏布局", wideMode.label) {
+                            SettingsChoices(WideLayoutMode.entries, wideMode,
+                                label = { it.label },
+                                onSelect = { if (it.split != wideSplitEnabled) onToggleWideSplit() })
+                        }
                     }
                     SettingsToggleRow(LinDoIcons.Search, "首页搜索框", defaultSearchExpanded, onDefaultSearchExpandedChange)
                     ExpandableSetting(LinDoIcons.Sliders, LinDoMessagesCopy.ROW_READING_FONT_SCALE.text, fontScalePreset.labelCopy.text,
@@ -13533,6 +13655,7 @@ private fun TopicReplyComposerSheet(
     replyToContentSnippet: String? = null,
     initialRaw: String = "",
     initialDraft: CloudDraftItem? = null,
+    exitInterceptor: ComposerExitInterceptor? = null,
     onDismiss: () -> Unit,
     onPostCreated: (PostItemModel) -> Unit
 ) = ComposerSheet(
@@ -13547,6 +13670,7 @@ private fun TopicReplyComposerSheet(
     replyToContentSnippet = replyToContentSnippet,
     initialRaw = initialRaw,
     initialDraft = initialDraft,
+    exitInterceptor = exitInterceptor,
     onDismiss = onDismiss,
     onPublished = { it.post?.let(onPostCreated) }
 )

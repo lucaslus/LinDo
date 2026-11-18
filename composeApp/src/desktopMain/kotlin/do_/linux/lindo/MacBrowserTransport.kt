@@ -226,7 +226,7 @@ internal object MacBrowserTransport {
                         site: location.origin === 'https://linux.do',
                         complete: document.readyState !== 'loading',
                         challenge: !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, iframe[src*="challenges.cloudflare.com"]') || /^(Just a moment|请稍候)/i.test(document.title || '')
-                    })""".trimIndent()) as? JsonObject
+                    })""".trimIndent(), isolated = true) as? JsonObject
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Exception) { verificationDiagnostic = "site-probe-${error.javaClass.simpleName}"; continue }
                 val inDomChallenge = probe?.get("challenge")?.jsonPrimitive?.booleanOrNull == true

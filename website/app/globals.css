@@ -1,0 +1,1110 @@
+/* 只引入 theme 与 utilities，不引入 preflight，避免影响 Nextra 文档页 */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: var(--font-inter), "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB",
+    "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+  --color-canvas: var(--canvas);
+  --color-subtle: var(--subtle);
+  --color-tonal: var(--tonal);
+  --color-ink-1: var(--ink-1);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-hairline: var(--hairline);
+  --color-accent: var(--accent);
+  --color-chip: var(--chip-bg);
+  --color-logo-do: var(--logo-do);
+}
+
+/* ───────────── 主题色（与 App BrandThemeOption 对齐） ───────────── */
+:root,
+html[data-accent="gold"] {
+  --a-swatch: #f59e0b;
+  --a-l-accent: #936000;
+  --a-l-chip-bg: #fef3c7;
+  --a-l-chip-text: #b45309;
+  --a-l-pub-bg: #f59e0b;
+  --a-l-pub-fg: #111827;
+  --a-d-chip-bg: #3f2e05;
+  --a-d-chip-text: #fcd34d;
+}
+html[data-accent="blue"] {
+  --a-swatch: #2563eb;
+  --a-l-accent: #1d4ed8;
+  --a-l-chip-bg: #eff6ff;
+  --a-l-chip-text: #1d4ed8;
+  --a-l-pub-bg: #1d4ed8;
+  --a-l-pub-fg: #fff;
+  --a-d-chip-bg: #172554;
+  --a-d-chip-text: #60a5fa;
+}
+html[data-accent="green"] {
+  --a-swatch: #059669;
+  --a-l-accent: #047857;
+  --a-l-chip-bg: #ecfdf5;
+  --a-l-chip-text: #047857;
+  --a-l-pub-bg: #047857;
+  --a-l-pub-fg: #fff;
+  --a-d-chip-bg: #064e3b;
+  --a-d-chip-text: #34d399;
+}
+html[data-accent="red"] {
+  --a-swatch: #e03e3e;
+  --a-l-accent: #b91c1c;
+  --a-l-chip-bg: #fdf2f2;
+  --a-l-chip-text: #b91c1c;
+  --a-l-pub-bg: #b91c1c;
+  --a-l-pub-fg: #fff;
+  --a-d-chip-bg: #3f1515;
+  --a-d-chip-text: #f87171;
+}
+html[data-accent="purple"] {
+  --a-swatch: #8b5cf6;
+  --a-l-accent: #6d28d9;
+  --a-l-chip-bg: #f3e8ff;
+  --a-l-chip-text: #6d28d9;
+  --a-l-pub-bg: #6d28d9;
+  --a-l-pub-fg: #fff;
+  --a-d-chip-bg: #30204b;
+  --a-d-chip-text: #c4b5fd;
+}
+html[data-accent="teal"] {
+  --a-swatch: #0891b2;
+  --a-l-accent: #0e7490;
+  --a-l-chip-bg: #cffafe;
+  --a-l-chip-text: #0e7490;
+  --a-l-pub-bg: #0e7490;
+  --a-l-pub-fg: #fff;
+  --a-d-chip-bg: #153c46;
+  --a-d-chip-text: #67e8f9;
+}
+html[data-accent="orange"] {
+  --a-swatch: #f97316;
+  --a-l-accent: #9a3412;
+  --a-l-chip-bg: #ffedd5;
+  --a-l-chip-text: #9a3412;
+  --a-l-pub-bg: #9a3412;
+  --a-l-pub-fg: #fff;
+  --a-d-chip-bg: #482913;
+  --a-d-chip-text: #fdba74;
+}
+
+/* ───────────── 浅色 / 深色语义 palette（buildLinDoPalette） ───────────── */
+:root {
+  color-scheme: light;
+  --canvas: #ffffff;
+  --subtle: #f3f4f6;
+  --tonal: #eef1f5;
+  --nav-surface: rgba(255, 255, 255, 0.94);
+  --ink-1: #111827;
+  --ink-2: #525866;
+  --ink-3: #6b7280;
+  --hairline: #ebeef2;
+  --logo-do: #f59e0b;
+  --accent: var(--a-l-accent);
+  --chip-bg: var(--a-l-chip-bg);
+  --chip-text: var(--a-l-chip-text);
+  --publish-bg: var(--a-l-pub-bg);
+  --publish-fg: var(--a-l-pub-fg);
+  --hover: rgba(17, 24, 39, 0.045);
+  --shadow-device: 0 40px 80px -30px rgba(17, 24, 39, 0.28), 0 18px 36px -18px rgba(17, 24, 39, 0.18);
+  --window-chrome: #f6f7f9;
+  --stage-glow: color-mix(in srgb, var(--a-swatch) 14%, transparent);
+}
+
+html.dark {
+  color-scheme: dark;
+  --canvas: #101217;
+  --subtle: #181b22;
+  --tonal: #212631;
+  --nav-surface: rgba(17, 20, 27, 0.94);
+  --ink-1: #f3f4f6;
+  --ink-2: #a1a8b5;
+  --ink-3: #7d8594;
+  --hairline: #1e222b;
+  --accent: var(--a-d-chip-text);
+  --chip-bg: var(--a-d-chip-bg);
+  --chip-text: var(--a-d-chip-text);
+  --publish-bg: var(--a-d-chip-text);
+  --publish-fg: #111827;
+  --hover: rgba(243, 244, 246, 0.05);
+  --shadow-device: 0 40px 90px -30px rgba(0, 0, 0, 0.75), 0 18px 36px -18px rgba(0, 0, 0, 0.6);
+  --window-chrome: #161920;
+  --stage-glow: color-mix(in srgb, var(--a-swatch) 18%, transparent);
+}
+
+/* ───────────── 主题切换动画（View Transitions，圆形展开） ───────────── */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-new(root) {
+  z-index: 2;
+}
+/* 浏览器不支持 View Transitions 时，退化为颜色过渡 */
+html.theme-fade,
+html.theme-fade * {
+  transition: background-color 360ms ease, color 360ms ease, border-color 360ms ease, fill 360ms ease !important;
+}
+
+@layer base {
+body {
+  margin: 0;
+}
+/* ───────────── 首页基础（只作用于 .site，文档页由 Nextra 管理） ───────────── */
+.site {
+  min-height: 100vh;
+  background: var(--canvas);
+  color: var(--ink-1);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv11", "ss01";
+  text-spacing-trim: trim-start;
+  overflow-x: clip;
+}
+.site h1,
+.site h2,
+.site h3 {
+  font-weight: 600;
+  text-wrap: balance;
+  /* 中文标点挤压：避免大字号下全角逗号句号留出空洞 */
+  font-feature-settings: "palt", "cv11";
+  text-spacing-trim: space-all;
+}
+.site p {
+  text-wrap: pretty;
+}
+.site ul,
+.site ol {
+  list-style: none;
+}
+/* 大字号中文标点：收掉全角标点右侧的空白，句末标点做视觉居中补偿 */
+.punct-tight {
+  margin-right: -0.42em;
+}
+.punct-end {
+  margin-right: -0.5em;
+}
+.site *,
+.site *::before,
+.site *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0 solid var(--hairline);
+}
+.site a {
+  color: inherit;
+  text-decoration: none;
+}
+.site button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  cursor: pointer;
+}
+.site img,
+.site svg {
+  display: block;
+  max-width: 100%;
+}
+.site :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.hairline-b {
+  border-bottom: 0.5px solid var(--hairline);
+}
+.hairline-t {
+  border-top: 0.5px solid var(--hairline);
+}
+
+}
+
+@layer components {
+/* 主按钮：与 App 的发布按钮同源 */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 20px;
+  border-radius: 10px;
+  background: var(--publish-bg);
+  color: var(--publish-fg) !important;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -0.005em;
+  transition: filter 160ms ease, transform 160ms ease;
+}
+.btn-primary:hover {
+  filter: brightness(1.06);
+}
+.btn-primary:active {
+  transform: translateY(1px);
+}
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 16px;
+  border-radius: 10px;
+  color: var(--ink-1);
+  font-weight: 500;
+  font-size: 15px;
+  transition: background-color 160ms ease;
+}
+.btn-ghost:hover {
+  background: var(--hover);
+}
+
+.eyebrow {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+
+/* 零度娘：轻摇摆，±1.8°，与 LinDoMascot.kt 一致 */
+@keyframes mascot-sway {
+  0%,
+  100% {
+    transform: rotate(-1.8deg);
+  }
+  50% {
+    transform: rotate(1.8deg);
+  }
+}
+.mascot-sway {
+  transform-origin: 50% 92%;
+  animation: mascot-sway 3.2s ease-in-out infinite;
+}
+
+/* 进入视口时的淡入 */
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 700ms cubic-bezier(0.2, 0.7, 0.2, 1), transform 700ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* ───────────── 设备切换器 ───────────── */
+.dv-tabs {
+  position: relative;
+  display: inline-flex;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--subtle);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+.dv-tabs-ind {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  border-radius: 999px;
+  background: var(--canvas);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 4px 12px -4px rgba(0, 0, 0, 0.12), 0 0 0 0.5px var(--hairline);
+  transition: transform 420ms cubic-bezier(0.3, 0.9, 0.3, 1), width 420ms cubic-bezier(0.3, 0.9, 0.3, 1);
+}
+.dv-tab {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 999px;
+  font-size: 14.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--ink-2);
+  transition: color 200ms ease;
+  overflow: hidden;
+}
+.dv-tab[aria-selected="true"] {
+  color: var(--ink-1);
+  font-weight: 600;
+}
+.dv-tab-progress {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 5px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.55;
+  transform-origin: left center;
+  animation-name: dv-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+}
+@keyframes dv-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* ───────────── 舞台 ───────────── */
+.dv-glow {
+  position: absolute;
+  inset: 8% 10% 0;
+  background: radial-gradient(50% 50% at 50% 55%, var(--stage-glow), transparent 70%);
+  filter: blur(20px);
+  pointer-events: none;
+}
+.dv-stage {
+  position: absolute;
+  inset: 0;
+}
+.dv-slot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: translate3d(0, 6px, 0) scale(0.99);
+  pointer-events: none;
+  will-change: transform, opacity;
+  transition: opacity 130ms ease, transform 240ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.dv-slot.is-active {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  pointer-events: auto;
+  transition: opacity 180ms ease 60ms, transform 300ms cubic-bezier(0.32, 0.72, 0, 1) 60ms;
+}
+.dv-shadow {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  height: 36px;
+  width: 340px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(0, 0, 0, 0.26), transparent);
+  transition: width 500ms cubic-bezier(0.28, 0.84, 0.24, 1), opacity 320ms ease;
+  pointer-events: none;
+}
+html.dark .dv-shadow {
+  background: radial-gradient(closest-side, rgba(0, 0, 0, 0.58), transparent);
+}
+.dv-shadow[data-device="fold"] {
+  width: 720px;
+  bottom: 24px;
+}
+.dv-shadow[data-device="tablet"] {
+  width: 860px;
+  bottom: 36px;
+}
+.dv-shadow[data-device="desktop"] {
+  width: 1040px;
+  bottom: 6px;
+}
+
+/* 真机截图：随主题交叉淡入 */
+.shot {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  background: var(--canvas);
+}
+.shot img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: cover;
+  object-position: 50% 0;
+  transition: opacity 420ms ease;
+}
+.shot-dark {
+  opacity: 0;
+}
+html.dark .shot-dark {
+  opacity: 1;
+}
+html.dark .shot-light {
+  opacity: 0;
+}
+
+/* 金属边框 */
+.metal {
+  background: linear-gradient(150deg, #3a3d44 0%, #121317 38%, #1e2026 70%, #34373e 100%);
+  box-shadow: inset 0 0 0 1.5px #44474f, inset 0 0 0 3px #0b0c0e;
+}
+
+/* ───────────── 手机 ───────────── */
+.dv-phone {
+  position: relative;
+  width: 334px;
+  height: 702px;
+  padding: 11px;
+  border-radius: 52px;
+  background: linear-gradient(150deg, #3a3d44 0%, #121317 38%, #1e2026 70%, #34373e 100%);
+  box-shadow: inset 0 0 0 1.5px #4a4d55, inset 0 0 0 3px #0b0c0e, 0 50px 80px -40px rgba(0, 0, 0, 0.45);
+}
+.dv-phone::before,
+.dv-phone::after {
+  content: "";
+  position: absolute;
+  right: -2.5px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: #2a2c31;
+}
+.dv-phone::before {
+  top: 150px;
+  height: 70px;
+}
+.dv-phone::after {
+  top: 240px;
+  height: 40px;
+}
+.dv-phone-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 42px;
+  overflow: hidden;
+  background: #000;
+}
+.dv-phone-screen::after {
+  /* 打孔摄像头 */
+  content: "";
+  position: absolute;
+  top: 11px;
+  left: 50%;
+  width: 11px;
+  height: 11px;
+  margin-left: -5.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #2b3140, #050608 60%);
+  box-shadow: 0 0 0 1.5px #000;
+}
+
+/* ───────────── 折叠屏（实体机身自然展开：左翼从前往后、向左侧从容翻开） ───────────── */
+.dv-fold {
+  position: relative;
+  width: 764px;
+  height: 620px;
+  perspective: 2400px;
+}
+.dv-fold-body {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  will-change: transform, opacity;
+}
+.dv-fold-half {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  transform-style: preserve-3d;
+}
+.dv-fold-right {
+  right: 0;
+  padding: 12px 12px 12px 0;
+  border-radius: 0 36px 36px 0;
+  background: linear-gradient(150deg, #2e3138 0%, #14161b 42%, #20232a 78%, #34373e 100%);
+  box-shadow: inset -1.5px 0 0 #4d515b, inset 0 1.5px 0 #4d515b, inset 0 -1.5px 0 #4d515b, 0 46px 76px -38px rgba(0, 0, 0, 0.42);
+  transform: translateZ(-1px);
+  will-change: opacity;
+}
+.dv-fold-left {
+  left: 0;
+  transform-origin: 100% 50%;
+  will-change: transform;
+}
+.dv-fold-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.dv-fold-front {
+  padding: 12px 0 12px 12px;
+  border-radius: 36px 0 0 36px;
+  background: linear-gradient(150deg, #3a3d44 0%, #14161b 42%, #20232a 78%, #32353d 100%);
+  box-shadow: inset 1.5px 0 0 #4d515b, inset 0 1.5px 0 #4d515b, inset 0 -1.5px 0 #4d515b;
+}
+.dv-fold-back {
+  transform: rotateY(180deg);
+  padding: 11px;
+  border-radius: 36px 8px 8px 36px;
+  background: linear-gradient(145deg, #3c4048 0%, #14161b 42%, #22252c 76%, #363941 100%);
+  box-shadow: inset 0 0 0 1.5px #4d515b, 0 38px 70px -34px rgba(0, 0, 0, 0.42);
+}
+.dv-fold-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--canvas);
+}
+.dv-fold-left .dv-fold-screen {
+  border-radius: 25px 0 0 25px;
+}
+.dv-fold-right .dv-fold-screen {
+  border-radius: 0 25px 25px 0;
+}
+.dv-fold-cover {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 25px 11px 11px 25px;
+  overflow: hidden;
+  background: var(--canvas);
+}
+.shot-left img {
+  width: 200%;
+  object-fit: fill;
+  left: 0;
+}
+.shot-right img {
+  width: 200%;
+  object-fit: fill;
+  left: -100%;
+}
+
+/* 展开过程仅保留柔和自然的物理受光阴影过渡，无透明穿透 */
+.dv-fold-shade-l {
+  position: absolute;
+  inset: 12px 0 12px 12px;
+  border-radius: 25px 0 0 25px;
+  background: linear-gradient(270deg, rgba(0, 0, 0, 0.34), rgba(0, 0, 0, 0.12) 60%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  will-change: opacity;
+}
+.dv-fold-shade-r {
+  position: absolute;
+  inset: 12px 12px 12px 0;
+  border-radius: 0 25px 25px 0;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.38), rgba(0, 0, 0, 0.08) 55%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  will-change: opacity;
+}
+
+/* 落平后切换为单层整块内屏，彻底消除 3D 中轴接缝 */
+.dv-fold-full {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  padding: 12px;
+  border-radius: 36px;
+  background: linear-gradient(150deg, #3a3d44 0%, #121317 40%, #1e2026 75%, #34373e 100%);
+  box-shadow: inset 0 0 0 1.5px #4d515b, inset 0 0 0 3px #0b0c0e, 0 46px 76px -38px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  will-change: opacity;
+}
+.dv-fold-full-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 25px;
+  overflow: hidden;
+  background: var(--canvas);
+}
+
+/* 展开时序：合拢停顿 420ms，随后 1650ms 单段连续舒缓曲线向左展开 */
+.dv-slot-fold.is-active .dv-fold-body {
+  animation:
+    dv-fold-shift 1650ms cubic-bezier(0.36, 0.06, 0.2, 1) 420ms both,
+    dv-fold-body-hide 1ms linear 2090ms forwards;
+}
+.dv-slot-fold.is-active .dv-fold-right {
+  animation: dv-fold-right-wake 180ms ease 520ms both;
+}
+.dv-slot-fold.is-active .dv-fold-left {
+  animation: dv-fold-open 1650ms cubic-bezier(0.36, 0.06, 0.2, 1) 420ms both;
+}
+.dv-slot-fold.is-active .dv-fold-shade-l {
+  animation: dv-fold-shade-l 1650ms linear 420ms both;
+}
+.dv-slot-fold.is-active .dv-fold-shade-r {
+  animation: dv-fold-shade-r 1650ms linear 420ms both;
+}
+.dv-slot-fold.is-active .dv-fold-full {
+  animation: dv-fold-full 80ms linear 2010ms both;
+}
+
+@keyframes dv-fold-shift {
+  from {
+    transform: translate3d(-25%, 0, 0);
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes dv-fold-body-hide {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+@keyframes dv-fold-right-wake {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes dv-fold-open {
+  from {
+    transform: rotateY(180deg);
+  }
+  to {
+    transform: rotateY(0deg);
+  }
+}
+@keyframes dv-fold-shade-l {
+  0%,
+  35% {
+    opacity: 1;
+  }
+  85%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes dv-fold-shade-r {
+  0%,
+  20% {
+    opacity: 1;
+  }
+  85%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes dv-fold-full {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ───────────── 平板（16:10 横屏双栏） ───────────── */
+.dv-tablet {
+  position: relative;
+  width: 900px;
+  height: 574px;
+  padding: 14px;
+  border-radius: 34px;
+  background: linear-gradient(150deg, #3b3e46 0%, #14151a 40%, #20232a 75%, #353840 100%);
+  box-shadow: inset 0 0 0 1.5px #4e525c, inset 0 0 0 3px #0b0c0e, 0 46px 80px -38px rgba(0, 0, 0, 0.45);
+}
+.dv-tablet::before {
+  /* 顶部居中前置镜头 */
+  content: "";
+  position: absolute;
+  top: 4.5px;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  margin-left: -2.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #343d52, #090b0f 70%);
+  z-index: 2;
+}
+.dv-tablet-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 21px;
+  overflow: hidden;
+  background: var(--canvas);
+}
+
+/* ───────────── 笔记本 ───────────── */
+.dv-laptop {
+  position: relative;
+  width: 1080px;
+  height: 680px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+.dv-laptop-lid {
+  position: relative;
+  width: 960px;
+  height: 622px;
+  padding: 16px 16px 22px;
+  border-radius: 22px 22px 6px 6px;
+  background: #0d0e10;
+  box-shadow: inset 0 0 0 1.5px #c9ccd2, inset 0 0 0 3px #1a1b1e, 0 30px 60px -30px rgba(0, 0, 0, 0.35);
+  transition: box-shadow 400ms ease;
+}
+html.dark .dv-laptop-lid {
+  box-shadow: inset 0 0 0 1.5px #51545b, inset 0 0 0 3px #1a1b1e, 0 30px 60px -30px rgba(0, 0, 0, 0.6);
+}
+.dv-laptop-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+}
+.dv-laptop-notch {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  width: 120px;
+  height: 14px;
+  margin-left: -60px;
+  border-radius: 0 0 8px 8px;
+  background: #0d0e10;
+}
+.dv-laptop-base {
+  position: relative;
+  width: 1080px;
+  height: 22px;
+  border-radius: 2px 2px 14px 14px;
+  background: linear-gradient(180deg, #e3e5e9 0%, #c8cbd1 45%, #9a9ea6 100%);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset;
+  transition: background 400ms ease;
+}
+html.dark .dv-laptop-base {
+  background: linear-gradient(180deg, #5b5e65 0%, #3e4046 45%, #26282c 100%);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.12) inset;
+}
+.dv-laptop-base > span {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 150px;
+  height: 8px;
+  margin-left: -75px;
+  border-radius: 0 0 10px 10px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+/* 窄屏舞台：设备按比例收进 640 宽 */
+.dv-stage.is-compact .dv-fold {
+  transform: scale(0.8);
+}
+.dv-stage.is-compact .dv-tablet {
+  transform: scale(0.68);
+}
+.dv-stage.is-compact .dv-laptop {
+  transform: scale(0.58);
+}
+.dv-stage.is-compact .dv-phone {
+  transform: scale(1.02);
+}
+.dv-stage.is-compact .dv-shadow[data-device="fold"] {
+  width: 560px;
+  bottom: 70px;
+}
+.dv-stage.is-compact .dv-shadow[data-device="tablet"] {
+  width: 590px;
+  bottom: 110px;
+}
+.dv-stage.is-compact .dv-shadow[data-device="desktop"] {
+  width: 600px;
+  bottom: 150px;
+}
+
+/* 零度娘：在设备旁边 */
+.dv-mascot {
+  position: absolute;
+  bottom: 2%;
+  width: 15.5%;
+  max-width: 200px;
+  pointer-events: none;
+  transform-origin: 50% 90%;
+  filter: drop-shadow(0 14px 18px rgba(0, 0, 0, 0.18));
+  transition: left 700ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 400ms ease, transform 700ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  animation: mascot-sway 3.2s ease-in-out infinite;
+}
+.dv-mascot.is-phone {
+  left: 64%;
+}
+.dv-mascot.is-fold {
+  left: 81%;
+}
+.dv-mascot.is-tablet,
+.dv-mascot.is-desktop {
+  left: 84%;
+  opacity: 0;
+  transform: translateY(28px);
+}
+@media (max-width: 767px) {
+  .dv-mascot {
+    display: none;
+  }
+  .dv-tab {
+    height: 36px;
+    padding: 0 11px;
+    gap: 5px;
+    font-size: 13.5px;
+  }
+}
+
+/* 首屏更新标签 */
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px 0 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-1);
+  background: var(--subtle);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+  transition: background-color 160ms ease;
+}
+.update-pill:hover {
+  background: var(--tonal);
+}
+.update-dot {
+  position: relative;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.update-dot::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  opacity: 0;
+  animation: update-ping 2.6s ease-out infinite;
+}
+@keyframes update-ping {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.6);
+  }
+  80%,
+  100% {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+/* 亮点图标：中性色、细描边，与 App 图标同源 */
+.feature-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  color: var(--ink-1);
+  background: var(--subtle);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+
+/* 字号层级 */
+.t-display {
+  font-size: clamp(44px, 7.2vw, 80px);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+.t-h2 {
+  font-size: clamp(30px, 4.2vw, 44px);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+.t-h3 {
+  font-size: 16px;
+  line-height: 1.45;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.t-body {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+.t-meta {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+.num {
+  font-family: var(--font-inter), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "cv11";
+}
+
+/* 亮点 */
+.hl-num {
+  font-family: var(--font-inter), "PingFang SC", system-ui, sans-serif;
+  font-size: clamp(44px, 5.6vw, 64px);
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "palt", "tnum", "cv11";
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dv-slot-fold.is-active .dv-fold-body {
+    display: none;
+  }
+  .dv-slot-fold.is-active .dv-fold-full {
+    animation: none;
+    opacity: 1;
+  }
+  .dv-mascot,
+  .mascot-sway,
+  .m-icon-btn.is-hint::after {
+    animation: none;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}
+
+/* 用户在“外观”区关闭动效 */
+html.no-motion .mascot-sway,
+html.no-motion .m-icon-btn.is-hint::after {
+  animation: none !important;
+}
+
+/* 设置行（与 App SettingsControls 同构） */
+.set-row {
+  padding: 16px 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+.seg {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: 9px;
+  background: var(--subtle);
+}
+.seg button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  transition: background-color 160ms ease, color 160ms ease;
+}
+.seg button[aria-checked="true"] {
+  background: var(--canvas);
+  color: var(--ink-1);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 0 0 0.5px var(--hairline);
+}
+.swatch {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+}
+.swatch > span {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  transition: box-shadow 160ms ease, transform 160ms ease;
+}
+.swatch[aria-checked="true"] > span {
+  box-shadow: 0 0 0 2px var(--canvas), 0 0 0 4px currentColor;
+}
+.switch {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--tonal);
+  transition: background-color 180ms ease;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 200ms cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+.switch[aria-checked="true"] {
+  background: var(--publish-bg);
+}
+.switch[aria-checked="true"]::after {
+  transform: translateX(18px);
+}
+.range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent) var(--pct), var(--tonal) var(--pct));
+  outline-offset: 6px;
+}
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+}
+.range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+
+
+
+}

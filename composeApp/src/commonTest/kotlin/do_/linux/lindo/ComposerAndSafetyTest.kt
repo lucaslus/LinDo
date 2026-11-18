@@ -423,4 +423,33 @@ class ComposerAndSafetyTest {
         assertEquals("fresh_live_token", winners["_t"]?.value)
         assertEquals("fresh_session", winners["_forum_session"]?.value)
     }
+
+    @Test fun composerExitInterceptorGuardsTopicSwitchUntilUserConfirmsOrCancels() {
+        val interceptor = do_.linux.lindo.ui.ComposerExitInterceptor()
+        var navigatedToTopicId: Int? = null
+
+        // 无打开编辑器时直接放行
+        interceptor.guardNavigation { navigatedToTopicId = 101 }
+        assertEquals(101, navigatedToTopicId)
+
+        // 有未发送修改的编辑器挂载后：拦截切帖并等待用户在确认弹窗中选择「保存 / 不保存 / 取消」
+        var pendingProceed: (() -> Unit)? = null
+        interceptor.tryExitHandler = { proceed ->
+            pendingProceed = proceed
+        }
+
+        interceptor.guardNavigation { navigatedToTopicId = 202 }
+        assertEquals(101, navigatedToTopicId)
+        assertNotNull(pendingProceed)
+
+        // 用户点「取消」：不触发切帖
+        pendingProceed = null
+        assertEquals(101, navigatedToTopicId)
+
+        // 用户再次点击切帖并选择「保存」或「不保存」：执行回调切换到目标帖子
+        interceptor.guardNavigation { navigatedToTopicId = 303 }
+        assertEquals(101, navigatedToTopicId)
+        pendingProceed?.invoke()
+        assertEquals(303, navigatedToTopicId)
+    }
 }

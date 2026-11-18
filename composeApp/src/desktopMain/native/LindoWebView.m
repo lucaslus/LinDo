@@ -56,12 +56,6 @@ static void reply(LindoReply callback, long long request, id value, NSString *er
     if (self) {
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
         config.websiteDataStore = store;
-        config.applicationNameForUserAgent = @"Version/18.1 Safari/605.1.15";
-        WKUserScript *hideGsi = [[WKUserScript alloc]
-            initWithSource:@"if (location.hostname === 'linux.do') { const s = document.createElement('style'); s.textContent = '#credential_picker_container, iframe[src*=\"accounts.google.com/gsi\"] { display: none !important; }'; (document.head || document.documentElement).appendChild(s); }"
-            injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
-            forMainFrameOnly:YES];
-        [config.userContentController addUserScript:hideGsi];
         _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0,0,680,680) configuration:config];
         _web.navigationDelegate = self;
         _web.UIDelegate = self;
@@ -208,7 +202,8 @@ __attribute__((visibility("default"))) void lindo_web_command(long long request,
         }
         else if ([method isEqualToString:@"evaluate"]) {
             NSString *body = [NSString stringWithFormat:@"return await (%@);",p[@"script"]];
-            [host.web callAsyncJavaScript:body arguments:@{} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id result, NSError *error) {
+            WKContentWorld *world = [p[@"isolated"] boolValue] ? WKContentWorld.defaultClientWorld : WKContentWorld.pageWorld;
+            [host.web callAsyncJavaScript:body arguments:@{} inFrame:nil inContentWorld:world completionHandler:^(id result, NSError *error) {
                 NSString *failure = error ? [NSString stringWithFormat:@"WebKit operation failed (%@:%ld)",error.domain,(long)error.code] : nil;
                 reply(callback,request,result,failure);
             }];

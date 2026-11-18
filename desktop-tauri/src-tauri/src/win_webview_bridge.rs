@@ -13,26 +13,6 @@ use url::Url;
 const BRIDGE_WINDOW_LABEL: &str = "lindo-bridge-host";
 const BROWSER_WINDOW_LABEL: &str = "lindo-forum-browser";
 const CONNECT_PROBE_LABEL: &str = "lindo-connect-probe";
-const GSI_HIDE_INIT_SCRIPT: &str = r#"
-(() => {
-  try {
-    if (location.hostname === 'linux.do') {
-      const inject = () => {
-        if (document.getElementById('lindo-hide-gsi')) return;
-        const s = document.createElement('style');
-        s.id = 'lindo-hide-gsi';
-        s.textContent = '#credential_picker_container, iframe[src*="accounts.google.com/gsi"] { display: none !important; }';
-        (document.head || document.documentElement)?.appendChild(s);
-      };
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', inject, { once: true });
-      } else {
-        inject();
-      }
-    }
-  } catch (_) {}
-})();
-"#;
 
 static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
 static EVAL_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -89,6 +69,7 @@ fn ensure_bridge_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .parse()
         .map_err(|e| format!("Invalid forum URL: {e}"))?;
 
+    // Preserve genuine Edge WebView2 User-Agent and untouched document DOM (zero initialization scripts).
     let wv = WebviewWindowBuilder::new(app, BRIDGE_WINDOW_LABEL, WebviewUrl::External(init_url))
         .title("linux.do · 安全验证与登录")
         .inner_size(680.0, 560.0)
@@ -96,7 +77,6 @@ fn ensure_bridge_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .resizable(true)
         .visible(false)
         .center()
-        .initialization_script(GSI_HIDE_INIT_SCRIPT)
         .build()
         .map_err(|e| format!("无法初始化 WebView2 桥接实例: {e}"))?;
 
@@ -138,7 +118,6 @@ fn open_or_reuse_browser_window(app: &AppHandle, target_url: Url, dark: bool) ->
     .center()
     .visible(true)
     .focused(true)
-    .initialization_script(GSI_HIDE_INIT_SCRIPT)
     .build()
     .map_err(|e| format!("无法打开内置浏览器窗口: {e}"))?;
 
@@ -264,17 +243,10 @@ fn purge_storage_auth_js(wv: &WebviewWindow) {
 }
 
 fn is_cloudflare_domain_cookie_name(name: &str) -> bool {
-    matches!(name, "cf_clearance" | "__cf_bm" | "_cfuvid")
-}
-
-fn build_domain_cloudflare_cookie(name: String, value: String) -> Cookie<'static> {
-    Cookie::build((name, value))
-        .domain(".linux.do")
-        .path("/")
-        .max_age(CookieDuration::days(1))
-        .secure(true)
-        .http_only(true)
-        .build()
+    matches!(
+        name,
+        "cf_clearance" | "__cf_bm" | "_cfuvid" | "cf_chl_rc_i" | "cf_chl_rc_ni"
+    )
 }
 
 fn build_host_only_forum_cookie(name: String, value: String, persistent: bool) -> Cookie<'static> {
@@ -381,7 +353,42 @@ pub async fn native_call(
         "evaluate" => {
             let wv = ensure_bridge_window(&app)?;
             let script = params.get("script").and_then(|v| v.as_str()).unwrap_or("null");
-            eval_async_promise(&wv, script, timeout_secs).await
+            let isolated = params
+                .get("isolated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if isolated {
+                // Zero-footprint synchronous read without mutating `window.__lindoAsyncStore` on verification pages
+                let sync_js = format!(
+                    r#"(() => {{
+  try {{
+    const val = ({script});
+    return JSON.stringify({{ ok: true, value: val === undefined ? null : val }});
+  }} catch (err) {{
+    return JSON.stringify({{ ok: false, error: String((err && err.message) || err || "Eval error") }});
+  }}
+}})()"#
+                );
+                let raw = eval_single_sync(&wv, sync_js).await?;
+                let trimmed = raw.trim();
+                let inner_json_str: String = match serde_json::from_str::<String>(trimmed) {
+                    Ok(s) => s,
+                    Err(_) => trimmed.to_string(),
+                };
+                let envelope: Value = serde_json::from_str(&inner_json_str)
+                    .map_err(|e| format!("解析 WebView2 返回结果失败: {e}"))?;
+                if envelope.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+                    Ok(envelope.get("value").cloned().unwrap_or(Value::Null))
+                } else {
+                    Err(envelope
+                        .get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("WebView2 script execution failed")
+                        .to_string())
+                }
+            } else {
+                eval_async_promise(&wv, script, timeout_secs).await
+            }
         }
         "cookies" => {
             let wv = ensure_bridge_window(&app)?;
@@ -420,10 +427,22 @@ pub async fn native_call(
 
             tokio::task::spawn_blocking(move || {
                 let forum_url: Url = "https://linux.do/".parse().unwrap();
+                // Site-owned Cloudflare cookies remain 100% managed by WebView2's native store; never delete or synthesize them.
                 let target_names: std::collections::HashSet<String> = incoming
                     .iter()
-                    .filter_map(|i| i.get("name")?.as_str().map(|s| s.to_string()))
+                    .filter_map(|i| {
+                        let name = i.get("name")?.as_str()?;
+                        if name.is_empty() || is_cloudflare_domain_cookie_name(name) {
+                            None
+                        } else {
+                            Some(name.to_string())
+                        }
+                    })
                     .collect();
+
+                if target_names.is_empty() {
+                    return Ok(json!({}));
+                }
 
                 if let Ok(existing) = wv.cookies_for_url(forum_url) {
                     for c in existing {
@@ -440,15 +459,11 @@ pub async fn native_call(
                     let Some(val) = item.get("value").and_then(|v| v.as_str()) else {
                         continue;
                     };
-                    if name.is_empty() || val.is_empty() {
+                    if name.is_empty() || val.is_empty() || is_cloudflare_domain_cookie_name(name) {
                         continue;
                     }
-                    let ck = if is_cloudflare_domain_cookie_name(name) {
-                        build_domain_cloudflare_cookie(name.to_string(), val.to_string())
-                    } else {
-                        let persistent = name == "_t";
-                        build_host_only_forum_cookie(name.to_string(), val.to_string(), persistent)
-                    };
+                    let persistent = name == "_t";
+                    let ck = build_host_only_forum_cookie(name.to_string(), val.to_string(), persistent);
                     let _ = wv.set_cookie(ck);
                 }
                 Ok(json!({}))
@@ -471,16 +486,6 @@ pub async fn native_call(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let preferred_cf = params
-                .get("preferredCf")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let challenged_cf = params
-                .get("challengedCf")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
 
             tokio::task::spawn_blocking(move || {
                 let forum_url: Url = "https://linux.do/".parse().unwrap();
@@ -495,16 +500,14 @@ pub async fn native_call(
                     return Ok(json!({ "cleared": true }));
                 }
 
+                // Strictly deduplicate Discourse `_t` / `_forum_session` when needed; never touch `cf_clearance`!
                 let mut t_variants = Vec::new();
                 let mut fs_variants = Vec::new();
-                let mut cf_variants = Vec::new();
                 for c in existing {
                     if c.name() == "_t" && !c.value().is_empty() {
                         t_variants.push(c);
                     } else if c.name() == "_forum_session" && !c.value().is_empty() {
                         fs_variants.push(c);
-                    } else if c.name() == "cf_clearance" && !c.value().is_empty() {
-                        cf_variants.push(c);
                     }
                 }
 
@@ -520,17 +523,8 @@ pub async fn native_call(
                         .and_then(|c| c.domain())
                         .map(|d| d.starts_with('.'))
                         .unwrap_or(false);
-                let cf_has_challenged = !challenged_cf.is_empty()
-                    && cf_variants.iter().any(|c| c.value() == challenged_cf);
-                let cf_needs = cf_variants.len() > 1
-                    || cf_has_challenged
-                    || cf_variants
-                        .first()
-                        .and_then(|c| c.domain())
-                        .map(|d| !d.starts_with('.'))
-                        .unwrap_or(false);
 
-                if !t_needs && !fs_needs && !cf_needs {
+                if !t_needs && !fs_needs {
                     return Ok(json!({ "swept": false }));
                 }
 
@@ -561,30 +555,6 @@ pub async fn native_call(
                     None
                 };
 
-                let winner_cf = if cf_needs {
-                    cf_variants
-                        .iter()
-                        .find(|c| {
-                            !preferred_cf.is_empty()
-                                && preferred_cf != challenged_cf
-                                && c.value() == preferred_cf
-                        })
-                        .or_else(|| {
-                            cf_variants.iter().rev().find(|c| {
-                                c.domain().unwrap_or("").starts_with('.')
-                                    && (challenged_cf.is_empty() || c.value() != challenged_cf)
-                            })
-                        })
-                        .or_else(|| {
-                            cf_variants.iter().rev().find(|c| {
-                                challenged_cf.is_empty() || c.value() != challenged_cf
-                            })
-                        })
-                        .map(|c| c.value().to_string())
-                } else {
-                    None
-                };
-
                 if t_needs {
                     for c in t_variants {
                         let _ = wv.delete_cookie(c);
@@ -592,11 +562,6 @@ pub async fn native_call(
                 }
                 if fs_needs {
                     for c in fs_variants {
-                        let _ = wv.delete_cookie(c);
-                    }
-                }
-                if cf_needs {
-                    for c in cf_variants {
                         let _ = wv.delete_cookie(c);
                     }
                 }
@@ -608,12 +573,6 @@ pub async fn native_call(
                         "_forum_session".to_string(),
                         wfs,
                         false,
-                    ));
-                }
-                if let Some(wcf) = winner_cf {
-                    let _ = wv.set_cookie(build_domain_cloudflare_cookie(
-                        "cf_clearance".to_string(),
-                        wcf,
                     ));
                 }
                 Ok(json!({ "swept": true }))

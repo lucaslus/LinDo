@@ -155,6 +155,25 @@ internal fun LinDoConfirmDialog(
 }
 
 /**
+ * 编辑器外部切帖 / 切 Tab 防误触拦截器：
+ * 当大屏双栏右侧正处于「回复 / 编辑」状态时，若用户点击左侧列表切换话题或切换主导航 Tab：
+ * - 若有未发送的修改 (`hasChanges`)，收起软键盘并弹出与点 `←` 完全一致的「保存草稿 / 不保存 / 取消」弹窗；
+ * - 若无修改，静默关闭编辑器并直接放行跳转。
+ */
+internal class ComposerExitInterceptor {
+    internal var tryExitHandler: (((() -> Unit)) -> Unit)? = null
+
+    fun guardNavigation(onProceed: () -> Unit) {
+        val handler = tryExitHandler
+        if (handler != null) {
+            handler(onProceed)
+        } else {
+            onProceed()
+        }
+    }
+}
+
+/**
  * 全新设计的旗舰级移动端创作工作台 (`ComposerSheet`)：
  * 1. 顶栏一体化：左侧关闭 + 标题/上下文副标题 + 右侧「编辑 | 预览」胶囊切换 + 醒目「发布」主按钮；
  * 2. 新建话题元数据精简为单行胶囊栏（`● 版块 ▾` + `#标签`），按需展开网格选择器，告别多行杂乱堆叠；
@@ -180,6 +199,7 @@ internal fun ComposerSheet(
     initialDraft: CloudDraftItem? = null,
     initialTags: List<String> = emptyList(),
     canEditTopicMeta: Boolean = false,
+    exitInterceptor: ComposerExitInterceptor? = null,
     onDismiss: () -> Unit,
     onPublished: (ComposerPublished) -> Unit
 ) {
@@ -317,6 +337,7 @@ internal fun ComposerSheet(
     var unconfirmedDraft by remember(stateKey) { mutableStateOf<ComposerDraft?>(null) }
     var confirmResubmit by remember(stateKey) { mutableStateOf(false) }
     var showExit by remember(stateKey) { mutableStateOf(false) }
+    var pendingAfterExit by remember(stateKey) { mutableStateOf<(() -> Unit)?>(null) }
     var discardError by remember(stateKey) { mutableStateOf<String?>(null) }
     var showCost by remember(stateKey) { mutableStateOf(false) }
     var syncRetry by remember(stateKey) { mutableIntStateOf(0) }
@@ -425,9 +446,12 @@ internal fun ComposerSheet(
             viewMode = WorkbenchViewMode.SOURCE
             return
         }
+        pendingAfterExit = null
         if (hasChanges) {
+            keyboard?.hide()
             showExit = true
         } else {
+            keyboard?.hide()
             if (action == ComposerAction.EDIT && session?.existsOnServer == true) {
                 val closingSession = session
                 LinuxDoRepository.launchDetachedDraftOp {
@@ -435,6 +459,48 @@ internal fun ComposerSheet(
                 }
             }
             onDismiss()
+        }
+    }
+
+    val latestExternalExitHandler by rememberUpdatedState<(() -> Unit) -> Unit> { proceed ->
+        if (busy) return@rememberUpdatedState
+        if (hasChanges) {
+            keyboard?.hide()
+            pendingAfterExit = proceed
+            showExit = true
+        } else {
+            keyboard?.hide()
+            if (action == ComposerAction.EDIT && session?.existsOnServer == true) {
+                val closingSession = session
+                LinuxDoRepository.launchDetachedDraftOp {
+                    runCatching { closingSession?.discard() }
+                }
+            }
+            onDismiss()
+            proceed()
+        }
+    }
+    DisposableEffect(exitInterceptor) {
+        val currentHandler: (() -> Unit) -> Unit = { proceed -> latestExternalExitHandler(proceed) }
+        exitInterceptor?.tryExitHandler = currentHandler
+        onDispose {
+            if (exitInterceptor?.tryExitHandler === currentHandler) {
+                exitInterceptor.tryExitHandler = null
+            }
+        }
+    }
+
+    // 兜底保护：若组件因外部不可抗因素（如会话切换）意外卸载且未走「不保存 / 已发布」，自动补推一次后台云端草稿同步
+    val latestHasChangesForDispose by rememberUpdatedState(hasChanges)
+    val latestSessionForDispose by rememberUpdatedState(session)
+    val latestDraftForDispose by rememberUpdatedState(draft)
+    DisposableEffect(stateKey) {
+        onDispose {
+            val s = latestSessionForDispose
+            if (latestHasChangesForDispose && s != null && s.userModifiedInSession) {
+                s.update(latestDraftForDispose, fromUserEdit = false)
+                s.syncInBackground()
+            }
         }
     }
 
@@ -1333,8 +1399,12 @@ internal fun ComposerSheet(
                     scope.launch {
                         try {
                             if (session?.discard() == true) {
+                                val after = pendingAfterExit
+                                pendingAfterExit = null
+                                keyboard?.hide()
                                 showExit = false
                                 onDismiss()
+                                after?.invoke()
                             } else {
                                 discardError = LinDoComposerCopy.DRAFT_UPDATED_REOPEN_CHECK.text
                             }
@@ -1351,8 +1421,23 @@ internal fun ComposerSheet(
                 Text(LinDoCommonCopy.DONT_SAVE.text, color = MaterialTheme.colorScheme.error)
             }
         },
-        onDismiss = { if (!submitting) { showExit = false; discardError = null } },
-        onConfirm = { session?.update(draft); session?.syncInBackground(); showExit = false; onDismiss() }
+        onDismiss = {
+            if (!submitting) {
+                showExit = false
+                discardError = null
+                pendingAfterExit = null
+            }
+        },
+        onConfirm = {
+            val after = pendingAfterExit
+            pendingAfterExit = null
+            keyboard?.hide()
+            session?.update(draft)
+            session?.syncInBackground()
+            showExit = false
+            onDismiss()
+            after?.invoke()
+        }
     )
     if (showCost) LinDoConfirmDialog(
         title = LinDoComposerCopy.CONFIRM_LOTTERY_TOPIC_TITLE.text,

@@ -96,42 +96,6 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 }
 @end
 
-static NSString *detectedSystemSafariVersion(void) {
-    static NSString *cachedVersion = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSArray<NSString *> *bundlePaths = @[
-            @"/Applications/Safari.app",
-            @"/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app"
-        ];
-        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"^[0-9]+(\\.[0-9]+)*$" options:0 error:nil];
-        for (NSString *path in bundlePaths) {
-            NSBundle *safariBundle = [NSBundle bundleWithPath:path];
-            NSString *ver = [safariBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-            if ([ver isKindOfClass:NSString.class] && ver.length > 0) {
-                NSRange match = [re rangeOfFirstMatchInString:ver options:0 range:NSMakeRange(0, ver.length)];
-                if (match.location != NSNotFound) {
-                    cachedVersion = [ver copy];
-                    break;
-                }
-            }
-        }
-        if (!cachedVersion.length) {
-            cachedVersion = @"18.6";
-        }
-    });
-    return cachedVersion;
-}
-
-static NSString *canonicalSafariApplicationName(void) {
-    return [NSString stringWithFormat:@"Version/%@ Safari/605.1.15", detectedSystemSafariVersion()];
-}
-
-static NSString *canonicalSafariFullUserAgent(void) {
-    return [NSString stringWithFormat:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) %@",
-            canonicalSafariApplicationName()];
-}
-
 @interface LindoBridgeHost : NSObject <WKNavigationDelegate, WKUIDelegate, NSWindowDelegate>
 @property WKWebView *web;
 @property NSPanel *panel;
@@ -154,14 +118,8 @@ static NSString *canonicalSafariFullUserAgent(void) {
         WKWebsiteDataStore *store = WKWebsiteDataStore.defaultDataStore;
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
         config.websiteDataStore = store;
-        config.applicationNameForUserAgent = canonicalSafariApplicationName();
-        WKUserScript *hideGsi = [[WKUserScript alloc]
-            initWithSource:@"if (location.hostname === 'linux.do') { const s = document.createElement('style'); s.textContent = '#credential_picker_container, iframe[src*=\"accounts.google.com/gsi\"] { display: none !important; }'; (document.head || document.documentElement).appendChild(s); }"
-            injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
-            forMainFrameOnly:YES];
-        [config.userContentController addUserScript:hideGsi];
+        // Preserve genuine macOS WKWebView User-Agent and untouched document head (zero user scripts or UA spoofing).
         _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 680, 524) configuration:config];
-        _web.customUserAgent = canonicalSafariFullUserAgent();
         _web.navigationDelegate = self;
         _web.UIDelegate = self;
         _web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -407,11 +365,9 @@ static LindoBridgeHost *gHost = nil;
         WKWebsiteDataStore *store = WKWebsiteDataStore.defaultDataStore;
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
         config.websiteDataStore = store;
-        config.applicationNameForUserAgent = canonicalSafariApplicationName();
 
         NSRect initRect = NSMakeRect(0, 0, 1120, 780);
         _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 1120, 736) configuration:config];
-        _web.customUserAgent = canonicalSafariFullUserAgent();
         _web.navigationDelegate = self;
         _web.UIDelegate = self;
         _web.allowsBackForwardNavigationGestures = YES;
@@ -609,7 +565,6 @@ static NSMutableSet<LindoConnectProbe *> *gActiveConnectProbes = nil;
         cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
         _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 1024, 768) configuration:cfg];
         _web.navigationDelegate = self;
-        _web.customUserAgent = canonicalSafariFullUserAgent();
     }
     return self;
 }
@@ -704,13 +659,6 @@ static void unlockHighRefreshRateForWebView(WKWebView *wv) {
         return;
     }
     [gUnlockedWebViews addObject:wv];
-
-    // Unify User-Agent 100% across Tauri's main UI WKWebView, gHost.web, and gBrowser.web
-    // so any subresource sharing WKWebsiteDataStore.defaultDataStore never splits UA!
-    NSString *canonicalUa = canonicalSafariFullUserAgent();
-    if (![wv.customUserAgent isEqualToString:canonicalUa]) {
-        wv.customUserAgent = canonicalUa;
-    }
 
     WKPreferences *prefs = wv.configuration.preferences;
     if (!prefs) return;
@@ -904,27 +852,9 @@ static BOOL isCloudflareDomainCookieName(NSString *name) {
     if (!name.length) return NO;
     return [name isEqualToString:@"cf_clearance"] ||
            [name isEqualToString:@"__cf_bm"] ||
-           [name isEqualToString:@"_cfuvid"];
-}
-
-static NSHTTPCookie *makeDomainCloudflareCookie(NSString *name, NSString *value) {
-    if (!name.length || !value.length) return nil;
-    NSURL *originUrl = [NSURL URLWithString:@"https://linux.do/"];
-    NSString *header = [NSString stringWithFormat:@"%@=%@; Domain=.linux.do; Path=/; Max-Age=86400; Secure; HttpOnly; SameSite=None", name, value];
-    NSArray<NSHTTPCookie *> *parsed = [NSHTTPCookie cookiesWithResponseHeaderFields:@{@"Set-Cookie": header} forURL:originUrl];
-    if (parsed.count > 0) {
-        return parsed.firstObject;
-    }
-    NSMutableDictionary *props = [NSMutableDictionary dictionaryWithDictionary:@{
-        NSHTTPCookieName: name,
-        NSHTTPCookieValue: value,
-        NSHTTPCookieDomain: @".linux.do",
-        NSHTTPCookiePath: @"/",
-        NSHTTPCookieSecure: @"TRUE",
-        @"HttpOnly": @"TRUE",
-        NSHTTPCookieExpires: [NSDate dateWithTimeIntervalSinceNow:86400]
-    }];
-    return [NSHTTPCookie cookieWithProperties:props];
+           [name isEqualToString:@"_cfuvid"] ||
+           [name isEqualToString:@"cf_chl_rc_i"] ||
+           [name isEqualToString:@"cf_chl_rc_ni"];
 }
 
 static NSHTTPCookie *makeHostOnlyForumCookie(NSString *name, NSString *value, BOOL persistent) {
@@ -1012,10 +942,12 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             sendReply(callback, request, @{}, nil);
         } else if ([method isEqualToString:@"evaluate"]) {
             NSString *body = [NSString stringWithFormat:@"return await (%@);", p[@"script"] ?: @"null"];
+            BOOL isolated = [p[@"isolated"] boolValue];
+            WKContentWorld *world = isolated ? WKContentWorld.defaultClientWorld : WKContentWorld.pageWorld;
             [gHost.web callAsyncJavaScript:body
                                  arguments:@{}
                                    inFrame:nil
-                            inContentWorld:WKContentWorld.pageWorld
+                            inContentWorld:world
                          completionHandler:^(id result, NSError *error) {
                 NSString *failure = nil;
                 if (error) {
@@ -1051,11 +983,16 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             NSMutableSet<NSString *> *targetNames = [NSMutableSet new];
             for (NSDictionary *item in incoming) {
                 NSString *n = item[@"name"];
-                if ([n isKindOfClass:NSString.class] && n.length > 0) {
+                // Site-owned Cloudflare cookies remain 100% managed by WKHTTPCookieStore; never delete or synthesize them.
+                if ([n isKindOfClass:NSString.class] && n.length > 0 && !isCloudflareDomainCookieName(n)) {
                     [targetNames addObject:n];
                 }
             }
-            // 1. Delete ALL existing variants (both domain=.linux.do and host-only linux.do) for target names first
+            if (!targetNames.count) {
+                sendReply(callback, request, @{}, nil);
+                return;
+            }
+            // 1. Delete existing variants for target Discourse session cookie names first
             [store getAllCookies:^(NSArray<NSHTTPCookie *> *existing) {
                 dispatch_group_t delGroup = dispatch_group_create();
                 for (NSHTTPCookie *c in existing) {
@@ -1066,19 +1003,15 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                     }
                 }
                 dispatch_group_notify(delGroup, dispatch_get_main_queue(), ^{
-                    // 2. Insert canonical cookies: Cloudflare trust cookies use Domain=.linux.do; Discourse session cookies are strictly host-only!
+                    // 2. Insert canonical host-only Discourse session cookies (`_t`, `_forum_session`)
                     dispatch_group_t setGroup = dispatch_group_create();
                     for (NSDictionary *item in incoming) {
                         NSString *name = item[@"name"];
                         NSString *val = item[@"value"];
                         if (![name isKindOfClass:NSString.class] || ![val isKindOfClass:NSString.class] || !val.length) continue;
-                        NSHTTPCookie *cookie = nil;
-                        if (isCloudflareDomainCookieName(name)) {
-                            cookie = makeDomainCloudflareCookie(name, val);
-                        } else {
-                            BOOL persistent = [name isEqualToString:@"_t"];
-                            cookie = makeHostOnlyForumCookie(name, val, persistent);
-                        }
+                        if (isCloudflareDomainCookieName(name)) continue;
+                        BOOL persistent = [name isEqualToString:@"_t"];
+                        NSHTTPCookie *cookie = makeHostOnlyForumCookie(name, val, persistent);
                         if (cookie) {
                             dispatch_group_enter(setGroup);
                             [store setCookie:cookie completionHandler:^{ dispatch_group_leave(setGroup); }];
@@ -1095,8 +1028,6 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             BOOL isClearMode = [mode isEqualToString:@"clear"];
             purgeSharedStorageAuthCookies(isClearMode);
             NSString *preferredT = [p[@"preferredT"] isKindOfClass:NSString.class] ? p[@"preferredT"] : @"";
-            NSString *preferredCf = [p[@"preferredCf"] isKindOfClass:NSString.class] ? p[@"preferredCf"] : @"";
-            NSString *challengedCf = [p[@"challengedCf"] isKindOfClass:NSString.class] ? p[@"challengedCf"] : @"";
             NSSet<NSString *> *authNames = [NSSet setWithObjects:@"_t", @"_forum_session", @"authentication_data", nil];
             [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
                 if (isClearMode) {
@@ -1116,31 +1047,20 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                 }
 
                 // mode == "dedupe":
-                // - Discourse _t / _forum_session: strictly ONE host-only (linux.do) entry
-                // - Cloudflare cf_clearance: strictly ONE Domain=.linux.do entry, evicting any challengedCf or stray host-only duplicate!
+                // Strictly deduplicate Discourse `_t` / `_forum_session` to a single host-only (`linux.do`) entry when needed.
+                // Never delete, rewrite, or synthesize `cf_clearance` / `__cf_bm` / `_cfuvid` in WKHTTPCookieStore!
                 NSMutableArray<NSHTTPCookie *> *tVariants = [NSMutableArray new];
                 NSMutableArray<NSHTTPCookie *> *fsVariants = [NSMutableArray new];
-                NSMutableArray<NSHTTPCookie *> *cfVariants = [NSMutableArray new];
                 for (NSHTTPCookie *c in cookies) {
                     NSString *dom = [c.domain hasPrefix:@"."] ? [c.domain substringFromIndex:1] : c.domain;
                     if ([dom.lowercaseString isEqualToString:@"linux.do"]) {
                         if ([c.name isEqualToString:@"_t"] && c.value.length > 0) [tVariants addObject:c];
                         else if ([c.name isEqualToString:@"_forum_session"] && c.value.length > 0) [fsVariants addObject:c];
-                        else if ([c.name isEqualToString:@"cf_clearance"] && c.value.length > 0) [cfVariants addObject:c];
                     }
                 }
                 BOOL tNeedsRewrite = tVariants.count > 1 || (tVariants.count == 1 && [tVariants.firstObject.domain hasPrefix:@"."]);
                 BOOL fsNeedsRewrite = fsVariants.count > 1 || (fsVariants.count == 1 && [fsVariants.firstObject.domain hasPrefix:@"."]);
-                BOOL cfHasChallenged = NO;
-                if (challengedCf.length > 0) {
-                    for (NSHTTPCookie *c in cfVariants) {
-                        if ([c.value isEqualToString:challengedCf]) { cfHasChallenged = YES; break; }
-                    }
-                }
-                BOOL cfNeedsRewrite = cfVariants.count > 1 ||
-                                      cfHasChallenged ||
-                                      (cfVariants.count == 1 && ![cfVariants.firstObject.domain hasPrefix:@"."]);
-                if (!tNeedsRewrite && !fsNeedsRewrite && !cfNeedsRewrite) {
+                if (!tNeedsRewrite && !fsNeedsRewrite) {
                     sendReply(callback, request, @{@"swept": @NO}, nil);
                     return;
                 }
@@ -1164,35 +1084,10 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                     }
                     if (!winnerFs) winnerFs = fsVariants.lastObject.value;
                 }
-                NSString *winnerCf = nil;
-                if (cfNeedsRewrite && cfVariants.count > 0) {
-                    if (preferredCf.length > 0 && ![preferredCf isEqualToString:challengedCf]) {
-                        for (NSHTTPCookie *c in cfVariants) {
-                            if ([c.value isEqualToString:preferredCf]) { winnerCf = c.value; break; }
-                        }
-                    }
-                    if (!winnerCf) {
-                        for (NSHTTPCookie *c in [cfVariants reverseObjectEnumerator]) {
-                            if ([c.domain hasPrefix:@"."] && (!challengedCf.length || ![c.value isEqualToString:challengedCf])) {
-                                winnerCf = c.value;
-                                break;
-                            }
-                        }
-                    }
-                    if (!winnerCf) {
-                        for (NSHTTPCookie *c in [cfVariants reverseObjectEnumerator]) {
-                            if (!challengedCf.length || ![c.value isEqualToString:challengedCf]) {
-                                winnerCf = c.value;
-                                break;
-                            }
-                        }
-                    }
-                }
 
                 NSMutableArray<NSHTTPCookie *> *toDelete = [NSMutableArray new];
                 if (tNeedsRewrite) [toDelete addObjectsFromArray:tVariants];
                 if (fsNeedsRewrite) [toDelete addObjectsFromArray:fsVariants];
-                if (cfNeedsRewrite) [toDelete addObjectsFromArray:cfVariants];
 
                 dispatch_group_t delGrp = dispatch_group_create();
                 for (NSHTTPCookie *c in toDelete) {
@@ -1213,13 +1108,6 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                         if (fc) {
                             dispatch_group_enter(writeGrp);
                             [store setCookie:fc completionHandler:^{ dispatch_group_leave(writeGrp); }];
-                        }
-                    }
-                    if (cfNeedsRewrite && winnerCf.length > 0) {
-                        NSHTTPCookie *cc = makeDomainCloudflareCookie(@"cf_clearance", winnerCf);
-                        if (cc) {
-                            dispatch_group_enter(writeGrp);
-                            [store setCookie:cc completionHandler:^{ dispatch_group_leave(writeGrp); }];
                         }
                     }
                     dispatch_group_notify(writeGrp, dispatch_get_main_queue(), ^{

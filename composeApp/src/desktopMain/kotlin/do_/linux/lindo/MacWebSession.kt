@@ -67,6 +67,6 @@ internal class MacWebSession {
     }
     suspend fun call(method: String, params: JsonObject = buildJsonObject {}): JsonObject =
         command(method, params, 20).jsonObject
-    suspend fun evaluate(script: String, timeoutSeconds: Long = 20): JsonElement? =
-        command("evaluate", buildJsonObject { put("script", script) }, timeoutSeconds).takeUnless { it == JsonNull }
+    suspend fun evaluate(script: String, timeoutSeconds: Long = 20, isolated: Boolean = false): JsonElement? =
+        command("evaluate", buildJsonObject { put("script", script); if (isolated) put("isolated", true) }, timeoutSeconds).takeUnless { it == JsonNull }
 }

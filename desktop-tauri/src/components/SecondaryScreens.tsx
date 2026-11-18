@@ -4662,9 +4662,20 @@ export const ConfirmDialog: React.FC<{
   detail?: string;
   confirmLabel: string;
   destructive?: boolean;
+  alternateLabel?: string;
+  onAlternate?: () => void;
   onCancel: () => void;
   onConfirm: () => void;
-}> = ({ title, detail, confirmLabel, destructive, onCancel, onConfirm }) => (
+}> = ({
+  title,
+  detail,
+  confirmLabel,
+  destructive,
+  alternateLabel,
+  onAlternate,
+  onCancel,
+  onConfirm,
+}) => (
   <div
     className="fixed inset-0 z-[60] flex items-center justify-center bg-black/62"
     onClick={onCancel}
@@ -4688,7 +4699,17 @@ export const ConfirmDialog: React.FC<{
           {detail}
         </p>
       )}
-      <div className="mt-5 flex justify-end gap-2">
+      <div className="mt-5 flex items-center justify-end gap-2">
+        {alternateLabel && onAlternate && (
+          <button
+            type="button"
+            onClick={onAlternate}
+            className="lindo-interactive mr-auto rounded-xl px-3 py-1.5 text-[13px] font-medium cursor-pointer"
+            style={{ color: "#EF4444" }}
+          >
+            {alternateLabel}
+          </button>
+        )}
         <button
           type="button"
           onClick={onCancel}

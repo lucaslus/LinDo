@@ -94,7 +94,7 @@ class NotificationJumpAndSessionExpiryTest {
             // Passive session expiry preserves reading context and shows the unified reminder bar
             edt { UserApiKeyAuthManager.handleServerAuthInvalidated() }
             waitUntil(timeoutMillis = 5_000L) {
-                edt { onAllNodesWithText("@jedilus 登录已过期，当前为访客模式", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                edt { onAllNodesWithText("登录已过期").fetchSemanticsNodes().isNotEmpty() }
             }
             edt {
                 onNodeWithText("重新登录").assertIsDisplayed()

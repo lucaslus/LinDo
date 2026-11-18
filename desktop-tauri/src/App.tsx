@@ -145,6 +145,9 @@ export const App: React.FC = () => {
     text: string;
     nonce: number;
   } | null>(null);
+  const composerReqRef = useRef<ComposerLaunchRequest | null>(null);
+  composerReqRef.current = composerReq;
+  const composerExitGuardRef = useRef<((proceed: () => void) => void) | null>(null);
   const [inspectedUsername, setInspectedUsername] = useState<string | null>(null);
   const [inspectedBadge, setInspectedBadge] = useState<GrantedBadge | null>(null);
   const [showConnectModal, setShowConnectModal] = useState(false);
@@ -288,8 +291,40 @@ export const App: React.FC = () => {
   const openTopic = useCallback(
     async (
       topic: TopicSummary,
-      opts?: { floor?: number | null; onlyOp?: boolean; forceRefresh?: boolean; trackVisit?: boolean }
+      opts?: {
+        floor?: number | null;
+        onlyOp?: boolean;
+        forceRefresh?: boolean;
+        trackVisit?: boolean;
+        bypassGuard?: boolean;
+      }
     ) => {
+      if (
+        !opts?.forceRefresh &&
+        opts?.floor == null &&
+        opts?.onlyOp == null &&
+        isWideLayout &&
+        currentTab === "HOME" &&
+        activeSummary?.id === topic.id &&
+        activeDetail?.id === topic.id &&
+        !readerError
+      ) {
+        return;
+      }
+      const curComposer = composerReqRef.current;
+      if (
+        !opts?.bypassGuard &&
+        curComposer &&
+        curComposer.action !== "NEW_TOPIC" &&
+        curComposer.topicId &&
+        curComposer.topicId !== topic.id &&
+        composerExitGuardRef.current
+      ) {
+        composerExitGuardRef.current(() => {
+          void openTopic(topic, { ...opts, bypassGuard: true });
+        });
+        return;
+      }
       setComposerReq((prev) =>
         prev && prev.action !== "NEW_TOPIC" && prev.topicId && prev.topicId !== topic.id
           ? null
@@ -352,14 +387,45 @@ export const App: React.FC = () => {
         setReaderLoading(false);
       }
     },
-    [activeDetail?.id]
+    [activeDetail?.id, activeSummary?.id, currentTab, isWideLayout, readerError]
   );
 
   const openMessageTopic = useCallback(
     async (
       topic: TopicSummary,
-      opts?: { floor?: number | null; onlyOp?: boolean; forceRefresh?: boolean }
+      opts?: {
+        floor?: number | null;
+        onlyOp?: boolean;
+        forceRefresh?: boolean;
+        bypassGuard?: boolean;
+      }
     ) => {
+      if (
+        !opts?.forceRefresh &&
+        opts?.floor == null &&
+        opts?.onlyOp == null &&
+        isWideLayout &&
+        currentTab === "MESSAGES" &&
+        msgSummary?.id === topic.id &&
+        msgDetail?.id === topic.id &&
+        !msgReaderError
+      ) {
+        return;
+      }
+      const curComposer = composerReqRef.current;
+      if (
+        !opts?.bypassGuard &&
+        curComposer &&
+        curComposer.action !== "NEW_TOPIC" &&
+        curComposer.topicId &&
+        curComposer.topicId !== topic.id &&
+        composerExitGuardRef.current
+      ) {
+        composerExitGuardRef.current(() => {
+          void openMessageTopic(topic, { ...opts, bypassGuard: true });
+        });
+        return;
+      }
       setComposerReq((prev) =>
         prev && prev.action !== "NEW_TOPIC" && prev.topicId && prev.topicId !== topic.id
           ? null
@@ -417,7 +483,7 @@ export const App: React.FC = () => {
         setMsgReaderLoading(false);
       }
     },
-    [msgDetail?.id]
+    [msgDetail?.id, msgSummary?.id, currentTab, isWideLayout, msgReaderError]
   );
 
   const makeSummaryById = useCallback(
@@ -1073,6 +1139,7 @@ export const App: React.FC = () => {
           allowToggle ? () => setComposerForceModal((v) => !v) : undefined
         }
         appendQuote={composerAppendQuote}
+        exitGuardRef={composerExitGuardRef}
         savedDraft={
           composerReq.draftKeyOverride
             ? drafts[composerReq.draftKeyOverride]
@@ -1182,6 +1249,17 @@ export const App: React.FC = () => {
             hasUpdate={Boolean(updateInfo?.hasUpdate)}
             isMacos={platform === "macos"}
             onSelectTab={(tab) => {
+              if (tab === currentTab) {
+                setNarrowShowingReader(false);
+                return;
+              }
+              if (isDrawerComposer && composerExitGuardRef.current) {
+                composerExitGuardRef.current(() => {
+                  setCurrentTab(tab);
+                  setNarrowShowingReader(false);
+                });
+                return;
+              }
               setCurrentTab(tab);
               setNarrowShowingReader(false);
             }}

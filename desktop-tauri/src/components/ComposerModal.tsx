@@ -59,6 +59,7 @@ interface ComposerModalProps {
   presentation?: "modal" | "drawer";
   onTogglePresentation?: () => void;
   appendQuote?: { text: string; nonce: number } | null;
+  exitGuardRef?: React.MutableRefObject<((proceed: () => void) => void) | null>;
   onClose: () => void;
   onPublished: (result: {
     topicId?: number;
@@ -101,6 +102,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   presentation = "modal",
   onTogglePresentation,
   appendQuote,
+  exitGuardRef,
   onClose,
   onPublished,
   onTriggerVerify,
@@ -192,6 +194,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
   // Lottery 20-point confirmation state
   const [showLotteryConfirm, setShowLotteryConfirm] = useState(false);
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [originalEditRaw, setOriginalEditRaw] = useState<string>(request.initialRaw ?? "");
+  const pendingProceedRef = useRef<(() => void) | null>(null);
 
   // Submit-time validation state
   const [submitAttempted, setSubmitAttempted] = useState(false);
@@ -286,7 +291,10 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     if (request.action === "EDIT" && request.postId && !request.initialRaw) {
       setLoadingRawEdit(true);
       fetchPostRawMarkdown(request.postId)
-        .then((loadedRaw) => setRaw(loadedRaw))
+        .then((loadedRaw) => {
+          setOriginalEditRaw(loadedRaw);
+          setRaw(loadedRaw);
+        })
         .catch((err: any) => setSubmitError(err?.message || "无法读取原帖内容"))
         .finally(() => setLoadingRawEdit(false));
     }
@@ -463,6 +471,70 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       : bodyRemaining > 0
         ? `还差 ${bodyRemaining} 个字`
         : null;
+
+  const isUntouchedTemplate =
+    isNewTopic &&
+    Boolean(lastAppliedTemplate) &&
+    raw.trim() === lastAppliedTemplate.trim() &&
+    title.trim().length === 0 &&
+    tags.length === 0;
+
+  const hasChanges = useMemo(() => {
+    if (loadingRawEdit || isUntouchedTemplate) return false;
+    if (request.action === "EDIT") {
+      if (raw !== originalEditRaw) return true;
+      if (isEditingOp) {
+        if (title.trim() !== (request.initialTitle ?? "").trim()) return true;
+        if (request.initialCategoryId && categoryId !== request.initialCategoryId) return true;
+        if (tags.join(",") !== (request.initialTags ?? []).join(",")) return true;
+      }
+      return false;
+    }
+    return raw.trim().length > 0 || title.trim().length > 0;
+  }, [
+    loadingRawEdit,
+    isUntouchedTemplate,
+    request.action,
+    request.initialTitle,
+    request.initialCategoryId,
+    request.initialTags,
+    raw,
+    originalEditRaw,
+    isEditingOp,
+    title,
+    categoryId,
+    tags,
+  ]);
+
+  const requestClose = useCallback(
+    (afterProceed?: () => void) => {
+      if (submitting || uploading) return;
+      if (!afterProceed && activePicker !== "NONE") {
+        setActivePicker("NONE");
+        return;
+      }
+      if (hasChanges) {
+        pendingProceedRef.current = afterProceed ?? null;
+        setShowExitConfirm(true);
+      } else {
+        pendingProceedRef.current = null;
+        onClose();
+        afterProceed?.();
+      }
+    },
+    [submitting, uploading, activePicker, hasChanges, onClose]
+  );
+
+  useEffect(() => {
+    if (!exitGuardRef) return;
+    const handler = (proceed: () => void) => requestClose(proceed);
+    exitGuardRef.current = handler;
+    return () => {
+      if (exitGuardRef.current === handler) {
+        exitGuardRef.current = null;
+      }
+    };
+  }, [exitGuardRef, requestClose]);
 
   const showTitleError = submitAttempted && Boolean(titleErrorMsg);
   const showTagError = submitAttempted && Boolean(tagErrorMsg);
@@ -712,7 +784,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           {!isDrawer && (
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => requestClose()}
               disabled={submitting}
               title="关闭"
               className="lindo-interactive flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
@@ -787,7 +859,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           {isDrawer && (
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => requestClose()}
               disabled={submitting}
               title="收起并保留草稿"
               className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
@@ -1912,6 +1984,50 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           }}
         />
       )}
+
+      {/* 未发送内容退出 / 切帖防误触确认 */}
+      {showExitConfirm && (
+        <ConfirmDialog
+          title="保存草稿？"
+          detail="当前编辑内容尚未发送，是否保存至草稿以便稍后继续？"
+          confirmLabel="保存"
+          alternateLabel="不保存"
+          onCancel={() => {
+            pendingProceedRef.current = null;
+            setShowExitConfirm(false);
+          }}
+          onAlternate={() => {
+            const after = pendingProceedRef.current;
+            pendingProceedRef.current = null;
+            setShowExitConfirm(false);
+            deleteLocalDraftInRust(draftKey).catch(() => {});
+            onClose();
+            after?.();
+          }}
+          onConfirm={() => {
+            const after = pendingProceedRef.current;
+            pendingProceedRef.current = null;
+            setShowExitConfirm(false);
+            if (request.action !== "EDIT" && (title.trim() || raw.trim() || tags.length > 0)) {
+              saveLocalDraftInRust({
+                key: draftKey,
+                action: request.action,
+                topicId: request.topicId ?? null,
+                postId: request.postId ?? null,
+                replyToPostNumber: request.replyToPostNumber ?? null,
+                categoryId,
+                title,
+                raw,
+                tags,
+                sequence: 0,
+                updatedAt: Date.now(),
+              }).catch(() => {});
+            }
+            onClose();
+            after?.();
+          }}
+        />
+      )}
     </>
   );
 
@@ -1934,8 +2050,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/58 p-5"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !submitting && !raw.trim() && !title.trim()) {
-          onClose();
+        if (e.target === e.currentTarget && !submitting && !uploading) {
+          requestClose();
         }
       }}
     >

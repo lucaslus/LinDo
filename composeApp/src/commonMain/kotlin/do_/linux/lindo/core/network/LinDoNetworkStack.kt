@@ -492,6 +492,8 @@ object UserApiKeyAuthManager {
 
     @Volatile
     var uiSplitFraction: Float = 0.42f
+    /** 移动端宽屏（折叠屏内屏 / 平板）是否使用左右分栏；关闭时按直板布局放宽 */
+    var uiWideSplitEnabled: Boolean = true
 
     var onAuthStateChanged: (() -> Unit)? = null
     var onUnreadCountChanged: ((Int) -> Unit)? = null
@@ -508,6 +510,7 @@ object UserApiKeyAuthManager {
     var onPersistHomeSearchExpanded: ((Boolean) -> Unit)? = null
     var onPersistThemeAndDensity: ((String, Boolean) -> Unit)? = null
     var onPersistSplitFraction: ((Float) -> Unit)? = null
+    var onPersistWideSplit: ((Boolean) -> Unit)? = null
     var onPersistReadTopics: ((String) -> Unit)? = null
     var onSyncCookieToPlatform: ((String) -> Unit)? = null
 
@@ -527,6 +530,11 @@ object UserApiKeyAuthManager {
         uiThemeAccent = themeAccent
         uiCompactFeed = compactFeed
         onPersistThemeAndDensity?.invoke(themeAccent, compactFeed)
+    }
+
+    fun updateWideSplitPref(enabled: Boolean) {
+        uiWideSplitEnabled = enabled
+        onPersistWideSplit?.invoke(enabled)
     }
 
     fun updateSplitFractionPref(fraction: Float) {
