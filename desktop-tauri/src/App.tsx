@@ -38,10 +38,12 @@ import {
   refreshCurrentUserSession,
   removeSavedAccountInRust,
   savePreferencesToRust,
+  setApiDarkTheme,
   setUnreadBadgeInRust,
   siteVerify,
   startBrowserOneClickAuth,
   switchSavedAccount,
+  triggerInteractiveVerifyOnce,
 } from "./lib/api";
 import { applyPaletteToDocument, performSmoothThemeSwitch } from "./lib/palette";
 import { DESKTOP_APP_VERSION, diagLog, installGlobalDiagHooks } from "./lib/diagnostics";
@@ -173,6 +175,8 @@ export const App: React.FC = () => {
   const [globalNotice, setGlobalNotice] = useState<string | null>(null);
   const [feedCollapsed, setFeedCollapsed] = useState(false);
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
+  const [cfAttentionNeeded, setCfAttentionNeeded] = useState(false);
+  const [cfAttentionDismissed, setCfAttentionDismissed] = useState(false);
   const lastFeedSyncedAtRef = useRef<number>(Date.now());
   const backgroundPollInFlightRef = useRef(false);
 
@@ -194,6 +198,7 @@ export const App: React.FC = () => {
   const inMainApp = isAuthorized || isGuestMode;
 
   useLayoutEffect(() => {
+    setApiDarkTheme(isDark);
     applyPaletteToDocument(isDark, preferences.themeOption, preferences.fontScale);
   }, [isDark, preferences.themeOption, preferences.fontScale]);
 
@@ -652,6 +657,8 @@ export const App: React.FC = () => {
           });
         }),
         listen("lindo://verified", () => {
+          setCfAttentionNeeded(false);
+          setCfAttentionDismissed(false);
           const hadReaderErr = Boolean(readerErrorRef.current);
           const curSummary = activeSummaryRef.current;
           const curFloor = targetFloorRef.current;
@@ -704,6 +711,13 @@ export const App: React.FC = () => {
         ),
         listen<boolean>("lindo://auth-completing", (ev) => {
           setAuthCompleting(Boolean(ev.payload));
+        }),
+        listen<boolean>("lindo://cf-attention-needed", (ev) => {
+          const needed = Boolean(ev.payload);
+          setCfAttentionNeeded(needed);
+          if (needed) {
+            setCfAttentionDismissed(false);
+          }
         }),
         listen<string>("lindo://auth-notice", (ev) => {
           const msg = String(ev.payload || "").trim();
@@ -1107,8 +1121,10 @@ export const App: React.FC = () => {
 
   const handleTriggerVerify = useCallback(async () => {
     try {
-      const ok = await siteVerify(false, isDark);
+      const ok = await triggerInteractiveVerifyOnce();
       if (ok) {
+        setCfAttentionNeeded(false);
+        setCfAttentionDismissed(false);
         setFeedError(null);
         setLoadMoreError(null);
         setReaderError(null);
@@ -1872,6 +1888,8 @@ export const App: React.FC = () => {
                       onPmArchiveChanged={() => setPmRefreshNonce((n) => n + 1)}
                       onRequestGuestLogin={(title, subtitle) => setGuestPrompt({ title, subtitle })}
                       onTriggerVerify={handleTriggerVerify}
+                      cfAttentionNeeded={cfAttentionNeeded && !cfAttentionDismissed}
+                      onDismissCfAttention={() => setCfAttentionDismissed(true)}
                       onFloorSeen={handleFloorSeen}
                     />
                   </div>
@@ -1980,6 +1998,8 @@ export const App: React.FC = () => {
                 onPmArchiveChanged={() => setPmRefreshNonce((n) => n + 1)}
                 onRequestGuestLogin={(title, subtitle) => setGuestPrompt({ title, subtitle })}
                 onTriggerVerify={handleTriggerVerify}
+                cfAttentionNeeded={cfAttentionNeeded && !cfAttentionDismissed}
+                onDismissCfAttention={() => setCfAttentionDismissed(true)}
                 onFloorSeen={handleFloorSeen}
               />
             ) : (

@@ -301,7 +301,26 @@ pub async fn native_call(
             let wv = ensure_bridge_window(&app)?;
             VERIFY_CANCELLED.store(false, Ordering::SeqCst);
             let dark = params.get("dark").and_then(|v| v.as_bool()).unwrap_or(true);
+            let login = params.get("login").and_then(|v| v.as_bool()).unwrap_or(false);
             let _ = wv.set_theme(Some(if dark { Theme::Dark } else { Theme::Light }));
+            let _ = wv.set_title(if login { "登录 LINUX DO" } else { "安全确认" });
+            let _ = wv.set_resizable(login);
+            if login {
+                let _ = wv.set_min_size(Some(tauri::LogicalSize::new(420.0, 460.0)));
+                let _ = wv.set_size(tauri::LogicalSize::new(540.0, 620.0));
+            } else {
+                let _ = wv.set_min_size(Some(tauri::LogicalSize::new(384.0, 190.0)));
+                let _ = wv.set_size(tauri::LogicalSize::new(384.0, 190.0));
+                let _ = wv.eval(r#"(() => {
+                  const root = document.head || document.documentElement;
+                  if (root && !document.getElementById('__lindo_cf_clean') && location.pathname.indexOf('/challenge') === 0) {
+                    const st = document.createElement('style');
+                    st.id = '__lindo_cf_clean';
+                    st.textContent = 'html,body{margin:0!important;padding:0!important;overflow:hidden!important;background:#181D27!important;}.zone-name-title,.h2,#challenge-body-text,#challenge-explainer-expandable,.footer,.ray-id{display:none!important;}.main-wrapper{margin:0 auto!important;padding:24px 0 0 0!important;min-height:0!important;display:flex!important;justify-content:center!important;}';
+                    root.appendChild(st);
+                  }
+                })()"#);
+            }
             let _ = wv.unminimize();
             let _ = wv.center();
             let _ = wv.show();

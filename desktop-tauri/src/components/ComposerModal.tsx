@@ -574,8 +574,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         });
       }
     } catch (err: any) {
-      if (err instanceof SiteError && err.isVerification) onTriggerVerify();
-      else setSubmitError(err?.message || "上传失败，请重试");
+      if (!(err instanceof SiteError && err.isVerification)) {
+        setSubmitError(err?.message || "上传失败，请重试");
+      }
     } finally {
       setUploading(false);
     }
@@ -618,10 +619,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         onPublished({ topicId: request.topicId, post: updated });
       }
     } catch (err: any) {
-      if (err instanceof SiteError && err.isVerification) {
-        onTriggerVerify();
+      if (!(err instanceof SiteError && err.isVerification)) {
+        setSubmitError(err?.message || "提交未完成，内容已保留在本地");
       }
-      setSubmitError(err?.message || "提交未完成，内容已保留在本地");
     } finally {
       setSubmitting(false);
     }
@@ -755,8 +755,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
       {/* 1. 顶部操作栏（弹窗与半屏抽屉统一清爽无红绿灯占位） */}
       <header
-        className={`lindo-hairline-b flex shrink-0 items-center justify-between gap-3 ${
-          isDrawer ? "h-[44px] px-4" : "h-[50px] px-5"
+        className={`flex shrink-0 items-center justify-between gap-3 ${
+          isDrawer ? "lindo-hairline-b h-[44px] px-4" : "h-[50px] px-5"
         }`}
       >
         <div className="flex min-w-0 items-center gap-2">

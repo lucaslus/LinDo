@@ -275,6 +275,7 @@ export interface TopicDetailModel {
   streamIds: number[];
   posts: PostItemModel[];
   hasSummary: boolean;
+  summarizable?: boolean;
 }
 
 export interface ConnectMetricItem {

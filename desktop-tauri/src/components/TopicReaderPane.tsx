@@ -91,6 +91,8 @@ interface TopicReaderPaneProps {
   onPmArchiveChanged?: () => void;
   onRequestGuestLogin: (title: string, subtitle: string) => void;
   onTriggerVerify: () => void;
+  cfAttentionNeeded?: boolean;
+  onDismissCfAttention?: () => void;
   onFloorSeen: (topicId: number, floor: number) => void;
 }
 
@@ -278,6 +280,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   onPmArchiveChanged,
   onRequestGuestLogin,
   onTriggerVerify,
+  cfAttentionNeeded = false,
+  onDismissCfAttention,
   onFloorSeen,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -591,17 +595,20 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   }, [summary?.id]);
 
   useEffect(() => {
-    if (activeFloorMorePostId === null && activeReactionPickerPostId === null) return;
+    if (activeFloorMorePostId === null && activeReactionPickerPostId === null && !aiSummaryOpen) return;
     const onDocDown = (ev: MouseEvent) => {
       const target = ev.target as HTMLElement | null;
       if (target?.closest("[data-floor-popover]")) return;
+      if (target?.closest("[data-ai-summary-popover]")) return;
       setActiveFloorMorePostId(null);
       setActiveReactionPickerPostId(null);
+      setAiSummaryOpen(false);
     };
     const onKeyDown = (ev: KeyboardEvent) => {
       if (ev.key === "Escape") {
         setActiveFloorMorePostId(null);
         setActiveReactionPickerPostId(null);
+        setAiSummaryOpen(false);
       }
     };
     document.addEventListener("mousedown", onDocDown);
@@ -610,7 +617,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       document.removeEventListener("mousedown", onDocDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [activeFloorMorePostId, activeReactionPickerPostId]);
+  }, [activeFloorMorePostId, activeReactionPickerPostId, aiSummaryOpen]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -1021,21 +1028,61 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   if (!summary) {
     return (
       <main
-        className="relative flex h-full flex-1 flex-col items-center justify-center select-none"
+        className="relative flex h-full flex-1 flex-col select-none"
         style={{ backgroundColor: "var(--canvas)" }}
       >
         <div
           onMouseDown={handleTitlebarMouseDown}
-          className="absolute inset-x-0 top-0 h-[50px]"
+          className="h-[48px] w-full shrink-0"
         />
-        <img
-          src="/brand/lingdu-welcome.svg"
-          alt="Lindo"
-          className="mb-3 h-20 w-20 opacity-80 pointer-events-none"
-        />
-        <p className="text-[13.5px]" style={{ color: "var(--ink-tertiary)" }}>
-          {emptyPlaceholderText}
-        </p>
+        {cfAttentionNeeded && (
+          <div
+            className="lindo-no-drag flex h-[32px] shrink-0 items-center justify-between px-6"
+            style={{
+              backgroundColor: "var(--canvas)",
+              borderTop: "0.5px solid var(--hairline-soft)",
+              borderBottom: "0.5px solid var(--hairline-soft)",
+            }}
+          >
+            <div className="flex items-center gap-1.5">
+              <LinDoIcons.ShieldCheck size={14} style={{ color: "var(--brand-gold)" }} />
+              <span className="text-[12.2px] font-normal" style={{ color: "var(--ink-secondary)" }}>
+                连接需安全确认
+              </span>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={onTriggerVerify}
+                className="inline-flex items-center gap-0.5 text-[12px] font-medium hover:opacity-85 cursor-pointer"
+                style={{ color: "var(--brand-gold)" }}
+              >
+                <span>去验证</span>
+                <span className="text-[13px] leading-none">›</span>
+              </button>
+              {onDismissCfAttention && (
+                <button
+                  type="button"
+                  onClick={onDismissCfAttention}
+                  className="flex h-5 w-5 items-center justify-center rounded hover:opacity-80 cursor-pointer"
+                  style={{ color: "var(--ink-tertiary)" }}
+                >
+                  <LinDoIcons.Close size={11.5} />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        <div className="flex flex-1 flex-col items-center justify-center">
+          <img
+            src="/brand/lingdu-welcome.svg"
+            alt="Lindo"
+            className="mb-3 h-20 w-20 opacity-80 pointer-events-none"
+          />
+          <p className="text-[13.5px]" style={{ color: "var(--ink-tertiary)" }}>
+            {emptyPlaceholderText}
+          </p>
+        </div>
       </main>
     );
   }
@@ -1141,8 +1188,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           )}
         </div>
 
-        <div className="lindo-no-drag flex items-center gap-1.5">
-          {detail?.hasSummary && (
+        <div className="lindo-no-drag flex items-center gap-1.5" data-ai-summary-popover="1">
+          {(detail?.summarizable || detail?.hasSummary) && (
             <button
               type="button"
               onClick={async () => {
@@ -1161,7 +1208,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 }
               }}
               title="AI 总结"
-              className="lindo-interactive flex h-[30px] items-center gap-1.5 rounded-full px-3 text-[12.2px] font-medium"
+              className="lindo-interactive flex h-[30px] items-center gap-1.5 rounded-full px-3 text-[12.2px] font-normal"
               style={{
                 backgroundColor: aiSummaryOpen ? "var(--active-chip-bg)" : "var(--subtle-surface)",
                 border: "0.5px solid var(--hairline)",
@@ -1218,6 +1265,103 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           </button>
         </div>
       </header>
+
+      {/* 极简后台安全确认细条（无背景色渲染、无多余解释文案、自然下推正文 32px） */}
+      {cfAttentionNeeded && (
+        <div
+          className="lindo-no-drag flex h-[32px] shrink-0 items-center justify-between px-6"
+          style={{
+            backgroundColor: "var(--canvas)",
+            borderBottom: "0.5px solid var(--hairline-soft)",
+          }}
+        >
+          <div className="flex items-center gap-1.5">
+            <LinDoIcons.ShieldCheck size={14} style={{ color: "var(--brand-gold)" }} />
+            <span className="text-[12.2px] font-normal" style={{ color: "var(--ink-secondary)" }}>
+              连接需安全确认
+            </span>
+          </div>
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={onTriggerVerify}
+              className="inline-flex items-center gap-0.5 text-[12px] font-medium hover:opacity-85 cursor-pointer"
+              style={{ color: "var(--brand-gold)" }}
+            >
+              <span>去验证</span>
+              <span className="text-[13px] leading-none">›</span>
+            </button>
+            {onDismissCfAttention && (
+              <button
+                type="button"
+                onClick={onDismissCfAttention}
+                className="flex h-5 w-5 items-center justify-center rounded hover:opacity-80 cursor-pointer"
+                style={{ color: "var(--ink-tertiary)" }}
+              >
+                <LinDoIcons.Close size={11.5} />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 右上角紧贴弹出的 AI 话题总结浮层（无论在第 1 楼还是第 1280 楼均可即点即看，无 header 分割线） */}
+      {aiSummaryOpen && (
+        <div
+          data-ai-summary-popover="1"
+          className="lindo-no-drag lindo-selectable absolute right-5 top-[52px] z-30 flex w-[388px] max-w-[calc(100%-32px)] flex-col rounded-2xl p-4 shadow-2xl select-text"
+          style={{
+            backgroundColor: "var(--card-surface)",
+            border: "0.5px solid var(--hairline)",
+          }}
+        >
+          <div className="mb-2 flex items-center justify-between">
+            <div
+              className="flex items-center gap-1.5 text-[13px] font-semibold"
+              style={{ color: "var(--ink-primary)" }}
+            >
+              <LinDoIcons.Sparkles size={14} style={{ color: "var(--brand-gold)" }} />
+              <span>AI 话题总结</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                title="重新获取总结"
+                disabled={aiSummaryLoading}
+                onClick={async () => {
+                  setAiSummaryLoading(true);
+                  try {
+                    const txt = await fetchTopicAiSummary(summary.id);
+                    setAiSummaryText(txt);
+                  } catch (e: any) {
+                    setAiSummaryText(e?.message || "总结暂时不可用");
+                  } finally {
+                    setAiSummaryLoading(false);
+                  }
+                }}
+                className="lindo-interactive flex h-6 w-6 items-center justify-center rounded-full"
+                style={{ color: "var(--ink-tertiary)" }}
+              >
+                <SmoothRefreshIcon spinning={aiSummaryLoading} size={13} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setAiSummaryOpen(false)}
+                className="lindo-interactive flex h-6 w-6 items-center justify-center rounded-full"
+                style={{ color: "var(--ink-tertiary)" }}
+              >
+                <LinDoIcons.Close size={13.5} />
+              </button>
+            </div>
+          </div>
+          <div
+            className="lindo-scroll max-h-[min(360px,62vh)] overflow-y-auto text-[13.2px] leading-[1.68] whitespace-pre-wrap"
+            style={{ color: aiSummaryLoading ? "var(--ink-secondary)" : "var(--ink-primary)" }}
+          >
+            {aiSummaryLoading ? "正在生成话题摘要…" : aiSummaryText || "暂无可用总结"}
+          </div>
+        </div>
+      )}
 
       {/* 二级更多操作条（no-scrollbar 绝无水平黑滚动槽！） */}
       {moreMenuOpen && (
@@ -1311,8 +1455,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   onPmArchiveChanged?.();
                   onRefresh();
                 } catch (e: any) {
-                  if (e instanceof SiteError && e.isVerification) onTriggerVerify();
-                  else setToastMsg(e?.message || "操作失败");
+                  if (!(e instanceof SiteError && e.isVerification)) {
+                    setToastMsg(e?.message || "操作失败");
+                  }
                 }
               }}
               className="lindo-interactive flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1"
@@ -1420,28 +1565,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               )}
             </div>
           </div>
-
-          {/* AI 总结卡片 */}
-          {aiSummaryOpen && (
-            <div
-              className="lindo-selectable mt-3.5 rounded-xl p-3.5 text-[13.5px] leading-relaxed select-text"
-              style={{
-                backgroundColor: "var(--subtle-surface)",
-                border: "0.5px solid color-mix(in srgb, var(--brand-gold) 35%, var(--hairline))",
-              }}
-            >
-              <div
-                className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold"
-                style={{ color: "var(--brand-gold)" }}
-              >
-                <LinDoIcons.Sparkles size={14} />
-                <span>AI 话题总结</span>
-              </div>
-              <p className="whitespace-pre-wrap" style={{ color: "var(--ink-primary)" }}>
-                {aiSummaryLoading ? "正在生成话题摘要..." : aiSummaryText}
-              </p>
-            </div>
-          )}
         </div>
 
         {/* 加载态 / 错误态 / 楼层流 */}
@@ -1670,7 +1793,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   setActiveBoostComposerPostId(null);
                 } catch (err: any) {
                   if (err instanceof SiteError && err.isVerification) {
-                    onTriggerVerify();
+                    // User dismissed the already-presented compact security card
                   } else if (err instanceof SiteError && err.isAuthRequired) {
                     onRequestGuestLogin(
                       "登录状态已过期，请重新登录",
@@ -2358,9 +2481,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                 const updated = await togglePostReaction(post.id, r.id);
                                 if (updated) onAppendPosts([updated], "after");
                               } catch (err: any) {
-                                if (err instanceof SiteError && err.isVerification)
-                                  onTriggerVerify();
-                                else setToastMsg(err?.message || "操作失败");
+                                if (!(err instanceof SiteError && err.isVerification)) {
+                                  setToastMsg(err?.message || "操作失败");
+                                }
                               }
                             }}
                             className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11.5px] tabular-nums transition-colors cursor-pointer"
@@ -2552,9 +2675,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                   );
                                   if (updated) onAppendPosts([updated], "after");
                                 } catch (err: any) {
-                                  if (err instanceof SiteError && err.isVerification)
-                                    onTriggerVerify();
-                                  else setToastMsg(err?.message || "点赞未完成");
+                                  if (!(err instanceof SiteError && err.isVerification)) {
+                                    setToastMsg(err?.message || "点赞未完成");
+                                  }
                                 }
                               }}
                               className={`flex h-8 items-center gap-1 rounded-full px-2 text-[12px] tabular-nums ${
@@ -2607,9 +2730,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                         const updated = await togglePostReaction(post.id, rc.id);
                                         if (updated) onAppendPosts([updated], "after");
                                       } catch (err: any) {
-                                        if (err instanceof SiteError && err.isVerification)
-                                          onTriggerVerify();
-                                        else setToastMsg(err?.message || "回应未成功");
+                                        if (!(err instanceof SiteError && err.isVerification)) {
+                                          setToastMsg(err?.message || "回应未成功");
+                                        }
                                       }
                                     }}
                                     className="rounded-full p-1 text-[15.5px] transition-transform hover:scale-125 cursor-pointer"
@@ -3657,8 +3780,6 @@ const FlagPostModal: React.FC<{
       onSubmitted();
     } catch (err: any) {
       if (err instanceof SiteError && err.isVerification) {
-        onClose();
-        onTriggerVerify();
         return;
       }
       setErrorMsg(err?.message || "举报提交未成功，请稍后重试");

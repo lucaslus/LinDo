@@ -485,6 +485,7 @@ struct BridgeRuntime {
     media_cooldown_until: Option<Instant>,
     challenge_429_streak: u32,
     last_challenge_429_at: Option<Instant>,
+    cf_attention_notified: bool,
     verifying: bool,
     pending_rsa: Option<PendingRsaGrant>,
     consumed_nonces: Vec<String>,
@@ -539,6 +540,7 @@ impl BridgeEngine {
                 media_cooldown_until: None,
                 challenge_429_streak: 0,
                 last_challenge_429_at: None,
+                cf_attention_notified: false,
                 verifying: false,
                 pending_rsa: None,
                 consumed_nonces: Vec::new(),
@@ -755,18 +757,33 @@ impl BridgeEngine {
 
         let started = Instant::now();
         let max_wait = if for_foreground_retry {
-            Duration::from_millis(3600)
+            Duration::from_millis(3200)
         } else {
-            Duration::from_millis(4500)
+            Duration::from_millis(4200)
         };
-        let mut interactive_since: Option<Instant> = None;
         let mut quiet_rounds = 0u32;
         let mut cleared = false;
 
         while started.elapsed() < max_wait {
-            tokio::time::sleep(Duration::from_millis(240)).await;
+            tokio::time::sleep(Duration::from_millis(220)).await;
             if self.inner.lock().unwrap().verifying {
                 return false;
+            }
+
+            let st_obj = native_call("status", json!({}), 4).await.ok();
+            let native_origin_404 = st_obj
+                .as_ref()
+                .and_then(|s| s.get("origin404")?.as_bool())
+                .unwrap_or(false);
+            let native_interactive = st_obj
+                .as_ref()
+                .and_then(|s| s.get("interactiveRequired")?.as_bool())
+                .unwrap_or(false);
+
+            // Instant bailout when Cloudflare Turnstile explicitly posts `interactiveBegin`:
+            // foreground actions promote straight to the compact card; background tasks notify the non-intrusive bar!
+            if native_interactive {
+                break;
             }
 
             let state = native_call(
@@ -775,11 +792,6 @@ impl BridgeEngine {
                     "isolated": true,
                     "script": r#"(() => {
                         if (location.origin !== 'https://linux.do') return { phase: 'waiting' };
-                        const hasTurnstile = !!document.querySelector('.cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]');
-                        const explicitChallenge = hasTurnstile
-                            || !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, script[src*="challenge-platform"]')
-                            || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
-                        if (explicitChallenge) return { phase: 'challenge', interactive: hasTurnstile };
                         const html = ((document.documentElement?.innerHTML || '') + ' ' + (document.title || '')).toLowerCase();
                         const origin404 = html.includes('page-not-found')
                             || html.includes('discourse-no-results')
@@ -793,6 +805,9 @@ impl BridgeEngine {
                         if (origin404 || (complete && csrf.length > 5)) {
                             return { phase: 'origin', csrf };
                         }
+                        const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
+                            || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
+                        if (explicitChallenge) return { phase: 'challenge' };
                         return { phase: 'waiting' };
                     })()"#
                 }),
@@ -801,26 +816,19 @@ impl BridgeEngine {
             .await
             .ok();
 
-            let phase = state
-                .as_ref()
-                .and_then(|v| v.get("phase")?.as_str())
-                .unwrap_or("waiting");
-            let interactive = state
-                .as_ref()
-                .and_then(|v| v.get("interactive")?.as_bool())
-                .unwrap_or(false);
+            let phase = if native_origin_404 {
+                "origin"
+            } else {
+                state
+                    .as_ref()
+                    .and_then(|v| v.get("phase")?.as_str())
+                    .unwrap_or("waiting")
+            };
 
             if phase == "challenge" {
                 quiet_rounds = 0;
-                if interactive {
-                    let since = *interactive_since.get_or_insert_with(Instant::now);
-                    if for_foreground_retry && since.elapsed() >= Duration::from_millis(900) {
-                        break;
-                    }
-                }
                 continue;
             }
-            interactive_since = None;
 
             let current_cfs = self.browser_cf_clearances().await;
             let has_fresh_cf = {
@@ -968,7 +976,7 @@ impl BridgeEngine {
                         "isolated": true,
                         "script": r#"(() => {
                             if (location.origin !== 'https://linux.do') return { state: 'waiting' };
-                            const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"], script[src*="challenge-platform"]')
+                            const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
                                 || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
                             if (explicitChallenge) return { state: 'challenge' };
                             const tok = document.querySelector('meta[name="csrf-token"]')?.content || '';
@@ -1776,19 +1784,60 @@ impl BridgeEngine {
                 .lock()
                 .unwrap()
                 .note_challenged(carried_cf.as_deref());
-            let now = Instant::now();
-            let mut rt = self.inner.lock().unwrap();
-            rt.bg_challenge_until = Some(now + Duration::from_secs(30));
-            if !is_background {
-                rt.fg_challenge_until = Some(now + Duration::from_millis(1500));
+            let should_probe_bg = {
+                let now = Instant::now();
+                let mut rt = self.inner.lock().unwrap();
+                rt.bg_challenge_until = Some(now + Duration::from_secs(30));
+                if !is_background {
+                    rt.fg_challenge_until = Some(now + Duration::from_millis(1500));
+                    false
+                } else {
+                    !rt.verifying && !rt.cf_attention_notified
+                }
+            };
+            // Background challenge: attempt silent `/challenge` revalidation first; ONLY if human click is genuinely needed,
+            // surface the non-intrusive 32px hairline bar (`lindo://cf-attention-needed`) without interrupting reading!
+            if should_probe_bg {
+                if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
+                    let eng_clone = Arc::clone(&eng);
+                    let app_clone = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let auto_cleared = eng_clone.silent_revalidate_challenge(false).await;
+                        let mut emit_attention = None;
+                        {
+                            let mut rt = eng_clone.inner.lock().unwrap();
+                            if auto_cleared {
+                                if rt.cf_attention_notified {
+                                    rt.cf_attention_notified = false;
+                                    emit_attention = Some(false);
+                                }
+                            } else if !rt.verifying && !rt.cf_attention_notified {
+                                rt.cf_attention_notified = true;
+                                emit_attention = Some(true);
+                            }
+                        }
+                        if let Some(flag) = emit_attention {
+                            let _ = app_clone.emit("lindo://cf-attention-needed", flag);
+                        }
+                    });
+                }
             }
         } else if (200..300).contains(&status) && !is_background {
-            {
+            let clear_banner = {
                 let mut rt = self.inner.lock().unwrap();
                 rt.fg_challenge_until = None;
                 rt.bg_challenge_until = None;
                 rt.bootstrap_challenged = false;
                 rt.challenge_429_streak = 0;
+                if rt.cf_attention_notified {
+                    rt.cf_attention_notified = false;
+                    true
+                } else {
+                    false
+                }
+            };
+            if clear_banner {
+                let _ = app.emit("lindo://cf-attention-needed", false);
             }
             let live_cf = {
                 let raw = self.state.lock().unwrap().raw_cookies.clone();
@@ -2424,7 +2473,7 @@ impl BridgeEngine {
                 json!({
                     "visible": true,
                     "dark": is_dark,
-                    "message": "正在连接安全验证服务…"
+                    "message": "校验连接中…"
                 }),
                 4,
             )
@@ -2450,14 +2499,20 @@ impl BridgeEngine {
         let deadline = loop_started + Duration::from_secs(180);
 
         while Instant::now() < deadline {
-            let poll_sleep = if requested_login { 500 } else { 260 };
+            let poll_sleep = if requested_login { 500 } else { 220 };
             tokio::time::sleep(Duration::from_millis(poll_sleep)).await;
 
             let status_obj = native_call("status", json!({}), 6).await?;
             let user_cancelled = status_obj.get("cancelled").and_then(|v| v.as_bool()) == Some(true);
+            let native_origin_404 = status_obj.get("origin404").and_then(|v| v.as_bool()) == Some(true);
+            let native_interactive = status_obj
+                .get("interactiveRequired")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             // Passive read-only DOM observation in isolated `defaultClientWorld` (macOS) / zero-global sync eval (Windows):
-            // never touches `pageWorld` or mutates `window` while site verification is on screen!
+            // NEVER include `script[src*="challenge-platform"]` (present passively on normal & 404 Discourse pages!),
+            // and ALWAYS evaluate `isOrigin404` BEFORE `explicitChallenge` so `/challenge` -> 404 closes reliably!
             let probe = native_call(
                 "evaluate",
                 json!({
@@ -2481,16 +2536,19 @@ impl BridgeEngine {
                             || location.pathname.indexOf('/auth/') === 0;
                         const bodyText = (document.body?.innerText || '').trim();
                         const lowerHtml = ((document.documentElement?.innerHTML || '') + ' ' + (document.title || '')).toLowerCase();
-                        const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"], script[src*="challenge-platform"]')
-                            || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
-                        const isOrigin404 = site && !explicitChallenge && (
-                            lowerHtml.includes('page-not-found')
+                        const isOrigin404 = site && (
+                            !!document.querySelector('.page-not-found, .discourse-no-results, #main-outlet .not-found-container')
+                            || lowerHtml.includes('page-not-found')
                             || lowerHtml.includes('discourse-no-results')
                             || lowerHtml.includes('"errortype":"notfound"')
                             || lowerHtml.includes('404-body')
                             || lowerHtml.includes('exist or is private')
                             || lowerHtml.includes('page you requested')
                             || lowerHtml.includes('该页面不存在')
+                        );
+                        const explicitChallenge = !isOrigin404 && (
+                            !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
+                            || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '')
                         );
                         const isDiscourseOops = site && complete && !explicitChallenge && /discussion forum encountered an unexpected problem/i.test(bodyText);
                         const missingDiscourseBoot = site && complete && !hasCsrf && !isOrigin404 && !isDiscourseOops && !bodyText.startsWith('{');
@@ -2523,7 +2581,7 @@ impl BridgeEngine {
                             isDiscourseOops,
                             preloadedUserJson,
                             explicitChallenge,
-                            challenge: explicitChallenge || missingDiscourseBoot
+                            challenge: !isOrigin404 && (explicitChallenge || missingDiscourseBoot)
                         };
                     })()"#
                 }),
@@ -2536,18 +2594,21 @@ impl BridgeEngine {
                 .as_ref()
                 .and_then(|p| p.get("isDiscourseOops")?.as_bool())
                 .unwrap_or(false);
-            let explicit_challenge = probe
-                .as_ref()
-                .and_then(|p| p.get("explicitChallenge")?.as_bool())
-                .unwrap_or(false);
-            let is_origin_404 = probe
+            let dom_origin_404 = probe
                 .as_ref()
                 .and_then(|p| p.get("isOrigin404")?.as_bool())
                 .unwrap_or(false);
-            let in_challenge = probe
-                .as_ref()
-                .and_then(|p| p.get("challenge")?.as_bool())
-                .unwrap_or(false);
+            let is_origin_404 = native_origin_404 || dom_origin_404;
+            let explicit_challenge = !is_origin_404
+                && probe
+                    .as_ref()
+                    .and_then(|p| p.get("explicitChallenge")?.as_bool())
+                    .unwrap_or(false);
+            let in_challenge = !is_origin_404
+                && probe
+                    .as_ref()
+                    .and_then(|p| p.get("challenge")?.as_bool())
+                    .unwrap_or(false);
             let ready = probe
                 .as_ref()
                 .map(|p| {
@@ -2560,7 +2621,6 @@ impl BridgeEngine {
                 .unwrap_or(false);
 
             if is_discourse_oops {
-                // Reaching Discourse's origin 500 ("Oops") page after Turnstile proves Cloudflare has already passed!
                 let _ = self.sync_cookies_from_webkit_verified(false, true).await;
                 if !oops_reloaded {
                     oops_reloaded = true;
@@ -2580,9 +2640,11 @@ impl BridgeEngine {
                         rt.bg_challenge_until = None;
                         rt.bootstrap_challenged = false;
                         rt.silent_revalidate_until = None;
+                        rt.cf_attention_notified = false;
                     }
                     let _ = native_call("hide", json!({}), 5).await;
                     let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
+                    let _ = app.emit("lindo://cf-attention-needed", false);
                     let _ = app.emit("lindo://verified", ());
                     return Ok(true);
                 }
@@ -2603,13 +2665,12 @@ impl BridgeEngine {
             if in_challenge {
                 quiet_rounds = 0;
                 challenge_ticks += 1;
-                // Give non-interactive JS challenges ~520ms (2 ticks) to pass invisibly before opening the panel!
-                if challenge_ticks >= 2 && !panel_shown {
+                // Show compact card immediately when `interactiveBegin` fired, or after 2 ticks (~440ms)
+                if (native_interactive || challenge_ticks >= 2) && !panel_shown {
                     panel_shown = true;
                     let _ = native_call("show", json!({ "dark": is_dark, "login": login }), 8).await;
                 }
-                // Reveal the WebView ONLY when interactive challenge DOM is genuinely present (`explicit_challenge`)
-                if explicit_challenge && mask_visible {
+                if (native_interactive || explicit_challenge) && mask_visible {
                     mask_visible = false;
                     let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
                 }
@@ -2618,8 +2679,7 @@ impl BridgeEngine {
             challenge_ticks = 0;
 
             // Pure verification flow (`/challenge`):
-            // Immediately cover any non-challenge page (e.g. Discourse `/challenge` 404 or forum chrome) with the native mask
-            // so zero frames of `404` or `Log In` ever flash on screen, confirm fresh `cf_clearance` / origin reach, and close!
+            // Immediately cover any non-challenge page with 0-frame mask, confirm fresh `cf_clearance` / origin reach, and close!
             if !login && !requested_login {
                 if !mask_visible && (is_origin_404 || ready) {
                     mask_visible = true;
@@ -2628,7 +2688,7 @@ impl BridgeEngine {
                         json!({
                             "visible": true,
                             "dark": is_dark,
-                            "message": "安全验证已完成，正在恢复连接…"
+                            "message": "已通过，正在继续…"
                         }),
                         4,
                     )
@@ -2647,15 +2707,15 @@ impl BridgeEngine {
                     quiet_rounds += 1;
                 } else {
                     quiet_rounds = 0;
-                    if !panel_shown && loop_started.elapsed() >= Duration::from_millis(1400) {
+                    if !panel_shown && loop_started.elapsed() >= Duration::from_millis(1200) {
                         panel_shown = true;
                         let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
                     }
                     continue;
                 }
 
-                // Require 2 consecutive quiet rounds (~520ms) without challenge markers so CF's Set-Cookie settles cleanly
-                if quiet_rounds < 2 {
+                let needed_rounds = if has_fresh_cf && (is_origin_404 || ready) { 1 } else { 2 };
+                if quiet_rounds < needed_rounds {
                     continue;
                 }
 
@@ -2714,6 +2774,7 @@ impl BridgeEngine {
                     rt.silent_revalidate_until = None;
                     rt.last_silent_cleared_at = Some(Instant::now());
                     rt.challenge_429_streak = 0;
+                    rt.cf_attention_notified = false;
                 }
                 let _ = native_call("hide", json!({}), 5).await;
                 // Restore clean `/about` origin document in the hidden bridge WebView and invalidate stale CSRF
@@ -2725,6 +2786,7 @@ impl BridgeEngine {
                 )
                 .await;
                 self.inner.lock().unwrap().origin_ready = true;
+                let _ = app.emit("lindo://cf-attention-needed", false);
                 let _ = app.emit("lindo://verified", ());
                 return Ok(true);
             }

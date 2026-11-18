@@ -381,10 +381,18 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
     [isAuthorized]
   );
 
-  const parentCategories = useMemo(
-    () => categories.filter((c) => !c.parentId),
-    [categories]
-  );
+  const parentCategories = useMemo(() => {
+    const seenNames = new Set<string>();
+    const deduped: typeof categories = [];
+    for (const c of categories) {
+      if (c.parentId) continue;
+      const key = c.name.trim();
+      if (seenNames.has(key)) continue;
+      seenNames.add(key);
+      deduped.push(c);
+    }
+    return deduped;
+  }, [categories]);
 
   const activeCategory = useMemo(
     () => categories.find((c) => c.id === selectedCategoryId) ?? null,
@@ -670,12 +678,13 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                   onSelectCategory(null);
                   setCatDrawerOpen(false);
                 }}
-                className="rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors cursor-pointer"
+                className="rounded-full px-2.5 py-1 text-[12px] transition-colors cursor-pointer"
                 style={{
                   backgroundColor:
                     selectedCategoryId === null ? "var(--active-chip-bg)" : "var(--card-surface)",
                   color:
                     selectedCategoryId === null ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                  fontWeight: selectedCategoryId === null ? 500 : 400,
                 }}
               >
                 全部分类
@@ -700,10 +709,11 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       onSelectCategory(cat.id);
                       if (!hasSubs) setCatDrawerOpen(false);
                     }}
-                    className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] transition-colors cursor-pointer"
                     style={{
                       backgroundColor: selected ? "var(--active-chip-bg)" : "var(--card-surface)",
-                      color: selected ? "var(--active-chip-text)" : "var(--ink-primary)",
+                      color: selected ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                      fontWeight: selected ? 500 : 400,
                     }}
                   >
                     <CatIcon size={11.5} style={{ color: offVis.color }} />
@@ -717,14 +727,14 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
             </div>
 
             {subCategories.length > 0 && effectiveParentId && (
-              <div className="lindo-hairline-t no-scrollbar mt-2 flex items-center gap-2 overflow-x-auto pt-2">
+              <div className="no-scrollbar mt-2 flex items-center gap-2 overflow-x-auto pt-1.5">
                 <button
                   type="button"
                   onClick={() => {
                     onSelectCategory(effectiveParentId);
                     setCatDrawerOpen(false);
                   }}
-                  className="shrink-0 rounded-md px-2 py-0.5 text-[11.8px] font-medium cursor-pointer"
+                  className="shrink-0 rounded-md px-2 py-0.5 text-[11.8px] cursor-pointer"
                   style={{
                     backgroundColor:
                       selectedCategoryId === effectiveParentId ? "var(--active-chip-bg)" : "transparent",
@@ -732,6 +742,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       selectedCategoryId === effectiveParentId
                         ? "var(--active-chip-text)"
                         : "var(--ink-secondary)",
+                    fontWeight: selectedCategoryId === effectiveParentId ? 500 : 400,
                   }}
                 >
                   主版块
@@ -746,10 +757,11 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                         onSelectCategory(sub.id);
                         setCatDrawerOpen(false);
                       }}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11.8px] font-medium transition-colors cursor-pointer"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11.8px] transition-colors cursor-pointer"
                       style={{
                         backgroundColor: selected ? "var(--active-chip-bg)" : "transparent",
                         color: selected ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                        fontWeight: selected ? 500 : 400,
                       }}
                     >
                       {sub.readRestricted && <LinDoIcons.FaLock size={9.5} />}

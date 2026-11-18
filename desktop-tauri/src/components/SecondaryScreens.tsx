@@ -2883,7 +2883,7 @@ export const ProfileSettingsView: React.FC<{
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="lindo-hairline-b flex h-[52px] shrink-0 items-center justify-between px-5">
+            <div className="flex h-[52px] shrink-0 items-center justify-between px-5">
               <div className="flex items-center gap-2">
                 <span className="text-[15.5px] font-semibold" style={{ color: "var(--ink-primary)" }}>
                   {subSheet === "bookmarks"
@@ -4978,7 +4978,7 @@ export const AuthModal: React.FC<{
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="lindo-hairline-b flex h-12 shrink-0 items-center justify-between px-3">
+        <div className="flex h-12 shrink-0 items-center justify-between px-3">
           <div className="flex items-center gap-1.5">
             <button
               type="button"
@@ -5474,7 +5474,7 @@ export const GlobalSearchModal: React.FC<{
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="lindo-hairline-b flex items-center gap-2.5 px-4 py-3">
+        <div className="flex items-center gap-2.5 px-4 py-3">
           <LinDoIcons.Search size={17} style={{ color: "var(--brand-gold)" }} />
           <input
             type="text"
@@ -6407,7 +6407,7 @@ export const ConnectTrustLevelModal: React.FC<{
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="lindo-hairline-b flex h-12 shrink-0 items-center justify-between px-4">
+        <div className="flex h-12 shrink-0 items-center justify-between px-4">
           <div className="flex items-center gap-2">
             <LinDoIcons.ShieldCheck size={17} style={{ color: "var(--brand-gold)" }} />
             <span className="text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>

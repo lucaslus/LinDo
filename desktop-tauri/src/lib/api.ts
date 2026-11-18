@@ -95,6 +95,21 @@ export async function siteRequest(
   }
 }
 
+let currentApiDarkTheme = true;
+let inflightVerifyReplayPromise: Promise<boolean> | null = null;
+
+export function setApiDarkTheme(isDark: boolean): void {
+  currentApiDarkTheme = isDark;
+}
+
+export function triggerInteractiveVerifyOnce(): Promise<boolean> {
+  if (inflightVerifyReplayPromise) return inflightVerifyReplayPromise;
+  inflightVerifyReplayPromise = siteVerify(false, currentApiDarkTheme).finally(() => {
+    inflightVerifyReplayPromise = null;
+  });
+  return inflightVerifyReplayPromise;
+}
+
 export async function siteVerify(login: boolean, isDark: boolean): Promise<boolean> {
   diagLog(
     "INFO",
@@ -187,9 +202,15 @@ export async function uploadMediaToSite(
   mime: string,
   dataBase64: string
 ): Promise<{ shortUrl: string; url: string; width: number; height: number; originalFilename: string }> {
-  const res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
+  let res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
   if (res.isChallenge) {
-    throw new SiteError("需要完成站点验证", { isVerification: true, status: res.status });
+    const passed = await triggerInteractiveVerifyOnce();
+    if (passed) {
+      res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
+    }
+  }
+  if (res.isChallenge) {
+    throw new SiteError("需要完成安全确认", { isVerification: true, status: res.status });
   }
   if (res.isUnauthenticated) {
     throw new SiteError("请先登录账号", { isAuthRequired: true, status: res.status });
@@ -258,9 +279,15 @@ async function mutateJsonOrThrow(
   method: "POST" | "PUT" | "DELETE",
   form?: Record<string, string>
 ): Promise<any> {
-  const res = await siteRequest(url, method, form);
+  let res = await siteRequest(url, method, form);
   if (res.isChallenge) {
-    throw new SiteError("需要完成站点验证", { isVerification: true, status: res.status });
+    const passed = await triggerInteractiveVerifyOnce();
+    if (passed) {
+      res = await siteRequest(url, method, form);
+    }
+  }
+  if (res.isChallenge) {
+    throw new SiteError("需要完成安全确认", { isVerification: true, status: res.status });
   }
   if (res.isUnauthenticated) {
     throw new SiteError("请先登录账号后再执行此操作", { isAuthRequired: true, status: res.status });
@@ -439,6 +466,14 @@ function mergeCategoriesFromRawArray(rawCategories: any[], hasFullSitePermission
           ? false
           : !READ_ONLY_ADMIN_CATEGORY_IDS.has(id);
     const topicTemplate = cObj.topic_template ? String(cObj.topic_template).trim() : existingTop?.topicTemplate;
+
+    // Remove any canonical fallback entry that shares the same Chinese display name under an older hardcoded ID
+    // (prevents duplicate pills like `积分乐园` / `深海幽域` when server category IDs differ from canonical defaults).
+    for (const [existingId, existingMeta] of Array.from(topById.entries())) {
+      if (existingId !== id && existingMeta.name === preferredName) {
+        topById.delete(existingId);
+      }
+    }
 
     topById.set(id, {
       id,
@@ -1305,7 +1340,8 @@ export async function fetchTopicDetail(
     opUsername,
     streamIds,
     posts,
-    hasSummary: Boolean(data.has_summary || data.summarizable),
+    hasSummary: Boolean(data.has_summary),
+    summarizable: Boolean(data.summarizable),
   };
   if (!opts.onlyOpUsername && (!opts.targetPostNumber || opts.targetPostNumber <= 1)) {
     putCachedTopicDetail(detail);
@@ -1351,8 +1387,63 @@ export async function fetchPostReplies(postId: number, fallbackTopicId: number):
 }
 
 export async function fetchTopicAiSummary(topicId: number): Promise<string> {
-  const data = await getJsonOrThrow(`https://linux.do/discourse-ai/summarization/t/${topicId}`);
-  return String(data?.ai_topic_summary?.summarized_text || data?.summary || "暂无可用总结");
+  const endpointJson = `https://linux.do/discourse-ai/summarization/t/${topicId}.json`;
+  const endpointBare = `https://linux.do/discourse-ai/summarization/t/${topicId}`;
+
+  const extractSummaryText = (obj: any): string | null => {
+    const raw =
+      obj?.ai_topic_summary?.summarized_text ??
+      obj?.summarized_text ??
+      (typeof obj?.summary === "string" ? obj.summary : null);
+    const trimmed = typeof raw === "string" ? raw.trim() : "";
+    return trimmed.length > 0 ? trimmed : null;
+  };
+
+  // 1. Check existing cached summary first (`GET .../t/{id}.json`)
+  const firstRes = await siteRequest(endpointJson, "GET");
+  if (firstRes.isChallenge) {
+    const passed = await triggerInteractiveVerifyOnce();
+    if (!passed) {
+      throw new SiteError("需要完成安全确认", { isVerification: true, status: firstRes.status });
+    }
+    return fetchTopicAiSummary(topicId);
+  }
+  if (firstRes.status >= 200 && firstRes.status < 300) {
+    const firstJson = safeJson(firstRes.body);
+    const cached = extractSummaryText(firstJson);
+    if (cached) return cached;
+  } else if (firstRes.status === 403) {
+    throw new SiteError("当前账号等级或该话题暂不支持 AI 总结", { status: 403 });
+  }
+
+  // 2. Modern Discourse AI triggers summary generation via `POST /discourse-ai/summarization/t/{id}` when cache misses (404/405)
+  const createRes = await siteRequest(endpointBare, "POST", { stream: "false" });
+  if (createRes.status >= 200 && createRes.status < 300) {
+    const createJson = safeJson(createRes.body);
+    const immediate = extractSummaryText(createJson);
+    if (immediate) return immediate;
+  } else if (createRes.status === 404 || createRes.status === 405) {
+    // Legacy Discourse fallback (`GET ?stream=true`)
+    const legacyRes = await siteRequest(`${endpointJson}?stream=true`, "GET");
+    if (legacyRes.status >= 200 && legacyRes.status < 300) {
+      const legacyText = extractSummaryText(safeJson(legacyRes.body));
+      if (legacyText) return legacyText;
+    }
+  } else if (createRes.status === 403) {
+    throw new SiteError("当前账号等级或该话题暂不支持 AI 总结", { status: 403 });
+  }
+
+  // 3. Poll briefly if server queued background generation
+  for (let i = 0; i < 6; i++) {
+    await new Promise((r) => setTimeout(r, 1100));
+    const pollRes = await siteRequest(endpointJson, "GET", undefined, { "Discourse-Background": "true" });
+    if (pollRes.status >= 200 && pollRes.status < 300) {
+      const polled = extractSummaryText(safeJson(pollRes.body));
+      if (polled) return polled;
+    }
+  }
+
+  return "暂无可用总结，请稍后再试";
 }
 
 export async function togglePostReaction(postId: number, reactionId = "heart"): Promise<PostItemModel | null> {

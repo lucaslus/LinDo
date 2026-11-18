@@ -12,13 +12,21 @@ internal fun webVerificationProbeScript(): String = """
         return result({waiting:true});
     }
     var title = (document.title || '').trim();
-    if (/^(Just a moment|请稍候|Attention Required|Security Check)/i.test(title)) {
-        return result({challenge:true});
-    }
-    if (document.querySelector('#challenge-running,#challenge-stage,#challenge-form,.cf-turnstile,#turnstile-wrapper,iframe[src*="challenges.cloudflare.com"],script[src*="challenge-platform"]')) {
-        return result({challenge:true});
-    }
     var bodyText = (document.body && document.body.innerText) || '';
+    var lowerHtml = (((document.documentElement && document.documentElement.innerHTML) || '') + ' ' + title).toLowerCase();
+    var isOrigin404 = !!document.querySelector('.page-not-found,.discourse-no-results,#main-outlet .not-found-container') ||
+        lowerHtml.indexOf('page-not-found') !== -1 ||
+        lowerHtml.indexOf('"errortype":"notfound"') !== -1 ||
+        lowerHtml.indexOf('404-body') !== -1 ||
+        /exist or is private|page you requested|该页面不存在|页面不存在或为私密/i.test(bodyText);
+    if (!isOrigin404) {
+        if (/^(Just a moment|请稍候|Attention Required|Security Check)/i.test(title)) {
+            return result({challenge:true});
+        }
+        if (document.querySelector('#challenge-running,#challenge-stage,#challenge-form,.cf-turnstile,#turnstile-wrapper,iframe[src*="challenges.cloudflare.com"]')) {
+            return result({challenge:true});
+        }
+    }
     var isDiscourseOops = /discussion forum encountered an unexpected problem/i.test(bodyText);
     if (isDiscourseOops && document.readyState === 'complete' && !window.__lindoOopsRetried) {
         window.__lindoOopsRetried = true;
@@ -67,8 +75,6 @@ internal fun webVerificationProbeScript(): String = """
         }
     } catch (_) {}
     var pathname = location.pathname || '/';
-    var isOrigin404 = !!document.querySelector('.page-not-found,.discourse-no-results,#main-outlet .not-found-container') ||
-        /page-not-found|"errorType"\s*:\s*"notFound"|404-body|exist or is private|page you requested|该页面不存在|页面不存在或为私密/i.test(bodyText);
     if (isOrigin404 || (pathname.indexOf('/challenge') === 0 && document.readyState === 'complete' && metaCsrf)) {
         return result({ ok: true, originReached: true, csrf: csrfVal, user: readBootedDiscourseUser() });
     }
