@@ -118,6 +118,74 @@ export async function bootstrapApp(): Promise<BootstrapPayload> {
   return invoke<BootstrapPayload>("bootstrap_state");
 }
 
+function extractDiagPath(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.pathname}${u.search}` || "/";
+  } catch {
+    return rawUrl.replace(/^https?:\/\/[^/]+/i, "") || rawUrl;
+  }
+}
+
+function summarizeDiagBody(rawBody: string, maxLen = 680): string {
+  const clean = (rawBody || "")
+    .replace(/^<!--lindo-cf-challenge-->/i, "")
+    .replace(/\r?\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean) return "";
+  if (clean.startsWith("<")) {
+    const titleMatch = clean.match(/<title[^>]*>([^<]{1,120})<\/title>/i);
+    const title = titleMatch?.[1]?.trim();
+    return title ? `<HTML title="${title}"> (${clean.length}B)` : `<HTML> ${clean.slice(0, 220)}`;
+  }
+  return clean.length > maxLen ? `${clean.slice(0, maxLen)}…` : clean;
+}
+
+function formatHttpDiagDetail(
+  url: string,
+  method: string,
+  res: SiteHttpResponse,
+  ms: number,
+  bgKey: string,
+  includeBody = true
+): string {
+  const d = res.diag;
+  const lines: string[] = [
+    `url: ${url}`,
+    `meta: method=${method} status=${res.status} duration=${ms}ms lane=${bgKey} bodyBytes=${d?.bodyBytes ?? (res.body ? res.body.length : 0)}`,
+  ];
+  const hdrParts: string[] = [];
+  if (d?.cfMitigated) hdrParts.push(`cf-mitigated=${d.cfMitigated}`);
+  if (d?.cfRay) hdrParts.push(`cf-ray=${d.cfRay}`);
+  if (d?.retryAfter) hdrParts.push(`retry-after=${d.retryAfter}`);
+  if (d?.contentType) hdrParts.push(`content-type=${d.contentType}`);
+  if (d?.requestId) hdrParts.push(`x-request-id=${d.requestId}`);
+  if (hdrParts.length > 0) {
+    lines.push(`headers: ${hdrParts.join(" | ")}`);
+  }
+  const bridgeParts: string[] = [];
+  if (d?.localCooldown) bridgeParts.push("localCooldown=true");
+  if (d?.isChallenge429) bridgeParts.push("challenge429=true");
+  if (res.rateLimitedMs) bridgeParts.push(`cooldownSet=${res.rateLimitedMs}ms`);
+  if (d?.cooldownWaitMs) bridgeParts.push(`cooldownWait=${d.cooldownWaitMs}ms`);
+  if (d?.paceWaitMs) bridgeParts.push(`paceWait=${d.paceWaitMs}ms`);
+  if (d?.retried) bridgeParts.push("retried=true");
+  if (d?.silentCfRevalidated) bridgeParts.push("silentCfRevalidated=true");
+  if (d?.csrfRefreshed) bridgeParts.push("csrfRefreshed=true");
+  if (d?.guestFallback) bridgeParts.push("guestFallback=true");
+  if (bridgeParts.length > 0) {
+    lines.push(`bridge: ${bridgeParts.join(" | ")}`);
+  }
+  if (includeBody && res.body) {
+    const snippet = summarizeDiagBody(res.body);
+    if (snippet) {
+      lines.push(`body: ${snippet}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 export async function siteRequest(
   url: string,
   method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
@@ -126,9 +194,11 @@ export async function siteRequest(
   opts?: { silentDiag?: boolean }
 ): Promise<SiteHttpResponse> {
   const isGet = method === "GET";
+  const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
   const isForceRetry = headers?.["X-LinDo-Force-Retry"] === "1";
   const bgKey = headers?.["Discourse-Background"] === "true" ? "bg" : "fg";
   const dedupeKey = isGet && !isForceRetry ? `${bgKey}:${url}` : null;
+  const diagPath = extractDiagPath(url);
 
   if (dedupeKey) {
     const existing = inflightGetRequests.get(dedupeKey);
@@ -144,47 +214,143 @@ export async function siteRequest(
       if (res.status >= 200 && res.status < 300 && !res.isChallenge) {
         globalRateLimitUntilMs = 0;
       } else if (res.status === 429) {
-        const waitMs = Math.max(1500, Number(res.rateLimitedMs || 3500));
-        globalRateLimitUntilMs = Math.max(globalRateLimitUntilMs, Date.now() + waitMs);
+        const isActionOnly429 =
+          isWrite &&
+          !res.diag?.isChallenge429 &&
+          !res.diag?.localCooldown &&
+          !(res.body || "").trimStart().startsWith("<");
+        if (!isActionOnly429) {
+          const waitMs = Math.max(1500, Number(res.rateLimitedMs || 3500));
+          globalRateLimitUntilMs = Math.max(globalRateLimitUntilMs, Date.now() + waitMs);
+        }
       }
 
       if (res.isChallenge) {
         const isLocalGuardShortCircuit =
-          typeof res.body === "string" &&
-          (res.body.startsWith("<!--lindo-cf-challenge-->verifying") ||
-            res.body.startsWith("<!--lindo-cf-challenge-->cooldown"));
+          Boolean(res.diag?.localCooldown) ||
+          (typeof res.body === "string" &&
+            (res.body.startsWith("<!--lindo-cf-challenge-->verifying") ||
+              res.body.startsWith("<!--lindo-cf-challenge-->cooldown")));
         if (!silent && !isLocalGuardShortCircuit) {
-          diagLog("WARN", "NETWORK", "Cloudflare", `${method} ${url} -> HTTP ${res.status} (站点验证挑战, ${ms}ms)`);
-        }
-      } else if (res.isUnauthenticated) {
-        if (!silent) {
-          diagLog("WARN", "AUTH", "Session", `${method} ${url} -> HTTP ${res.status} (未授权或登录态失效, ${ms}ms)`);
-        }
-      } else if (res.status === 429) {
-        const isLocalCooldown = typeof res.body === "string" && res.body.includes('"localCooldown":true');
-        if (!silent && !isLocalCooldown) {
-          const sec = Math.ceil(Number(res.rateLimitedMs || 3000) / 1000);
           diagLog(
             "WARN",
             "NETWORK",
-            "RateLimit",
-            `${method} ${url} -> HTTP 429 (限流冷却 ${sec}s 后自动恢复, ${ms}ms)`
+            "Cloudflare",
+            `${method} ${url} -> HTTP ${res.status} (站点验证挑战, ${ms}ms)`,
+            formatHttpDiagDetail(url, method, res, ms, bgKey, true),
+            { method, path: diagPath, status: res.status, durationMs: ms, note: "需站点验证挑战" }
+          );
+        }
+      } else if (res.isUnauthenticated) {
+        if (!silent) {
+          diagLog(
+            "WARN",
+            "AUTH",
+            "Session",
+            `${method} ${url} -> HTTP ${res.status} (未授权或登录态失效, ${ms}ms)`,
+            formatHttpDiagDetail(url, method, res, ms, bgKey, true),
+            { method, path: diagPath, status: res.status, durationMs: ms, note: "未授权或登录态失效" }
+          );
+        }
+      } else if (res.status === 429) {
+        const isLocalCooldown =
+          Boolean(res.diag?.localCooldown) ||
+          (typeof res.body === "string" && res.body.includes('"localCooldown":true'));
+        const isActionOnly429 =
+          isWrite &&
+          !res.diag?.isChallenge429 &&
+          !isLocalCooldown &&
+          !(res.body || "").trimStart().startsWith("<");
+        const sec = Math.ceil(Number(res.rateLimitedMs || 3000) / 1000);
+        if (!silent && (!isLocalCooldown || (isWrite && bgKey === "fg"))) {
+          const sourceNote = isLocalCooldown
+            ? `本地冷却拦截 · 剩余 ${sec}s`
+            : res.diag?.isChallenge429
+              ? `WAF 限流冷却 ${sec}s`
+              : isActionOnly429
+                ? `服务端操作频率限制 · 建议等待 ${sec}s`
+                : `限流冷却 ${sec}s${res.diag?.retryAfter ? ` · Retry-After ${res.diag.retryAfter}s` : ""}`;
+          diagLog(
+            "WARN",
+            "NETWORK",
+            isLocalCooldown ? "LocalCooldown" : isActionOnly429 ? "ActionRateLimit" : "RateLimit",
+            `${method} ${url} -> HTTP 429 (${sourceNote}, ${ms}ms)`,
+            formatHttpDiagDetail(url, method, res, ms, bgKey, true),
+            { method, path: diagPath, status: 429, durationMs: ms, note: sourceNote }
           );
         }
       } else if ((res.status < 200 || res.status >= 300) && !silent) {
+        const errHint = extractDiscourseError(safeJson(res.body));
         diagLog(
-          "ERROR",
+          res.status >= 500 ? "ERROR" : "WARN",
           "NETWORK",
           "HttpStatus",
           `${method} ${url} -> HTTP ${res.status} (${ms}ms)`,
-          (res.body || "").slice(0, 360)
+          formatHttpDiagDetail(url, method, res, ms, bgKey, true),
+          {
+            method,
+            path: diagPath,
+            status: res.status,
+            durationMs: ms,
+            note: errHint || undefined,
+          }
         );
+      } else if (!silent) {
+        const isTimings = url.includes("/topics/timings");
+        if (isWrite && !isTimings) {
+          const flags: string[] = [];
+          if (res.diag?.csrfRefreshed) flags.push("已刷新 CSRF");
+          if (res.diag?.silentCfRevalidated) flags.push("静默验证恢复");
+          if (res.diag?.cooldownWaitMs) flags.push(`等待冷却 ${res.diag.cooldownWaitMs}ms`);
+          diagLog(
+            "INFO",
+            "NETWORK",
+            "Mutation",
+            `${method} ${url} -> HTTP ${res.status} (${ms}ms)`,
+            formatHttpDiagDetail(url, method, res, ms, bgKey, false),
+            {
+              method,
+              path: diagPath,
+              status: res.status,
+              durationMs: ms,
+              note: flags.length > 0 ? flags.join(" · ") : undefined,
+            }
+          );
+        } else if (ms >= 3000 && !isTimings) {
+          const waitNotes: string[] = [];
+          if (res.diag?.cooldownWaitMs) waitNotes.push(`冷却等待 ${res.diag.cooldownWaitMs}ms`);
+          if (res.diag?.paceWaitMs) waitNotes.push(`节流排队 ${res.diag.paceWaitMs}ms`);
+          if (res.diag?.silentCfRevalidated) waitNotes.push("静默验证恢复");
+          if (res.diag?.retried) waitNotes.push("已自动重试");
+          diagLog(
+            "WARN",
+            "NETWORK",
+            "SlowRequest",
+            `${method} ${url} -> HTTP ${res.status} (慢请求 ${ms}ms)`,
+            formatHttpDiagDetail(url, method, res, ms, bgKey, false),
+            {
+              method,
+              path: diagPath,
+              status: res.status,
+              durationMs: ms,
+              note: waitNotes.length > 0 ? `慢响应 · ${waitNotes.join(" · ")}` : "响应较慢",
+            }
+          );
+        }
       }
       return res;
     } catch (err: any) {
       const ms = Math.round(performance.now() - t0);
       if (!silent) {
-        diagLog("ERROR", "NETWORK", "BridgeIPC", `${method} ${url} 调用异常 (${ms}ms)`, String(err?.message || err));
+        const errMsg = String(err?.message || err || "未知异常");
+        diagLog(
+          "ERROR",
+          "NETWORK",
+          "BridgeIPC",
+          `${method} ${url} 调用异常 (${ms}ms)`,
+          `url: ${url}\nmeta: method=${method} lane=${bgKey} duration=${ms}ms\nerror: ${errMsg}`,
+          { method, path: diagPath, durationMs: ms, note: errMsg }
+        );
       }
       throw err;
     }
@@ -258,11 +424,17 @@ export async function clearExpiredNoticeInRust(): Promise<void> {
 
 export async function switchSavedAccount(username: string): Promise<boolean> {
   clearTopicDetailCache();
-  return invoke<boolean>("switch_account", { username });
+  diagLog("INFO", "AUTH", "AccountSwitch", `切换至已保存账号 @${username}`);
+  const ok = await invoke<boolean>("switch_account", { username });
+  if (!ok) {
+    diagLog("WARN", "AUTH", "AccountSwitch", `切换账号 @${username} 未成功`);
+  }
+  return ok;
 }
 
 export async function logoutAccount(removeSaved = true): Promise<void> {
   clearTopicDetailCache();
+  diagLog("INFO", "AUTH", "Logout", removeSaved ? "退出登录并移除本地凭据" : "退出当前会话（保留已保存账号）");
   return invoke("logout_account", { removeSaved });
 }
 
@@ -410,6 +582,19 @@ async function mutateJsonOrThrow(
     throw new SiteError("请先登录账号后再执行此操作", { isAuthRequired: true, status: res.status });
   }
   const data = safeJson(res.body);
+  if (res.status === 429) {
+    const waitMs = Math.max(1500, Number(res.rateLimitedMs || 3500));
+    const waitSec = Math.ceil(waitMs / 1000);
+    const serverErr = extractDiscourseError(data);
+    const isGeneric =
+      !serverErr ||
+      serverErr === "请求较频繁，请稍后再试" ||
+      serverErr === "操作较为频繁，请稍候片刻再试";
+    throw new SiteError(
+      isGeneric ? `请求较频繁，请 ${waitSec} 秒后再试` : serverErr,
+      { status: 429, retryAfterMs: waitMs }
+    );
+  }
   if (res.status < 200 || res.status >= 300) {
     throw new SiteError(extractDiscourseError(data) || `操作未成功 (${res.status})`, { status: res.status });
   }

@@ -302,9 +302,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   const [loadingMoreBottom, setLoadingMoreBottom] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [activeReactionPickerPostId, setActiveReactionPickerPostId] = useState<number | null>(null);
-  const [hoverReactionPostId, setHoverReactionPostId] = useState<number | null>(null);
   const [activeFloorMorePostId, setActiveFloorMorePostId] = useState<number | null>(null);
-  const reactionHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingReactionPostsRef = useRef<Set<number>>(new Set());
+  const [pendingReactionPostIds, setPendingReactionPostIds] = useState<Set<number>>(() => new Set());
   const [activeBoostComposerPostId, setActiveBoostComposerPostId] = useState<number | null>(null);
   const [boostEmojiOpen, setBoostEmojiOpen] = useState(false);
   const [boostDraftText, setBoostDraftText] = useState("");
@@ -594,7 +594,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     setFloorNavOpen(false);
     setSelectionQuote(null);
     setActiveReactionPickerPostId(null);
-    setHoverReactionPostId(null);
     setActiveFloorMorePostId(null);
     setExpandedRepliesMap({});
     setResolvedParentMap({});
@@ -632,6 +631,27 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [activeFloorMorePostId, activeReactionPickerPostId, aiSummaryOpen]);
+
+  const executeToggleReaction = useCallback(
+    async (postId: number, reactionId: string, fallbackErrMsg: string) => {
+      if (pendingReactionPostsRef.current.has(postId)) return;
+      pendingReactionPostsRef.current.add(postId);
+      setPendingReactionPostIds(new Set(pendingReactionPostsRef.current));
+      setActiveReactionPickerPostId(null);
+      try {
+        const updated = await togglePostReaction(postId, reactionId);
+        if (updated) onAppendPosts([updated], "after");
+      } catch (err: any) {
+        if (!(err instanceof SiteError && err.isVerification)) {
+          setToastMsg(err?.message || fallbackErrMsg);
+        }
+      } finally {
+        pendingReactionPostsRef.current.delete(postId);
+        setPendingReactionPostIds(new Set(pendingReactionPostsRef.current));
+      }
+    },
+    [onAppendPosts]
+  );
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -2516,14 +2536,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                 );
                                 return;
                               }
-                              try {
-                                const updated = await togglePostReaction(post.id, r.id);
-                                if (updated) onAppendPosts([updated], "after");
-                              } catch (err: any) {
-                                if (!(err instanceof SiteError && err.isVerification)) {
-                                  setToastMsg(err?.message || "操作失败");
-                                }
-                              }
+                              await executeToggleReaction(post.id, r.id, "操作失败");
                             }}
                             className="inline-flex items-center gap-1 rounded-full px-2 py-[1.5px] text-[11.2px] tabular-nums transition-colors cursor-pointer"
                             style={{
@@ -2593,9 +2606,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                       const activeReactionId =
                         post.currentUserReaction || (post.liked ? "heart" : null);
                       const showReactionBar =
-                        !isOwnPost &&
-                        (activeReactionPickerPostId === post.id ||
-                          hoverReactionPostId === post.id);
+                        !isOwnPost && activeReactionPickerPostId === post.id;
+                      const isReactionBusy = pendingReactionPostIds.has(post.id);
                       const isMoreOpen = activeFloorMorePostId === post.id;
                       const btnHCls = isReplyFloor ? "h-[26px]" : "h-[28px]";
                       const btnSqCls = isReplyFloor ? "h-[26px] w-[26px]" : "h-[28px] w-[28px]";
@@ -2653,123 +2665,140 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           className="flex items-center gap-0.5"
                           style={{ color: "var(--ink-tertiary)" }}
                         >
-                          {/* 1. 点赞 / 悬停展开表情表态栏（本人楼层不触发自赞，对齐移动端） */}
+                          {/* 1. 点赞（纯心心按钮，仅点赞/取消赞）+ 独立表情选择入口按钮 */}
                           <div
                             data-floor-popover="true"
-                            className="relative"
-                            onMouseEnter={() => {
-                              if (isOwnPost || !isAuthorized) return;
-                              if (reactionHoverTimerRef.current) {
-                                clearTimeout(reactionHoverTimerRef.current);
-                              }
-                              reactionHoverTimerRef.current = setTimeout(() => {
-                                setHoverReactionPostId(post.id);
-                              }, 240);
-                            }}
-                            onMouseLeave={() => {
-                              if (reactionHoverTimerRef.current) {
-                                clearTimeout(reactionHoverTimerRef.current);
-                              }
-                              reactionHoverTimerRef.current = setTimeout(() => {
-                                setHoverReactionPostId((prev) =>
-                                  prev === post.id ? null : prev
-                                );
-                              }, 200);
-                            }}
+                            className="relative flex items-center gap-0.5"
                           >
-                            <button
-                              type="button"
-                              title={
-                                isOwnPost
-                                  ? "自己的发言"
-                                  : activeReactionId
-                                    ? "取消表态（悬停可切换表情）"
-                                    : "点赞（悬停可选择表情回应）"
-                              }
-                              onClick={async () => {
-                                if (isOwnPost) return;
-                                if (!isAuthorized) {
-                                  onRequestGuestLogin(
-                                    "登录后点赞",
-                                    "登录后可为喜欢的回复送出赞同或表情回应"
-                                  );
-                                  return;
-                                }
-                                setActiveReactionPickerPostId(null);
-                                setHoverReactionPostId(null);
-                                const targetReaction = activeReactionId || "heart";
-                                try {
-                                  const updated = await togglePostReaction(
-                                    post.id,
-                                    targetReaction
-                                  );
-                                  if (updated) onAppendPosts([updated], "after");
-                                } catch (err: any) {
-                                  if (!(err instanceof SiteError && err.isVerification)) {
-                                    setToastMsg(err?.message || "点赞未完成");
-                                  }
-                                }
-                              }}
-                              className={`flex ${btnHCls} items-center gap-1 rounded-full px-1.5 text-[11.5px] tabular-nums ${
-                                isOwnPost
-                                  ? "cursor-default opacity-45"
-                                  : `lindo-interactive cursor-pointer ${
-                                      activeReactionId || post.liked ? "" : mutedIdleCls
-                                    }`
-                              }`}
-                              style={{
-                                color:
-                                  activeReactionId === "heart" || post.liked
-                                    ? "#E11D48"
-                                    : showReactionBar
-                                      ? "var(--brand-gold)"
-                                      : "var(--ink-tertiary)",
-                              }}
-                            >
-                              {activeReactionId && activeReactionId !== "heart" ? (
-                                <span className="text-[14px] leading-none">
-                                  {REACTION_EMOJI_MAP[activeReactionId] || "❤️"}
-                                </span>
-                              ) : activeReactionId === "heart" || post.liked ? (
-                                <LinDoIcons.HeartFilled size={15} />
-                              ) : (
-                                <LinDoIcons.Heart size={15} />
-                              )}
-                              {post.likeCount > 0 && post.reactions.length === 0 && (
-                                <span>{post.likeCount}</span>
-                              )}
-                            </button>
+                            {(() => {
+                              const isHeartActive =
+                                activeReactionId === "heart" || (!activeReactionId && post.liked);
+                              const customReactionId =
+                                activeReactionId && activeReactionId !== "heart"
+                                  ? activeReactionId
+                                  : null;
+                              return (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={isReactionBusy}
+                                    title={
+                                      isOwnPost
+                                        ? "自己的发言"
+                                        : isHeartActive
+                                          ? "取消赞"
+                                          : "点赞"
+                                    }
+                                    onClick={async () => {
+                                      if (isOwnPost || isReactionBusy) return;
+                                      if (!isAuthorized) {
+                                        onRequestGuestLogin(
+                                          "登录后点赞",
+                                          "登录后可为喜欢的回复送出赞同"
+                                        );
+                                        return;
+                                      }
+                                      await executeToggleReaction(post.id, "heart", "点赞未完成");
+                                    }}
+                                    className={`flex ${btnHCls} items-center gap-1 rounded-full px-1.5 text-[11.5px] tabular-nums ${
+                                      isOwnPost
+                                        ? "cursor-default opacity-45"
+                                        : `lindo-interactive cursor-pointer ${
+                                            isReactionBusy
+                                              ? "opacity-55"
+                                              : isHeartActive
+                                                ? ""
+                                                : mutedIdleCls
+                                          }`
+                                    }`}
+                                    style={{
+                                      color: isHeartActive ? "#E11D48" : "var(--ink-tertiary)",
+                                    }}
+                                  >
+                                    {isHeartActive ? (
+                                      <LinDoIcons.HeartFilled size={15} />
+                                    ) : (
+                                      <LinDoIcons.Heart size={15} />
+                                    )}
+                                    {post.likeCount > 0 && post.reactions.length === 0 && (
+                                      <span>{post.likeCount}</span>
+                                    )}
+                                  </button>
+
+                                  {!isOwnPost && !post.isDeletedTombstone && !post.isSmallAction && (
+                                    <button
+                                      type="button"
+                                      disabled={isReactionBusy}
+                                      title={customReactionId ? "切换或取消表情回应" : "选择表情回应"}
+                                      onClick={() => {
+                                        if (!isAuthorized) {
+                                          onRequestGuestLogin(
+                                            "登录后表情回应",
+                                            "登录后可为喜欢的回复送出表情回应"
+                                          );
+                                          return;
+                                        }
+                                        setActiveFloorMorePostId(null);
+                                        setActiveReactionPickerPostId((prev) =>
+                                          prev === post.id ? null : post.id
+                                        );
+                                      }}
+                                      className={`lindo-interactive flex ${btnSqCls} items-center justify-center rounded-full ${
+                                        showReactionBar || customReactionId ? "" : mutedIdleCls
+                                      } cursor-pointer`}
+                                      style={{
+                                        color: showReactionBar
+                                          ? "var(--brand-gold)"
+                                          : "var(--ink-tertiary)",
+                                      }}
+                                    >
+                                      {customReactionId ? (
+                                        <span className="text-[14px] leading-none">
+                                          {REACTION_EMOJI_MAP[customReactionId] || "😊"}
+                                        </span>
+                                      ) : (
+                                        <LinDoIcons.Smile size={15} />
+                                      )}
+                                    </button>
+                                  )}
+                                </>
+                              );
+                            })()}
 
                             {showReactionBar && (
                               <div
-                                className="absolute bottom-8 right-0 z-30 flex items-center gap-1 rounded-full px-2.5 py-1 shadow-xl"
+                                className="absolute bottom-9 right-0 z-30 flex items-center gap-0.5 rounded-full px-2 py-1 shadow-xl"
                                 style={{
                                   backgroundColor: "var(--subtle-surface)",
                                   border: "0.5px solid var(--hairline)",
                                 }}
                               >
-                                {REACTION_CHOICES.map((rc) => (
-                                  <button
-                                    key={rc.id}
-                                    type="button"
-                                    title={rc.label}
-                                    onClick={async () => {
-                                      setActiveReactionPickerPostId(null);
-                                      setHoverReactionPostId(null);
-                                      try {
-                                        const updated = await togglePostReaction(post.id, rc.id);
-                                        if (updated) onAppendPosts([updated], "after");
-                                      } catch (err: any) {
-                                        if (!(err instanceof SiteError && err.isVerification)) {
-                                          setToastMsg(err?.message || "回应未成功");
-                                        }
+                                {REACTION_CHOICES.map((rc) => {
+                                  const isSelected = activeReactionId === rc.id;
+                                  return (
+                                    <button
+                                      key={rc.id}
+                                      type="button"
+                                      disabled={isReactionBusy}
+                                      title={rc.label}
+                                      onClick={() => {
+                                        void executeToggleReaction(post.id, rc.id, "回应未成功");
+                                      }}
+                                      className="rounded-full p-1 text-[15px] leading-none transition-transform hover:scale-125 cursor-pointer"
+                                      style={
+                                        isSelected
+                                          ? {
+                                              backgroundColor: "var(--active-chip-bg)",
+                                              boxShadow:
+                                                "inset 0 0 0 0.5px color-mix(in srgb, var(--brand-gold) 55%, transparent)",
+                                            }
+                                          : undefined
                                       }
-                                    }}
-                                    className="rounded-full p-1 text-[15px] transition-transform hover:scale-125 cursor-pointer"
-                                  >
-                                    {rc.emoji}
-                                  </button>
-                                ))}
+                                    >
+                                      {rc.emoji}
+                                    </button>
+                                  );
+                                })}
                               </div>
                             )}
                           </div>

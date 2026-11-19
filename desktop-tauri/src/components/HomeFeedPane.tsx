@@ -947,17 +947,13 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
             </div>
           ) : (
             <div className="py-1">
-              {/* 置顶单行静默收纳胶囊（默认浓缩为 1 行，点击标题直达首条置顶，点击右侧展开全部置顶） */}
+              {/* 置顶单行静默收纳条（无外框无背景底色，自然融入列表顶部的极简分隔流） */}
               {pinnedTopics.length > 0 && (
-                <div className="mx-3 mt-1.5 mb-1.5">
+                <div>
                   {!pinnedExpanded ? (
                     <div
                       data-pinned-bar="1"
-                      className="flex items-center gap-2 rounded-[9px] px-2.5 py-[7px]"
-                      style={{
-                        backgroundColor: "var(--subtle-surface)",
-                        border: "0.5px solid var(--hairline-soft)",
-                      }}
+                      className="flex items-center gap-2 px-4 py-2"
                     >
                       <button
                         type="button"
@@ -981,7 +977,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       <button
                         type="button"
                         onClick={() => onSelectTopic(pinnedTopics[0])}
-                        className="min-w-0 flex-1 truncate text-left text-[12.3px] transition-opacity hover:opacity-85 cursor-pointer"
+                        className="min-w-0 flex-1 truncate text-left text-[12.5px] transition-opacity hover:opacity-85 cursor-pointer"
                         style={{
                           color:
                             selectedTopicId === pinnedTopics[0].id
@@ -1006,20 +1002,14 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       )}
                     </div>
                   ) : (
-                    <div
-                      className="overflow-hidden rounded-[10px]"
-                      style={{
-                        backgroundColor: "var(--subtle-surface)",
-                        border: "0.5px solid var(--hairline-soft)",
-                      }}
-                    >
+                    <div className="py-0.5">
                       {pinnedTopics.map((pinned, pIdx) => {
                         const selected = selectedTopicId === pinned.id;
                         return (
                           <React.Fragment key={pinned.id}>
                             {pIdx > 0 && (
                               <div
-                                className="mx-3 h-[0.5px]"
+                                className="mx-4 h-[0.5px]"
                                 style={{ backgroundColor: "var(--hairline-soft)" }}
                               />
                             )}
@@ -1027,7 +1017,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                               type="button"
                               data-topic-id={pinned.id}
                               onClick={() => onSelectTopic(pinned)}
-                              className="cursor-pointer flex w-full items-center gap-2 px-3 py-2 text-left"
+                              className="cursor-pointer flex w-full items-center gap-2 px-4 py-2 text-left transition-colors"
                               style={{
                                 backgroundColor: selected
                                   ? "var(--selected-card-bg)"
@@ -1063,14 +1053,10 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                           </React.Fragment>
                         );
                       })}
-                      <div
-                        className="h-[0.5px]"
-                        style={{ backgroundColor: "var(--hairline-soft)" }}
-                      />
                       <button
                         type="button"
                         onClick={() => setPinnedExpanded(false)}
-                        className="lindo-interactive flex w-full items-center justify-center gap-1 py-1.5 text-[11.2px]"
+                        className="lindo-interactive flex w-full items-center justify-center gap-1 py-1.5 text-[11.2px] cursor-pointer"
                         style={{ color: "var(--ink-tertiary)" }}
                       >
                         <span>收起置顶</span>
@@ -1078,6 +1064,10 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       </button>
                     </div>
                   )}
+                  <div
+                    className="mx-4 h-[0.5px]"
+                    style={{ backgroundColor: "var(--hairline-soft)" }}
+                  />
                 </div>
               )}
 

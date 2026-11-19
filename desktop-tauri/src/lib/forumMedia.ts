@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { resolveForumAssetUrl } from "./palette";
+import { diagLog } from "./diagnostics";
 
 export const TRANSPARENT_1PX_GIF =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
@@ -14,6 +15,7 @@ interface ForumMediaPayload {
 const MAX_BLOB_CACHE_ENTRIES = 240;
 const blobUrlCache = new Map<string, string>();
 const inFlightFetches = new Map<string, Promise<string | null>>();
+const loggedMediaFailures = new Set<string>();
 
 /**
  * Returns true if the resolved URL points to `linux.do` or `*.linux.do`
@@ -88,14 +90,29 @@ export function fetchForumMediaBlobUrl(rawUrl: string): Promise<string | null> {
   if (existing) return existing;
 
   const task = (async () => {
+    const t0 = performance.now();
     try {
       const payload = await invoke<ForumMediaPayload>("site_fetch_media", { url: cleanUrl });
+      const ms = Math.round(performance.now() - t0);
       if (
         !payload ||
         payload.status < 200 ||
         payload.status >= 300 ||
         !payload.dataBase64
       ) {
+        const status = payload?.status ?? 0;
+        if (loggedMediaFailures.size < 120 && !loggedMediaFailures.has(cleanUrl)) {
+          loggedMediaFailures.add(cleanUrl);
+          const pathOnly = cleanUrl.replace(/^https?:\/\/[^/]+/i, "");
+          diagLog(
+            "WARN",
+            "NETWORK",
+            "MediaBridge",
+            `GET ${cleanUrl} -> HTTP ${status} (媒体加载失败, ${ms}ms)`,
+            `url: ${cleanUrl}\nstatus: ${status}\ncontentType: ${payload?.contentType || "unknown"}\nduration: ${ms}ms`,
+            { method: "GET", path: pathOnly, status, durationMs: ms, note: "媒体桥接加载失败" }
+          );
+        }
         return null;
       }
       const mime = payload.contentType || "image/png";
@@ -105,7 +122,25 @@ export function fetchForumMediaBlobUrl(rawUrl: string): Promise<string | null> {
       const blobUrl = URL.createObjectURL(blob);
       putCachedForumMediaBlobUrl(cleanUrl, blobUrl);
       return blobUrl;
-    } catch {
+    } catch (err: any) {
+      const ms = Math.round(performance.now() - t0);
+      const reason = String(err?.message || err || "媒体桥接异常");
+      if (
+        !reason.includes("verification in progress") &&
+        loggedMediaFailures.size < 120 &&
+        !loggedMediaFailures.has(cleanUrl)
+      ) {
+        loggedMediaFailures.add(cleanUrl);
+        const pathOnly = cleanUrl.replace(/^https?:\/\/[^/]+/i, "");
+        diagLog(
+          "WARN",
+          "NETWORK",
+          "MediaBridge",
+          `GET ${cleanUrl} 调用异常 (${ms}ms)`,
+          `url: ${cleanUrl}\nerror: ${reason}\nduration: ${ms}ms`,
+          { method: "GET", path: pathOnly, durationMs: ms, note: reason }
+        );
+      }
       return null;
     } finally {
       inFlightFetches.delete(cleanUrl);

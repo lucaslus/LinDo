@@ -252,6 +252,10 @@ export const App: React.FC = () => {
     applyPaletteToDocument(isDark, preferences.themeOption, preferences.fontScale);
   }, [isDark, preferences.themeOption, preferences.fontScale]);
 
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle("lindo-reduce-motion", !preferences.enableAnimations);
+  }, [preferences.enableAnimations]);
+
   useEffect(() => {
     const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
     if (!mq) return;

@@ -377,6 +377,52 @@ async fn native_call(method: &str, params: Value, timeout_secs: u64) -> Result<V
         .await
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteHttpDiag {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cf_ray: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cf_mitigated: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub local_cooldown: bool,
+    pub is_challenge_429: bool,
+    pub pace_wait_ms: u64,
+    pub cooldown_wait_ms: u64,
+    pub retried: bool,
+    pub silent_cf_revalidated: bool,
+    pub csrf_refreshed: bool,
+    pub guest_fallback: bool,
+    pub body_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagRuntimeSnapshot {
+    pub os: String,
+    pub arch: String,
+    pub origin_ready: bool,
+    pub verifying: bool,
+    pub bootstrap_challenged: bool,
+    pub cf_attention_notified: bool,
+    pub has_cookie_t: bool,
+    pub has_forum_session: bool,
+    pub has_cf_clearance: bool,
+    pub saved_accounts_count: usize,
+    pub rate_limit_remain_ms: u64,
+    pub fg_challenge_remain_ms: u64,
+    pub bg_challenge_remain_ms: u64,
+    pub media_cooldown_remain_ms: u64,
+    pub challenge_429_streak: u32,
+    pub media_cache_entries: usize,
+    pub media_cache_bytes: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteHttpResponse {
@@ -385,6 +431,8 @@ pub struct SiteHttpResponse {
     pub is_challenge: bool,
     pub is_unauthenticated: bool,
     pub rate_limited_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diag: Option<SiteHttpDiag>,
 }
 
 #[derive(Clone, Default)]
@@ -1465,6 +1513,10 @@ impl BridgeEngine {
         }
 
         let mut pending_cooldown_wait: Option<Duration> = None;
+        let mut cooldown_wait_ms: u64 = 0;
+        let mut pace_wait_ms: u64 = 0;
+        let mut retried = false;
+        let mut silent_cf_revalidated = false;
         {
             let mut rt = self.inner.lock().unwrap();
             if !in_verification {
@@ -1475,6 +1527,10 @@ impl BridgeEngine {
                         is_challenge: true,
                         is_unauthenticated: false,
                         rate_limited_ms: None,
+                        diag: Some(SiteHttpDiag {
+                            local_cooldown: true,
+                            ..Default::default()
+                        }),
                     });
                 }
                 let active_until = if is_background {
@@ -1490,6 +1546,10 @@ impl BridgeEngine {
                             is_challenge: true,
                             is_unauthenticated: false,
                             rate_limited_ms: None,
+                            diag: Some(SiteHttpDiag {
+                                local_cooldown: true,
+                                ..Default::default()
+                            }),
                         });
                     }
                 }
@@ -1509,6 +1569,7 @@ impl BridgeEngine {
                         } else if !is_background && remain_ms <= 6500 {
                             // Short rate-limit window: hold quietly in normal Loading state & auto-dispatch once cooldown ends!
                             pending_cooldown_wait = Some(remain_dur);
+                            cooldown_wait_ms = remain_ms;
                         } else {
                             return Ok(SiteHttpResponse {
                                 status: 429,
@@ -1517,6 +1578,10 @@ impl BridgeEngine {
                                 is_challenge: false,
                                 is_unauthenticated: false,
                                 rate_limited_ms: Some(remain_ms),
+                                diag: Some(SiteHttpDiag {
+                                    local_cooldown: true,
+                                    ..Default::default()
+                                }),
                             });
                         }
                     }
@@ -1545,6 +1610,7 @@ impl BridgeEngine {
         // and background calls yield extra headroom whenever foreground activity is present.
         if !in_verification {
             if is_background && self.active_fg_requests.load(Ordering::Relaxed) > 0 {
+                pace_wait_ms += 240;
                 tokio::time::sleep(Duration::from_millis(240)).await;
             }
             let pace_wait = {
@@ -1559,6 +1625,7 @@ impl BridgeEngine {
                     .reserve(Instant::now(), min_floor)
             };
             if !pace_wait.is_zero() {
+                pace_wait_ms += pace_wait.as_millis() as u64;
                 tokio::time::sleep(pace_wait).await;
             }
         }
@@ -1581,6 +1648,12 @@ impl BridgeEngine {
                     is_challenge: true,
                     is_unauthenticated: false,
                     rate_limited_ms: None,
+                    diag: Some(SiteHttpDiag {
+                        local_cooldown: true,
+                        pace_wait_ms,
+                        cooldown_wait_ms,
+                        ..Default::default()
+                    }),
                 });
             }
         }
@@ -1682,6 +1755,7 @@ impl BridgeEngine {
                     }});
                     let bodyText = await r.text();
                     let cfHeader = r.headers.get('cf-mitigated');
+                    let csrfRefreshed = false;
                     if (!write && !cfHeader && (r.status === 403 || r.status === 401) && c.headers['Discourse-Logged-In'] && !c.url.includes('/session/current.json') && /not_logged_in|need to be logged in/i.test(bodyText)) {{
                         const guestHdrs = Object.assign({{}}, c.headers);
                         delete guestHdrs['Discourse-Logged-In'];
@@ -1700,7 +1774,11 @@ impl BridgeEngine {
                                 body: await gr.text(),
                                 retryAfter: gr.headers.get('Retry-After'),
                                 challenge: gr.headers.get('cf-mitigated'),
-                                hadUnauthLoggedHeader: true
+                                cfRay: gr.headers.get('cf-ray'),
+                                contentType: gr.headers.get('content-type'),
+                                requestId: gr.headers.get('x-request-id'),
+                                hadUnauthLoggedHeader: true,
+                                guestFallback: true
                             }};
                         }}
                     }}
@@ -1709,6 +1787,7 @@ impl BridgeEngine {
                         window.__lindoIgnoreDomCsrf = true;
                         const fc2 = await fetchFreshCsrf();
                         if (fc2.token) {{
+                            csrfRefreshed = true;
                             c.headers['X-CSRF-Token'] = fc2.token;
                             r = await fetch(c.url, {{
                                 method: c.method,
@@ -1728,7 +1807,11 @@ impl BridgeEngine {
                         status: r.status,
                         body: bodyText,
                         retryAfter: r.headers.get('Retry-After'),
-                        challenge: cfHeader
+                        challenge: cfHeader,
+                        cfRay: r.headers.get('cf-ray'),
+                        contentType: r.headers.get('content-type'),
+                        requestId: r.headers.get('x-request-id'),
+                        csrfRefreshed
                     }};
                 }} catch (err) {{
                     return {{
@@ -1752,6 +1835,7 @@ impl BridgeEngine {
             _ => true,
         };
         if needs_retry && idempotent && !self.inner.lock().unwrap().verifying {
+            retried = true;
             let force_reinit = eval_res
                 .as_ref()
                 .ok()
@@ -1772,6 +1856,12 @@ impl BridgeEngine {
                         is_challenge: true,
                         is_unauthenticated: false,
                         rate_limited_ms: None,
+                        diag: Some(SiteHttpDiag {
+                            retried,
+                            pace_wait_ms,
+                            cooldown_wait_ms,
+                            ..Default::default()
+                        }),
                     });
                 }
             } else {
@@ -1808,6 +1898,15 @@ impl BridgeEngine {
                     .unwrap()
                     .note_challenged(carried_cf.as_deref());
                 if self.silent_revalidate_challenge(true).await && !self.inner.lock().unwrap().verifying {
+                    silent_cf_revalidated = true;
+                    emit_diag(
+                        app,
+                        "INFO",
+                        "AUTH",
+                        "SilentCF",
+                        "静默安全验证已通过，正在自动重放请求",
+                        Some(&format!("method={method_upper} url={url} firstStatus={first_status}")),
+                    );
                     let _ = native_call(
                         "evaluate",
                         json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
@@ -1822,6 +1921,15 @@ impl BridgeEngine {
                             eval_res = replayed;
                         }
                     }
+                } else {
+                    emit_diag(
+                        app,
+                        "WARN",
+                        "AUTH",
+                        "SilentCF",
+                        "静默安全验证未自动通过，可能需要人工确认",
+                        Some(&format!("method={method_upper} url={url} firstStatus={first_status}")),
+                    );
                 }
             }
         }
@@ -1843,11 +1951,12 @@ impl BridgeEngine {
         // CRITICAL (aligned with xuemk `ChallengeDetector.isChallenge`):
         // HTTP 429 (even with `cf-mitigated: challenge`) is a WAF rate-limit rule, NOT a dead `cf_clearance`!
         // Never tag 429 as `is_challenge`, never invalidate `cf_clearance`, and never pop a verification modal on 429!
+        let raw_body_is_html = raw_body.trim_start().starts_with('<');
         let is_challenge_429 =
             status == 429 && (cf_header == "challenge" || Self::looks_like_challenge(&raw_body));
         let body = if status != 429 && cf_header == "challenge" {
             format!("{CF_CHALLENGE_PREFIX}{raw_body}")
-        } else if status == 429 && raw_body.trim_start().starts_with('<') {
+        } else if status == 429 && raw_body_is_html {
             "{\"errors\":[\"操作较为频繁，请稍候片刻再试\"]}".to_string()
         } else {
             raw_body
@@ -1945,9 +2054,25 @@ impl BridgeEngine {
             let retry_after_secs = eval_res
                 .get("retryAfter")
                 .and_then(|v| v.as_str())
-                .and_then(|s| s.trim().parse::<u64>().ok());
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .or_else(|| {
+                    serde_json::from_str::<Value>(&body).ok().and_then(|v| {
+                        v.get("extras")
+                            .and_then(|e| e.get("wait_seconds"))
+                            .and_then(|w| w.as_u64())
+                    })
+                });
+            let is_discourse_action_429 =
+                method_upper != "GET" && !is_challenge_429 && !raw_body_is_html;
             // `/topics/timings` is a discardable background stat: never lock out main app browsing on timings 429!
-            if !is_timings_req {
+            // Discourse JSON write-action 429s (e.g. reaction toggle / reply cooldown) are action-scoped:
+            // surface exact wait seconds to the caller without triggering a global app-wide lockout!
+            if is_discourse_action_429 {
+                let now = Instant::now();
+                self.api_pacer.lock().unwrap().drain_on_429(now);
+                let secs = retry_after_secs.unwrap_or(5).clamp(2, 60);
+                rate_limited_ms = Some(secs * 1000);
+            } else if !is_timings_req {
                 let now = Instant::now();
                 self.api_pacer.lock().unwrap().drain_on_429(now);
                 let secs = if is_challenge_429 {
@@ -2057,12 +2182,62 @@ impl BridgeEngine {
             }
         }
 
+        let cf_ray = eval_res
+            .get("cfRay")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let retry_after = eval_res
+            .get("retryAfter")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let content_type = eval_res
+            .get("contentType")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let request_id = eval_res
+            .get("requestId")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let csrf_refreshed = eval_res
+            .get("csrfRefreshed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let guest_fallback = eval_res
+            .get("guestFallback")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let body_bytes = body.len();
+
         Ok(SiteHttpResponse {
             status,
             body,
             is_challenge,
             is_unauthenticated: is_unauth,
             rate_limited_ms,
+            diag: Some(SiteHttpDiag {
+                cf_ray,
+                cf_mitigated: if cf_header.is_empty() {
+                    None
+                } else {
+                    Some(cf_header.to_string())
+                },
+                retry_after,
+                content_type,
+                request_id,
+                local_cooldown: false,
+                is_challenge_429,
+                pace_wait_ms,
+                cooldown_wait_ms,
+                retried,
+                silent_cf_revalidated,
+                csrf_refreshed,
+                guest_fallback,
+                body_bytes,
+            }),
         })
     }
 
@@ -2235,14 +2410,14 @@ impl BridgeEngine {
                     body: form,
                     signal: AbortSignal.timeout(90000)
                 }});
-                return {{ status: r.status, body: await r.text(), challenge: r.headers.get('cf-mitigated') }};
+                return {{ status: r.status, body: await r.text(), challenge: r.headers.get('cf-mitigated'), cfRay: r.headers.get('cf-ray'), contentType: r.headers.get('content-type') }};
             }})()"#
         );
         let res = native_call("evaluate", json!({ "script": script }), 105).await?;
         let status = res.get("status").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
         let body = res.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let is_challenge = res.get("challenge").and_then(|v| v.as_str()) == Some("challenge")
-            || Self::looks_like_challenge(&body);
+        let cf_hdr = res.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
+        let is_challenge = cf_hdr == "challenge" || Self::looks_like_challenge(&body);
         let is_unauthenticated = Self::is_unauthenticated_response(status, &body);
         if is_challenge {
             let carried_cf = {
@@ -2254,13 +2429,98 @@ impl BridgeEngine {
                 .unwrap()
                 .note_challenged(carried_cf.as_deref());
         }
+        let body_bytes = body.len();
         Ok(SiteHttpResponse {
             status,
             body,
             is_challenge,
             is_unauthenticated,
             rate_limited_ms: None,
+            diag: Some(SiteHttpDiag {
+                cf_ray: res.get("cfRay").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                cf_mitigated: if cf_hdr.is_empty() {
+                    None
+                } else {
+                    Some(cf_hdr.to_string())
+                },
+                content_type: res
+                    .get("contentType")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                body_bytes,
+                ..Default::default()
+            }),
         })
+    }
+
+    pub fn diag_runtime_snapshot(&self) -> DiagRuntimeSnapshot {
+        let now = Instant::now();
+        let rem = |opt: Option<Instant>| -> u64 {
+            opt.and_then(|t| t.checked_duration_since(now))
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        };
+        let (
+            origin_ready,
+            verifying,
+            bootstrap_challenged,
+            cf_attention_notified,
+            rate_limit_remain_ms,
+            fg_challenge_remain_ms,
+            bg_challenge_remain_ms,
+            media_cooldown_remain_ms,
+            challenge_429_streak,
+        ) = {
+            let rt = self.inner.lock().unwrap();
+            (
+                rt.origin_ready,
+                rt.verifying,
+                rt.bootstrap_challenged,
+                rt.cf_attention_notified,
+                rem(rt.rate_limit_until),
+                rem(rt.fg_challenge_until),
+                rem(rt.bg_challenge_until),
+                rem(rt.media_cooldown_until),
+                rt.challenge_429_streak,
+            )
+        };
+        let (has_cookie_t, has_forum_session, has_cf_clearance, saved_accounts_count) = {
+            let st = self.state.lock().unwrap();
+            let cmap = Self::parse_cookie_map(&st.raw_cookies);
+            (
+                cmap.get("_t").map(|v| !v.trim().is_empty()).unwrap_or(false),
+                cmap.get("_forum_session")
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false),
+                cmap.get("cf_clearance")
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false),
+                st.saved_accounts.len(),
+            )
+        };
+        let (media_cache_entries, media_cache_bytes) = {
+            let mc = self.media_cache.lock().unwrap();
+            (mc.entries.len(), mc.total_bytes)
+        };
+        DiagRuntimeSnapshot {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            origin_ready,
+            verifying,
+            bootstrap_challenged,
+            cf_attention_notified,
+            has_cookie_t,
+            has_forum_session,
+            has_cf_clearance,
+            saved_accounts_count,
+            rate_limit_remain_ms,
+            fg_challenge_remain_ms,
+            bg_challenge_remain_ms,
+            media_cooldown_remain_ms,
+            challenge_429_streak,
+            media_cache_entries,
+            media_cache_bytes,
+        }
     }
 
     /// Fetches `https://linux.do/...` binary assets (`/uploads/...`, animated `.gif` avatars, custom badges)

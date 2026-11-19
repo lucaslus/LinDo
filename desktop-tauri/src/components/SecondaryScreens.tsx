@@ -19,6 +19,7 @@ import {
   type DiagCategory,
   diagLog,
   exportDiagLogToFile,
+  fetchDiagRuntimeSnapshot,
   getDiagEntries,
   subscribeDiagEntries,
 } from "../lib/diagnostics";
@@ -28,6 +29,7 @@ import type {
   ComposerLaunchRequest,
   ConnectTrustLevelReport,
   DesktopUpdateInfo,
+  DiagRuntimeSnapshot,
   FlairInfo,
   FollowUserEntry,
   GrantedBadge,
@@ -82,9 +84,10 @@ import {
   BRAND_THEMES,
   formatCompactCount,
   formatRelativeTime,
-  getAvatarClassName,
   isHolographicTitle,
+  isSquareAvatar,
   parseLetterAvatarMeta,
+  resolveAvatarGlowClass,
   resolveAvatarUrl,
   resolveBadgeArtwork,
   resolveCategoryVisual,
@@ -483,7 +486,17 @@ export const AvatarWithFlair: React.FC<{
       ? Math.round(badgeSize * 0.66)
       : Math.round(badgeSize * 0.8);
 
-  const shapeAndGlow = getAvatarClassName("h-full w-full", username, primaryGroupName, avatarTemplate);
+  const shapeClass = isSquareAvatar(username, avatarTemplate) ? "lindo-avatar-square" : "rounded-full";
+  const glowClass = resolveAvatarGlowClass(username, primaryGroupName, avatarTemplate);
+  const shapeAndGlow = `h-full w-full ${shapeClass} ${glowClass} object-cover`.trim();
+  const haloClass =
+    sizePx >= 24
+      ? glowClass === "lindo-glow-gold"
+        ? "lindo-avatar-halo lindo-avatar-halo-gold"
+        : glowClass === "lindo-glow-blue"
+          ? "lindo-avatar-halo lindo-avatar-halo-blue"
+          : ""
+      : "";
   const letterMeta = useMemo(
     () => parseLetterAvatarMeta(avatarTemplate, username),
     [avatarTemplate, username]
@@ -495,6 +508,13 @@ export const AvatarWithFlair: React.FC<{
       className={`lindo-avatar-wrap relative inline-flex shrink-0 ${className}`}
       style={{ width: sizePx, height: sizePx }}
     >
+      {/* Dedicated GPU-composited breathing halo behind avatar (animates ONLY opacity + transform; zero per-frame box-shadow repaint) */}
+      {haloClass && (
+        <span
+          aria-hidden="true"
+          className={`pointer-events-none absolute inset-0 z-0 ${shapeClass} ${haloClass}`}
+        />
+      )}
       {/* Base layer: instant ~3KB static edge CDN avatar, or crisp Discourse Letter Avatar when CDN/origin fails (NEVER WebKit `[?]`) */}
       {displayImgSrc ? (
         <img
@@ -502,13 +522,13 @@ export const AvatarWithFlair: React.FC<{
           alt={username}
           decoding="async"
           onError={handleStaticError}
-          className={shapeAndGlow}
+          className={`relative z-[1] ${shapeAndGlow}`}
           style={{ backgroundColor: "var(--subtle-surface)" }}
         />
       ) : (
         <div
           aria-label={username}
-          className={`${shapeAndGlow} flex items-center justify-center select-none font-semibold text-white`}
+          className={`relative z-[1] ${shapeAndGlow} flex items-center justify-center select-none font-semibold text-white`}
           style={{
             backgroundColor:
               activeFallback.stage === "letter" ? letterMeta.bgColor : "var(--subtle-surface)",
@@ -528,13 +548,13 @@ export const AvatarWithFlair: React.FC<{
           onError={(e) => {
             (e.currentTarget as HTMLImageElement).style.display = "none";
           }}
-          className={`lindo-avatar-anim absolute inset-0 ${shapeAndGlow}`}
+          className={`lindo-avatar-anim absolute inset-0 z-[2] h-full w-full ${shapeClass} object-cover`}
         />
       )}
       {flairVis && (
         <span
           title={flairVis.name || primaryGroupName || undefined}
-          className="pointer-events-none absolute -right-[3px] -bottom-[2px] flex items-center justify-center rounded-full"
+          className="pointer-events-none absolute -right-[3px] -bottom-[2px] z-[3] flex items-center justify-center rounded-full"
           style={{
             width: badgeSize,
             height: badgeSize,
@@ -2328,22 +2348,49 @@ export const ProfileSettingsView: React.FC<{
     | null
   >(null);
   const [diagFilter, setDiagFilter] = useState<DiagCategory | "ALL">("ALL");
+  const [diagQuery, setDiagQuery] = useState("");
+  const [diagSnapshot, setDiagSnapshot] = useState<DiagRuntimeSnapshot | null>(null);
   const [diagTick, setDiagTick] = useState(0);
   const [expandedDiagId, setExpandedDiagId] = useState<number | null>(null);
 
   useEffect(() => {
     if (subSheet !== "diagnostics") return;
-    return subscribeDiagEntries(() => setDiagTick((n) => n + 1));
+    let alive = true;
+    const refreshSnap = () => {
+      fetchDiagRuntimeSnapshot().then((s) => {
+        if (alive) setDiagSnapshot(s);
+      });
+    };
+    refreshSnap();
+    const unsub = subscribeDiagEntries(() => {
+      setDiagTick((n) => n + 1);
+      refreshSnap();
+    });
+    return () => {
+      alive = false;
+      unsub();
+    };
   }, [subSheet]);
 
   const allDiagEntries = useMemo(
     () => (subSheet === "diagnostics" ? getDiagEntries("ALL") : []),
     [subSheet, diagTick]
   );
-  const diagEntries = useMemo(
-    () => (subSheet === "diagnostics" ? getDiagEntries(diagFilter) : []),
-    [subSheet, diagFilter, diagTick]
-  );
+  const diagEntries = useMemo(() => {
+    if (subSheet !== "diagnostics") return [];
+    const list = getDiagEntries(diagFilter);
+    const q = diagQuery.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (e) =>
+        e.summary.toLowerCase().includes(q) ||
+        (e.path && e.path.toLowerCase().includes(q)) ||
+        (e.note && e.note.toLowerCase().includes(q)) ||
+        (e.detail && e.detail.toLowerCase().includes(q)) ||
+        e.tag.toLowerCase().includes(q) ||
+        (typeof e.status === "number" && String(e.status).includes(q))
+    );
+  }, [subSheet, diagFilter, diagQuery, diagTick]);
   const foldedDiagEntries = useMemo(() => {
     const out: Array<{ entry: (typeof diagEntries)[number]; repeatCount: number }> = [];
     for (const item of diagEntries) {
@@ -3092,9 +3139,13 @@ export const ProfileSettingsView: React.FC<{
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex h-[52px] shrink-0 items-center justify-between px-5">
-              <div className="flex items-center gap-2">
-                <span className="text-[15.5px] font-semibold" style={{ color: "var(--ink-primary)" }}>
+            <div
+              className={`flex shrink-0 items-center justify-between px-5 ${
+                subSheet === "diagnostics" ? "lindo-hairline-b h-[48px]" : "h-[52px]"
+              }`}
+            >
+              <div className="flex items-baseline gap-2.5">
+                <span className="text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
                   {subSheet === "bookmarks"
                     ? "我的书签与收藏"
                     : subSheet === "history"
@@ -3115,41 +3166,35 @@ export const ProfileSettingsView: React.FC<{
                 </span>
                 {subSheet === "diagnostics" && (
                   <span
-                    className="rounded-full px-2 py-[1.5px] text-[10.5px] font-medium"
-                    style={{
-                      backgroundColor: "var(--subtle-surface)",
-                      color: "var(--ink-tertiary)",
-                      border: "0.5px solid var(--hairline)",
-                    }}
+                    className="text-[12px] tabular-nums"
+                    style={{ color: "var(--ink-tertiary)" }}
                   >
-                    已脱敏
+                    v{updateInfo?.currentVersion || DESKTOP_APP_VERSION} · {allDiagEntries.length} 条
                   </span>
                 )}
               </div>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-0.5">
                 {subSheet === "diagnostics" && (
                   <>
                     <button
                       type="button"
-                      onClick={() => {
+                      onClick={async () => {
+                        const snap = await fetchDiagRuntimeSnapshot();
                         const report = buildDiagReport(
                           updateInfo?.currentVersion || DESKTOP_APP_VERSION,
                           isAuthorized,
-                          diagFilter
+                          diagFilter,
+                          snap ?? diagSnapshot,
+                          currentUser?.username
                         );
-                        navigator.clipboard.writeText(report);
-                        setToast("已复制诊断日志（敏感凭据已自动脱敏）");
+                        await navigator.clipboard.writeText(report);
+                        setToast("已复制日志（敏感凭据已脱敏）");
                       }}
-                      className="lindo-interactive flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium cursor-pointer"
-                      style={{
-                        backgroundColor: "var(--subtle-surface)",
-                        border: "0.5px solid var(--hairline)",
-                        color: "var(--ink-primary)",
-                      }}
+                      className="lindo-interactive rounded-md px-2.5 py-1 text-[12px] cursor-pointer"
+                      style={{ color: "var(--ink-secondary)" }}
                     >
-                      <LinDoIcons.Copy size={13} />
-                      <span>复制</span>
+                      复制
                     </button>
                     <button
                       type="button"
@@ -3158,43 +3203,34 @@ export const ProfileSettingsView: React.FC<{
                           const savedPath = await exportDiagLogToFile(
                             updateInfo?.currentVersion || DESKTOP_APP_VERSION,
                             isAuthorized,
-                            diagFilter
+                            diagFilter,
+                            currentUser?.username
                           );
                           const base = savedPath.split(/[/\\]/).pop() || savedPath;
-                          setToast(`已导出：${base}`);
+                          setToast(`已导出 ${base}`);
                         } catch (e: any) {
                           setToast(e?.message || "导出日志失败");
                         }
                       }}
-                      className="flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] font-semibold transition-opacity hover:opacity-90 cursor-pointer"
-                      style={{
-                        backgroundColor: "var(--active-chip-bg)",
-                        border: "0.5px solid color-mix(in srgb, var(--brand-gold) 42%, transparent)",
-                        color: "var(--active-chip-text)",
-                      }}
+                      className="lindo-interactive rounded-md px-2.5 py-1 text-[12px] font-medium cursor-pointer"
+                      style={{ color: "var(--ink-primary)" }}
                     >
-                      <LinDoIcons.Download size={13} />
-                      <span>导出</span>
+                      导出
                     </button>
                     {allDiagEntries.length > 0 && (
                       <button
                         type="button"
-                        title="清空本地日志"
                         onClick={() => {
                           clearDiagEntries();
                           setExpandedDiagId(null);
-                          setToast("已清空本地诊断日志");
+                          setToast("已清空本地日志");
                         }}
-                        className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full cursor-pointer"
+                        className="lindo-interactive rounded-md px-2.5 py-1 text-[12px] cursor-pointer"
                         style={{ color: "var(--ink-tertiary)" }}
                       >
-                        <LinDoIcons.Trash size={14} />
+                        清空
                       </button>
                     )}
-                    <span
-                      className="mx-0.5 h-3.5 w-[0.5px]"
-                      style={{ backgroundColor: "var(--hairline)" }}
-                    />
                   </>
                 )}
                 {subSheet === "history" && localHistory.length > 0 && (
@@ -3306,7 +3342,13 @@ export const ProfileSettingsView: React.FC<{
               </div>
             )}
 
-            <div className="lindo-scroll flex-1 divide-y">
+            <div
+              className={
+                subSheet === "diagnostics"
+                  ? "flex-1 min-h-0 overflow-hidden"
+                  : "lindo-scroll flex-1 divide-y"
+              }
+            >
               {subLoading ? (
                 subSheet === "badges" ? (
                   <div className="grid grid-cols-2 gap-2.5 p-4 border-b-0">
@@ -4170,14 +4212,32 @@ export const ProfileSettingsView: React.FC<{
                     if (k === "ERROR") return warnOrErrCount;
                     return allDiagEntries.filter((e) => e.category === k).length;
                   };
-                  const formatDurationMs = (rawMs: string | undefined): string | null => {
-                    if (!rawMs) return null;
-                    const n = Number.parseInt(rawMs.replace(/ms$/i, ""), 10);
-                    if (Number.isNaN(n)) return rawMs;
-                    return n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${n}ms`;
+                  const formatDuration = (ms?: number | null): string | null => {
+                    if (typeof ms !== "number" || Number.isNaN(ms)) return null;
+                    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
                   };
-                  const parseEntryVisual = (rawSummary: string) => {
-                    const httpMatch = rawSummary
+                  const parseEntryVisual = (entry: (typeof allDiagEntries)[number]) => {
+                    if (entry.method && entry.path) {
+                      const rawPath = entry.path;
+                      const base = rawPath.split("?")[0] || "/";
+                      const query = rawPath.includes("?") ? rawPath.slice(base.length + 1) : "";
+                      const cleanPath =
+                        !query || query === "no_definitions=true"
+                          ? base
+                          : rawPath.length > 62
+                            ? `${base}?…`
+                            : rawPath;
+                      return {
+                        isHttp: true,
+                        method: entry.method,
+                        cleanPath,
+                        title: cleanPath,
+                        statusCode: typeof entry.status === "number" ? entry.status : null,
+                        latency: formatDuration(entry.durationMs),
+                        subNote: entry.note || null,
+                      };
+                    }
+                    const httpMatch = entry.summary
                       .trim()
                       .match(
                         /^(GET|POST|PUT|DELETE|PATCH|HEAD)\s+https?:\/\/linux\.do([^\s]*)\s+->\s+HTTP\s+(\d+)(?:\s*\(([^)]*)\))?$/i
@@ -4190,34 +4250,28 @@ export const ProfileSettingsView: React.FC<{
                       const cleanPath =
                         query === "no_definitions=true" || !query
                           ? base
-                          : fullPath.length > 52
+                          : fullPath.length > 62
                             ? `${base}?…`
                             : fullPath;
-                      const status = httpMatch[3];
+                      const statusCode = Number.parseInt(httpMatch[3], 10);
                       const paren = (httpMatch[4] || "").trim();
-                      const msMatch = paren.match(/(\d+ms)$/i);
-                      const latency = formatDurationMs(msMatch?.[1]);
-                      const notePart = paren
-                        .replace(/,?\s*\d+ms$/i, "")
-                        .trim();
-                      const statusBadge = notePart
-                        ? `HTTP ${status} · ${notePart
-                            .replace("站点验证挑战", "需站点验证")
-                            .replace("未授权或登录态失效", "登录态失效")}`
-                        : `HTTP ${status}`;
+                      const msMatch = paren.match(/(\d+)ms$/i);
+                      const latency = formatDuration(msMatch ? Number.parseInt(msMatch[1], 10) : null);
+                      const notePart = paren.replace(/,?\s*\d+ms$/i, "").trim();
                       return {
                         isHttp: true,
                         method,
                         cleanPath,
                         title: cleanPath,
-                        statusBadge,
+                        statusCode: Number.isNaN(statusCode) ? null : statusCode,
                         latency,
+                        subNote: notePart || null,
                       };
                     }
-                    const ipcErrMatch = rawSummary
+                    const ipcErrMatch = entry.summary
                       .trim()
                       .match(
-                        /^(GET|POST|PUT|DELETE|PATCH|HEAD)\s+https?:\/\/linux\.do([^\s]*)\s+调用异常\s*\((\d+ms)\)$/i
+                        /^(GET|POST|PUT|DELETE|PATCH|HEAD)\s+https?:\/\/linux\.do([^\s]*)\s+调用异常\s*\((\d+)ms\)$/i
                       );
                     if (ipcErrMatch) {
                       return {
@@ -4225,77 +4279,37 @@ export const ProfileSettingsView: React.FC<{
                         method: ipcErrMatch[1].toUpperCase(),
                         cleanPath: ipcErrMatch[2] || "/",
                         title: ipcErrMatch[2] || "/",
-                        statusBadge: "网络调用异常",
-                        latency: formatDurationMs(ipcErrMatch[3]),
+                        statusCode: null as number | null,
+                        latency: formatDuration(Number.parseInt(ipcErrMatch[3], 10)),
+                        subNote: entry.note || entry.detail?.split("\n")[0] || "网络调用异常",
                       };
                     }
                     return {
                       isHttp: false,
                       method: null as string | null,
                       cleanPath: null as string | null,
-                      title: rawSummary.replace(/^https?:\/\/linux\.do/i, ""),
-                      statusBadge: null as string | null,
-                      latency: null as string | null,
+                      title: entry.summary.replace(/^https?:\/\/linux\.do/i, ""),
+                      statusCode: null as number | null,
+                      latency: formatDuration(entry.durationMs),
+                      subNote: entry.note || null,
                     };
                   };
 
+                  const cooldownSecs = diagSnapshot?.rateLimitRemainMs
+                    ? Math.ceil(diagSnapshot.rateLimitRemainMs / 1000)
+                    : 0;
+
                   return (
                     <div className="flex h-full flex-col">
-                      {/* 1. 运行状态概览条 + 圆角胶囊分类筛选器（100% 遵循 Lindo 统一视觉规范） */}
-                      <div className="lindo-hairline-b shrink-0 px-5 pt-3 pb-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="text-[12px] tabular-nums" style={{ color: "var(--ink-secondary)" }}>
-                            Lindo Desktop v{updateInfo?.currentVersion || DESKTOP_APP_VERSION} · 共 {allDiagEntries.length} 条记录
-                          </span>
-
-                          <div className="flex items-center gap-2">
-                            <span
-                              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-[3px] text-[11px] font-medium"
-                              style={{
-                                backgroundColor: "var(--subtle-surface)",
-                                color: "var(--ink-secondary)",
-                              }}
-                            >
-                              <span
-                                className="h-[5.5px] w-[5.5px] rounded-full"
-                                style={{
-                                  backgroundColor: isAuthorized ? "#10B981" : "var(--ink-tertiary)",
-                                }}
-                              />
-                              <span>
-                                {isAuthorized
-                                  ? currentUser?.username
-                                    ? `已登录 · @${currentUser.username}`
-                                    : "会话已保持"
-                                  : "访客模式"}
-                              </span>
-                            </span>
-
-                            <span
-                              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-[3px] text-[11px] font-medium tabular-nums"
-                              style={{
-                                backgroundColor: "var(--subtle-surface)",
-                                color: "var(--ink-secondary)",
-                              }}
-                            >
-                              <span
-                                className="h-[5.5px] w-[5.5px] rounded-full"
-                                style={{
-                                  backgroundColor: warnOrErrCount > 0 ? "#F59E0B" : "#10B981",
-                                }}
-                              />
-                              <span>{warnOrErrCount > 0 ? `${warnOrErrCount} 条告警` : "运行平稳"}</span>
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="no-scrollbar mt-2.5 flex items-center gap-1.5 overflow-x-auto">
+                      {/* 1. 极简下划线标签栏 + 右侧无框快速检索（去胶囊堆砌，对齐 Lindo 冷静排版） */}
+                      <div className="lindo-hairline-b flex h-[38px] shrink-0 items-center justify-between gap-3 px-5">
+                        <div className="no-scrollbar flex h-full items-center gap-4 overflow-x-auto">
                           {(
                             [
                               ["ALL", "全部"],
                               ["NETWORK", "网络"],
-                              ["AUTH", "登录与验证"],
-                              ["ERROR", "仅告警"],
+                              ["AUTH", "验证"],
+                              ["ERROR", "告警"],
                               ["SYSTEM", "系统"],
                             ] as const
                           ).map(([k, label]) => {
@@ -4306,89 +4320,82 @@ export const ProfileSettingsView: React.FC<{
                                 key={k}
                                 type="button"
                                 onClick={() => setDiagFilter(k)}
-                                className="inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-[4.5px] text-[12px] transition-colors cursor-pointer"
+                                className="relative flex h-full shrink-0 items-center gap-1 text-[12.5px] transition-colors cursor-pointer"
                                 style={{
-                                  backgroundColor: active
-                                    ? "var(--active-chip-bg)"
-                                    : "var(--subtle-surface)",
-                                  border: active
-                                    ? "0.5px solid color-mix(in srgb, var(--brand-gold) 45%, transparent)"
-                                    : "0.5px solid transparent",
-                                  color: active ? "var(--active-chip-text)" : "var(--ink-secondary)",
-                                  fontWeight: active ? 600 : 400,
+                                  color: active ? "var(--ink-primary)" : "var(--ink-tertiary)",
+                                  fontWeight: active ? 500 : 400,
                                 }}
                               >
                                 <span>{label}</span>
                                 {cnt > 0 && (
+                                  <span className="text-[11px] tabular-nums opacity-65">{cnt}</span>
+                                )}
+                                {active && (
                                   <span
-                                    className="text-[11px] tabular-nums"
-                                    style={{
-                                      color: active
-                                        ? "color-mix(in srgb, var(--active-chip-text) 85%, transparent)"
-                                        : "var(--ink-tertiary)",
-                                    }}
-                                  >
-                                    {cnt}
-                                  </span>
+                                    className="absolute right-0 bottom-0 left-0 h-[1.5px] rounded-full"
+                                    style={{ backgroundColor: "var(--ink-primary)" }}
+                                  />
                                 )}
                               </button>
                             );
                           })}
                         </div>
+
+                        <div className="flex w-[164px] shrink-0 items-center gap-1.5">
+                          <LinDoIcons.Search
+                            size={12.5}
+                            className="shrink-0 opacity-55"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          />
+                          <input
+                            type="text"
+                            value={diagQuery}
+                            onChange={(e) => setDiagQuery(e.target.value)}
+                            placeholder="筛选路径或状态…"
+                            className="w-full min-w-0 bg-transparent text-[12px] outline-none placeholder:opacity-55"
+                            style={{ color: "var(--ink-primary)" }}
+                          />
+                          {diagQuery && (
+                            <button
+                              type="button"
+                              onClick={() => setDiagQuery("")}
+                              className="shrink-0 opacity-60 hover:opacity-100 cursor-pointer"
+                              style={{ color: "var(--ink-tertiary)" }}
+                            >
+                              <LinDoIcons.Close size={11} />
+                            </button>
+                          )}
+                        </div>
                       </div>
 
-                      {/* 2. 双层结构化日志列表（自动折叠连续重复项 + 清晰方法胶囊/路径截断 + 点击展开详情检视器） */}
+                      {/* 2. 极简排版日志流：零多余色块胶囊，点击任意行展开完整工程现场 */}
                       <div className="lindo-scroll flex-1 min-h-0">
                         {foldedDiagEntries.length === 0 ? (
                           <div
-                            className="flex h-full flex-col items-center justify-center gap-2.5 py-20 text-[13px]"
+                            className="flex h-full flex-col items-center justify-center py-20 text-[12.5px]"
                             style={{ color: "var(--ink-tertiary)" }}
                           >
-                            <MascotExpression expression="sleepy" sizePx={44} className="opacity-80" />
-                            <span>当前筛选下暂无诊断记录</span>
+                            <span>{diagQuery ? "没有匹配的日志记录" : "暂无运行日志"}</span>
                           </div>
                         ) : (
-                          <div className="py-1">
+                          <div>
                             {foldedDiagEntries.map(({ entry, repeatCount }, idx) => {
                               const isExpanded = expandedDiagId === entry.id;
-                              const parsed = parseEntryVisual(entry.summary);
-                              const isAuthPending =
-                                entry.level === "INFO" &&
-                                entry.category === "AUTH" &&
-                                (entry.tag === "AuthPending" ||
-                                  /^(发起|打开|已打开|正在等待|收到.*正在)/.test(entry.summary));
-                              const isAuthSuccess =
-                                entry.level === "INFO" &&
-                                entry.category === "AUTH" &&
-                                !isAuthPending;
-                              const accentColor =
+                              const parsed = parseEntryVisual(entry);
+                              const dotColor =
                                 entry.level === "ERROR"
                                   ? "var(--error-fg)"
                                   : entry.level === "WARN"
-                                    ? "#F59E0B"
-                                    : isAuthSuccess
-                                      ? "#10B981"
-                                      : "#60A5FA";
-                              const categoryLabel =
-                                entry.category === "NETWORK"
-                                  ? "网络请求"
-                                  : entry.category === "AUTH"
-                                    ? "登录与验证"
-                                    : entry.category === "ERROR"
-                                      ? "运行异常"
-                                      : "系统事件";
-                              const levelLabel =
-                                entry.level === "ERROR"
-                                  ? "异常"
-                                  : entry.level === "WARN"
-                                    ? "告警"
-                                    : isAuthPending
-                                      ? "进行中"
-                                      : isAuthSuccess
-                                        ? "已完成"
-                                        : "正常";
-                              const effectiveStatusBadge =
-                                parsed.statusBadge || (isAuthPending ? "等待回调" : null);
+                                    ? "#E5940A"
+                                    : "color-mix(in srgb, var(--ink-tertiary) 45%, transparent)";
+                              const statusColor =
+                                parsed.statusCode !== null
+                                  ? parsed.statusCode >= 500
+                                    ? "var(--error-fg)"
+                                    : parsed.statusCode >= 400
+                                      ? "#E5940A"
+                                      : "var(--ink-tertiary)"
+                                  : "var(--ink-tertiary)";
 
                               let shortTime = entry.timestampIso;
                               let fullTime = entry.timestampIso;
@@ -4413,44 +4420,50 @@ export const ProfileSettingsView: React.FC<{
                                         prev === entry.id ? null : entry.id
                                       )
                                     }
-                                    className="lindo-interactive px-5 py-3 transition-colors cursor-pointer"
+                                    className="lindo-interactive px-5 py-2.5 transition-colors cursor-pointer"
                                   >
-                                    <div className="flex items-start gap-3">
+                                    <div className="flex items-start gap-2.5">
                                       <span
-                                        className="mt-[6px] h-[6.5px] w-[6.5px] shrink-0 rounded-full"
-                                        style={{ backgroundColor: accentColor }}
+                                        className="mt-[7px] h-[5px] w-[5px] shrink-0 rounded-full"
+                                        style={{ backgroundColor: dotColor }}
                                       />
 
                                       <div className="min-w-0 flex-1">
-                                        {/* 第一行：模块分类 · 级别 + 状态胶囊 + 重复次数 / 右侧耗时 + 时间 */}
-                                        <div className="flex items-center justify-between gap-2">
-                                          <div className="flex min-w-0 items-center gap-1.5">
-                                            <span
-                                              className="shrink-0 text-[11.5px] font-semibold"
-                                              style={{ color: accentColor }}
-                                            >
-                                              {categoryLabel} · {levelLabel}
-                                            </span>
-
-                                            {effectiveStatusBadge && (
+                                        <div className="flex items-baseline justify-between gap-3">
+                                          <div className="flex min-w-0 items-baseline gap-2">
+                                            {parsed.isHttp && parsed.method ? (
+                                              <>
+                                                <span
+                                                  className="w-[34px] shrink-0 text-[11px] font-semibold"
+                                                  style={{
+                                                    fontFamily: "var(--font-mono)",
+                                                    color: "var(--ink-tertiary)",
+                                                  }}
+                                                >
+                                                  {parsed.method}
+                                                </span>
+                                                <span
+                                                  className="truncate text-[12.5px] leading-[1.45]"
+                                                  style={{
+                                                    fontFamily: "var(--font-mono)",
+                                                    color: "var(--ink-primary)",
+                                                  }}
+                                                >
+                                                  {parsed.cleanPath}
+                                                </span>
+                                              </>
+                                            ) : (
                                               <span
-                                                className="shrink-0 rounded px-1.5 py-[1px] text-[10.5px] font-medium tabular-nums"
-                                                style={{
-                                                  backgroundColor: `color-mix(in srgb, ${accentColor} 13%, transparent)`,
-                                                  color: accentColor,
-                                                }}
+                                                className="truncate text-[13px] leading-[1.45]"
+                                                style={{ color: "var(--ink-primary)" }}
                                               >
-                                                {effectiveStatusBadge}
+                                                {parsed.title}
                                               </span>
                                             )}
-
                                             {repeatCount > 1 && (
                                               <span
-                                                className="shrink-0 rounded-full px-1.5 py-[0.5px] text-[10.5px] font-semibold tabular-nums"
-                                                style={{
-                                                  backgroundColor: "var(--tonal-pill)",
-                                                  color: "var(--ink-secondary)",
-                                                }}
+                                                className="shrink-0 text-[11px] tabular-nums"
+                                                style={{ color: "var(--ink-tertiary)" }}
                                               >
                                                 ×{repeatCount}
                                               </span>
@@ -4458,67 +4471,46 @@ export const ProfileSettingsView: React.FC<{
                                           </div>
 
                                           <div
-                                            className="flex shrink-0 items-center gap-2 text-[11px] tabular-nums"
+                                            className="flex shrink-0 items-baseline gap-2.5 text-[11.5px] tabular-nums"
                                             style={{
-                                              color: "var(--ink-tertiary)",
                                               fontFamily: "var(--font-mono)",
+                                              color: "var(--ink-tertiary)",
                                             }}
                                           >
+                                            {parsed.statusCode !== null && (
+                                              <span
+                                                className="font-medium"
+                                                style={{ color: statusColor }}
+                                              >
+                                                {parsed.statusCode}
+                                              </span>
+                                            )}
                                             {parsed.latency && <span>{parsed.latency}</span>}
                                             <span title={fullTime}>{shortTime}</span>
-                                            {isExpanded ? (
-                                              <LinDoIcons.ChevronUp size={12} />
-                                            ) : (
-                                              <LinDoIcons.ChevronDown size={12} className="opacity-65" />
-                                            )}
                                           </div>
                                         </div>
 
-                                        {/* 第二行：HTTP 方法胶囊 + 干净接口路径 或 自然中文事件标题（绝不断词乱折行） */}
-                                        <div className="mt-1 flex min-w-0 items-center gap-2">
-                                          {parsed.isHttp && parsed.method ? (
-                                            <>
-                                              <span
-                                                className="shrink-0 rounded px-1.5 py-[1px] text-[10.5px] font-semibold"
-                                                style={{
-                                                  fontFamily: "var(--font-mono)",
-                                                  backgroundColor: "var(--tonal-pill)",
-                                                  color: "var(--ink-secondary)",
-                                                }}
-                                              >
-                                                {parsed.method}
-                                              </span>
-                                              <span
-                                                className="truncate text-[12.5px] leading-[1.45]"
-                                                style={{
-                                                  fontFamily: "var(--font-mono)",
-                                                  color: "var(--ink-primary)",
-                                                }}
-                                              >
-                                                {parsed.cleanPath}
-                                              </span>
-                                            </>
-                                          ) : (
-                                            <span
-                                              className="truncate text-[13px] leading-[1.45]"
-                                              style={{ color: "var(--ink-primary)" }}
-                                            >
-                                              {parsed.title}
-                                            </span>
-                                          )}
-                                        </div>
+                                        {parsed.subNote && (
+                                          <div
+                                            className="mt-0.5 truncate text-[11.5px] leading-[1.4]"
+                                            style={{
+                                              color: "var(--ink-tertiary)",
+                                              paddingLeft: parsed.isHttp && parsed.method ? "42px" : 0,
+                                            }}
+                                          >
+                                            {parsed.subNote}
+                                          </div>
+                                        )}
 
-                                        {/* 展开详情检视卡片 */}
                                         {isExpanded && (
                                           <div
                                             onClick={(e) => e.stopPropagation()}
-                                            className="mt-2.5 rounded-xl p-3"
+                                            className="mt-2 rounded-lg px-3 py-2.5"
                                             style={{
                                               backgroundColor: "var(--subtle-surface)",
-                                              border: "0.5px solid var(--hairline)",
                                             }}
                                           >
-                                            <div className="flex items-center justify-between gap-2 pb-2">
+                                            <div className="flex items-center justify-between gap-2 pb-1.5">
                                               <span
                                                 className="text-[11px] tabular-nums"
                                                 style={{
@@ -4526,7 +4518,7 @@ export const ProfileSettingsView: React.FC<{
                                                   color: "var(--ink-tertiary)",
                                                 }}
                                               >
-                                                {fullTime} · {entry.category}/{entry.tag}
+                                                {fullTime} · {entry.level} · {entry.category}/{entry.tag}
                                               </span>
                                               <button
                                                 type="button"
@@ -4535,19 +4527,16 @@ export const ProfileSettingsView: React.FC<{
                                                     entry.detail ? `\n${entry.detail}` : ""
                                                   }`;
                                                   navigator.clipboard.writeText(single);
-                                                  setToast("已复制该条记录（已脱敏）");
+                                                  setToast("已复制该条日志");
                                                 }}
-                                                className="rounded-md px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-85 cursor-pointer"
-                                                style={{
-                                                  backgroundColor: "var(--active-chip-bg)",
-                                                  color: "var(--active-chip-text)",
-                                                }}
+                                                className="text-[11px] transition-opacity hover:opacity-100 opacity-75 cursor-pointer"
+                                                style={{ color: "var(--ink-secondary)" }}
                                               >
                                                 复制单条
                                               </button>
                                             </div>
                                             <div
-                                              className="lindo-selectable text-[11.5px] leading-relaxed break-all"
+                                              className="lindo-selectable text-[11.5px] leading-[1.55] break-all"
                                               style={{
                                                 fontFamily: "var(--font-mono)",
                                                 color: "var(--ink-primary)",
@@ -4557,10 +4546,10 @@ export const ProfileSettingsView: React.FC<{
                                             </div>
                                             {entry.detail && (
                                               <pre
-                                                className="lindo-selectable mt-2 border-t pt-2 text-[11px] leading-relaxed whitespace-pre-wrap break-all"
+                                                className="lindo-selectable mt-1.5 border-t pt-1.5 text-[11px] leading-[1.6] whitespace-pre-wrap break-all"
                                                 style={{
                                                   fontFamily: "var(--font-mono)",
-                                                  borderColor: "var(--hairline)",
+                                                  borderColor: "var(--hairline-soft)",
                                                   color: "var(--ink-secondary)",
                                                 }}
                                               >
@@ -4574,8 +4563,8 @@ export const ProfileSettingsView: React.FC<{
                                   </div>
                                   {idx < foldedDiagEntries.length - 1 && (
                                     <div
-                                      className="mr-5 ml-[39px] h-[0.5px]"
-                                      style={{ backgroundColor: "var(--hairline)" }}
+                                      className="mx-5 h-[0.5px]"
+                                      style={{ backgroundColor: "var(--hairline-soft)" }}
                                     />
                                   )}
                                 </React.Fragment>
@@ -4583,6 +4572,35 @@ export const ProfileSettingsView: React.FC<{
                             })}
                           </div>
                         )}
+                      </div>
+
+                      {/* 3. 克制底栏：实时运行态摘要 + 脱敏说明（纯文本，零胶囊） */}
+                      <div
+                        className="lindo-hairline-t flex h-[30px] shrink-0 items-center justify-between gap-3 px-5 text-[11px] tabular-nums"
+                        style={{ color: "var(--ink-tertiary)" }}
+                      >
+                        <span className="truncate">
+                          {isAuthorized && currentUser?.username
+                            ? `@${currentUser.username}`
+                            : isAuthorized
+                              ? "已登录"
+                              : "访客模式"}
+                          {diagSnapshot && (
+                            <>
+                              {" · "}
+                              {diagSnapshot.hasCookieT ? "_t" : "无_t"}
+                              {" / "}
+                              {diagSnapshot.hasCfClearance ? "cf" : "无cf"}
+                              {diagSnapshot.mediaCacheEntries > 0
+                                ? ` · 缓存 ${diagSnapshot.mediaCacheEntries}`
+                                : ""}
+                            </>
+                          )}
+                          {cooldownSecs > 0 && (
+                            <span style={{ color: "#E5940A" }}> · 冷却 {cooldownSecs}s</span>
+                          )}
+                        </span>
+                        <span className="shrink-0">凭据已自动脱敏 · 保留最近 600 条</span>
                       </div>
                     </div>
                   );

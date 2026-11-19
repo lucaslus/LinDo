@@ -168,33 +168,75 @@ textarea {
   animation: lindo-shimmer-sweep 1.65s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
-/* Linux.do exclusive site visual rules (@neo square avatar, blue/gold glow, official text-clipped holographic title) */
+/* Linux.do exclusive site visual rules (@neo square avatar, blue/gold breathing glow, official text-clipped holographic title) */
+/* NOTE: Keep `contain: layout style` WITHOUT `paint` — paint containment clips both outer glow halos and negative-offset flair badges. */
 .lindo-avatar-wrap {
-  contain: layout style paint;
+  contain: layout style;
 }
 .lindo-avatar-square {
   border-radius: 11% !important;
 }
 .lindo-glow-blue {
-  box-shadow: 0 0 0 1.5px rgba(0, 174, 255, 0.72), 0 0 10px rgba(0, 174, 255, 0.28);
+  box-shadow: 0 0 0 1.5px rgba(0, 174, 255, 0.8);
 }
 .lindo-glow-gold {
-  box-shadow: 0 0 0 1.5px rgba(245, 191, 3, 0.78), 0 0 10px rgba(245, 191, 3, 0.28);
+  box-shadow: 0 0 0 1.5px rgba(245, 191, 3, 0.82);
 }
 
-/* Pause animated GIF/WebP avatar overlays & expensive Gaussian shadow blurs during active 144Hz scroll or split-pane slide;
-   static crisp CDN base avatar underneath remains 100% visible, then animation resumes seamlessly 145ms after settle! */
+/* GPU-composited breathing halo matching LINUX DO common_theme_138 & Android SmartAvatar
+   (3s ice-blue pulse for @neo / staff, 5s gold pulse for g-merchant / g-merchant2).
+   Animates ONLY transform + opacity on a dedicated layer behind the avatar for zero per-frame repaints at 120/144Hz. */
+@keyframes lindo-avatar-glow-pulse {
+  0%,
+  100% {
+    opacity: 0.42;
+    transform: scale(0.95);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+.lindo-avatar-halo {
+  will-change: transform, opacity;
+}
+.lindo-avatar-halo-blue {
+  box-shadow: 0 0 9px 1.5px rgba(0, 174, 255, 0.52), 0 0 3.5px 0.5px rgba(0, 174, 255, 0.34);
+  animation: lindo-avatar-glow-pulse 3s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.lindo-avatar-halo-gold {
+  box-shadow: 0 0 9px 1.5px rgba(245, 191, 3, 0.52), 0 0 3.5px 0.5px rgba(245, 191, 3, 0.34);
+  animation: lindo-avatar-glow-pulse 5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Pause animated GIF/WebP avatar overlays & breathing halo animations during active 144Hz scroll or split-pane slide;
+   static crisp CDN base avatar + ring remain 100% visible without flicker, then animations resume seamlessly 145ms after settle! */
 html.lindo-scrolling .lindo-avatar-anim,
-html.lindo-pane-animating .lindo-avatar-anim {
+html.lindo-pane-animating .lindo-avatar-anim,
+html.lindo-reduce-motion .lindo-avatar-anim {
   display: none !important;
 }
-html.lindo-scrolling .lindo-glow-blue,
-html.lindo-pane-animating .lindo-glow-blue {
-  box-shadow: 0 0 0 1.5px rgba(0, 174, 255, 0.72);
+html.lindo-scrolling .lindo-avatar-halo,
+html.lindo-pane-animating .lindo-avatar-halo {
+  animation-play-state: paused;
 }
-html.lindo-scrolling .lindo-glow-gold,
-html.lindo-pane-animating .lindo-glow-gold {
-  box-shadow: 0 0 0 1.5px rgba(245, 191, 3, 0.78);
+html.lindo-reduce-motion .lindo-avatar-halo {
+  animation: none;
+  opacity: 0.72;
+  transform: none;
+}
+html.lindo-reduce-motion .lindo-title-holo {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lindo-avatar-halo {
+    animation: none;
+    opacity: 0.72;
+    transform: none;
+  }
+  .lindo-title-holo {
+    animation: none;
+  }
 }
 
 /* Skip layout/paint of offscreen post floors ONLY during the 200ms split-pane collapse/expand animation

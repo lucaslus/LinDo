@@ -76,12 +76,50 @@ export interface BootstrapPayload {
   platform: "macos" | "windows" | "linux";
 }
 
+export interface SiteHttpDiag {
+  cfRay?: string | null;
+  cfMitigated?: string | null;
+  retryAfter?: string | null;
+  contentType?: string | null;
+  requestId?: string | null;
+  localCooldown?: boolean;
+  isChallenge429?: boolean;
+  paceWaitMs?: number;
+  cooldownWaitMs?: number;
+  retried?: boolean;
+  silentCfRevalidated?: boolean;
+  csrfRefreshed?: boolean;
+  guestFallback?: boolean;
+  bodyBytes?: number;
+}
+
+export interface DiagRuntimeSnapshot {
+  os: string;
+  arch: string;
+  originReady: boolean;
+  verifying: boolean;
+  bootstrapChallenged: boolean;
+  cfAttentionNotified: boolean;
+  hasCookieT: boolean;
+  hasForumSession: boolean;
+  hasCfClearance: boolean;
+  savedAccountsCount: number;
+  rateLimitRemainMs: number;
+  fgChallengeRemainMs: number;
+  bgChallengeRemainMs: number;
+  mediaCooldownRemainMs: number;
+  challenge429Streak: number;
+  mediaCacheEntries: number;
+  mediaCacheBytes: number;
+}
+
 export interface SiteHttpResponse {
   status: number;
   body: string;
   isChallenge: boolean;
   isUnauthenticated: boolean;
   rateLimitedMs?: number | null;
+  diag?: SiteHttpDiag | null;
 }
 
 export interface CategoryMeta {

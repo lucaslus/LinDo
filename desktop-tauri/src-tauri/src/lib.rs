@@ -4,7 +4,7 @@ pub mod legacy;
 #[cfg(not(target_os = "macos"))]
 pub mod win_webview_bridge;
 
-use bridge::{BridgeEngine, ForumMediaPayload, SiteHttpResponse};
+use bridge::{BridgeEngine, DiagRuntimeSnapshot, ForumMediaPayload, SiteHttpResponse};
 use futures_util::StreamExt;
 use legacy::{
     load_or_migrate_state, save_state, LocalDraftRecord, PersistedState, UserPreferences,
@@ -702,6 +702,13 @@ async fn check_app_update() -> Result<DesktopUpdateInfo, String> {
 }
 
 #[tauri::command]
+async fn get_diag_runtime_snapshot(
+    engine: State<'_, Arc<BridgeEngine>>,
+) -> Result<DiagRuntimeSnapshot, String> {
+    Ok(engine.diag_runtime_snapshot())
+}
+
+#[tauri::command]
 async fn export_diagnostic_log(file_name: String, content: String) -> Result<String, String> {
     let safe_name: String = file_name
         .chars()
@@ -1137,6 +1144,7 @@ pub fn run() {
             set_unread_badge,
             check_app_update,
             download_and_install_update,
+            get_diag_runtime_snapshot,
             export_diagnostic_log
         ]);
 
