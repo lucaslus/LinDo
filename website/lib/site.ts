@@ -9,7 +9,7 @@ export const SITE = {
   forum: "https://linux.do",
   versions: {
     android: "0.2.40",
-    desktop: "1.0.55",
+    desktop: "1.0.56",
   },
   sizes: {
     androidMb: "12",

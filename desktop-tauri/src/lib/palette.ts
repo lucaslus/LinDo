@@ -216,7 +216,6 @@ export function applyPaletteToDocument(isDark: boolean, optionKey: string, fontS
     root.style.setProperty("--ink-tertiary", "#6E7787");
     root.style.setProperty("--hairline", "rgba(255, 255, 255, 0.058)");
     root.style.setProperty("--hairline-soft", "rgba(255, 255, 255, 0.042)");
-    root.style.setProperty("--hover-floor-bg", "rgba(255, 255, 255, 0.024)");
     root.style.setProperty("--accent", opt.darkChipText);
     root.style.setProperty("--brand-gold", opt.darkChipText);
     root.style.setProperty("--logo-do", "#F59E0B");
@@ -246,7 +245,6 @@ export function applyPaletteToDocument(isDark: boolean, optionKey: string, fontS
     root.style.setProperty("--ink-tertiary", "#8A93A3");
     root.style.setProperty("--hairline", "rgba(15, 23, 42, 0.072)");
     root.style.setProperty("--hairline-soft", "rgba(15, 23, 42, 0.05)");
-    root.style.setProperty("--hover-floor-bg", "rgba(15, 23, 42, 0.022)");
     root.style.setProperty("--accent", opt.lightChipText);
     root.style.setProperty("--brand-gold", opt.key === "OFFICIAL_GOLD" ? "#B45309" : opt.lightChipText);
     root.style.setProperty("--logo-do", "#E58E09");

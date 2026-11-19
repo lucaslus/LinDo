@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type {
   BootstrapPayload,
@@ -35,17 +36,82 @@ export class SiteError extends Error {
   readonly isVerification: boolean;
   readonly isAuthRequired: boolean;
   readonly status: number;
+  readonly retryAfterMs: number;
 
   constructor(
     message: string,
-    opts: { isVerification?: boolean; isAuthRequired?: boolean; status?: number } = {}
+    opts: {
+      isVerification?: boolean;
+      isAuthRequired?: boolean;
+      status?: number;
+      retryAfterMs?: number;
+    } = {}
   ) {
     super(message);
     this.name = "SiteError";
     this.isVerification = Boolean(opts.isVerification);
     this.isAuthRequired = Boolean(opts.isAuthRequired);
     this.status = opts.status ?? 0;
+    this.retryAfterMs = opts.retryAfterMs ?? 0;
   }
+}
+
+let globalRateLimitUntilMs = 0;
+let forceNextRetryUntilMs = 0;
+const inflightGetRequests = new Map<string, Promise<SiteHttpResponse>>();
+
+/**
+ * Arms a 2s window where manual user retry buttons bypass local short-circuiting
+ * and invalidate short SWR caches so an explicit click on 「重试 / 刷新」 performs a live probe.
+ */
+export function markManualRetryIntent(): void {
+  forceNextRetryUntilMs = Date.now() + 2000;
+  shortFeedCache.clear();
+  shortNotifCache = null;
+}
+
+/**
+ * React hook for automatic rate-limit countdown & zero-touch self-recovery:
+ * Whenever a view displays a 429 rate-limit message, counts down remaining cooldown seconds
+ * and automatically triggers `onRecover()` as soon as the cooldown window completes.
+ */
+export function useRateLimitAutoRecovery(
+  errorMessage: string | null | undefined,
+  onRecover: () => void
+): number {
+  const isRateLimited = Boolean(errorMessage && errorMessage.includes("频繁"));
+  const onRecoverRef = useRef(onRecover);
+  onRecoverRef.current = onRecover;
+  const [remainSecs, setRemainSecs] = useState(0);
+
+  useEffect(() => {
+    if (!isRateLimited) {
+      setRemainSecs(0);
+      return;
+    }
+    const deadline =
+      globalRateLimitUntilMs > Date.now() + 800
+        ? globalRateLimitUntilMs
+        : Date.now() + 4000;
+    const updateTick = () => {
+      const leftMs = deadline - Date.now();
+      if (leftMs <= 0) {
+        setRemainSecs(0);
+        markManualRetryIntent();
+        onRecoverRef.current();
+        return true;
+      }
+      setRemainSecs(Math.max(1, Math.ceil(leftMs / 1000)));
+      return false;
+    };
+    if (updateTick()) return;
+    const timer = setInterval(() => {
+      if (updateTick()) clearInterval(timer);
+    }, 500);
+    return () => clearInterval(timer);
+  }, [isRateLimited, errorMessage]);
+
+  return isRateLimited ? remainSecs : 0;
 }
 
 export async function bootstrapApp(): Promise<BootstrapPayload> {
@@ -59,40 +125,80 @@ export async function siteRequest(
   headers?: Record<string, string>,
   opts?: { silentDiag?: boolean }
 ): Promise<SiteHttpResponse> {
-  const t0 = performance.now();
-  const silent = Boolean(opts?.silentDiag);
-  try {
-    const res = await invoke<SiteHttpResponse>("site_request", { url, method, form, headers });
-    const ms = Math.round(performance.now() - t0);
-    if (res.isChallenge) {
-      const isLocalGuardShortCircuit =
-        typeof res.body === "string" &&
-        (res.body.startsWith("<!--lindo-cf-challenge-->verifying") ||
-          res.body.startsWith("<!--lindo-cf-challenge-->cooldown"));
-      if (!silent && !isLocalGuardShortCircuit) {
-        diagLog("WARN", "NETWORK", "Cloudflare", `${method} ${url} -> HTTP ${res.status} (站点验证挑战, ${ms}ms)`);
-      }
-    } else if (res.isUnauthenticated) {
-      if (!silent) {
-        diagLog("WARN", "AUTH", "Session", `${method} ${url} -> HTTP ${res.status} (未授权或登录态失效, ${ms}ms)`);
-      }
-    } else if ((res.status < 200 || res.status >= 300) && !silent) {
-      diagLog(
-        "ERROR",
-        "NETWORK",
-        "HttpStatus",
-        `${method} ${url} -> HTTP ${res.status} (${ms}ms)`,
-        (res.body || "").slice(0, 360)
-      );
-    }
-    return res;
-  } catch (err: any) {
-    const ms = Math.round(performance.now() - t0);
-    if (!silent) {
-      diagLog("ERROR", "NETWORK", "BridgeIPC", `${method} ${url} 调用异常 (${ms}ms)`, String(err?.message || err));
-    }
-    throw err;
+  const isGet = method === "GET";
+  const isForceRetry = headers?.["X-LinDo-Force-Retry"] === "1";
+  const bgKey = headers?.["Discourse-Background"] === "true" ? "bg" : "fg";
+  const dedupeKey = isGet && !isForceRetry ? `${bgKey}:${url}` : null;
+
+  if (dedupeKey) {
+    const existing = inflightGetRequests.get(dedupeKey);
+    if (existing) return existing;
   }
+
+  const run = (async (): Promise<SiteHttpResponse> => {
+    const t0 = performance.now();
+    const silent = Boolean(opts?.silentDiag);
+    try {
+      const res = await invoke<SiteHttpResponse>("site_request", { url, method, form, headers });
+      const ms = Math.round(performance.now() - t0);
+      if (res.status >= 200 && res.status < 300 && !res.isChallenge) {
+        globalRateLimitUntilMs = 0;
+      } else if (res.status === 429) {
+        const waitMs = Math.max(1500, Number(res.rateLimitedMs || 3500));
+        globalRateLimitUntilMs = Math.max(globalRateLimitUntilMs, Date.now() + waitMs);
+      }
+
+      if (res.isChallenge) {
+        const isLocalGuardShortCircuit =
+          typeof res.body === "string" &&
+          (res.body.startsWith("<!--lindo-cf-challenge-->verifying") ||
+            res.body.startsWith("<!--lindo-cf-challenge-->cooldown"));
+        if (!silent && !isLocalGuardShortCircuit) {
+          diagLog("WARN", "NETWORK", "Cloudflare", `${method} ${url} -> HTTP ${res.status} (站点验证挑战, ${ms}ms)`);
+        }
+      } else if (res.isUnauthenticated) {
+        if (!silent) {
+          diagLog("WARN", "AUTH", "Session", `${method} ${url} -> HTTP ${res.status} (未授权或登录态失效, ${ms}ms)`);
+        }
+      } else if (res.status === 429) {
+        const isLocalCooldown = typeof res.body === "string" && res.body.includes('"localCooldown":true');
+        if (!silent && !isLocalCooldown) {
+          const sec = Math.ceil(Number(res.rateLimitedMs || 3000) / 1000);
+          diagLog(
+            "WARN",
+            "NETWORK",
+            "RateLimit",
+            `${method} ${url} -> HTTP 429 (限流冷却 ${sec}s 后自动恢复, ${ms}ms)`
+          );
+        }
+      } else if ((res.status < 200 || res.status >= 300) && !silent) {
+        diagLog(
+          "ERROR",
+          "NETWORK",
+          "HttpStatus",
+          `${method} ${url} -> HTTP ${res.status} (${ms}ms)`,
+          (res.body || "").slice(0, 360)
+        );
+      }
+      return res;
+    } catch (err: any) {
+      const ms = Math.round(performance.now() - t0);
+      if (!silent) {
+        diagLog("ERROR", "NETWORK", "BridgeIPC", `${method} ${url} 调用异常 (${ms}ms)`, String(err?.message || err));
+      }
+      throw err;
+    }
+  })();
+
+  if (dedupeKey) {
+    inflightGetRequests.set(dedupeKey, run);
+    run.finally(() => {
+      if (inflightGetRequests.get(dedupeKey) === run) {
+        inflightGetRequests.delete(dedupeKey);
+      }
+    });
+  }
+  return run;
 }
 
 let currentApiDarkTheme = true;
@@ -118,6 +224,11 @@ export async function siteVerify(login: boolean, isDark: boolean): Promise<boole
     login ? "已打开内置登录窗口，等待完成登录" : "已打开站点安全验证窗口，等待完成验证"
   );
   const ok = await invoke<boolean>("site_verify", { login, isDark });
+  if (ok) {
+    globalRateLimitUntilMs = 0;
+    shortFeedCache.clear();
+    shortNotifCache = null;
+  }
   diagLog(
     ok ? "INFO" : "WARN",
     "AUTH",
@@ -253,7 +364,12 @@ async function getJsonOrThrow(
   extraHeaders?: Record<string, string>
 ): Promise<any> {
   const headers: Record<string, string> = { ...(extraHeaders ?? {}) };
-  if (background) headers["Discourse-Background"] = "true";
+  if (background) {
+    headers["Discourse-Background"] = "true";
+  } else if (Date.now() < forceNextRetryUntilMs) {
+    headers["X-LinDo-Force-Retry"] = "1";
+    forceNextRetryUntilMs = 0;
+  }
   const res = await siteRequest(url, "GET", undefined, Object.keys(headers).length ? headers : undefined);
   if (res.isChallenge) {
     throw new SiteError("需要完成站点验证", { isVerification: true, status: res.status });
@@ -265,7 +381,8 @@ async function getJsonOrThrow(
     throw new SiteError("登录状态已过期，请重新登录", { isAuthRequired: true, status: res.status });
   }
   if (res.status === 429) {
-    throw new SiteError("请求较频繁，请稍后再试", { status: 429 });
+    const waitMs = Math.max(1500, Number(res.rateLimitedMs || 3500));
+    throw new SiteError("请求较频繁，请稍后再试", { status: 429, retryAfterMs: waitMs });
   }
   const data = safeJson(res.body);
   if (res.status < 200 || res.status >= 300 || !data) {
@@ -1042,6 +1159,13 @@ export async function fetchTopicFeed(params: {
     qs.push(`page=${page}`);
   }
   const url = `https://linux.do/${basePath}?${qs.join("&")}`;
+  const canUseShortCache = page === 0 && !params.background && Date.now() >= forceNextRetryUntilMs;
+  if (canUseShortCache) {
+    const hit = shortFeedCache.get(url);
+    if (hit && Date.now() - hit.ts <= SHORT_LIST_CACHE_TTL_MS) {
+      return hit.data;
+    }
+  }
 
   const data = await getJsonOrThrow(url, Boolean(params.background));
   const usersMap = new Map<number, any>();
@@ -1052,10 +1176,14 @@ export async function fetchTopicFeed(params: {
   const rawTopics: any[] = data?.topic_list?.topics ?? data?.topics ?? [];
   const topics = rawTopics.map((t) => mapTopicListEntry(t, usersMap));
   const moreUrl = data?.topic_list?.more_topics_url;
-  return {
+  const result = {
     topics,
     hasMore: Boolean(moreUrl) || rawTopics.length >= 15,
   };
+  if (page === 0 && topics.length > 0) {
+    shortFeedCache.set(url, { ts: Date.now(), data: result });
+  }
+  return result;
 }
 
 /* ==================== 4. 话题阅读器、投票、嵌套回复、小火箭助力与解答采纳 ==================== */
@@ -1229,8 +1357,14 @@ const TOPIC_DETAIL_CACHE_MAX = 28;
 const topicDetailMemoryCache = new Map<number, { ts: number; detail: TopicDetailModel }>();
 let lastTopicTrackVisitAtMs = 0;
 
+const SHORT_LIST_CACHE_TTL_MS = 12000;
+const shortFeedCache = new Map<string, { ts: number; data: { topics: TopicSummary[]; hasMore: boolean } }>();
+let shortNotifCache: { ts: number; items: NotificationItem[] } | null = null;
+
 export function clearTopicDetailCache(): void {
   topicDetailMemoryCache.clear();
+  shortFeedCache.clear();
+  shortNotifCache = null;
 }
 
 export function getCachedTopicDetail(topicId: number): TopicDetailModel | null {
@@ -1638,8 +1772,17 @@ export async function reportTopicTimings(topicId: number, postNumbers: number[])
 const CONSOLIDATED_COUNT_RE =
   /^(\d+)\s*(?:个|条|位|次)?\s*(?:新)?(?:回复|消息|用户|人|发言|赞|replies|users|messages|notifications).*$/i;
 
-export async function fetchNotifications(offset = 0): Promise<NotificationItem[]> {
+export async function fetchNotifications(offset = 0, forceRefresh = false): Promise<NotificationItem[]> {
   const cleanOffset = Math.max(0, offset);
+  if (
+    cleanOffset === 0 &&
+    !forceRefresh &&
+    Date.now() >= forceNextRetryUntilMs &&
+    shortNotifCache &&
+    Date.now() - shortNotifCache.ts <= SHORT_LIST_CACHE_TTL_MS
+  ) {
+    return shortNotifCache.items;
+  }
   // CRITICAL: Never combine `recent=true` with `offset` in Discourse (returns 400 InvalidParameters!).
   // Use `offset=${cleanOffset}&limit=60&silent=true` exactly like composeApp LinDoNetworkStack.kt line 4243!
   const data = await getJsonOrThrow(
@@ -1780,6 +1923,7 @@ export async function fetchNotifications(offset = 0): Promise<NotificationItem[]
   });
 
   if (cleanOffset === 0) {
+    shortNotifCache = { ts: Date.now(), items: parsed };
     const pageUnread = parsed.filter((x) => !x.read).length;
     if (parsed.length < 60 || pageUnread === 0) {
       setUnreadBadgeInRust(pageUnread).catch(() => {});

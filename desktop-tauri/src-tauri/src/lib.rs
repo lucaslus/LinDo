@@ -13,13 +13,14 @@ use legacy::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-#[cfg(target_os = "macos")]
-use tauri::{RunEvent, WindowEvent};
-use tauri::{AppHandle, Emitter, Manager, State, Theme};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, Theme, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
+
+static EXPLICIT_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -843,6 +844,7 @@ async fn download_and_install_update(
                 .map_err(|e| format!("启动 Windows 安装程序失败: {e}"))?;
         }
         tokio::time::sleep(std::time::Duration::from_millis(320)).await;
+        EXPLICIT_QUIT_REQUESTED.store(true, Ordering::SeqCst);
         app.exit(0);
         return Ok("launched_windows_installer".to_string());
     }
@@ -966,6 +968,10 @@ async fn download_and_install_update(
 }
 
 fn focus_main_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.show();
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -1023,9 +1029,17 @@ pub fn run() {
             let tray_menu =
                 Menu::with_items(app, &[&open_item, &new_topic_item, &refresh_item, &sep, &quit_item])?;
 
-            if let Some(icon) = app.default_window_icon().cloned() {
-                let _ = TrayIconBuilder::new()
+            #[cfg(target_os = "macos")]
+            let tray_icon_img = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))
+                .ok()
+                .or_else(|| app.default_window_icon().cloned());
+            #[cfg(not(target_os = "macos"))]
+            let tray_icon_img = app.default_window_icon().cloned();
+
+            if let Some(icon) = tray_icon_img {
+                let _ = TrayIconBuilder::with_id("main_tray")
                     .icon(icon)
+                    .icon_as_template(cfg!(target_os = "macos"))
                     .tooltip("Lindo — Linux.do 社区客户端")
                     .menu(&tray_menu)
                     .show_menu_on_left_click(false)
@@ -1040,19 +1054,24 @@ pub fn run() {
                             let _ = app.emit("lindo://tray-command", "refresh");
                         }
                         "quit_app" => {
+                            EXPLICIT_QUIT_REQUESTED.store(true, Ordering::SeqCst);
                             app.exit(0);
                         }
                         _ => {}
                     })
-                    .on_tray_icon_event(|tray, event| {
-                        if let TrayIconEvent::Click {
+                    .on_tray_icon_event(|tray, event| match event {
+                        TrayIconEvent::Click {
                             button: MouseButton::Left,
                             button_state: MouseButtonState::Up,
                             ..
-                        } = event
-                        {
+                        }
+                        | TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } => {
                             focus_main_window(tray.app_handle());
                         }
+                        _ => {}
                     })
                     .build(app);
             }
@@ -1073,13 +1092,24 @@ pub fn run() {
             });
             Ok(())
         })
-        .on_window_event(|_window, _event| {
-            #[cfg(target_os = "macos")]
-            if _window.label() == "main" {
-                if let WindowEvent::CloseRequested { api, .. } = _event {
-                    // Standard macOS native behavior: closing window hides to Dock/Tray instead of terminating process
-                    api.prevent_close();
-                    let _ = _window.hide();
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    if !EXPLICIT_QUIT_REQUESTED.load(Ordering::SeqCst) {
+                        // Keep app running in background (Tray / Dock) across macOS, Windows & Linux
+                        api.prevent_close();
+                        #[cfg(target_os = "macos")]
+                        if window.is_fullscreen().unwrap_or(false) {
+                            let _ = window.set_fullscreen(false);
+                            let win_clone = window.clone();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(620)).await;
+                                let _ = win_clone.hide();
+                            });
+                            return;
+                        }
+                        let _ = window.hide();
+                    }
                 }
             }
         })
@@ -1115,6 +1145,11 @@ pub fn run() {
         .expect("error while building Lindo Tauri application");
 
     app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { api, code, .. } => {
+            if code.is_none() && !EXPLICIT_QUIT_REQUESTED.load(Ordering::SeqCst) {
+                api.prevent_exit();
+            }
+        }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
             focus_main_window(app_handle);

@@ -32,6 +32,7 @@ import {
   getCachedTopicDetail,
   importManualCredentialInRust,
   logoutAccount,
+  markManualRetryIntent,
   openInAppForumPanel,
   recordLocalTopicVisit,
   recordReadFloorInRust,
@@ -404,8 +405,9 @@ export const App: React.FC = () => {
       lastTopicClickMsRef.current = nowClickMs;
 
       try {
-        if (!opts?.forceRefresh && prevClickMs > 0 && nowClickMs - prevClickMs < 320) {
-          await new Promise((r) => setTimeout(r, 95));
+        if (!opts?.forceRefresh && prevClickMs > 0 && nowClickMs - prevClickMs < 750) {
+          // Rapid topic skimming protection: wait 165ms; if user clicked another topic, abort BEFORE firing any network call!
+          await new Promise((r) => setTimeout(r, 165));
           if (seq !== topicReqSeqRef.current) return;
         }
         const detail = await fetchTopicDetail(topic.id, {
@@ -779,12 +781,15 @@ export const App: React.FC = () => {
     };
   }, [syncFromRustState, loadFeed, isGuestMode]);
 
-  // Load site category catalog once on entering main app (single-flight + 5-min TTL inside api.ts)
+  // Load site category catalog calmly after main feed boots (single-flight + 5-min TTL inside api.ts)
   useEffect(() => {
     if (!bootstrapped || !inMainApp) return;
-    fetchSiteCategories()
-      .then(setCategories)
-      .catch(() => {});
+    const timer = setTimeout(() => {
+      fetchSiteCategories()
+        .then(setCategories)
+        .catch(() => {});
+    }, 900);
+    return () => clearTimeout(timer);
   }, [bootstrapped, inMainApp, isAuthorized]);
 
   // Reload feed when in main app and filter/sort changes
@@ -1773,7 +1778,10 @@ export const App: React.FC = () => {
                       }}
                       onSelectTag={setSelectedTag}
                       onSelectTopic={(t, resumeFloor) => openTopic(t, { floor: resumeFloor ?? null })}
-                      onRefresh={() => loadFeed()}
+                      onRefresh={() => {
+                        markManualRetryIntent();
+                        loadFeed();
+                      }}
                       onApplyPendingNew={applyPendingNewTopicsNow}
                       onLoadMore={handleLoadMoreTopics}
                       onToggleCompact={() =>
@@ -1840,6 +1848,7 @@ export const App: React.FC = () => {
                       }
                       onBack={() => {}}
                       onRefresh={() => {
+                        markManualRetryIntent();
                         if (currentTab === "MESSAGES" && msgSummary) {
                           openMessageTopic(msgSummary, {
                             floor: msgTargetFloor,
@@ -1941,13 +1950,14 @@ export const App: React.FC = () => {
                 )}
                 showBackButton={true}
                 onBack={() => setNarrowShowingReader(false)}
-                onRefresh={() =>
+                onRefresh={() => {
+                  markManualRetryIntent();
                   openTopic(activeSummary, {
                     floor: targetFloor,
                     onlyOp: onlyOpFilter,
                     forceRefresh: true,
-                  })
-                }
+                  });
+                }}
                 onToggleOnlyOp={() =>
                   openTopic(activeSummary, {
                     onlyOp: !onlyOpFilter,

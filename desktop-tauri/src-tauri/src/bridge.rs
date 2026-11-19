@@ -394,6 +394,50 @@ struct PendingRsaGrant {
     created_at_ms: u64,
 }
 
+struct TokenBucketPacer {
+    tokens: f64,
+    capacity: f64,
+    refill_per_sec: f64,
+    last_refill: Instant,
+}
+
+impl TokenBucketPacer {
+    fn new(capacity: f64, refill_per_sec: f64) -> Self {
+        Self {
+            tokens: capacity,
+            capacity,
+            refill_per_sec,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Reserves 1 request slot using virtual-time debt so concurrent bursts are spaced smoothly
+    /// without thundering herds or holding a mutex across `.await`.
+    /// `min_floor` reserves extra headroom so background tasks yield burst tokens to foreground clicks.
+    fn reserve(&mut self, now: Instant, min_floor: f64) -> Duration {
+        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        if elapsed > 0.0 {
+            self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+            self.last_refill = now;
+        }
+        let needed_level = 1.0 + min_floor;
+        let wait_secs = if self.tokens >= needed_level {
+            0.0
+        } else {
+            ((needed_level - self.tokens) / self.refill_per_sec).min(6.5)
+        };
+        self.tokens -= 1.0;
+        Duration::from_secs_f64(wait_secs)
+    }
+
+    fn drain_on_429(&mut self, now: Instant) {
+        self.last_refill = now;
+        if self.tokens > 0.0 {
+            self.tokens = 0.0;
+        }
+    }
+}
+
 pub struct BridgeEngine {
     pub state: StdMutex<PersistedState>,
     bootstrap_lock: Mutex<()>,
@@ -404,6 +448,8 @@ pub struct BridgeEngine {
     avatar_sem: Semaphore,
     emoji_sem: Semaphore,
     media_sem: Semaphore,
+    api_pacer: StdMutex<TokenBucketPacer>,
+    media_pacer: StdMutex<TokenBucketPacer>,
     active_fg_requests: AtomicUsize,
     warmup_spawned: AtomicBool,
     inner: StdMutex<BridgeRuntime>,
@@ -478,6 +524,7 @@ struct BridgeRuntime {
     last_login_at: Option<Instant>,
     last_expiry_check: Option<Instant>,
     rate_limit_until: Option<Instant>,
+    last_429_probe_at: Option<Instant>,
     fg_challenge_until: Option<Instant>,
     bg_challenge_until: Option<Instant>,
     silent_revalidate_until: Option<Instant>,
@@ -515,12 +562,14 @@ impl BridgeEngine {
             bootstrap_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
             account_lock: RwLock::new(()),
-            fg_sem: Semaphore::new(3),
-            bg_sem: Semaphore::new(2),
-            // 3-lane image concurrency gate (aligned with xuemk/Fluxdo): AVATAR=3, MEDIA=4, EMOJI=8
-            avatar_sem: Semaphore::new(3),
-            emoji_sem: Semaphore::new(8),
-            media_sem: Semaphore::new(4),
+            fg_sem: Semaphore::new(2),
+            bg_sem: Semaphore::new(1),
+            // Conservative 3-lane media concurrency + token-bucket pacer so same-origin `/uploads/` never starve or 429 JSON APIs
+            avatar_sem: Semaphore::new(2),
+            emoji_sem: Semaphore::new(4),
+            media_sem: Semaphore::new(2),
+            api_pacer: StdMutex::new(TokenBucketPacer::new(5.0, 3.2)),
+            media_pacer: StdMutex::new(TokenBucketPacer::new(3.0, 5.2)),
             active_fg_requests: AtomicUsize::new(0),
             warmup_spawned: AtomicBool::new(false),
             inner: StdMutex::new(BridgeRuntime {
@@ -533,6 +582,7 @@ impl BridgeEngine {
                 last_login_at: None,
                 last_expiry_check: None,
                 rate_limit_until: None,
+                last_429_probe_at: None,
                 fg_challenge_until: None,
                 bg_challenge_until: None,
                 silent_revalidate_until: None,
@@ -1392,9 +1442,14 @@ impl BridgeEngine {
         );
         let mut is_background = false;
         let mut expects_html = false;
+        let mut force_retry = false;
         if let Some(h) = headers {
             for (k, v) in h {
                 let lower = k.to_lowercase();
+                if lower == "x-lindo-force-retry" {
+                    force_retry = v == "1" || v.eq_ignore_ascii_case("true");
+                    continue;
+                }
                 if lower == "discourse-background" && v == "true" {
                     is_background = true;
                 }
@@ -1409,8 +1464,9 @@ impl BridgeEngine {
             }
         }
 
+        let mut pending_cooldown_wait: Option<Duration> = None;
         {
-            let rt = self.inner.lock().unwrap();
+            let mut rt = self.inner.lock().unwrap();
             if !in_verification {
                 if rt.verifying {
                     return Ok(SiteHttpResponse {
@@ -1438,18 +1494,38 @@ impl BridgeEngine {
                     }
                 }
                 if let Some(until) = rt.rate_limit_until {
-                    if Instant::now() < until {
-                        let remain = until.saturating_duration_since(Instant::now()).as_millis() as u64;
-                        return Ok(SiteHttpResponse {
-                            status: 429,
-                            body: r#"{"errors":["请求较频繁，请稍后再试"]}"#.to_string(),
-                            is_challenge: false,
-                            is_unauthenticated: false,
-                            rate_limited_ms: Some(remain),
-                        });
+                    let now = Instant::now();
+                    if now < until {
+                        let remain_dur = until.saturating_duration_since(now);
+                        let remain_ms = remain_dur.as_millis() as u64;
+                        let can_force_probe = !is_background
+                            && force_retry
+                            && rt
+                                .last_429_probe_at
+                                .map(|t| now.saturating_duration_since(t) >= Duration::from_millis(1800))
+                                .unwrap_or(true);
+                        if can_force_probe {
+                            rt.last_429_probe_at = Some(now);
+                        } else if !is_background && remain_ms <= 6500 {
+                            // Short rate-limit window: hold quietly in normal Loading state & auto-dispatch once cooldown ends!
+                            pending_cooldown_wait = Some(remain_dur);
+                        } else {
+                            return Ok(SiteHttpResponse {
+                                status: 429,
+                                body: r#"{"errors":["请求较频繁，请稍后再试"],"localCooldown":true}"#
+                                    .to_string(),
+                                is_challenge: false,
+                                is_unauthenticated: false,
+                                rate_limited_ms: Some(remain_ms),
+                            });
+                        }
                     }
                 }
             }
+        }
+
+        if let Some(wait_dur) = pending_cooldown_wait {
+            tokio::time::sleep(wait_dur).await;
         }
 
         let _permit = if in_verification {
@@ -1464,6 +1540,28 @@ impl BridgeEngine {
         } else {
             None
         };
+
+        // Smooth Token-Bucket Pacer: foreground calls consume burst immediately, sustained bursts glide at ~312ms spacing,
+        // and background calls yield extra headroom whenever foreground activity is present.
+        if !in_verification {
+            if is_background && self.active_fg_requests.load(Ordering::Relaxed) > 0 {
+                tokio::time::sleep(Duration::from_millis(240)).await;
+            }
+            let pace_wait = {
+                let min_floor = if is_background || url.contains("/topics/timings") {
+                    1.6
+                } else {
+                    0.0
+                };
+                self.api_pacer
+                    .lock()
+                    .unwrap()
+                    .reserve(Instant::now(), min_floor)
+            };
+            if !pace_wait.is_zero() {
+                tokio::time::sleep(pace_wait).await;
+            }
+        }
 
         if !in_verification {
             self.ensure_ready(false).await?;
@@ -1689,10 +1787,10 @@ impl BridgeEngine {
             return Err(format!("网络请求超时或中断: {net_err}"));
         }
 
-        // First-strike silent self-healing (aligned with xuemk/Fluxdo):
-        // 1. On isolated foreground GET 429 without Retry-After, wait 850ms and retry once.
-        // 2. On foreground 403/503 CF challenge (both GET and edge-blocked POST like Boost/Like, which never reached Discourse!),
-        //    attempt single-flight silent `/challenge` revalidation first; if non-interactive JS challenge clears, refresh CSRF & replay seamlessly!
+        // First-strike silent CF self-healing:
+        // On foreground 403/503 CF challenge (both GET and edge-blocked POST like Boost/Like, which never reached Discourse!),
+        // attempt single-flight silent `/challenge` revalidation first; if non-interactive JS challenge clears, refresh CSRF & replay seamlessly!
+        // NOTE: Never blind-retry HTTP 429 after 850ms — immediate double-taps refresh WAF penalty windows and escalate cooldowns!
         if !in_verification && !is_background && !is_timings_req && !self.inner.lock().unwrap().verifying {
             let first_status = eval_res.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
             let first_cf = eval_res.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
@@ -1700,19 +1798,7 @@ impl BridgeEngine {
             let first_is_cf_challenge =
                 first_status != 429 && (first_cf == "challenge" || Self::looks_like_challenge(first_body));
 
-            if idempotent && first_status == 429 && first_cf != "challenge" && eval_res.get("retryAfter").is_none() {
-                tokio::time::sleep(Duration::from_millis(850)).await;
-                if !self.inner.lock().unwrap().verifying {
-                    if let Ok(second_res) = native_call("evaluate", json!({ "script": script }), 16).await {
-                        if second_res.is_object()
-                            && second_res.get("originLost").and_then(|v| v.as_bool()) != Some(true)
-                            && second_res.get("netErr").is_none()
-                        {
-                            eval_res = second_res;
-                        }
-                    }
-                }
-            } else if first_is_cf_challenge && !url.contains("/session/otp/") {
+            if first_is_cf_challenge && !url.contains("/session/otp/") {
                 let carried_cf = {
                     let raw = self.state.lock().unwrap().raw_cookies.clone();
                     Self::parse_cookie_map(&raw).remove("cf_clearance")
@@ -1822,16 +1908,21 @@ impl BridgeEngine {
                     });
                 }
             }
-        } else if (200..300).contains(&status) && !is_background {
+        } else if (200..300).contains(&status) {
             let clear_banner = {
                 let mut rt = self.inner.lock().unwrap();
-                rt.fg_challenge_until = None;
-                rt.bg_challenge_until = None;
-                rt.bootstrap_challenged = false;
+                rt.rate_limit_until = None;
                 rt.challenge_429_streak = 0;
-                if rt.cf_attention_notified {
-                    rt.cf_attention_notified = false;
-                    true
+                if !is_background {
+                    rt.fg_challenge_until = None;
+                    rt.bg_challenge_until = None;
+                    rt.bootstrap_challenged = false;
+                    if rt.cf_attention_notified {
+                        rt.cf_attention_notified = false;
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
@@ -1839,13 +1930,15 @@ impl BridgeEngine {
             if clear_banner {
                 let _ = app.emit("lindo://cf-attention-needed", false);
             }
-            let live_cf = {
-                let raw = self.state.lock().unwrap().raw_cookies.clone();
-                Self::parse_cookie_map(&raw).remove("cf_clearance")
-            };
-            if let Some(cf_val) = live_cf {
-                let ts = now_epoch_ms();
-                self.cf_authority.lock().unwrap().confirm_healthy(&cf_val, ts);
+            if !is_background {
+                let live_cf = {
+                    let raw = self.state.lock().unwrap().raw_cookies.clone();
+                    Self::parse_cookie_map(&raw).remove("cf_clearance")
+                };
+                if let Some(cf_val) = live_cf {
+                    let ts = now_epoch_ms();
+                    self.cf_authority.lock().unwrap().confirm_healthy(&cf_val, ts);
+                }
             }
         }
         if status == 429 {
@@ -1855,29 +1948,34 @@ impl BridgeEngine {
                 .and_then(|s| s.trim().parse::<u64>().ok());
             // `/topics/timings` is a discardable background stat: never lock out main app browsing on timings 429!
             if !is_timings_req {
+                let now = Instant::now();
+                self.api_pacer.lock().unwrap().drain_on_429(now);
                 let secs = if is_challenge_429 {
                     let step_secs = {
                         let mut rt = self.inner.lock().unwrap();
-                        let now = Instant::now();
                         if rt
                             .last_challenge_429_at
-                            .map(|t| now.duration_since(t) > Duration::from_secs(180))
+                            .map(|t| now.duration_since(t) > Duration::from_secs(90))
                             .unwrap_or(true)
                         {
                             rt.challenge_429_streak = 0;
                         }
                         rt.last_challenge_429_at = Some(now);
-                        let steps = [12u64, 24u64, 40u64];
+                        let steps = [5u64, 9u64, 15u64];
                         let idx = (rt.challenge_429_streak as usize).min(steps.len() - 1);
                         rt.challenge_429_streak = rt.challenge_429_streak.saturating_add(1);
                         steps[idx]
                     };
-                    retry_after_secs.unwrap_or(step_secs).max(step_secs).clamp(6, 120)
+                    retry_after_secs.unwrap_or(step_secs).clamp(3, 45)
                 } else {
-                    retry_after_secs.unwrap_or(8).clamp(2, 120)
+                    retry_after_secs.unwrap_or(3).clamp(2, 45)
                 };
                 let dur = Duration::from_secs(secs);
-                self.inner.lock().unwrap().rate_limit_until = Some(Instant::now() + dur);
+                {
+                    let mut rt = self.inner.lock().unwrap();
+                    rt.rate_limit_until = Some(now + dur);
+                    rt.last_429_probe_at = Some(now);
+                }
                 rate_limited_ms = Some(dur.as_millis() as u64);
 
                 // If 429 rate-challenge occurred while we held zero `cf_clearance`, schedule a quiet prewarm after cooldown
@@ -2241,11 +2339,11 @@ impl BridgeEngine {
         }
         // Yield politely while foreground JSON API calls are active so subresource image `fetch()` never spikes Cloudflare burst counters
         let mut waited_ms = 0u64;
-        while waited_ms < 240 && self.active_fg_requests.load(Ordering::Relaxed) > 0 {
+        while waited_ms < 560 && self.active_fg_requests.load(Ordering::Relaxed) > 0 {
             tokio::time::sleep(Duration::from_millis(80)).await;
             waited_ms += 80;
         }
-        // 3-lane image concurrency gate (aligned with xuemk/Fluxdo): AVATAR=3, MEDIA=4, EMOJI=8
+        // 3-lane image concurrency gate + smooth media pacer
         let lower_url = clean_url.to_ascii_lowercase();
         let is_emoji = lower_url.contains("/images/emoji/") || lower_url.contains("/svg-sprite/");
         let is_avatar = lower_url.contains("/user_avatar/") || lower_url.contains("/letter_avatar");
@@ -2257,6 +2355,19 @@ impl BridgeEngine {
             &self.media_sem
         };
         let _permit = sem.acquire().await.ok();
+        if !is_emoji {
+            let pace_wait = {
+                let floor = if self.active_fg_requests.load(Ordering::Relaxed) > 0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                self.media_pacer.lock().unwrap().reserve(Instant::now(), floor)
+            };
+            if !pace_wait.is_zero() {
+                tokio::time::sleep(pace_wait).await;
+            }
+        }
         self.ensure_ready(false).await?;
         if self.inner.lock().unwrap().bootstrap_challenged {
             return Err("Site verification required".to_string());
@@ -4072,5 +4183,28 @@ mod tests {
         let decoded = BridgeEngine::url_decode(&cgi_escaped);
         let plain = crate::crypto_rsa::decrypt_rsa_pkcs1v15(&priv_b64, &decoded).unwrap();
         assert_eq!(plain, raw_json);
+    }
+
+    #[test]
+    fn token_bucket_pacer_allows_initial_burst_and_spaces_sustained_load() {
+        let t0 = Instant::now();
+        let mut pacer = TokenBucketPacer::new(5.0, 4.0); // 250ms per token after burst of 5
+        for _ in 0..5 {
+            assert_eq!(pacer.reserve(t0, 0.0), Duration::ZERO);
+        }
+        // 6th and 7th concurrent arrivals get spaced smoothly without thundering herd
+        let w6 = pacer.reserve(t0, 0.0);
+        let w7 = pacer.reserve(t0, 0.0);
+        assert!(w6 >= Duration::from_millis(240) && w6 <= Duration::from_millis(260));
+        assert!(w7 >= Duration::from_millis(490) && w7 <= Duration::from_millis(510));
+
+        // After 2 seconds idle, burst refills cleanly up to capacity
+        let t1 = t0 + Duration::from_secs(2);
+        assert_eq!(pacer.reserve(t1, 0.0), Duration::ZERO);
+
+        // On 429, burst tokens are drained so recovery ramps up gently
+        pacer.drain_on_429(t1);
+        let w_after_429 = pacer.reserve(t1, 0.0);
+        assert!(w_after_429 >= Duration::from_millis(240));
     }
 }

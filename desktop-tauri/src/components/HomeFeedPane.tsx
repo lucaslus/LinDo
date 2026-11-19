@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { CategoryMeta, FeedSort, TopPeriod, TopicSummary, UserProfile } from "../lib/types";
-import { handleTitlebarMouseDown } from "../lib/api";
+import {
+  handleTitlebarMouseDown,
+  markManualRetryIntent,
+  useRateLimitAutoRecovery,
+} from "../lib/api";
 import {
   formatCompactCount,
   formatRelativeTime,
@@ -69,6 +73,7 @@ const TOP_PERIODS: Array<{ key: TopPeriod; label: string }> = [
 interface FeedTopicRowProps {
   topic: TopicSummary;
   selected: boolean;
+  locatedFlash: boolean;
   hideBottomDivider: boolean;
   isCompact: boolean;
   isReadDimmed: boolean;
@@ -82,6 +87,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
   ({
     topic,
     selected,
+    locatedFlash,
     hideBottomDivider,
     isCompact,
     isReadDimmed,
@@ -101,6 +107,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
     return (
       <>
         <div
+          data-topic-id={topic.id}
           onClick={() => onSelectTopic(topic)}
           role="button"
           tabIndex={0}
@@ -110,7 +117,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
               onSelectTopic(topic);
             }
           }}
-          className={`lindo-interactive flex text-left ${
+          className={`cursor-pointer flex text-left ${
             isCompact
               ? "mx-2 my-[1px] items-center gap-2.5 rounded-lg px-2.5 py-2"
               : "mx-2.5 my-[2px] items-start gap-3 rounded-xl px-3 py-[13px]"
@@ -119,7 +126,9 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
             selected
               ? {
                   backgroundColor: "var(--selected-card-bg)",
-                  boxShadow: "inset 0 0 0 0.5px var(--selected-card-border)",
+                  boxShadow: locatedFlash
+                    ? "inset 0 0 0 1px var(--brand-gold)"
+                    : "inset 0 0 0 0.5px var(--selected-card-border)",
                 }
               : undefined
           }
@@ -162,7 +171,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
                   )}
                   {isUnread && (
                     <span
-                      className="ml-0.5 h-[5.5px] w-[5.5px] shrink-0 rounded-full"
+                      className="ml-0.5 h-[5px] w-[5px] shrink-0 rounded-full opacity-75"
                       style={{ backgroundColor: "var(--brand-gold)" }}
                     />
                   )}
@@ -241,7 +250,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
                 )}
                 {isUnread && (
                   <span
-                    className="ml-1.5 inline-block h-[6px] w-[6px] rounded-full align-middle"
+                    className="ml-1.5 inline-block h-[5.5px] w-[5.5px] rounded-full align-middle opacity-75"
                     style={{ backgroundColor: "var(--brand-gold)" }}
                   />
                 )}
@@ -356,6 +365,9 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
   const [catDrawerOpen, setCatDrawerOpen] = useState(false);
   const [focusedParentCatId, setFocusedParentCatId] = useState<number | null>(null);
   const [pinnedExpanded, setPinnedExpanded] = useState(false);
+  const [isSelectedOffscreen, setIsSelectedOffscreen] = useState(false);
+  const [locatedFlashId, setLocatedFlashId] = useState<number | null>(null);
+  const locateFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
@@ -420,8 +432,89 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
     return { pinnedTopics: pinned, regularTopics: regular };
   }, [topics, selectedCategoryId, selectedTag, currentSort]);
 
+  const selectedInList = useMemo(
+    () => selectedTopicId !== null && topics.some((t) => t.id === selectedTopicId),
+    [topics, selectedTopicId]
+  );
+
+  // Zero-jank IntersectionObserver: tracks ONLY whether the single selected topic row is visible in the viewport (0 scroll listeners!)
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root || !selectedTopicId || !selectedInList || isLoading) {
+      setIsSelectedOffscreen(false);
+      return;
+    }
+    const isCollapsedPinned =
+      !pinnedExpanded && pinnedTopics.some((p) => p.id === selectedTopicId);
+    const targetEl = isCollapsedPinned
+      ? root.querySelector<HTMLElement>('[data-pinned-bar="1"]')
+      : root.querySelector<HTMLElement>(`[data-topic-id="${selectedTopicId}"]`);
+    if (!targetEl) {
+      setIsSelectedOffscreen(false);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry) {
+          setIsSelectedOffscreen(!entry.isIntersecting);
+        }
+      },
+      { root, threshold: 0.15 }
+    );
+    observer.observe(targetEl);
+    return () => observer.disconnect();
+  }, [selectedTopicId, selectedInList, isLoading, isCompact, pinnedExpanded, pinnedTopics, regularTopics.length]);
+
+  useEffect(() => {
+    return () => {
+      if (locateFlashTimerRef.current) clearTimeout(locateFlashTimerRef.current);
+    };
+  }, []);
+
+  const handleLocateSelectedTopic = () => {
+    const root = scrollRef.current;
+    if (!root || !selectedTopicId) return;
+
+    const triggerFlash = () => {
+      setLocatedFlashId(selectedTopicId);
+      if (locateFlashTimerRef.current) clearTimeout(locateFlashTimerRef.current);
+      locateFlashTimerRef.current = setTimeout(() => {
+        setLocatedFlashId((cur) => (cur === selectedTopicId ? null : cur));
+      }, 950);
+    };
+
+    const inPinned = pinnedTopics.some((p) => p.id === selectedTopicId);
+    if (inPinned && !pinnedExpanded) {
+      if (pinnedTopics[0]?.id !== selectedTopicId) {
+        setPinnedExpanded(true);
+        requestAnimationFrame(() => {
+          root
+            .querySelector<HTMLElement>(`[data-topic-id="${selectedTopicId}"]`)
+            ?.scrollIntoView({ behavior: "smooth", block: "center" });
+          triggerFlash();
+        });
+      } else {
+        root.scrollTo({ top: 0, behavior: "smooth" });
+        triggerFlash();
+      }
+      return;
+    }
+
+    const el = root.querySelector<HTMLElement>(`[data-topic-id="${selectedTopicId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      triggerFlash();
+    }
+  };
+
   const isVerifyError = (msg: string | null) =>
     Boolean(msg && (msg.includes("验证") || msg.includes("challenge")));
+
+  const feedRetrySecs = useRateLimitAutoRecovery(
+    topics.length === 0 ? errorMessage : null,
+    onRefresh
+  );
 
   return (
     <section
@@ -842,11 +935,20 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
             <div className="flex h-full flex-col items-center justify-center px-6 text-center">
               <MascotExpression expression="surprised" sizePx={58} className="mb-3 opacity-95" />
               <p className="text-[13.5px]" style={{ color: "var(--ink-secondary)" }}>
-                {errorMessage}
+                {feedRetrySecs > 0
+                  ? `请求较频繁，${feedRetrySecs} 秒后自动恢复…`
+                  : errorMessage}
               </p>
               <button
                 type="button"
-                onClick={isVerifyError(errorMessage) ? onTriggerVerify : onRefresh}
+                onClick={() => {
+                  if (isVerifyError(errorMessage)) {
+                    onTriggerVerify();
+                  } else {
+                    markManualRetryIntent();
+                    onRefresh();
+                  }
+                }}
                 className="mt-3.5 rounded-full px-4 py-1.5 text-[12.5px] font-semibold cursor-pointer transition-opacity hover:opacity-90"
                 style={{
                   backgroundColor: "var(--publish-btn-bg)",
@@ -863,6 +965,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                 <div className="mx-3 mt-1.5 mb-1.5">
                   {!pinnedExpanded ? (
                     <div
+                      data-pinned-bar="1"
                       className="flex items-center gap-2 rounded-[9px] px-2.5 py-[7px]"
                       style={{
                         backgroundColor: "var(--subtle-surface)",
@@ -935,8 +1038,9 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                             )}
                             <button
                               type="button"
+                              data-topic-id={pinned.id}
                               onClick={() => onSelectTopic(pinned)}
-                              className="lindo-interactive flex w-full items-center gap-2 px-3 py-2 text-left"
+                              className="cursor-pointer flex w-full items-center gap-2 px-3 py-2 text-left"
                               style={{
                                 backgroundColor: selected
                                   ? "var(--selected-card-bg)"
@@ -1006,6 +1110,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                     key={topic.id}
                     topic={topic}
                     selected={selected}
+                    locatedFlash={locatedFlashId === topic.id}
                     hideBottomDivider={hideBottomDivider}
                     isCompact={isCompact}
                     isReadDimmed={isReadDimmed}
@@ -1048,6 +1153,31 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
             </div>
           )}
         </div>
+
+        {/* 右下角轻量「定位到正在阅读的话题」悬浮小按钮（仅当已选帖子滑出视口时自动浮现，滚回后自动消失） */}
+        {selectedInList && isSelectedOffscreen && (
+          <button
+            type="button"
+            onClick={handleLocateSelectedTopic}
+            title="定位到正在阅读的话题"
+            aria-label="定位到正在阅读的话题"
+            className="lindo-interactive absolute right-3.5 bottom-3.5 z-20 flex h-8 w-8 items-center justify-center rounded-full shadow-lg active:scale-95"
+            style={{
+              backgroundColor: "var(--subtle-surface)",
+              border: "0.5px solid color-mix(in srgb, var(--brand-gold) 36%, var(--hairline))",
+              color: "var(--ink-secondary)",
+            }}
+          >
+            <svg width={15.5} height={15.5} viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="6.8" stroke="currentColor" strokeWidth="1.75" />
+              <line x1="12" y1="2.4" x2="12" y2="5.4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+              <line x1="12" y1="18.6" x2="12" y2="21.6" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+              <line x1="2.4" y1="12" x2="5.4" y2="12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+              <line x1="18.6" y1="12" x2="21.6" y2="12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+              <circle cx="12" cy="12" r="2.3" fill="var(--brand-gold)" />
+            </svg>
+          </button>
+        )}
       </div>
     </section>
   );

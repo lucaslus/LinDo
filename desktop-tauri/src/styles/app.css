@@ -37,7 +37,6 @@
   --ink-tertiary: #6e7787;
   --hairline: rgba(255, 255, 255, 0.058);
   --hairline-soft: rgba(255, 255, 255, 0.042);
-  --hover-floor-bg: rgba(255, 255, 255, 0.024);
   --accent: #fcd34d;
   --brand-gold: #fcd34d;
   --logo-do: #f59e0b;
@@ -307,10 +306,9 @@ a:focus-visible,
   box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--brand-gold) 72%, transparent);
 }
 
-/* Calm interactive utility classes */
+/* Instant zero-lag interactive controls (toolbar icons, menu items, pills — never used on scrollable list cards) */
 .lindo-interactive {
   cursor: pointer;
-  transition: background-color 110ms ease, color 110ms ease, border-color 110ms ease, opacity 110ms ease;
 }
 .lindo-interactive:hover {
   background-color: var(--hover-overlay);
@@ -320,20 +318,11 @@ a:focus-visible,
 }
 
 /* Eliminate stationary-cursor :hover transition repaint churn during active 144Hz scrolling */
-html.lindo-scrolling .lindo-interactive,
-html.lindo-scrolling .lindo-reply-floor {
+html.lindo-scrolling .lindo-interactive {
   transition: none !important;
 }
-html.lindo-scrolling .lindo-interactive:hover:not(:active),
-html.lindo-scrolling .lindo-reply-floor:hover {
+html.lindo-scrolling .lindo-interactive:hover:not(:active) {
   background-color: transparent;
-}
-
-.lindo-reply-floor {
-  transition: background-color 120ms ease;
-}
-.lindo-reply-floor:hover {
-  background-color: var(--hover-floor-bg);
 }
 
 /*Mathematically concentric GPU rotation (zero eccentric wobble on Retina displays) */
@@ -367,9 +356,15 @@ html.lindo-scrolling .lindo-reply-floor:hover {
   -webkit-user-select: text;
   font-size: calc(15px * var(--font-scale));
   font-size: round(nearest, calc(15px * var(--font-scale)), 0.5px);
-  line-height: 1.72;
+  line-height: 1.66;
   color: var(--ink-primary);
   word-break: break-word;
+}
+
+.lindo-cooked-reply {
+  font-size: calc(14.5px * var(--font-scale));
+  font-size: round(nearest, calc(14.5px * var(--font-scale)), 0.5px);
+  line-height: 1.6;
 }
 
 /* Global sp-style typography scaling (aligned 1:1 with Android LocalDensity.fontScale: scales all text sizes across Feed, Reader, Messages, Discover, Composer & Settings while keeping dp layout spacing/chrome rock-solid, snapped to 0.5px Retina device pixels) */
@@ -382,6 +377,7 @@ html.lindo-scrolling .lindo-reply-floor:hover {
 .text-\[10\.5px\] { font-size: calc(10.5px * var(--font-scale)); font-size: round(nearest, calc(10.5px * var(--font-scale)), 0.5px); }
 .text-\[10\.8px\] { font-size: calc(10.8px * var(--font-scale)); font-size: round(nearest, calc(10.8px * var(--font-scale)), 0.5px); }
 .text-\[11px\] { font-size: calc(11px * var(--font-scale)); font-size: round(nearest, calc(11px * var(--font-scale)), 0.5px); }
+.text-\[11\.2px\] { font-size: calc(11.2px * var(--font-scale)); font-size: round(nearest, calc(11.2px * var(--font-scale)), 0.5px); }
 .text-\[11\.5px\] { font-size: calc(11.5px * var(--font-scale)); font-size: round(nearest, calc(11.5px * var(--font-scale)), 0.5px); }
 .text-\[11\.8px\] { font-size: calc(11.8px * var(--font-scale)); font-size: round(nearest, calc(11.8px * var(--font-scale)), 0.5px); }
 .text-\[12px\] { font-size: calc(12px * var(--font-scale)); font-size: round(nearest, calc(12px * var(--font-scale)), 0.5px); }
@@ -409,7 +405,10 @@ html.lindo-scrolling .lindo-reply-floor:hover {
 .text-\[24px\] { font-size: calc(24px * var(--font-scale)); font-size: round(nearest, calc(24px * var(--font-scale)), 0.5px); }
 
 .lindo-cooked p {
-  margin: 0.65em 0;
+  margin: 0.5em 0;
+}
+.lindo-cooked-reply p {
+  margin: 0.42em 0;
 }
 .lindo-cooked p:first-child {
   margin-top: 0;
@@ -521,11 +520,11 @@ html.lindo-scrolling .lindo-reply-floor:hover {
 .lindo-cooked blockquote,
 .lindo-cooked aside.quote,
 .lindo-cooked .d-callout {
-  margin: 0.75em 0;
-  padding: 0.65em 0.95em;
-  border-left: 3px solid color-mix(in srgb, var(--brand-gold) 65%, var(--hairline));
+  margin: 0.55em 0;
+  padding: 0.5em 0.85em;
+  border-left: 2.5px solid color-mix(in srgb, var(--brand-gold) 65%, var(--hairline));
   background: color-mix(in srgb, var(--subtle-surface) 78%, transparent);
-  border-radius: 0 9px 9px 0;
+  border-radius: 0 8px 8px 0;
   color: var(--ink-secondary);
 }
 

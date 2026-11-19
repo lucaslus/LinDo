@@ -199,7 +199,7 @@ function getSharedCookedObserver(): IntersectionObserver | null {
           }
         }
       },
-      { rootMargin: "900px 0px" }
+      { rootMargin: "220px 0px" }
     );
   }
   return sharedCookedObserver;

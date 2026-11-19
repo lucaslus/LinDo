@@ -48,6 +48,8 @@ import {
   fetchConnectTrustLevelReport,
   fetchNotifications,
   fetchPrivateMessages,
+  markManualRetryIntent,
+  useRateLimitAutoRecovery,
   fetchReadHistoryTopics,
   fetchSiteBadges,
   fetchTopicFeed,
@@ -1174,7 +1176,7 @@ export const DiscoverView: React.FC<{
                   key={t.id}
                   type="button"
                   onClick={() => onSelectTopic(t)}
-                  className="lindo-interactive flex w-full items-center gap-3 px-4 py-3 text-left"
+                  className="cursor-pointer flex w-full items-center gap-3 px-4 py-3 text-left"
                 >
                   <span
                     className="w-5 shrink-0 text-center text-[13px] font-extrabold tabular-nums"
@@ -1303,6 +1305,8 @@ export const MessagesView: React.FC<{
   const [pmAttempted, setPmAttempted] = useState(false);
   const [pmSending, setPmSending] = useState(false);
   const [pmFeedback, setPmFeedback] = useState<string | null>(null);
+  const [isMsgSelectedOffscreen, setIsMsgSelectedOffscreen] = useState(false);
+  const msgScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (initialComposeRecipient) {
@@ -1312,12 +1316,12 @@ export const MessagesView: React.FC<{
     }
   }, [initialComposeRecipient, onConsumeInitialRecipient]);
 
-  const loadNotifications = async () => {
+  const loadNotifications = async (forceRefresh = false) => {
     if (!isAuthorized) return;
     setLoading(true);
     setLoadError(null);
     try {
-      const list = await fetchNotifications(0);
+      const list = await fetchNotifications(0, forceRefresh);
       setItems(list);
       setHasMoreNotifs(list.length >= 55);
     } catch (err: any) {
@@ -1366,9 +1370,14 @@ export const MessagesView: React.FC<{
     return () => clearTimeout(timer);
   }, [pmActionNotice]);
 
+  const msgRetrySecs = useRateLimitAutoRecovery(loadError, () => {
+    if (subTab === "PM") void loadPms(pmBox);
+    else if (subTab === "NOTIFICATIONS") void loadNotifications(true);
+  });
+
   useEffect(() => {
     if (subTab === "PM") loadPms(pmBox);
-    else if (subTab === "NOTIFICATIONS") loadNotifications();
+    else if (subTab === "NOTIFICATIONS") loadNotifications(false);
   }, [isAuthorized, subTab, pmBox, currentUser?.username, pmRefreshNonce]);
 
   const filteredItems = items.filter((n) => {
@@ -1387,9 +1396,38 @@ export const MessagesView: React.FC<{
     return true;
   });
 
+  const msgSelectedInList =
+    selectedTopicId !== null &&
+    subTab !== "COMPOSE_PM" &&
+    (subTab === "PM"
+      ? pmList.some((pm) => pm.id === selectedTopicId)
+      : filteredItems.some((n) => n.topicId === selectedTopicId));
+
+  useEffect(() => {
+    const root = msgScrollRef.current;
+    if (!root || !selectedTopicId || !msgSelectedInList || loading) {
+      setIsMsgSelectedOffscreen(false);
+      return;
+    }
+    const targetEl = root.querySelector<HTMLElement>(`[data-msg-topic-id="${selectedTopicId}"]`);
+    if (!targetEl) {
+      setIsMsgSelectedOffscreen(false);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry) setIsMsgSelectedOffscreen(!entry.isIntersecting);
+      },
+      { root, threshold: 0.15 }
+    );
+    observer.observe(targetEl);
+    return () => observer.disconnect();
+  }, [selectedTopicId, msgSelectedInList, loading, subTab, catFilter, pmBox, pmList.length, filteredItems.length]);
+
   return (
     <div
-      className="lindo-hairline-r flex h-full w-full flex-col"
+      className="lindo-hairline-r relative flex h-full w-full flex-col"
       style={{ backgroundColor: "var(--feed-surface)" }}
     >
       <div
@@ -1431,7 +1469,10 @@ export const MessagesView: React.FC<{
                 </button>
                 <button
                   type="button"
-                  onClick={loadNotifications}
+                  onClick={() => {
+                    markManualRetryIntent();
+                    void loadNotifications(true);
+                  }}
                   title="刷新通知"
                   className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
                   style={{ color: "var(--ink-secondary)" }}
@@ -1581,7 +1622,7 @@ export const MessagesView: React.FC<{
           </button>
         </div>
       ) : (
-        <div className="lindo-scroll flex-1 min-h-0">
+        <div ref={msgScrollRef} className="lindo-scroll flex-1 min-h-0">
           {subTab === "COMPOSE_PM" ? (
             <div className="space-y-3 p-4">
               <div className="text-[14.5px] font-bold" style={{ color: "var(--ink-primary)" }}>
@@ -1719,14 +1760,20 @@ export const MessagesView: React.FC<{
             <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
               <MascotExpression expression="surprised" sizePx={54} className="mb-3" />
               <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                {loadError}
+                {msgRetrySecs > 0
+                  ? `请求较频繁，${msgRetrySecs} 秒后自动恢复…`
+                  : loadError}
               </p>
               <button
                 type="button"
                 onClick={() => {
-                  if (loadError.includes("验证") && onTriggerVerify) onTriggerVerify();
-                  else if (subTab === "PM") loadPms(pmBox);
-                  else loadNotifications();
+                  if (loadError.includes("验证") && onTriggerVerify) {
+                    onTriggerVerify();
+                  } else {
+                    markManualRetryIntent();
+                    if (subTab === "PM") void loadPms(pmBox);
+                    else void loadNotifications(true);
+                  }
                 }}
                 className="mt-3 rounded-full px-4 py-1.5 text-[12px] font-semibold cursor-pointer"
                 style={{
@@ -1753,6 +1800,7 @@ export const MessagesView: React.FC<{
                 return (
                   <React.Fragment key={pm.id}>
                     <div
+                      data-msg-topic-id={pm.id}
                       className="group relative flex w-full items-center"
                       style={{
                         backgroundColor: selected ? "var(--subtle-surface)" : "transparent",
@@ -1763,7 +1811,7 @@ export const MessagesView: React.FC<{
                         onClick={() =>
                           onOpenNotificationTopic(pm.id, pm.title, pm.highestPostNumber)
                         }
-                        className="lindo-interactive flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left"
+                        className="cursor-pointer flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left"
                       >
                         <img
                           src={resolveAvatarUrl(pm.originalPoster.avatarTemplate, 96)}
@@ -1895,6 +1943,7 @@ export const MessagesView: React.FC<{
                   <React.Fragment key={n.id}>
                     <button
                       type="button"
+                      data-msg-topic-id={n.topicId || undefined}
                       onClick={() => {
                         if (!n.read) {
                           setItems((prev) =>
@@ -1928,7 +1977,7 @@ export const MessagesView: React.FC<{
                           onInspectUser(n.actorUsername);
                         }
                       }}
-                      className="lindo-interactive flex w-full items-start gap-3 px-4 py-3 text-left transition-colors"
+                      className="cursor-pointer flex w-full items-start gap-3 px-4 py-3 text-left"
                       style={{ backgroundColor: rowBg }}
                     >
                       {/* 左侧 38px 圆形头像（或 Linux.do 三色圆标）+ 右上角镂空语义动作角标 */}
@@ -2020,6 +2069,35 @@ export const MessagesView: React.FC<{
             </div>
           )}
         </div>
+      )}
+
+      {msgSelectedInList && isMsgSelectedOffscreen && (
+        <button
+          type="button"
+          onClick={() => {
+            if (!selectedTopicId) return;
+            msgScrollRef.current
+              ?.querySelector<HTMLElement>(`[data-msg-topic-id="${selectedTopicId}"]`)
+              ?.scrollIntoView({ behavior: "smooth", block: "center" });
+          }}
+          title="定位到正在阅读的消息"
+          aria-label="定位到正在阅读的消息"
+          className="lindo-interactive absolute right-3.5 bottom-3.5 z-20 flex h-8 w-8 items-center justify-center rounded-full shadow-lg active:scale-95"
+          style={{
+            backgroundColor: "var(--subtle-surface)",
+            border: "0.5px solid color-mix(in srgb, var(--brand-gold) 36%, var(--hairline))",
+            color: "var(--ink-secondary)",
+          }}
+        >
+          <svg width={15.5} height={15.5} viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="6.8" stroke="currentColor" strokeWidth="1.75" />
+            <line x1="12" y1="2.4" x2="12" y2="5.4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+            <line x1="12" y1="18.6" x2="12" y2="21.6" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+            <line x1="2.4" y1="12" x2="5.4" y2="12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+            <line x1="18.6" y1="12" x2="21.6" y2="12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+            <circle cx="12" cy="12" r="2.3" fill="var(--brand-gold)" />
+          </svg>
+        </button>
       )}
 
       {pmActionNotice && (
@@ -3294,7 +3372,7 @@ export const ProfileSettingsView: React.FC<{
                               setSubSheet(null);
                               onOpenTopicById(h.topicId, h.title, h.resumeFloor);
                             }}
-                            className="lindo-interactive flex w-full items-start gap-3 px-4 py-3 text-left"
+                            className="cursor-pointer flex w-full items-start gap-3 px-4 py-3 text-left"
                           >
                             <AvatarWithFlair
                               username={h.authorUsername}
@@ -3541,7 +3619,7 @@ export const ProfileSettingsView: React.FC<{
                           Number(act.post_number || 1)
                         );
                       }}
-                      className="lindo-interactive flex w-full flex-col px-4 py-3 text-left"
+                      className="cursor-pointer flex w-full flex-col px-4 py-3 text-left"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span
