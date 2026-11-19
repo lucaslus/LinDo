@@ -692,7 +692,6 @@ class MainActivity : ComponentActivity() {
         }
         requestHighRefreshRateDisplay()
         var appIcon by mutableStateOf(iconManager.initialIcon())
-        activityScope.launch { iconManager.finishRestart()?.let { appIcon = it } }
 
         // 1. 注册待授权 RSA 私钥同步持久化钩子，并恢复持久化的登录状态与 WebView Cookie
         UserApiKeyAuthManager.onPersistPendingKey = { pkB64, nonce ->
@@ -715,7 +714,12 @@ class MainActivity : ComponentActivity() {
         }
         AppAppearance.onApplyIconAppearance = { mode ->
             val background = LinDoIconBackground.fromAppearance(mode)
-            iconManager.apply(appIcon, appIcon.copy(background = background))
+            val nextIcon = appIcon.copy(background = background)
+            iconManager.apply(appIcon, nextIcon).also { applied ->
+                if (applied) {
+                    appIcon = nextIcon
+                }
+            }
         }
         do_.linux.lindo.core.compose.LocalComposerDrafts.restore(prefs.getString("composer_drafts", null))
         do_.linux.lindo.core.compose.LocalComposerDrafts.onPersist = { encoded -> prefs.edit().putString("composer_drafts", encoded).apply() }
@@ -868,15 +872,17 @@ class MainActivity : ComponentActivity() {
                 initialUrl = initialUrl,
                 onDismiss = {
                     // 关闭内置网页（如完成站点验证后点关闭）前同步刷盘最新 cf_clearance / 会话 Cookie，确保紧随其后的自动重刷立即生效
+                    NetworkRecoveryPolicy.androidVerifying = false
                     runCatching {
                         val cm = MainActivity.currentWebViewCookieManager()
                         cm.flush()
                         val latestCookies = cm.getCookie("https://linux.do").orEmpty()
-                        if (latestCookies.isNotBlank()) {
-                            CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies)
-                        }
                         val latestClearance = getCookieValue(latestCookies, "cf_clearance")
-                        if (!latestClearance.isNullOrBlank() && latestClearance != openedClearance) {
+                        val rotated = !latestClearance.isNullOrBlank() && latestClearance != openedClearance
+                        if (latestCookies.isNotBlank()) {
+                            CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies, verified = rotated)
+                        }
+                        if (rotated) {
                             LinuxDoRepository.clearChallengeCooldown()
                             val freshCsrf = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
                             runOnUiThread {
@@ -891,11 +897,12 @@ class MainActivity : ComponentActivity() {
                     onDismiss()
                 },
                 onLoginSuccess = {
+                    NetworkRecoveryPolicy.androidVerifying = false
                     val cm = MainActivity.currentWebViewCookieManager()
                     runCatching { cm.flush() }
                     val latestCookies = cm.getCookie("https://linux.do").orEmpty()
                     if (latestCookies.isNotBlank()) {
-                        CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies)
+                        CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies, verified = true)
                     }
                     LinuxDoRepository.clearChallengeCooldown()
                     val freshCsrf = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
@@ -1061,8 +1068,14 @@ class MainActivity : ComponentActivity() {
                             onApplyAppIcon = { selected ->
                                 iconManager.apply(appIcon, selected).also { applied ->
                                     if (applied) {
+                                        appIcon = selected
                                         AppAppearance.iconAppearance = selected.background.appearanceMode
                                         AppAppearance.onPersist?.invoke()
+                                        android.widget.Toast.makeText(
+                                            this@MainActivity,
+                                            LinDoMessagesCopy.SWITCH_ICON_APPLIED.text,
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
                                     }
                                 }
                             },
@@ -1597,7 +1610,10 @@ class MainActivity : ComponentActivity() {
      * - 若为非交互式 Cloudflare Turnstile 挑战，约 1~2s 自动签发新 `cf_clearance` 并落入源站轻量 404，全程用户零感知；
      * - 若检测到交互式 `.cf-turnstile` 小组件且 900ms 内未自动放行，立即中止静默流程交由前台遮罩验证窗展示。
      */
-    private suspend fun silentRevalidateChallenge(previousClearance: String? = null): Boolean {
+    private suspend fun silentRevalidateChallenge(
+        previousClearance: String? = null,
+        isInteractiveWrite: Boolean = false
+    ): Boolean {
         if (isFinishing || isDestroyed || LinuxDoRepository.isRateLimitedNow() || NetworkRecoveryPolicy.verifying) {
             return false
         }
@@ -1642,6 +1658,16 @@ class MainActivity : ComponentActivity() {
                             if (tempWv === view) tempWv = null
                             return true
                         }
+                        override fun onReceivedError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            error: android.webkit.WebResourceError?
+                        ) {
+                            super.onReceivedError(view, request, error)
+                            if (request?.isForMainFrame == true && !done.isCompleted) {
+                                done.complete(false)
+                            }
+                        }
                         override fun onReceivedHttpError(
                             view: WebView?,
                             request: WebResourceRequest?,
@@ -1680,9 +1706,10 @@ class MainActivity : ComponentActivity() {
             }
 
             val startAt = System.currentTimeMillis()
+            val maxSilentWaitMs = if (isInteractiveWrite) 2_600L else 3_800L
             var interactiveSeenSince = 0L
-            while (!done.isCompleted && System.currentTimeMillis() - startAt < 5_800L) {
-                delay(280L)
+            while (!done.isCompleted && System.currentTimeMillis() - startAt < maxSilentWaitMs) {
+                delay(160L)
                 val probeState = withContext(Dispatchers.Main) {
                     val wv = tempWv ?: return@withContext "gone"
                     val cm = MainActivity.currentWebViewCookieManager()
@@ -1712,9 +1739,10 @@ class MainActivity : ComponentActivity() {
                     break
                 }
                 if (parsed?.optBoolean("challenge") == true) {
+                    val abortAfterMs = if (parsed.optBoolean("widget")) 550L else 750L
                     if (interactiveSeenSince == 0L) interactiveSeenSince = System.currentTimeMillis()
-                    else if (System.currentTimeMillis() - interactiveSeenSince >= 950L) {
-                        // 出现需要人工点击的 Turnstile，快速中止静默流程以让前台验证窗接管
+                    else if (System.currentTimeMillis() - interactiveSeenSince >= abortAfterMs) {
+                        // 出现需要人工点击的 Turnstile，快速中止静默流程以让前台紧凑验证卡及时接管
                         done.complete(false)
                         break
                     }
@@ -2258,7 +2286,7 @@ class MainActivity : ComponentActivity() {
         ) {
             val staleCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
             CfClearanceAuthority.noteChallenged(staleCf)
-            if (silentRevalidateChallenge(previousClearance = staleCf)) {
+            if (silentRevalidateChallenge(previousClearance = staleCf, isInteractiveWrite = !isRead)) {
                 return executeHttpViaWebViewBridge(
                     url = url,
                     method = method,
@@ -3301,8 +3329,8 @@ class MainActivity : ComponentActivity() {
             (host.parent as? ViewGroup)?.removeView(host)
         }
         apiWebViewHost = null
+        iconManager.flushPendingOnBackground(isChangingConfigurations)
         super.onDestroy()
-        iconManager.onActivityDestroyed()
     }
 
     private fun abortPendingHttpRequests(
@@ -3458,6 +3486,11 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        super.onStop()
+        iconManager.flushPendingOnBackground(isChangingConfigurations)
+    }
+
     override fun onUserInteraction() {
         super.onUserInteraction()
         UserPresenceService.markUserActivity()
@@ -3554,6 +3587,20 @@ private fun AndroidWebLoginModal(
     var rendererGone by remember { mutableStateOf(false) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     val isDark = LocalLinDoDarkTheme.current
+    val modalKeyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val modalFocusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val modalLocalView = androidx.compose.ui.platform.LocalView.current
+
+    LaunchedEffect(initialUrl, isVerificationFlow) {
+        if (isVerificationFlow) {
+            runCatching { modalFocusManager.clearFocus(force = true) }
+            runCatching { modalKeyboardController?.hide() }
+            runCatching {
+                val imm = modalLocalView.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                imm?.hideSoftInputFromWindow(modalLocalView.windowToken, 0)
+            }
+        }
+    }
 
     fun retryPage() {
         val view = webViewRef

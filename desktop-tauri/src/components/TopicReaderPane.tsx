@@ -1804,11 +1804,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 targetReplyFloor && !repliedPost && loadingParentFloors.has(targetReplyFloor)
               );
               const isParentExpanded = expandedParentPreviewIds.has(post.id);
-              const canExpandParent = Boolean(
-                repliedPost &&
-                  (parentPreviewMeta?.isLongOrRich ||
-                    (alreadyQuotedSameFloor && repliedPost.cookedHtml.length > 0))
-              );
+              const canExpandParent = Boolean(repliedPost && parentPreviewMeta?.isLongOrRich);
               const targetReplyUsername =
                 repliedPost?.username || post.replyToUsername || "";
               const targetReplyDisplayName =
@@ -2076,8 +2072,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
               const floorContentBody = (
                 <>
-                  {/* 回复目标楼层上下文预览卡片（紧凑高信息密度设计） */}
-                  {targetReplyFloor && (
+                  {/* 回复目标楼层上下文预览卡片（若正文首段已直接引用同楼层，则由单张引用卡统一承担，避免双重头部堆叠） */}
+                  {targetReplyFloor && !alreadyQuotedSameFloor && (
                     <div
                       onClick={() => {
                         if (!isParentExpanded) {
@@ -2096,8 +2092,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                         isParentExpanded ? "" : "lindo-interactive cursor-pointer"
                       }`}
                       style={{
-                        borderLeftColor: "color-mix(in srgb, var(--brand-gold) 72%, var(--hairline))",
-                        backgroundColor: "color-mix(in srgb, var(--subtle-surface) 50%, transparent)",
+                        borderLeftColor: "color-mix(in srgb, var(--brand-gold) 65%, var(--hairline))",
+                        backgroundColor: "color-mix(in srgb, var(--subtle-surface) 64%, transparent)",
                       }}
                     >
                       <div className="flex items-center justify-between gap-2 text-[11.8px]">
@@ -2186,10 +2182,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           onCookedClick={handleCookedClick}
                           className="lindo-cooked lindo-cooked-reply lindo-hairline-t mt-1.5 pt-1.5 text-[13.5px]"
                         />
-                      ) : !alreadyQuotedSameFloor &&
-                        (parentPreviewMeta?.snippet ||
-                          parentPreviewMeta?.firstImageUrl ||
-                          isParentPreviewLoading) ? (
+                      ) : parentPreviewMeta?.snippet ||
+                        parentPreviewMeta?.firstImageUrl ||
+                        isParentPreviewLoading ? (
                         <div className="mt-0.5 flex items-center justify-between gap-2 pl-[24px]">
                           <p
                             className="min-w-0 flex-1 line-clamp-2 text-[12.5px] leading-[1.48]"
@@ -2286,10 +2281,10 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                               border: "0.5px solid var(--hairline)",
                             }}
                           >
-                            <img
-                              src={resolveAvatarUrl(boost.avatarTemplate, 96)}
-                              alt={boost.username}
-                              className="h-4 w-4 rounded-full object-cover"
+                            <AvatarWithFlair
+                              username={boost.username}
+                              avatarTemplate={boost.avatarTemplate}
+                              sizePx={16}
                             />
                             <span
                               className="lindo-cooked text-[12px] leading-none"
@@ -3278,7 +3273,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     />
                   )}
 
-                  {post.postNumber === 1 && (totalFloors > 1 || onlyOpFilter) && (
+                  {post.postNumber === 1 && (totalFloors > 1 || onlyOpFilter) ? (
                     <div
                       className="flex items-center justify-between py-2"
                       style={{
@@ -3328,10 +3323,73 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                       </button>
                     </div>
                   </div>
-                )}
+                  ) : post.postNumber === 1 ? (
+                    <div
+                      className="h-[0.5px] w-full"
+                      style={{ backgroundColor: "var(--hairline)" }}
+                    />
+                  ) : null}
                 </React.Fragment>
               );
             })}
+
+            {!isLoading &&
+              !loadingMoreBottom &&
+              !errorMessage &&
+              detail &&
+              detail.posts.length === 1 &&
+              detail.posts[0].postNumber === 1 &&
+              (totalFloors <= 1 || onlyOpFilter) && (
+                <div
+                  className="flex items-center justify-center gap-2 py-12 text-[12.5px] select-none"
+                  style={{ color: "var(--ink-tertiary)" }}
+                >
+                  <MascotExpression
+                    expression={onlyOpFilter ? "sleepy" : "happy"}
+                    sizePx={20}
+                    className="opacity-80"
+                  />
+                  {onlyOpFilter ? (
+                    <>
+                      <span>楼主暂无更多发言</span>
+                      <span className="opacity-45">·</span>
+                      <button
+                        type="button"
+                        onClick={onToggleOnlyOp}
+                        className="transition-colors hover:opacity-100 cursor-pointer"
+                        style={{ color: "var(--ink-secondary)" }}
+                      >
+                        查看全部
+                      </button>
+                    </>
+                  ) : detail.closed || detail.archived ? (
+                    <span>暂无回复 · 话题已关闭</span>
+                  ) : (
+                    <>
+                      <span>暂无回复</span>
+                      <span className="opacity-45">·</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!isAuthorized) {
+                            onRequestGuestLogin("登录后回复话题", "登录后即可参与社区讨论");
+                            return;
+                          }
+                          onOpenComposer({
+                            action: "REPLY",
+                            topicId: summary.id,
+                            topicTitle: detail.title || summary.title,
+                          });
+                        }}
+                        className="transition-opacity hover:opacity-100 opacity-85 cursor-pointer"
+                        style={{ color: "var(--brand-gold)" }}
+                      >
+                        写下第一条
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
 
             {loadingMoreBottom && (
               <div

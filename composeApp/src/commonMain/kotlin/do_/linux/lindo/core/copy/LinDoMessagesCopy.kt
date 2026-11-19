@@ -269,6 +269,7 @@ enum class LinDoMessagesCopy(override val text: String) : LinDoCopyEntry {
     APPLY_ICON_AND_RESTART("应用图标"),
     ICON_SECTION_ARTWORK("图案"),
     ICON_SECTION_BACKGROUND("底色"),
+    SWITCH_ICON_APPLIED("已应用新图标，返回桌面即可查看效果"),
     SWITCH_ICON_FAILED("切换图标失败"),
     SWITCH_ICON_FAILED_RETRY("切换图标失败，请重试"),
 

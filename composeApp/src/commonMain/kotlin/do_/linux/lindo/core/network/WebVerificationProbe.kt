@@ -20,10 +20,14 @@ internal fun webVerificationProbeScript(): String = """
         lowerHtml.indexOf('404-body') !== -1 ||
         /exist or is private|page you requested|该页面不存在|页面不存在或为私密/i.test(bodyText);
     if (!isOrigin404) {
+        var hasWidget = !!document.querySelector('#challenge-stage,.cf-turnstile,#turnstile-wrapper,iframe[src*="challenges.cloudflare.com"]');
+        if (hasWidget) {
+            return result({challenge:true, widget:true});
+        }
         if (/^(Just a moment|请稍候|Attention Required|Security Check)/i.test(title)) {
             return result({challenge:true});
         }
-        if (document.querySelector('#challenge-running,#challenge-stage,#challenge-form,.cf-turnstile,#turnstile-wrapper,iframe[src*="challenges.cloudflare.com"]')) {
+        if (document.querySelector('#challenge-running,#challenge-form')) {
             return result({challenge:true});
         }
     }

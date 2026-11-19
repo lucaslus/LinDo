@@ -7,12 +7,17 @@ import {
   resolveOfficialTagVisual,
 } from "./LinDoIcons";
 import type { ExternalUrlAssessment } from "../lib/cooked";
-import { useForumImageSrc } from "../lib/forumMedia";
+import {
+  fetchForumMediaBlobUrl,
+  needsSameOriginMediaBridge,
+  useForumImageSrc,
+} from "../lib/forumMedia";
 import {
   buildDiagReport,
   clearDiagEntries,
   DESKTOP_APP_VERSION,
   type DiagCategory,
+  diagLog,
   exportDiagLogToFile,
   getDiagEntries,
   subscribeDiagEntries,
@@ -79,11 +84,13 @@ import {
   formatRelativeTime,
   getAvatarClassName,
   isHolographicTitle,
+  parseLetterAvatarMeta,
   resolveAvatarUrl,
   resolveBadgeArtwork,
   resolveCategoryVisual,
   resolveEmojiShortcodeUrl,
   resolveFlairVisual,
+  resolveOriginalLinuxDoAvatarUrl,
 } from "../lib/palette";
 
 function trustLevelLabel(level?: number): string {
@@ -346,6 +353,10 @@ export const OfficialBadgeIcon: React.FC<{
   );
 };
 
+// Module-level cache of CDN-failed avatars -> bridged `blob:` URL or `null` (render crisp native Letter Avatar immediately)
+const avatarOriginFallbackCache = new Map<string, string | null>();
+const loggedAvatarFallbackUrls = new Set<string>();
+
 export const AvatarWithFlair: React.FC<{
   username: string;
   avatarTemplate?: string | null;
@@ -366,7 +377,97 @@ export const AvatarWithFlair: React.FC<{
   const flairVis = sizePx >= 28 ? resolveFlairVisual(flair) : null;
   // Unify <=48px CSS avatars onto Discourse's 96px bucket (~3KB, 2.6x Retina) so Feed, Notifications, and Topic floors hit 100% RAM cache!
   const targetBucket = sizePx <= 48 ? 96 : sizePx <= 96 ? 144 : 288;
-  const staticAvatarSrc = resolveAvatarUrl(avatarTemplate, targetBucket);
+  const hasTemplate = Boolean(avatarTemplate && avatarTemplate.trim());
+  const staticAvatarSrc = hasTemplate ? resolveAvatarUrl(avatarTemplate, targetBucket) : "";
+  const staticNeedsBridge = needsSameOriginMediaBridge(staticAvatarSrc);
+  const bridgedPrimarySrc = useForumImageSrc(staticNeedsBridge ? staticAvatarSrc : null, "");
+  const primaryResolvedSrc = staticNeedsBridge ? bridgedPrimarySrc : staticAvatarSrc;
+
+  const [fallbackState, setFallbackState] = useState<{
+    key: string;
+    stage: "primary" | "bridged_origin" | "letter";
+    bridgedUrl: string | null;
+  }>(() => {
+    if (!staticAvatarSrc) return { key: "", stage: "letter", bridgedUrl: null };
+    if (avatarOriginFallbackCache.has(staticAvatarSrc)) {
+      const hit = avatarOriginFallbackCache.get(staticAvatarSrc) ?? null;
+      return hit
+        ? { key: staticAvatarSrc, stage: "bridged_origin", bridgedUrl: hit }
+        : { key: staticAvatarSrc, stage: "letter", bridgedUrl: null };
+    }
+    return { key: staticAvatarSrc, stage: "primary", bridgedUrl: null };
+  });
+
+  const activeFallback = useMemo(() => {
+    if (!staticAvatarSrc) {
+      return { key: "", stage: "letter" as const, bridgedUrl: null };
+    }
+    if (fallbackState.key === staticAvatarSrc) {
+      return fallbackState;
+    }
+    if (avatarOriginFallbackCache.has(staticAvatarSrc)) {
+      const hit = avatarOriginFallbackCache.get(staticAvatarSrc) ?? null;
+      return hit
+        ? { key: staticAvatarSrc, stage: "bridged_origin" as const, bridgedUrl: hit }
+        : { key: staticAvatarSrc, stage: "letter" as const, bridgedUrl: null };
+    }
+    return { key: staticAvatarSrc, stage: "primary" as const, bridgedUrl: null };
+  }, [staticAvatarSrc, fallbackState]);
+
+  const latestKeyRef = useRef(staticAvatarSrc);
+  latestKeyRef.current = staticAvatarSrc;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const handleStaticError = () => {
+    const failedKey = staticAvatarSrc;
+    if (!failedKey) return;
+    if (loggedAvatarFallbackUrls.size < 120 && !loggedAvatarFallbackUrls.has(failedKey)) {
+      loggedAvatarFallbackUrls.add(failedKey);
+      diagLog(
+        "WARN",
+        "NETWORK",
+        "AvatarFallback",
+        `头像直连加载失败，已启用降级恢复 (@${username || "unknown"})`,
+        `resolved=${failedKey} | raw=${avatarTemplate || ""}`
+      );
+    }
+
+    if (activeFallback.stage === "primary" && !staticNeedsBridge) {
+      const originUrl = resolveOriginalLinuxDoAvatarUrl(avatarTemplate, targetBucket);
+      if (originUrl && needsSameOriginMediaBridge(originUrl)) {
+        setFallbackState({ key: failedKey, stage: "bridged_origin", bridgedUrl: null });
+        void fetchForumMediaBlobUrl(originUrl).then((blobUrl) => {
+          if (avatarOriginFallbackCache.size > 400) avatarOriginFallbackCache.clear();
+          avatarOriginFallbackCache.set(failedKey, blobUrl);
+          if (!mountedRef.current || latestKeyRef.current !== failedKey) return;
+          if (blobUrl) {
+            setFallbackState({ key: failedKey, stage: "bridged_origin", bridgedUrl: blobUrl });
+          } else {
+            setFallbackState({ key: failedKey, stage: "letter", bridgedUrl: null });
+          }
+        });
+        return;
+      }
+    }
+
+    if (avatarOriginFallbackCache.size > 400) avatarOriginFallbackCache.clear();
+    avatarOriginFallbackCache.set(failedKey, null);
+    setFallbackState({ key: failedKey, stage: "letter", bridgedUrl: null });
+  };
+
+  const displayImgSrc =
+    activeFallback.stage === "letter"
+      ? ""
+      : activeFallback.stage === "bridged_origin"
+        ? activeFallback.bridgedUrl || ""
+        : primaryResolvedSrc;
+
   const rawAnimUrl =
     animatedAvatar && animatedAvatar !== avatarTemplate
       ? resolveAvatarUrl(animatedAvatar, targetBucket)
@@ -383,26 +484,50 @@ export const AvatarWithFlair: React.FC<{
       : Math.round(badgeSize * 0.8);
 
   const shapeAndGlow = getAvatarClassName("h-full w-full", username, primaryGroupName, avatarTemplate);
+  const letterMeta = useMemo(
+    () => parseLetterAvatarMeta(avatarTemplate, username),
+    [avatarTemplate, username]
+  );
+  const letterFontSize = Math.max(9, Math.round(sizePx * 0.46));
 
   return (
     <div
       className={`lindo-avatar-wrap relative inline-flex shrink-0 ${className}`}
       style={{ width: sizePx, height: sizePx }}
     >
-      {/* Base layer: instant ~3KB static edge CDN avatar (never waits for multi-MB GIF download!) */}
-      <img
-        src={staticAvatarSrc}
-        alt={username}
-        decoding="async"
-        className={shapeAndGlow}
-        style={{ backgroundColor: "var(--subtle-surface)" }}
-      />
+      {/* Base layer: instant ~3KB static edge CDN avatar, or crisp Discourse Letter Avatar when CDN/origin fails (NEVER WebKit `[?]`) */}
+      {displayImgSrc ? (
+        <img
+          src={displayImgSrc}
+          alt={username}
+          decoding="async"
+          onError={handleStaticError}
+          className={shapeAndGlow}
+          style={{ backgroundColor: "var(--subtle-surface)" }}
+        />
+      ) : (
+        <div
+          aria-label={username}
+          className={`${shapeAndGlow} flex items-center justify-center select-none font-semibold text-white`}
+          style={{
+            backgroundColor:
+              activeFallback.stage === "letter" ? letterMeta.bgColor : "var(--subtle-surface)",
+            fontSize: letterFontSize,
+            lineHeight: 1,
+          }}
+        >
+          {activeFallback.stage === "letter" ? letterMeta.letter : null}
+        </div>
+      )}
       {/* Overlay layer: seamlessly mounts animated GIF/WebP once bridged & ready; auto-paused during active scroll/pane-slide */}
-      {animatedSrc && animatedSrc !== staticAvatarSrc && (
+      {animatedSrc && animatedSrc !== displayImgSrc && (
         <img
           src={animatedSrc}
           alt=""
           decoding="async"
+          onError={(e) => {
+            (e.currentTarget as HTMLImageElement).style.display = "none";
+          }}
           className={`lindo-avatar-anim absolute inset-0 ${shapeAndGlow}`}
         />
       )}
@@ -422,6 +547,9 @@ export const AvatarWithFlair: React.FC<{
               alt={flairVis.name || ""}
               style={{ width: innerSize, height: innerSize }}
               className="object-contain"
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.display = "none";
+              }}
             />
           ) : (
             <span
@@ -1819,10 +1947,11 @@ export const MessagesView: React.FC<{
                         }
                         className="cursor-pointer flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left"
                       >
-                        <img
-                          src={resolveAvatarUrl(pm.originalPoster.avatarTemplate, 96)}
-                          alt={pm.originalPoster.username}
-                          className="h-9 w-9 shrink-0 rounded-full object-cover"
+                        <AvatarWithFlair
+                          username={pm.originalPoster.username}
+                          avatarTemplate={pm.originalPoster.avatarTemplate}
+                          animatedAvatar={pm.originalPoster.animatedAvatar}
+                          sizePx={36}
                         />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center justify-between gap-2">
@@ -1996,18 +2125,10 @@ export const MessagesView: React.FC<{
                             style={{ backgroundColor: "var(--subtle-surface)" }}
                           />
                         ) : (
-                          <img
-                            src={resolveAvatarUrl(n.actorAvatarTemplate, 144)}
-                            alt={n.actorUsername}
-                            loading="lazy"
-                            decoding="async"
-                            className={getAvatarClassName(
-                              "h-[38px] w-[38px]",
-                              n.actorUsername,
-                              undefined,
-                              n.actorAvatarTemplate
-                            )}
-                            style={{ backgroundColor: "var(--subtle-surface)" }}
+                          <AvatarWithFlair
+                            username={n.actorUsername}
+                            avatarTemplate={n.actorAvatarTemplate}
+                            sizePx={38}
                           />
                         )}
                         <span
@@ -2412,18 +2533,11 @@ export const ProfileSettingsView: React.FC<{
             <div className="flex items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3.5">
                 {isAuthorized && currentUser ? (
-                  <img
-                    src={resolveAvatarUrl(
-                      currentUser.animatedAvatar || currentUser.avatarTemplate,
-                      144
-                    )}
-                    alt={currentUser.username}
-                    className={getAvatarClassName(
-                      "h-[52px] w-[52px] shrink-0",
-                      currentUser.username,
-                      undefined,
-                      currentUser.avatarTemplate
-                    )}
+                  <AvatarWithFlair
+                    username={currentUser.username}
+                    avatarTemplate={currentUser.avatarTemplate}
+                    animatedAvatar={currentUser.animatedAvatar}
+                    sizePx={52}
                   />
                 ) : (
                   <button
@@ -3681,15 +3795,11 @@ export const ProfileSettingsView: React.FC<{
                         }}
                         className="flex min-w-0 flex-1 items-center gap-3 text-left cursor-pointer"
                       >
-                        <img
-                          src={resolveAvatarUrl(fu.animatedAvatar || fu.avatarTemplate, 96)}
-                          alt={fu.username}
-                          className={getAvatarClassName(
-                            "h-9 w-9 shrink-0",
-                            fu.username,
-                            undefined,
-                            fu.avatarTemplate
-                          )}
+                        <AvatarWithFlair
+                          username={fu.username}
+                          avatarTemplate={fu.avatarTemplate}
+                          animatedAvatar={fu.animatedAvatar}
+                          sizePx={36}
                         />
                         <div className="min-w-0 flex-1">
                           <div
@@ -5238,18 +5348,11 @@ export const AuthModal: React.FC<{
                         }}
                         className="lindo-interactive flex flex-1 items-center gap-3 rounded-xl px-2 py-2.5 text-left"
                       >
-                        <img
-                          src={resolveAvatarUrl(
-                            acc.profile.animatedAvatar || acc.profile.avatarTemplate,
-                            96
-                          )}
-                          alt={acc.profile.username}
-                          className={getAvatarClassName(
-                            "h-10 w-10 shrink-0",
-                            acc.profile.username,
-                            undefined,
-                            acc.profile.avatarTemplate
-                          )}
+                        <AvatarWithFlair
+                          username={acc.profile.username}
+                          avatarTemplate={acc.profile.avatarTemplate}
+                          animatedAvatar={acc.profile.animatedAvatar}
+                          sizePx={40}
                         />
                         <div className="min-w-0 flex-1">
                           <div
@@ -5659,10 +5762,11 @@ export const GlobalSearchModal: React.FC<{
                     }}
                     className="lindo-interactive flex w-full items-start gap-3 px-4 py-3 text-left"
                   >
-                    <img
-                      src={resolveAvatarUrl(h.avatarTemplate, 96)}
-                      alt={h.username}
-                      className="mt-0.5 h-8 w-8 shrink-0 rounded-full object-cover"
+                    <AvatarWithFlair
+                      username={h.username}
+                      avatarTemplate={h.avatarTemplate}
+                      sizePx={32}
+                      className="mt-0.5"
                     />
                     <div className="min-w-0 flex-1">
                       <div

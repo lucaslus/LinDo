@@ -28,8 +28,8 @@ import {
   uploadMediaToSite,
 } from "../lib/api";
 import { optimizePanguSpacing, prepareCookedHtml } from "../lib/cooked";
-import { formatCompactCount, resolveAvatarUrl, resolveCategoryVisual } from "../lib/palette";
-import { ConfirmDialog } from "./SecondaryScreens";
+import { formatCompactCount, resolveCategoryVisual } from "../lib/palette";
+import { AvatarWithFlair, ConfirmDialog } from "./SecondaryScreens";
 
 interface ComposerModalProps {
   request: ComposerLaunchRequest;
@@ -1687,10 +1687,10 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   {u.isGroup ? (
                     <LinDoIcons.Users size={14} style={{ color: "var(--brand-gold)" }} />
                   ) : (
-                    <img
-                      src={resolveAvatarUrl(u.avatarTemplate, 48)}
-                      alt={u.username}
-                      className="h-4.5 w-4.5 rounded-full object-cover"
+                    <AvatarWithFlair
+                      username={u.username}
+                      avatarTemplate={u.avatarTemplate}
+                      sizePx={18}
                     />
                   )}
                   <span className="font-semibold">@{u.username}</span>

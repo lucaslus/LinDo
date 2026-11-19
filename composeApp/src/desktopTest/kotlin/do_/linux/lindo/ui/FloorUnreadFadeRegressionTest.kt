@@ -63,10 +63,11 @@ class FloorUnreadFadeRegressionTest {
         }
         mainClock.advanceTimeByFrame()
         mainClock.advanceTimeByFrame()
-        mainClock.advanceTimeBy(250L)
+        // 250ms 缓冲 + 2600ms 优雅淡出（对齐 PC 端）：1200ms 处应处于半淡出中段，3200ms 后彻底消失
+        mainClock.advanceTimeBy(1200L)
         waitForIdle()
         val middle = dotColor()
-        mainClock.advanceTimeBy(900L)
+        mainClock.advanceTimeBy(2000L)
         waitForIdle()
         val after = dotColor()
         assertTrue(distance(before, after) > 0.5f, "Unread dot must disappear without waiting for the server")

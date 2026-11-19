@@ -18,6 +18,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -206,6 +207,7 @@ internal fun ComposerSheet(
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     val ownerScopeKey = accountUsername ?: UserApiKeyAuthManager.currentUser?.username.orEmpty()
     val key = when (action) {
         ComposerAction.NEW_TOPIC -> "new_topic"
@@ -855,7 +857,15 @@ internal fun ComposerSheet(
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
                 if (error is PostSubmissionUnconfirmed) unconfirmedDraft = snapshot
-                submitError = error.message ?: LinDoComposerCopy.SUBMIT_FAILED_KEPT.text
+                val errMsg = error.message ?: LinDoComposerCopy.SUBMIT_FAILED_KEPT.text
+                submitError = errMsg
+                if (errMsg.isSiteVerificationError()) {
+                    focusManager.clearFocus(force = true)
+                    keyboard?.hide()
+                    if (openWebUrl != null && !PlatformSessionRecovery.verifying) {
+                        openWebUrl.invoke("https://linux.do/challenge#lindo-verify")
+                    }
+                }
             }
             finally { submitting = false }
         }

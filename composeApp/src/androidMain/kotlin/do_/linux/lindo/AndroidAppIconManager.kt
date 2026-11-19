@@ -2,30 +2,48 @@ package do_.linux.lindo
 
 import android.app.Activity
 import android.content.ComponentName
-import android.content.Intent
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
-import android.widget.Toast
-import do_.linux.lindo.core.copy.LinDoMessagesCopy
 import do_.linux.lindo.ui.LinDoAppIcon
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.withTimeoutOrNull
 
+/**
+ * Android 桌面图标无缝切换管理器（零跳首页、零前台强退）：
+ * - 在 Android（尤其 Samsung One UI / Android 14~16）上，前台直接禁用当前 launcher `<activity-alias>`
+ *   即使传入 `DONT_KILL_APP` 也常会触发系统关闭前台任务或杀进程；
+ * - 采用业界标准「前台立即更新态 + 退至后台 `onStop()` 时原子切换 alias」策略：
+ *   用户点击「应用图标」时留在当前页并立刻提示「已应用新图标，返回桌面即可查看效果」，
+ *   返回桌面瞬间由 `onStop()` 执行 `setComponentEnabledSettings`，桌面图标顺滑刷新且绝不打断阅读。
+ */
 internal class AndroidAppIconManager(private val activity: Activity) {
-    private class Restart(val owner: Any, val current: LinDoAppIcon, val selected: LinDoAppIcon) {
-        val oldActivityDestroyed = CompletableDeferred<Unit>()
-    }
-
     private companion object {
-        var pendingRestart: Restart? = null
+        private const val PREFS_NAME = "lindo_launcher_icon_prefs"
+        private const val KEY_PENDING_ICON = "pending_launcher_icon_key"
+
+        @Volatile
+        var pendingIcon: LinDoAppIcon? = null
     }
 
-    private val owner = Any()
     private val packages get() = activity.packageManager
+    private val iconPrefs get() = activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    fun component(icon: LinDoAppIcon) = ComponentName(activity.packageName, "${activity.packageName}.LauncherIcon_${icon.key}")
+    fun component(icon: LinDoAppIcon) =
+        ComponentName(activity.packageName, "${activity.packageName}.LauncherIcon_${icon.key}")
+
+    private fun loadPersistedPendingIcon(): LinDoAppIcon? {
+        val raw = runCatching { iconPrefs.getString(KEY_PENDING_ICON, null) }.getOrNull() ?: return null
+        return LinDoAppIcon.Choices.firstOrNull { it.key == raw }
+    }
+
+    private fun persistPendingIcon(icon: LinDoAppIcon?) {
+        runCatching {
+            val editor = iconPrefs.edit()
+            if (icon == null) editor.remove(KEY_PENDING_ICON)
+            else editor.putString(KEY_PENDING_ICON, icon.key)
+            editor.apply()
+        }
+    }
 
     fun restore(): LinDoAppIcon {
         val enabled = LinDoAppIcon.Choices.filter(::isEnabled)
@@ -39,49 +57,51 @@ internal class AndroidAppIconManager(private val activity: Activity) {
         return selected
     }
 
+    fun initialIcon(): LinDoAppIcon {
+        val savedPending = pendingIcon ?: loadPersistedPendingIcon()
+        if (savedPending != null) {
+            val enabled = LinDoAppIcon.Choices.filter(::isEnabled)
+            if (enabled.size == 1 && enabled.first() == savedPending) {
+                pendingIcon = null
+                persistPendingIcon(null)
+            } else {
+                pendingIcon = savedPending
+            }
+            return savedPending
+        }
+        return restore()
+    }
+
     fun apply(current: LinDoAppIcon, selected: LinDoAppIcon): Boolean {
-        if (selected == current) return true
-        if (pendingRestart != null) return false
-        val restart = Restart(owner, current, selected)
-        pendingRestart = restart
+        if (selected == current && pendingIcon == null) return true
         return try {
-            // The task must adopt MainActivity's identity before its launcher alias is disabled.
-            val main = ComponentName(activity, MainActivity::class.java)
-            activity.startActivity(Intent.makeRestartActivityTask(main))
+            val enabled = LinDoAppIcon.Choices.filter(::isEnabled)
+            if (enabled.size == 1 && enabled.first() == selected) {
+                // 用户离开应用前又切回原图标：直接取消待生效队列，零 PackageManager 变更
+                pendingIcon = null
+                persistPendingIcon(null)
+            } else {
+                pendingIcon = selected
+                persistPendingIcon(selected)
+            }
             true
         } catch (error: Exception) {
-            pendingRestart = null
-            Log.w("LinDoIcon", "Could not restart for launcher icon change", error)
+            Log.w("LinDoIcon", "Could not stage launcher icon change", error)
             false
         }
     }
 
-    fun initialIcon(): LinDoAppIcon = pendingRestart?.takeIf { it.owner !== owner }?.selected ?: restore()
-
-    suspend fun finishRestart(): LinDoAppIcon? {
-        val restart = pendingRestart?.takeIf { it.owner !== owner } ?: return null
-        return try {
-            // A package change can finish the entire task while the old alias is still in it.
-            check(withTimeoutOrNull(5_000L) { restart.oldActivityDestroyed.await() } != null) {
-                "Previous activity is still finishing"
-            }
-            selectOnly(restart.selected)
-            restart.selected
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            runCatching { selectOnly(restart.current) }
-                .onFailure { Log.w("LinDoIcon", "Could not restore launcher icon", it) }
-            Log.w("LinDoIcon", "Could not switch launcher icon", error)
-            Toast.makeText(activity, LinDoMessagesCopy.SWITCH_ICON_FAILED_RETRY.text, Toast.LENGTH_SHORT).show()
-            restore()
-        } finally {
-            if (pendingRestart === restart) pendingRestart = null
+    fun flushPendingOnBackground(isChangingConfigurations: Boolean) {
+        if (isChangingConfigurations) return
+        val target = pendingIcon ?: loadPersistedPendingIcon() ?: return
+        runCatching {
+            selectOnly(target)
+            pendingIcon = null
+            persistPendingIcon(null)
+            Log.i("LinDoIcon", "Applied launcher icon on background: ${target.key}")
+        }.onFailure { error ->
+            Log.w("LinDoIcon", "Could not apply pending launcher icon on background", error)
         }
-    }
-
-    fun onActivityDestroyed() {
-        pendingRestart?.takeIf { it.owner === owner }?.oldActivityDestroyed?.complete(Unit)
     }
 
     private fun isEnabled(icon: LinDoAppIcon): Boolean =

@@ -6,6 +6,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -21,6 +23,8 @@ internal fun VerificationInlineStatus(
 ) {
     val p = LocalPalette.current
     val busy = PlatformSessionRecovery.verifying
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     Row(
         modifier
             .fillMaxWidth()
@@ -59,7 +63,13 @@ internal fun VerificationInlineStatus(
             modifier = Modifier
                 .heightIn(min = 36.dp)
                 .clickable {
-                    if (busy) PlatformSessionRecovery.cancelVerification?.invoke() else onVerify()
+                    if (busy) {
+                        PlatformSessionRecovery.cancelVerification?.invoke()
+                    } else {
+                        focusManager.clearFocus(force = true)
+                        keyboardController?.hide()
+                        onVerify()
+                    }
                 }
                 .padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,

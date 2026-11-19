@@ -67,6 +67,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -95,6 +96,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -1881,6 +1883,7 @@ internal fun LinDoApp(
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val rootKeyboardController = LocalSoftwareKeyboardController.current
+    val rootFocusManager = LocalFocusManager.current
     val serverConfirmedTopicFloors = remember {
         androidx.compose.runtime.mutableStateMapOf<Int, Int>().apply {
             putAll(LinuxDoRepository.getReadTopicSnapshot())
@@ -1899,6 +1902,7 @@ internal fun LinDoApp(
     }
 
     fun openWebPage(url: String) {
+        rootFocusManager.clearFocus(force = true)
         rootKeyboardController?.hide()
         guestLoginPrompt = null
         val trimmed = url.trim()
@@ -4763,6 +4767,7 @@ internal fun LinDoApp(
                         modifier = Modifier
                             .fillMaxSize()
                             .then(if (isWideLayout && !isAndroidRuntime) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
+                            .imePadding()
                             .padding(bottom = if (isWideLayout && !isAndroidRuntime) 28.dp else FloatingNavClearance, start = 20.dp, end = 20.dp),
                         contentAlignment = Alignment.BottomCenter
                     ) {
@@ -5190,91 +5195,97 @@ private fun DesktopSideRail(
                 .fillMaxHeight()
         ) {
             val isCompactHeight = maxHeight < 500.dp
-            val itemVerticalPad = if (isCompactHeight) 5.dp else 9.dp
+            val itemHeight = if (isCompactHeight) 44.dp else 52.dp
 
             @Composable
             fun RailTabItem(tab: MainTab) {
                 val selected = currentTab == tab
-                Column(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .height(itemHeight)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) { onSelectTab(tab) }
-                        .padding(vertical = itemVerticalPad),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        ) { onSelectTab(tab) },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .width(52.dp)
-                            .height(30.dp)
-                    ) {
+                    if (selected) {
                         Box(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .clip(RoundedCornerShape(15.dp))
-                                .background(if (selected) palette.activeChipBg else Color.Transparent),
+                                .align(Alignment.CenterStart)
+                                .width(3.dp)
+                                .height(if (isCompactHeight) 18.dp else 22.dp)
+                                .clip(RoundedCornerShape(topEnd = 3.dp, bottomEnd = 3.dp))
+                                .background(palette.brandGold)
+                        )
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Box(
+                            modifier = Modifier.size(width = 28.dp, height = 24.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             if (tab == MainTab.HOME) {
                                 Image(
                                     painter = painterResource(Res.drawable.lindo_brand_mark),
                                     contentDescription = tab.title,
-                                    modifier = Modifier.size(22.dp),
-                                    alpha = if (selected) 1f else 0.75f,
+                                    modifier = Modifier.size(21.dp),
+                                    alpha = if (selected) 1f else 0.78f,
                                     contentScale = ContentScale.Fit
                                 )
                             } else {
                                 Icon(
                                     imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
                                     contentDescription = tab.title,
-                                    modifier = Modifier.size(20.dp),
-                                    tint = if (selected) palette.activeChipText else palette.inkSecondary
+                                    modifier = Modifier.size(19.5.dp),
+                                    tint = if (selected) palette.brandGold else palette.inkSecondary
                                 )
                             }
-                        }
-                        if (tab == MainTab.MESSAGES && unreadCount > 0) {
-                            val badgeText = if (unreadCount > 99) LinDoCommonCopy.BADGE_OVERFLOW_99.text else unreadCount.toString()
-                            val isSingleDigit = badgeText.length == 1
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .offset(x = if (isSingleDigit) (-3).dp else 0.dp, y = (-3).dp)
-                                    .then(
-                                        if (isSingleDigit) {
-                                            Modifier.size(15.dp)
-                                        } else {
-                                            Modifier
-                                                .height(15.dp)
-                                                .widthIn(min = 19.dp)
-                                        }
+                            if (tab == MainTab.MESSAGES && unreadCount > 0) {
+                                val badgeText = if (unreadCount > 99) LinDoCommonCopy.BADGE_OVERFLOW_99.text else unreadCount.toString()
+                                val isSingleDigit = badgeText.length == 1
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = if (isSingleDigit) 6.dp else 9.dp, y = (-4).dp)
+                                        .then(
+                                            if (isSingleDigit) {
+                                                Modifier.size(15.dp)
+                                            } else {
+                                                Modifier
+                                                    .height(15.dp)
+                                                    .widthIn(min = 19.dp)
+                                            }
+                                        )
+                                        .clip(CircleShape)
+                                        .background(palette.brandGold)
+                                        .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = badgeText,
+                                        fontSize = 9.sp,
+                                        lineHeight = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = palette.onAccent,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
-                                    .clip(CircleShape)
-                                    .background(palette.brandGold)
-                                    .padding(horizontal = if (isSingleDigit) 0.dp else 4.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = badgeText,
-                                    fontSize = 9.sp,
-                                    lineHeight = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = palette.onAccent,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
+                                }
                             }
                         }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = tab.title,
+                            fontSize = 10.5.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            color = if (selected) palette.brandGold else palette.inkSecondary,
+                            maxLines = 1
+                        )
                     }
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(
-                        text = tab.title,
-                        fontSize = 11.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        color = if (selected) palette.brandGold else palette.inkSecondary,
-                        maxLines = 1
-                    )
                 }
             }
 
@@ -5292,7 +5303,7 @@ private fun DesktopSideRail(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     leftTabs.forEach { tab -> RailTabItem(tab) }
 
-                    // 中间「+ 发布」入口（对齐竖屏底栏的无底块极简主题色加号）
+                    // 中间「+ 发布」入口（38dp 正圆微描边，与上下 56×52 圆角方块导航形成清晰语义区分）
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -5300,28 +5311,30 @@ private fun DesktopSideRail(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null
                             ) { onPublishClick() }
-                            .padding(vertical = itemVerticalPad),
+                            .padding(vertical = if (isCompactHeight) 4.dp else 6.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Box(
                             modifier = Modifier
-                                .width(52.dp)
-                                .height(30.dp),
+                                .size(if (isCompactHeight) 34.dp else 38.dp)
+                                .clip(CircleShape)
+                                .background(palette.tonalPill)
+                                .border(0.5.dp, palette.brandGold.copy(alpha = 0.32f), CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = LinDoIcons.Plus,
                                 contentDescription = LinDoFeedCopy.PUBLISH_NEW_TOPIC_DESC.text,
-                                modifier = Modifier.size(21.dp),
+                                modifier = Modifier.size(18.5.dp),
                                 tint = palette.brandGold
                             )
                         }
-                        Spacer(modifier = Modifier.height(3.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = LinDoCommonCopy.PUBLISH.text,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.brandGold,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkSecondary,
                             maxLines = 1
                         )
                     }
@@ -9223,11 +9236,99 @@ internal fun CommunityTopicReaderPane(
                         }
                     }
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                } else if (post.postNumber == 1) {
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
             }
 
-            // 剩余未加载楼层 / 已读完全部楼层的零度娘底部收尾条
-            if (posts.isNotEmpty()) {
+            // 无回复空状态 / 剩余未加载楼层与底部收尾条
+            val hasZeroReplies = !isLoading &&
+                !changingReaderFilter &&
+                !fetchingJumpWindow &&
+                !isLoadingMorePosts &&
+                posts.size == 1 &&
+                posts.first().postNumber == 1 &&
+                afterTailPostIds.isEmpty() &&
+                (totalFloorCount <= 1 || onlyOpFilter)
+            if (hasZeroReplies) {
+                item(key = "empty_replies", contentType = "footer") {
+                    val topicClosed = detail?.closed == true || detail?.archived == true
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 34.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        LinDoMascot(
+                            state = LinDoMascotState.Empty,
+                            compact = true,
+                            size = 20.dp,
+                            animate = false,
+                            useIconArtwork = true
+                        )
+                        Spacer(modifier = Modifier.width(7.dp))
+                        when {
+                            onlyOpFilter -> {
+                                Text(
+                                    text = "楼主暂无更多发言",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary
+                                )
+                                Text(
+                                    text = " · ",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary.copy(alpha = 0.5f)
+                                )
+                                Text(
+                                    text = "查看全部",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkSecondary,
+                                    modifier = Modifier.clickable { toggleOnlyOpMode() }
+                                )
+                            }
+                            topicClosed -> {
+                                Text(
+                                    text = "暂无回复 · 话题已关闭",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary
+                                )
+                            }
+                            else -> {
+                                Text(
+                                    text = "暂无回复",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary
+                                )
+                                Text(
+                                    text = " · ",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary.copy(alpha = 0.5f)
+                                )
+                                Text(
+                                    text = "写下第一条",
+                                    fontSize = 12.5.sp,
+                                    color = palette.brandGold.copy(alpha = 0.88f),
+                                    modifier = Modifier.clickable {
+                                        if (!UserApiKeyAuthManager.isAuthorized()) {
+                                            requestGuestLogin?.invoke(
+                                                GuestGateScenario.REPLY_TOPIC.titleCopy.text,
+                                                GuestGateScenario.REPLY_TOPIC.subtitleCopy.text
+                                            ) ?: onRequestLogin()
+                                        } else {
+                                            replyTargetPostNumber = null
+                                            replyTargetUsername = null
+                                            replyInitialQuote = ""
+                                            replyCloudDraft = null
+                                            showReplySheet = true
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if (posts.isNotEmpty()) {
                 item(key = "load_more_posts", contentType = "footer") {
                     LinearPulseLoadingFooter(
                         isLoadingMore = isLoadingMorePosts && !loadingEarlierPosts,
@@ -9754,9 +9855,12 @@ internal fun CommunityPostFloor(
     var showBoostEmojiPicker by remember(post.id) { mutableStateOf(false) }
     var selectedBoostEmojiGroupKey by remember(post.id) { mutableStateOf("official_reactions") }
     var isSubmittingBoost by remember(post.id) { mutableStateOf(false) }
+    var pendingBoostAfterVerify by remember(post.id) { mutableStateOf<String?>(null) }
     var isDeletingBoostId by remember(post.id) { mutableStateOf<Long?>(null) }
     var isTogglingReaction by remember(post.id) { mutableStateOf(false) }
     var floorActionError by remember(post.id) { mutableStateOf<String?>(null) }
+    val floorKeyboardController = LocalSoftwareKeyboardController.current
+    val floorFocusManager = LocalFocusManager.current
 
     var showReactionPopover by remember(post.id) { mutableStateOf(false) }
     var showBoostComposer by remember(post.id) { mutableStateOf(false) }
@@ -9776,17 +9880,12 @@ internal fun CommunityPostFloor(
 
     val floorVerifyVer = LocalSiteVerificationRestoreVersion.current
     var lastFloorVerifyVer by remember(post.id) { mutableIntStateOf(floorVerifyVer) }
-    LaunchedEffect(floorVerifyVer) {
-        if (floorVerifyVer > 0 && floorVerifyVer != lastFloorVerifyVer) {
-            lastFloorVerifyVer = floorVerifyVer
-            if (floorActionError.isSiteVerificationError()) {
-                floorActionError = null
-            }
-        }
-    }
 
     LaunchedEffect(floorActionError) {
-        if (floorActionError != null && !floorActionError.isSiteVerificationError()) {
+        if (floorActionError.isSiteVerificationError()) {
+            floorFocusManager.clearFocus(force = true)
+            floorKeyboardController?.hide()
+        } else if (floorActionError != null) {
             delay(4200L)
             floorActionError = null
         }
@@ -9858,7 +9957,13 @@ internal fun CommunityPostFloor(
                 } else {
                     myReactionId = prevReaction
                     localReactions = prevReactionsSnapshot
-                    floorActionError = res.errorMessage ?: LinDoReaderCopy.LIKE_OR_REACTION_FAILED.text
+                    val errMsg = res.errorMessage ?: LinDoReaderCopy.LIKE_OR_REACTION_FAILED.text
+                    floorActionError = errMsg
+                    if (errMsg.isSiteVerificationError() && !PlatformSessionRecovery.verifying) {
+                        floorFocusManager.clearFocus(force = true)
+                        floorKeyboardController?.hide()
+                        onOpenWebUrl("https://linux.do/challenge#lindo-verify")
+                    }
                 }
             } finally {
                 isTogglingReaction = false
@@ -9866,7 +9971,7 @@ internal fun CommunityPostFloor(
         }
     }
 
-    fun submitBoost(rawText: String = boostInputText) {
+    fun submitBoost(rawText: String = boostInputText, autoAfterVerify: Boolean = false) {
         if (!UserApiKeyAuthManager.isAuthorized()) {
             requestGuestLogin?.invoke(
                 GuestGateScenario.BOOST.titleCopy.text,
@@ -9896,6 +10001,7 @@ internal fun CommunityPostFloor(
             return
         }
         floorActionError = null
+        pendingBoostAfterVerify = null
         isSubmittingBoost = true
 
         scope.launch {
@@ -9905,14 +10011,43 @@ internal fun CommunityPostFloor(
                     localBoosts = localBoosts.filterNot { it.id == res.boost.id } + res.boost
                     canBoostLocal = false
                     boostInputText = ""
+                    pendingBoostAfterVerify = null
                     showBoostEmojiPicker = false
                     showBoostComposer = false
                     showReactionPopover = false
                 } else {
-                    floorActionError = res.errorMessage ?: LinDoNetworkCopy.BOOST_SEND_FAILED.text
+                    val errMsg = res.errorMessage ?: LinDoNetworkCopy.BOOST_SEND_FAILED.text
+                    floorActionError = errMsg
+                    if (errMsg.isSiteVerificationError()) {
+                        floorFocusManager.clearFocus(force = true)
+                        floorKeyboardController?.hide()
+                        if (!autoAfterVerify) {
+                            pendingBoostAfterVerify = trimmed
+                            if (!PlatformSessionRecovery.verifying) {
+                                onOpenWebUrl("https://linux.do/challenge#lindo-verify")
+                            }
+                        }
+                    }
                 }
             } finally {
                 isSubmittingBoost = false
+            }
+        }
+    }
+
+    LaunchedEffect(floorVerifyVer) {
+        if (floorVerifyVer > 0 && floorVerifyVer != lastFloorVerifyVer) {
+            lastFloorVerifyVer = floorVerifyVer
+            if (floorActionError.isSiteVerificationError()) {
+                floorActionError = null
+            }
+            val pendingText = pendingBoostAfterVerify
+            if (!pendingText.isNullOrBlank() && showBoostComposer && canComposeBoost && !isSubmittingBoost) {
+                pendingBoostAfterVerify = null
+                delay(120L)
+                if (showBoostComposer && canComposeBoost && !isSubmittingBoost && boostInputText.trim() == pendingText) {
+                    submitBoost(pendingText, autoAfterVerify = true)
+                }
             }
         }
     }
@@ -9932,7 +10067,13 @@ internal fun CommunityPostFloor(
                     if (expandedBoostId == boostId) expandedBoostId = null
                     pendingBoostDelete = null
                 } else {
-                    floorActionError = res.errorMessage ?: LinDoReaderCopy.BOOST_DELETE_FAILED_SHORT.text
+                    val errMsg = res.errorMessage ?: LinDoReaderCopy.BOOST_DELETE_FAILED_SHORT.text
+                    floorActionError = errMsg
+                    if (errMsg.isSiteVerificationError() && !PlatformSessionRecovery.verifying) {
+                        floorFocusManager.clearFocus(force = true)
+                        floorKeyboardController?.hide()
+                        onOpenWebUrl("https://linux.do/challenge#lindo-verify")
+                    }
                 }
             } finally {
                 isDeletingBoostId = null
@@ -10265,28 +10406,31 @@ internal fun CommunityPostFloor(
                             )
                         }
 
+                        // 1:1 对齐 PC 端楼层未读小圆点：1s 阅读停留 + 250ms 缓冲 (=1250ms) 后，
+                        // 以 2600ms cubic-bezier(0.42, 0, 0.2, 1) 从柔和暖金 0.58 透明度优雅渐隐（总可见约 3.85s）
+                        val unreadDotColor = androidx.compose.ui.graphics.lerp(
+                            palette.inkSecondary,
+                            palette.brandGold,
+                            0.76f
+                        )
                         val unreadDotAlpha by animateFloatAsState(
-                            targetValue = if (isUnread) 1f else 0f,
+                            targetValue = if (isUnread) 0.58f else 0f,
                             animationSpec = tween(
-                                durationMillis = if (enableAnimations) 850 else 0,
-                                easing = FastOutSlowInEasing
+                                durationMillis = if (enableAnimations) 2600 else 0,
+                                delayMillis = if (enableAnimations && !isUnread) 250 else 0,
+                                easing = androidx.compose.animation.core.CubicBezierEasing(0.42f, 0f, 0.2f, 1f)
                             ),
                             label = "unreadFloorDotAlpha"
                         )
                         Box(
                             modifier = Modifier
-                                .size(6.5.dp)
+                                .size(5.5.dp)
                                 .testTag("post_unread_${post.id}")
                                 .graphicsLayer {
                                     alpha = unreadDotAlpha
-                                    val scale = 0.88f + 0.12f * unreadDotAlpha
-                                    scaleX = scale
-                                    scaleY = scale
                                 }
                                 .clip(CircleShape)
-                                .background(
-                                    palette.brandGold
-                                )
+                                .background(unreadDotColor)
                         )
                     }
                 }
@@ -10544,14 +10688,16 @@ internal fun CommunityPostFloor(
             val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
 
             LaunchedEffect(Unit) {
-                delay(60L)
-                runCatching { boostFocusRequester.requestFocus() }
-                delay(100L)
-                runCatching { boostBringIntoViewRequester.bringIntoView() }
+                if (!floorActionError.isSiteVerificationError() && !PlatformSessionRecovery.verifying) {
+                    delay(60L)
+                    runCatching { boostFocusRequester.requestFocus() }
+                    delay(100L)
+                    runCatching { boostBringIntoViewRequester.bringIntoView() }
+                }
             }
 
-            LaunchedEffect(imeBottomPx, showBoostEmojiPicker) {
-                if (imeBottomPx > 0 || showBoostEmojiPicker) {
+            LaunchedEffect(imeBottomPx, showBoostEmojiPicker, floorActionError) {
+                if (imeBottomPx > 0 || showBoostEmojiPicker || floorActionError != null) {
                     runCatching { boostBringIntoViewRequester.bringIntoView() }
                     delay(120L)
                     runCatching { boostBringIntoViewRequester.bringIntoView() }
@@ -10576,10 +10722,17 @@ internal fun CommunityPostFloor(
                     color = MaterialTheme.colorScheme.error, fontSize = 12.5.sp
                 )
 
-                // 一体化单行小火箭输入条（左侧纯矢量表情按钮 + 中部无框输入 + 右侧字数与发送/关闭图标）
+                // 一体化单行小火箭输入条（验证条置于输入条上方，绝不被软键盘遮挡；发送中展示即时加载圈）
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
                     .background(palette.subtleSurface).border(0.6.dp,
                         if (counterOverLimit) Color(0xFFEF4444) else palette.hairline, RoundedCornerShape(10.dp))) {
+                if (floorActionError.isSiteVerificationError()) {
+                    VerificationInlineStatus(
+                        onVerify = { onOpenWebUrl("https://linux.do/challenge#lindo-verify") },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                    HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -10608,7 +10761,13 @@ internal fun CommunityPostFloor(
                     val boostInputStyle = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, color = palette.inkPrimary)
                     BasicTextField(
                         value = boostInputText,
-                        onValueChange = { next -> boostInputText = next.replace("\n", " ") },
+                        onValueChange = { next ->
+                            val normalized = next.replace("\n", " ")
+                            boostInputText = normalized
+                            if (pendingBoostAfterVerify != null && normalized.trim() != pendingBoostAfterVerify) {
+                                pendingBoostAfterVerify = null
+                            }
+                        },
                         singleLine = true,
                         textStyle = boostInputStyle,
                         cursorBrush = SolidColor(palette.brandGold),
@@ -10632,7 +10791,7 @@ internal fun CommunityPostFloor(
                         }
                     )
 
-                    // 右侧：精简字数提示 + 纯图标发送按钮 + 关闭按钮
+                    // 右侧：精简字数提示 + 纯图标发送按钮（发送中实时显示加载圈） + 关闭按钮
                     Text(
                         text = "${boostStats.visibleLength}/${BoostInputStats.MAX_BOOST_VISIBLE_LENGTH}",
                         fontSize = 12.sp,
@@ -10651,12 +10810,20 @@ internal fun CommunityPostFloor(
                             },
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = LinDoIcons.Send,
-                            contentDescription = LinDoReaderCopy.SEND_ROCKET_DESC.text,
-                            modifier = Modifier.size(16.dp),
-                            tint = if (canSendNow) palette.brandGold else palette.inkTertiary.copy(alpha = 0.38f)
-                        )
+                        if (isSubmittingBoost) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                color = palette.brandGold,
+                                strokeWidth = 1.8.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = LinDoIcons.Send,
+                                contentDescription = LinDoReaderCopy.SEND_ROCKET_DESC.text,
+                                modifier = Modifier.size(16.dp),
+                                tint = if (canSendNow) palette.brandGold else palette.inkTertiary.copy(alpha = 0.38f)
+                            )
+                        }
                     }
 
                     Box(
@@ -10664,6 +10831,7 @@ internal fun CommunityPostFloor(
                             .size(28.dp)
                             .clip(CircleShape)
                             .clickable {
+                                pendingBoostAfterVerify = null
                                 showBoostEmojiPicker = false
                                 showBoostComposer = false
                             },
@@ -10676,11 +10844,6 @@ internal fun CommunityPostFloor(
                             tint = palette.inkTertiary
                         )
                     }
-                }
-
-                if (floorActionError.isSiteVerificationError()) {
-                    VerificationInlineStatus(onVerify = { onOpenWebUrl("https://linux.do/") },
-                        modifier = Modifier.padding(horizontal = 12.dp))
                 }
                 }
 
@@ -11438,13 +11601,20 @@ private fun CommunityPostContent(
                 DiscourseAstParser.parseOrGetCached(postId, cookedHtml)
             }
         }
-        if (targetReplyFloorNum != null) {
-            val repliedSnippet = remember(repliedHtml, astNodes.firstOrNull(), targetReplyFloorNum, originalUrl) {
+        val leadingSameFloorQuote = remember(astNodes.firstOrNull(), targetReplyFloorNum, originalUrl) {
+            if (targetReplyFloorNum == null) {
+                false
+            } else {
                 val quote = astNodes.firstOrNull() as? PostBlockNode.QuoteBlock
                 val topicId = originalUrl?.let(::parseSmartTopicUrlTarget)?.first
-                val sameTarget = quote != null && quote.postNumber == targetReplyFloorNum &&
+                quote != null &&
+                    quote.postNumber == targetReplyFloorNum &&
                     (quote.topicId == null || (topicId != null && quote.topicId == topicId))
-                if (sameTarget) "" else repliedHtml?.let(::postPreviewText)?.take(200).orEmpty()
+            }
+        }
+        if (targetReplyFloorNum != null && !leadingSameFloorQuote) {
+            val repliedSnippet = remember(repliedHtml) {
+                repliedHtml?.let(::postPreviewText)?.take(200).orEmpty()
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
@@ -11489,7 +11659,8 @@ private fun CommunityPostContent(
             postId = postId,
             onSelectionChange = onSelectionChange,
             onQuoteSelection = onQuoteSelection,
-            onRequestLogin = onRequestLogin
+            onRequestLogin = onRequestLogin,
+            onJumpToFloorNumber = onJumpToFloorNumber
         )
 
     }

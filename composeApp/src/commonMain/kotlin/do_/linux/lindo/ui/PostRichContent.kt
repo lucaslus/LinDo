@@ -21,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -28,6 +29,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -166,6 +168,7 @@ internal fun RichPostText(rich: RichText, palette: LinDoThemePalette,
 
 private val LocalActiveSelectionOwner = compositionLocalOf<MutableState<Any?>?> { null }
 internal val LocalOnQuoteSelectedText = compositionLocalOf<((String) -> Unit)?> { null }
+internal val LocalOnJumpToFloorNumber = compositionLocalOf<((Int) -> Unit)?> { null }
 private val isAndroidSelectionRuntime: Boolean =
     System.getProperty("java.vm.name")?.contains("Dalvik", ignoreCase = true) == true
 
@@ -381,15 +384,18 @@ internal fun PostRichContent(
     postId: Int? = null,
     onSelectionChange: ((String?) -> Unit)? = null,
     onRequestLogin: (() -> Unit)? = null,
-    onQuoteSelection: ((String) -> Unit)? = null
+    onQuoteSelection: ((String) -> Unit)? = null,
+    onJumpToFloorNumber: ((Int) -> Unit)? = null
 ) {
     val existingSelectionOwner = LocalActiveSelectionOwner.current
     val effectiveQuoteAction = onQuoteSelection ?: LocalOnQuoteSelectedText.current
+    val effectiveJumpAction = onJumpToFloorNumber ?: LocalOnJumpToFloorNumber.current
     if (existingSelectionOwner == null) {
         val rootSelectionOwner = remember { mutableStateOf<Any?>(null) }
         CompositionLocalProvider(
             LocalActiveSelectionOwner provides rootSelectionOwner,
-            LocalOnQuoteSelectedText provides effectiveQuoteAction
+            LocalOnQuoteSelectedText provides effectiveQuoteAction,
+            LocalOnJumpToFloorNumber provides effectiveJumpAction
         ) {
             PostRichContentBody(
                 nodes = nodes,
@@ -402,7 +408,10 @@ internal fun PostRichContent(
             )
         }
     } else {
-        CompositionLocalProvider(LocalOnQuoteSelectedText provides effectiveQuoteAction) {
+        CompositionLocalProvider(
+            LocalOnQuoteSelectedText provides effectiveQuoteAction,
+            LocalOnJumpToFloorNumber provides effectiveJumpAction
+        ) {
             PostRichContentBody(
                 nodes = nodes,
                 palette = palette,
@@ -445,9 +454,82 @@ private fun PostRichContentBody(
             }
             is PostBlockNode.Poll -> NativePostPoll(node, palette, postId, originalUrl, onOpenLink, onRequestLogin)
 
-            is PostBlockNode.QuoteBlock -> Column(Modifier.fillMaxWidth().background(palette.subtleSurface, RoundedCornerShape(8.dp)).padding(12.dp)) {
-                node.username?.let { Text(LinDoCommonCopy.AT_USERNAME.format(it), color = palette.inkSecondary, fontSize = 12.sp) }
-                PostRichContent(node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.quotedText)) }, palette, onOpenLink, originalUrl, postId, onSelectionChange, onRequestLogin)
+            is PostBlockNode.QuoteBlock -> {
+                val onJumpFloor = LocalOnJumpToFloorNumber.current
+                val currentTopicId = remember(originalUrl) { originalUrl?.let(::parseSmartTopicUrlTarget)?.first }
+                val accentColor = lerp(palette.hairline, palette.brandGold, 0.65f)
+                val quoteFloorNum = node.postNumber?.takeIf { it > 0 }
+                val isCrossTopic = node.topicId != null && currentTopicId != null && node.topicId != currentTopicId
+                val canJump = quoteFloorNum != null && (isCrossTopic || onJumpFloor != null)
+                val quoteShape = RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(quoteShape)
+                        .background(palette.subtleSurface.copy(alpha = 0.64f))
+                        .drawBehind {
+                            val barWidth = 2.dp.toPx()
+                            drawLine(
+                                color = accentColor,
+                                start = Offset(barWidth / 2f, 0f),
+                                end = Offset(barWidth / 2f, size.height),
+                                strokeWidth = barWidth
+                            )
+                        }
+                        .padding(start = 12.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (!node.username.isNullOrBlank() || quoteFloorNum != null) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = node.username?.takeIf { it.isNotBlank() } ?: "引用",
+                                modifier = Modifier.weight(1f),
+                                color = palette.inkPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (quoteFloorNum != null) {
+                                Text(
+                                    text = "#$quoteFloorNum 楼 ›",
+                                    color = palette.inkTertiary,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    modifier = if (canJump) {
+                                        Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .pointerHoverIcon(PointerIcon.Hand)
+                                            .clickable {
+                                                if (isCrossTopic) {
+                                                    onOpenLink("https://linux.do/t/-/${node.topicId}/$quoteFloorNum")
+                                                } else {
+                                                    onJumpFloor?.invoke(quoteFloorNum)
+                                                }
+                                            }
+                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    PostRichContent(
+                        node.children.ifEmpty { listOf(PostBlockNode.Paragraph(node.quotedText)) },
+                        palette,
+                        onOpenLink,
+                        originalUrl,
+                        postId,
+                        onSelectionChange,
+                        onRequestLogin
+                    )
+                }
             }
             is PostBlockNode.CodeBlock -> {
                 var copied by remember(node.code) { mutableStateOf(false) }

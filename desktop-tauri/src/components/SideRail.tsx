@@ -48,27 +48,30 @@ export const SideRail: React.FC<SideRailProps> = ({
         key={tab}
         type="button"
         onClick={() => onSelectTab(tab)}
-        className="lindo-no-drag group flex w-full flex-col items-center py-[9px] cursor-pointer"
+        className="lindo-no-drag group relative flex h-[52px] w-full flex-col items-center justify-center gap-[3px] cursor-pointer"
       >
-        <div className="relative flex h-[30px] w-[52px] items-center justify-center">
-          <div
-            className="flex h-full w-full items-center justify-center rounded-full transition-colors duration-150"
+        {selected && (
+          <span
+            className="pointer-events-none absolute left-0 top-1/2 h-[22px] w-[3px] -translate-y-1/2 rounded-r-full"
             style={{
-              backgroundColor: selected ? "var(--active-chip-bg)" : "transparent",
+              backgroundColor: "var(--brand-gold)",
+              boxShadow: "0 0 8px color-mix(in srgb, var(--brand-gold) 42%, transparent)",
+            }}
+          />
+        )}
+        <div className="relative flex h-[24px] w-[28px] items-center justify-center">
+          <div
+            className="flex h-[22px] w-[22px] items-center justify-center transition-all duration-150 group-hover:scale-[1.06]"
+            style={{
+              color: selected ? "var(--brand-gold)" : "var(--ink-secondary)",
+              opacity: selected ? 1 : 0.82,
             }}
           >
-            <div
-              className="flex items-center justify-center transition-opacity"
-              style={{
-                color: selected ? "var(--active-chip-text)" : "var(--ink-secondary)",
-              }}
-            >
-              {iconNode(selected)}
-            </div>
+            {iconNode(selected)}
           </div>
           {badgeText ? (
             <span
-              className="absolute -top-[3px] right-[2px] flex h-[15px] min-w-[15px] items-center justify-center rounded-full px-1 text-[9px] font-bold leading-none tabular-nums"
+              className="absolute -top-[4px] -right-[8px] flex h-[15px] min-w-[15px] items-center justify-center rounded-full px-1 text-[9px] font-bold leading-none tabular-nums"
               style={{
                 backgroundColor: "var(--brand-gold)",
                 color: isDark ? "#101217" : "#FFFFFF",
@@ -78,16 +81,17 @@ export const SideRail: React.FC<SideRailProps> = ({
             </span>
           ) : showDot ? (
             <span
-              className="absolute top-[1px] right-[8px] h-[7px] w-[7px] rounded-full"
+              className="absolute -top-[1px] -right-[2px] h-[7px] w-[7px] rounded-full"
               style={{ backgroundColor: "var(--brand-gold)" }}
             />
           ) : null}
         </div>
         <span
-          className="mt-[3px] text-[11px] leading-tight transition-colors"
+          className="text-[10.5px] leading-tight transition-colors duration-150"
           style={{
             fontWeight: selected ? 600 : 500,
             color: selected ? "var(--brand-gold)" : "var(--ink-secondary)",
+            opacity: selected ? 1 : 0.86,
           }}
         >
           {label}
@@ -116,37 +120,40 @@ export const SideRail: React.FC<SideRailProps> = ({
           style={{ height: isMacos ? 38 : 14 }}
         />
 
-        <div className="flex w-full flex-col items-center gap-0.5">
+        <div className="flex w-full flex-col items-center gap-[2px]">
           {renderTab("HOME", "首页", (selected) => (
             <img
               src="/brand/lindo-mark.svg"
               alt="首页"
-              className="h-[22px] w-[22px] object-contain pointer-events-none"
-              style={{ opacity: selected ? 1 : 0.75 }}
+              className="h-[21px] w-[21px] object-contain pointer-events-none"
+              style={{ opacity: selected ? 1 : 0.78 }}
             />
           ))}
 
           {renderTab("DISCOVER", "发现", (selected) =>
-            selected ? <LinDoIcons.CompassSelected size={20} /> : <LinDoIcons.Compass size={20} />
+            selected ? <LinDoIcons.CompassSelected size={19.5} /> : <LinDoIcons.Compass size={19.5} />
           )}
 
-          {/* 发布新话题按钮 */}
+          {/* 发布新话题按钮（38px 正圆微描边，与上下 56×52 圆角方块导航形成清晰语义区分） */}
           <button
             type="button"
             onClick={onPublishClick}
-            className="lindo-no-drag group flex w-full flex-col items-center py-[9px] cursor-pointer"
+            title="发布新话题"
+            className="lindo-no-drag group flex w-full flex-col items-center py-[6px] cursor-pointer"
           >
             <div
-              className="flex h-[30px] w-[52px] items-center justify-center rounded-full transition-transform duration-150 group-hover:scale-[1.03] group-active:scale-[0.97]"
+              className="flex h-[38px] w-[38px] items-center justify-center rounded-full transition-all duration-150 group-hover:scale-[1.04] group-active:scale-[0.96]"
               style={{
                 backgroundColor: "var(--tonal-pill)",
                 color: "var(--brand-gold)",
+                boxShadow:
+                  "inset 0 0 0 0.5px color-mix(in srgb, var(--brand-gold) 32%, transparent)",
               }}
             >
-              <LinDoIcons.Plus size={19} />
+              <LinDoIcons.Plus size={18.5} />
             </div>
             <span
-              className="mt-[3px] text-[11px] font-medium leading-tight"
+              className="mt-[4px] text-[10.5px] font-medium leading-tight transition-colors group-hover:opacity-95"
               style={{ color: "var(--ink-secondary)" }}
             >
               发布
@@ -157,7 +164,7 @@ export const SideRail: React.FC<SideRailProps> = ({
             "MESSAGES",
             "消息",
             (selected) =>
-              selected ? <LinDoIcons.BellSelected size={20} /> : <LinDoIcons.Bell size={20} />,
+              selected ? <LinDoIcons.BellSelected size={19.5} /> : <LinDoIcons.Bell size={19.5} />,
             unreadCount
           )}
 
@@ -165,7 +172,7 @@ export const SideRail: React.FC<SideRailProps> = ({
             "PROFILE",
             "我的",
             (selected) =>
-              selected ? <LinDoIcons.UserSelected size={20} /> : <LinDoIcons.User size={20} />,
+              selected ? <LinDoIcons.UserSelected size={19.5} /> : <LinDoIcons.User size={19.5} />,
             undefined,
             hasUpdate
           )}

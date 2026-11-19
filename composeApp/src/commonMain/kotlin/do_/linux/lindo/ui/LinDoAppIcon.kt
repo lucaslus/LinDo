@@ -147,10 +147,18 @@ internal fun LinDoAppIconPage(
 ) {
     var pending by remember(current) { mutableStateOf(current) }
     var applyFailed by remember { mutableStateOf(false) }
+    var applySucceeded by remember { mutableStateOf(false) }
     val palette = LocalPalette.current
     LinDoFullScreenPage(onBack = onDismiss) {
         LinDoPageTopBar(title = LinDoMessagesCopy.ROW_APP_ICON.text, onBack = onDismiss) {
-            TextButton(enabled = pending != current, onClick = { applyFailed = !onApply(pending) }) {
+            TextButton(
+                enabled = pending != current,
+                onClick = {
+                    val ok = onApply(pending)
+                    applyFailed = !ok
+                    applySucceeded = ok
+                }
+            ) {
                 Text(LinDoMessagesCopy.APPLY_ICON_AND_RESTART.text)
             }
         }
@@ -158,6 +166,25 @@ internal fun LinDoAppIconPage(
             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            if (applySucceeded) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(palette.activeChipBg)
+                        .border(0.5.dp, palette.brandGold.copy(alpha = 0.28f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "✓ ${LinDoMessagesCopy.SWITCH_ICON_APPLIED.text}",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.brandGold
+                    )
+                }
+            }
             Text(LinDoMessagesCopy.ICON_SECTION_ARTWORK.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
             Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 LinDoIconArtwork.entries.chunked(3).forEach { row ->
@@ -173,6 +200,7 @@ internal fun LinDoAppIconPage(
                                     .selectable(selected, role = Role.RadioButton, onClick = {
                                         pending = choice
                                         applyFailed = false
+                                        applySucceeded = false
                                     }).padding(vertical = 8.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(7.dp)
@@ -207,6 +235,7 @@ internal fun LinDoAppIconPage(
                             .selectable(selected, role = Role.RadioButton, onClick = {
                                 pending = pending.copy(background = background)
                                 applyFailed = false
+                                applySucceeded = false
                             }).padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)

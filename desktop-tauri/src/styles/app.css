@@ -69,8 +69,6 @@ body,
   background-color: var(--canvas);
   color: var(--ink-primary);
   font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
   text-rendering: auto;
   font-synthesis: style;
   font-synthesis-weight: none;
@@ -526,27 +524,72 @@ html.lindo-scrolling .lindo-interactive:hover:not(:active) {
 .lindo-cooked blockquote,
 .lindo-cooked aside.quote,
 .lindo-cooked .d-callout {
-  margin: 0.55em 0;
-  padding: 0.5em 0.85em;
-  border-left: 2.5px solid color-mix(in srgb, var(--brand-gold) 65%, var(--hairline));
-  background: color-mix(in srgb, var(--subtle-surface) 78%, transparent);
+  margin: 0.45em 0 0.65em;
+  padding: 0.48em 0.78em;
+  border-left: 2px solid color-mix(in srgb, var(--brand-gold) 65%, var(--hairline));
+  background: color-mix(in srgb, var(--subtle-surface) 64%, transparent);
   border-radius: 0 8px 8px 0;
   color: var(--ink-secondary);
+}
+
+.lindo-cooked > aside.quote:first-child {
+  margin-top: 0.15em;
+}
+
+/* Discourse wraps quoted content in `aside.quote > blockquote` — unwrap the inner blockquote box
+   so quotes render as a single calm card instead of double nested vertical bars. */
+.lindo-cooked aside.quote > blockquote {
+  margin: 0;
+  padding: 0;
+  border-left: none;
+  background: transparent;
+  border-radius: 0;
+  font-size: 0.93em;
+  line-height: 1.56;
+  color: var(--ink-secondary);
+}
+.lindo-cooked blockquote > p:first-child,
+.lindo-cooked aside.quote > blockquote > p:first-child {
+  margin-top: 0;
+}
+.lindo-cooked blockquote > p:last-child,
+.lindo-cooked aside.quote > blockquote > p:last-child {
+  margin-bottom: 0;
 }
 
 .lindo-cooked aside.quote .title {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.86em;
+  font-size: 12px;
+  line-height: 1.35;
   font-weight: var(--font-weight-semibold);
   color: var(--ink-primary);
-  margin-bottom: 0.35em;
+  margin-bottom: 4px;
 }
 .lindo-cooked aside.quote .title img.avatar {
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
   border-radius: 9999px;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+.lindo-cooked aside.quote .title [data-quote-jump-floor] {
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  border-radius: 6px;
+  color: var(--ink-tertiary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.14s ease, background-color 0.14s ease;
+}
+.lindo-cooked aside.quote .title [data-quote-jump-floor]:hover {
+  color: var(--brand-gold);
+  background: color-mix(in srgb, var(--brand-gold) 10%, transparent);
 }
 
 .lindo-cooked aside.onebox {

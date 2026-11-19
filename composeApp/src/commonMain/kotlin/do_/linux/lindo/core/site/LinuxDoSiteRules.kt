@@ -37,7 +37,9 @@ object LinuxDoSiteRules {
     private val holographicTitles = setOf("种子用户", "破界者", "premium")
     private val avatarUsernameRegex = Regex("""/user_avatar/[^/]+/([^/]+)/""")
     private val sizedUserAvatarRegex = Regex("""(/user_avatar/[^/]+/[^/]+/)\d+(/.*)""")
+    private val sizedLocalLetterAvatarRegex = Regex("""(/letter_avatar/[^/]+/)\d+(/.*)""")
     private val sizedLetterAvatarRegex = Regex("""(/(?:letter_avatar_proxy/)?v\d+/letter/[^/]+/[^/]+/)\d+(\.[a-zA-Z0-9]+.*)""")
+    private val letterCdnWebpRegex = Regex("""\.webp(\?.*)?$""", RegexOption.IGNORE_CASE)
 
     /**
      * 将请求的像素尺寸收敛至 Discourse 官方预生成 `avatar_sizes` (`24, 48, 96, 144, 288`)，
@@ -128,20 +130,32 @@ object LinuxDoSiteRules {
         } else {
             trimmed
                 .let { sizedUserAvatarRegex.replace(it) { m -> "${m.groupValues[1]}$targetSize${m.groupValues[2]}" } }
+                .let { sizedLocalLetterAvatarRegex.replace(it) { m -> "${m.groupValues[1]}$targetSize${m.groupValues[2]}" } }
                 .let { sizedLetterAvatarRegex.replace(it) { m -> "${m.groupValues[1]}$targetSize${m.groupValues[2]}" } }
         }
+        fun normalizeLetterCdn(url: String): String =
+            letterCdnWebpRegex.replace(url) { m -> ".png${m.groupValues[1]}" }
         return when {
             sized.startsWith("/user_avatar/linux.do/") -> "$CDN_BASE_URL$sized"
             sized.startsWith("https://linux.do/user_avatar/linux.do/") ->
                 sized.replaceFirst("https://linux.do", CDN_BASE_URL)
             sized.startsWith("http://linux.do/user_avatar/linux.do/") ->
                 sized.replaceFirst("http://linux.do", CDN_BASE_URL)
+            sized.startsWith("/letter_avatar/") -> "$CDN_BASE_URL$sized"
+            sized.startsWith("https://linux.do/letter_avatar/") ->
+                sized.replaceFirst("https://linux.do", CDN_BASE_URL)
+            sized.startsWith("http://linux.do/letter_avatar/") ->
+                sized.replaceFirst("http://linux.do", CDN_BASE_URL)
             sized.startsWith("/letter_avatar_proxy/") ->
-                "$LETTER_AVATAR_CDN_BASE_URL/${sized.removePrefix("/letter_avatar_proxy/")}"
+                normalizeLetterCdn("$LETTER_AVATAR_CDN_BASE_URL/${sized.removePrefix("/letter_avatar_proxy/")}")
             sized.startsWith("https://linux.do/letter_avatar_proxy/") ->
-                sized.replaceFirst("https://linux.do/letter_avatar_proxy", LETTER_AVATAR_CDN_BASE_URL)
+                normalizeLetterCdn(sized.replaceFirst("https://linux.do/letter_avatar_proxy", LETTER_AVATAR_CDN_BASE_URL))
             sized.startsWith("http://linux.do/letter_avatar_proxy/") ->
-                sized.replaceFirst("http://linux.do/letter_avatar_proxy", LETTER_AVATAR_CDN_BASE_URL)
+                normalizeLetterCdn(sized.replaceFirst("http://linux.do/letter_avatar_proxy", LETTER_AVATAR_CDN_BASE_URL))
+            sized.startsWith("$CDN_BASE_URL/letter_avatar_proxy/") ->
+                normalizeLetterCdn(sized.replaceFirst("$CDN_BASE_URL/letter_avatar_proxy", LETTER_AVATAR_CDN_BASE_URL))
+            sized.startsWith("$LETTER_AVATAR_CDN_BASE_URL/") ->
+                normalizeLetterCdn(sized)
             else -> resolveUrl(sized)
         }
     }

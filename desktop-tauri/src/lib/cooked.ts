@@ -81,20 +81,28 @@ export function prepareCookedHtml(rawHtml: string, opts?: { stripPolls?: boolean
     const postNum = aside.getAttribute("data-post");
     const topicAttr = aside.getAttribute("data-topic") || "";
     const titleEl = aside.querySelector(".title");
-    if (postNum && Number(postNum) > 0 && titleEl && !titleEl.querySelector("[data-quote-jump-floor]")) {
+    if (titleEl) {
       titleEl.querySelectorAll(".quote-controls").forEach((c) => c.remove());
-      const jumpBtn = doc.createElement("button");
-      jumpBtn.setAttribute("type", "button");
-      jumpBtn.setAttribute("data-quote-jump-floor", postNum);
-      if (topicAttr) {
-        jumpBtn.setAttribute("data-quote-jump-topic", topicAttr);
+      for (const child of Array.from(titleEl.childNodes)) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          const cleaned = (child.textContent || "").trim().replace(/[:：]\s*$/, "").trim();
+          if (cleaned) {
+            child.textContent = cleaned;
+          } else {
+            child.remove();
+          }
+        }
       }
-      jumpBtn.textContent = `#${postNum} 楼 ›`;
-      jumpBtn.setAttribute(
-        "style",
-        "margin-left:auto;padding:1px 6px;font-size:11.5px;font-weight:500;border-radius:6px;color:var(--ink-tertiary);background:transparent;border:none;cursor:pointer;"
-      );
-      titleEl.appendChild(jumpBtn);
+      if (postNum && Number(postNum) > 0 && !titleEl.querySelector("[data-quote-jump-floor]")) {
+        const jumpBtn = doc.createElement("button");
+        jumpBtn.setAttribute("type", "button");
+        jumpBtn.setAttribute("data-quote-jump-floor", postNum);
+        if (topicAttr) {
+          jumpBtn.setAttribute("data-quote-jump-topic", topicAttr);
+        }
+        jumpBtn.textContent = `#${postNum} 楼 ›`;
+        titleEl.appendChild(jumpBtn);
+      }
     }
   });
 
@@ -158,11 +166,24 @@ export function extractPostReplyPreview(postId: number, rawHtml: string): PostRe
   const parser = new DOMParser();
   const doc = parser.parseFromString(rawHtml, "text/html");
 
-  // Check if the post's very first block is a Discourse `<aside class="quote" data-post="N">`
+  // Check if the post's very first visible block is a Discourse `<aside class="quote" data-post="N">` with a title header
   let leadingQuotedFloor: number | null = null;
   let leadingQuotedTopicId: number | null = null;
-  const firstEl = doc.body.firstElementChild;
-  if (firstEl && firstEl.tagName === "ASIDE" && firstEl.classList.contains("quote")) {
+  let firstEl: Element | null = doc.body.firstElementChild;
+  while (
+    firstEl &&
+    firstEl.tagName === "P" &&
+    !(firstEl.textContent || "").trim() &&
+    !firstEl.querySelector("img")
+  ) {
+    firstEl = firstEl.nextElementSibling;
+  }
+  if (
+    firstEl &&
+    firstEl.tagName === "ASIDE" &&
+    firstEl.classList.contains("quote") &&
+    firstEl.querySelector(".title")
+  ) {
     const dp = Number(firstEl.getAttribute("data-post") || 0);
     const dt = Number(firstEl.getAttribute("data-topic") || 0);
     if (dp > 0) leadingQuotedFloor = dp;

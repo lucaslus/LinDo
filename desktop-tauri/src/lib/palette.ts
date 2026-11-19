@@ -339,6 +339,66 @@ function normalizeAvatarSize(sizePx: number): number {
   return 288;
 }
 
+const LETTER_AVATAR_FALLBACK_COLORS = [
+  "#5B7FA6",
+  "#4E8C7D",
+  "#8A6BBE",
+  "#C47451",
+  "#3F8E9B",
+  "#B5637A",
+  "#6B8E55",
+  "#9B7B47",
+  "#5E72B8",
+  "#A3689B",
+  "#4F8A6B",
+  "#B07449",
+];
+
+/**
+ * Extracts letter + background hex directly from Discourse `/letter_avatar_proxy/v4/letter/<char>/<hex>/...`
+ * or deterministically derives a crisp Discourse-style initial badge from `username` so broken `[?]` never appears.
+ */
+export function parseLetterAvatarMeta(
+  template?: string | null,
+  username?: string | null
+): { letter: string; bgColor: string } {
+  const raw = (template || "").trim();
+  const proxyMatch = raw.match(/\/v\d+\/letter\/([^/]+)\/([0-9a-fA-F]{6})\//i);
+  if (proxyMatch) {
+    let ch = proxyMatch[1];
+    try {
+      ch = decodeURIComponent(ch);
+    } catch {
+      // keep raw
+    }
+    const letter = Array.from(ch.trim())[0]?.toUpperCase() || "L";
+    return { letter, bgColor: `#${proxyMatch[2].toLowerCase()}` };
+  }
+  const cleanUser = (username || "").trim().replace(/^@+/, "");
+  const letter = Array.from(cleanUser)[0]?.toUpperCase() || "L";
+  let hash = 0;
+  const seed = cleanUser.toLowerCase() || "lindo";
+  for (let i = 0; i < seed.length; i++) {
+    hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
+  }
+  const idx = Math.abs(hash) % LETTER_AVATAR_FALLBACK_COLORS.length;
+  return { letter, bgColor: LETTER_AVATAR_FALLBACK_COLORS[idx] };
+}
+
+function normalizeDiscourseLetterCdnUrl(url: string): string {
+  // KeyCDN (`avatars.discourse-cdn.com`) serves `.png` (200) and returns 404 for `.webp`
+  return url.replace(/\.webp(\?.*)?$/i, ".png$1");
+}
+
+function normalizeSizedAvatarTemplate(trimmed: string, targetSize: string): string {
+  return trimmed.includes("{size}")
+    ? trimmed.replace("{size}", targetSize)
+    : trimmed
+        .replace(/(\/user_avatar\/[^/]+\/[^/]+\/)\d+(\/.*)/, `$1${targetSize}$2`)
+        .replace(/(\/letter_avatar\/[^/]+\/)\d+(\/.*)/, `$1${targetSize}$2`)
+        .replace(/(\/(?:letter_avatar_proxy\/)?v\d+\/letter\/[^/]+\/[^/]+\/)\d+(\.[a-zA-Z0-9]+.*)/, `$1${targetSize}$2`);
+}
+
 /**
  * Resolves static/animated avatar URLs via official Linux.do edge CDNs (`cdn.ldstatic.com` & `avatars.discourse-cdn.com`)
  * with normalized pre-generated Discourse sizes (`24/48/96/144/288`) for zero 302 redirects and instant load.
@@ -353,11 +413,7 @@ export function resolveAvatarUrl(template?: string | null, size = 96): string {
 
   // Animated original WebP/GIF URLs do not contain `{size}`
   const targetSize = String(normalizeAvatarSize(size));
-  const sized = trimmed.includes("{size}")
-    ? trimmed.replace("{size}", targetSize)
-    : trimmed
-        .replace(/(\/user_avatar\/[^/]+\/[^/]+\/)\d+(\/.*)/, `$1${targetSize}$2`)
-        .replace(/(\/(?:letter_avatar_proxy\/)?v\d+\/letter\/[^/]+\/[^/]+\/)\d+(\.[a-zA-Z0-9]+.*)/, `$1${targetSize}$2`);
+  const sized = normalizeSizedAvatarTemplate(trimmed, targetSize);
 
   const isGif = sized.split("?")[0].toLowerCase().endsWith(".gif");
   if (!isGif && sized.startsWith("/user_avatar/linux.do/")) {
@@ -369,14 +425,37 @@ export function resolveAvatarUrl(template?: string | null, size = 96): string {
   if (!isGif && sized.startsWith("http://linux.do/user_avatar/linux.do/")) {
     return sized.replace("http://linux.do", "https://cdn.ldstatic.com");
   }
+  if (sized.startsWith("/letter_avatar/")) {
+    return `https://cdn.ldstatic.com${sized}`;
+  }
+  if (sized.startsWith("https://linux.do/letter_avatar/")) {
+    return sized.replace("https://linux.do", "https://cdn.ldstatic.com");
+  }
+  if (sized.startsWith("http://linux.do/letter_avatar/")) {
+    return sized.replace("http://linux.do", "https://cdn.ldstatic.com");
+  }
   if (sized.startsWith("/letter_avatar_proxy/")) {
-    return `https://avatars.discourse-cdn.com/${sized.replace(/^\/letter_avatar_proxy\//, "")}`;
+    return normalizeDiscourseLetterCdnUrl(
+      `https://avatars.discourse-cdn.com/${sized.replace(/^\/letter_avatar_proxy\//, "")}`
+    );
   }
   if (sized.startsWith("https://linux.do/letter_avatar_proxy/")) {
-    return sized.replace("https://linux.do/letter_avatar_proxy", "https://avatars.discourse-cdn.com");
+    return normalizeDiscourseLetterCdnUrl(
+      sized.replace("https://linux.do/letter_avatar_proxy", "https://avatars.discourse-cdn.com")
+    );
   }
   if (sized.startsWith("http://linux.do/letter_avatar_proxy/")) {
-    return sized.replace("http://linux.do/letter_avatar_proxy", "https://avatars.discourse-cdn.com");
+    return normalizeDiscourseLetterCdnUrl(
+      sized.replace("http://linux.do/letter_avatar_proxy", "https://avatars.discourse-cdn.com")
+    );
+  }
+  if (sized.startsWith("https://cdn.ldstatic.com/letter_avatar_proxy/")) {
+    return normalizeDiscourseLetterCdnUrl(
+      sized.replace("https://cdn.ldstatic.com/letter_avatar_proxy", "https://avatars.discourse-cdn.com")
+    );
+  }
+  if (sized.startsWith("https://avatars.discourse-cdn.com/")) {
+    return normalizeDiscourseLetterCdnUrl(sized);
   }
   if (sized.startsWith("http://") || sized.startsWith("https://")) {
     return sized;
@@ -385,6 +464,34 @@ export function resolveAvatarUrl(template?: string | null, size = 96): string {
     return `https:${sized}`;
   }
   return `https://linux.do${sized.startsWith("/") ? "" : "/"}${sized}`;
+}
+
+/**
+ * Resolves the canonical `https://linux.do/...` origin URL for authenticated same-origin WebView bridge fallback
+ * when an edge CDN (`cdn.ldstatic.com`) fails or 404s. Returns `null` for `letter_avatar_proxy` (which 404s on origin
+ * and should fall back directly to the native Discourse Letter Avatar).
+ */
+export function resolveOriginalLinuxDoAvatarUrl(template?: string | null, size = 96): string | null {
+  if (!template) return null;
+  const trimmed = template.trim();
+  if (!trimmed || trimmed.startsWith("/brand/") || trimmed.startsWith("data:") || trimmed.startsWith("blob:")) {
+    return null;
+  }
+  if (trimmed.includes("/letter_avatar_proxy/") || trimmed.includes("avatars.discourse-cdn.com/")) {
+    return null;
+  }
+  const targetSize = String(normalizeAvatarSize(size));
+  const sized = normalizeSizedAvatarTemplate(trimmed, targetSize);
+  if (sized.startsWith("https://cdn.ldstatic.com/user_avatar/") || sized.startsWith("https://cdn.ldstatic.com/letter_avatar/")) {
+    return sized.replace("https://cdn.ldstatic.com", "https://linux.do");
+  }
+  if (sized.startsWith("https://linux.do/") || sized.startsWith("http://linux.do/")) {
+    return sized.replace(/^http:\/\//, "https://");
+  }
+  if (sized.startsWith("/")) {
+    return `https://linux.do${sized}`;
+  }
+  return null;
 }
 
 export function resolveForumAssetUrl(raw?: string | null): string {
@@ -409,8 +516,18 @@ export function resolveForumAssetUrl(raw?: string | null): string {
   if (!isGif && normalized.startsWith("https://linux.do/user_avatar/linux.do/")) {
     return resolveAvatarUrl(normalized, 144);
   }
+  if (normalized.startsWith("https://linux.do/letter_avatar/")) {
+    return normalized.replace("https://linux.do", "https://cdn.ldstatic.com");
+  }
   if (normalized.startsWith("https://linux.do/letter_avatar_proxy/")) {
-    return normalized.replace("https://linux.do/letter_avatar_proxy", "https://avatars.discourse-cdn.com");
+    return normalizeDiscourseLetterCdnUrl(
+      normalized.replace("https://linux.do/letter_avatar_proxy", "https://avatars.discourse-cdn.com")
+    );
+  }
+  if (normalized.startsWith("https://cdn.ldstatic.com/letter_avatar_proxy/")) {
+    return normalizeDiscourseLetterCdnUrl(
+      normalized.replace("https://cdn.ldstatic.com/letter_avatar_proxy", "https://avatars.discourse-cdn.com")
+    );
   }
   if (normalized.startsWith("https://linux.do/images/emoji/")) {
     return normalized.replace("https://linux.do", "https://cdn.ldstatic.com");
