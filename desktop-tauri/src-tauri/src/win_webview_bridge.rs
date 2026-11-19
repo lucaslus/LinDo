@@ -16,7 +16,13 @@ const CONNECT_PROBE_LABEL: &str = "lindo-connect-probe";
 
 static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
 static EVAL_SEQ: AtomicU64 = AtomicU64::new(1);
+static RELOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
 static PROTOCOL_REGISTERED: OnceLock<()> = OnceLock::new();
+static CACHED_BRIDGE_UA: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
+
+fn cached_bridge_ua() -> &'static std::sync::Mutex<String> {
+    CACHED_BRIDGE_UA.get_or_init(|| std::sync::Mutex::new(String::new()))
+}
 
 fn is_forum_host(host: Option<&str>) -> bool {
     let Some(h) = host else { return false };
@@ -304,22 +310,14 @@ pub async fn native_call(
             let login = params.get("login").and_then(|v| v.as_bool()).unwrap_or(false);
             let _ = wv.set_theme(Some(if dark { Theme::Dark } else { Theme::Light }));
             let _ = wv.set_title(if login { "登录 LINUX DO" } else { "安全确认" });
-            let _ = wv.set_resizable(login);
+            let _ = wv.set_resizable(true);
             if login {
                 let _ = wv.set_min_size(Some(tauri::LogicalSize::new(420.0, 460.0)));
                 let _ = wv.set_size(tauri::LogicalSize::new(540.0, 620.0));
             } else {
-                let _ = wv.set_min_size(Some(tauri::LogicalSize::new(384.0, 190.0)));
-                let _ = wv.set_size(tauri::LogicalSize::new(384.0, 190.0));
-                let _ = wv.eval(r#"(() => {
-                  const root = document.head || document.documentElement;
-                  if (root && !document.getElementById('__lindo_cf_clean') && location.pathname.indexOf('/challenge') === 0) {
-                    const st = document.createElement('style');
-                    st.id = '__lindo_cf_clean';
-                    st.textContent = 'html,body{margin:0!important;padding:0!important;overflow:hidden!important;background:#181D27!important;}.zone-name-title,.h2,#challenge-body-text,#challenge-explainer-expandable,.footer,.ray-id{display:none!important;}.main-wrapper{margin:0 auto!important;padding:24px 0 0 0!important;min-height:0!important;display:flex!important;justify-content:center!important;}';
-                    root.appendChild(st);
-                  }
-                })()"#);
+                // Match macOS unclipped 480x380 verification window with ZERO DOM/CSS tampering on `/challenge`.
+                let _ = wv.set_min_size(Some(tauri::LogicalSize::new(420.0, 340.0)));
+                let _ = wv.set_size(tauri::LogicalSize::new(480.0, 380.0));
             }
             let _ = wv.unminimize();
             let _ = wv.center();
@@ -335,10 +333,36 @@ pub async fn native_call(
         }
         "status" => {
             let cancelled = VERIFY_CANCELLED.load(Ordering::SeqCst);
+            let mut ua = cached_bridge_ua()
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            if ua.is_empty() {
+                if let Some(wv) = app.get_webview_window(BRIDGE_WINDOW_LABEL) {
+                    if let Ok(raw) = eval_single_sync(&wv, "navigator.userAgent || ''".to_string()).await {
+                        let parsed = serde_json::from_str::<String>(raw.trim())
+                            .unwrap_or_else(|_| raw.trim().trim_matches('"').to_string());
+                        if !parsed.is_empty() {
+                            if let Ok(mut g) = cached_bridge_ua().lock() {
+                                *g = parsed.clone();
+                            }
+                            ua = parsed;
+                        }
+                    }
+                }
+            }
             Ok(json!({
                 "cancelled": cancelled,
                 "loading": false,
-                "error": ""
+                "error": "",
+                "origin404": false,
+                "interactiveRequired": false,
+                "userReloading": false,
+                "reloadEpoch": RELOAD_EPOCH.load(Ordering::Relaxed),
+                "maskVisible": false,
+                "maskMessage": "",
+                "processTerminated": false,
+                "bridgeUa": ua
             }))
         }
         "setDockBadge" => {
@@ -599,6 +623,50 @@ pub async fn native_call(
             .await
             .map_err(|e| format!("清理 Cookie 线程异常: {e}"))?
         }
+        "deleteCfClearance" => {
+            let wv = ensure_bridge_window(&app)?;
+            tokio::task::spawn_blocking(move || {
+                let forum_url: Url = "https://linux.do/".parse().unwrap();
+                let mut deleted: Vec<String> = Vec::new();
+                if let Ok(existing) = wv.cookies_for_url(forum_url) {
+                    for c in existing {
+                        if c.name() == "cf_clearance" {
+                            let val = c.value().to_string();
+                            if !val.is_empty() && !deleted.contains(&val) {
+                                deleted.push(val);
+                            }
+                            let _ = wv.delete_cookie(c);
+                        }
+                    }
+                }
+                Ok(json!({ "deleted": deleted }))
+            })
+            .await
+            .map_err(|e| format!("删除 cf_clearance 线程异常: {e}"))?
+        }
+        "restoreCfClearance" => {
+            let wv = ensure_bridge_window(&app)?;
+            let val = params
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if val.is_empty() {
+                return Ok(json!({ "restored": false }));
+            }
+            tokio::task::spawn_blocking(move || {
+                let mut cb = tauri::webview::Cookie::build(("cf_clearance", val))
+                    .domain(".linux.do")
+                    .path("/")
+                    .secure(true)
+                    .http_only(true);
+                cb = cb.max_age(tauri::webview::cookie::time::Duration::hours(24));
+                let ok = wv.set_cookie(cb.build()).is_ok();
+                Ok(json!({ "restored": ok }))
+            })
+            .await
+            .map_err(|e| format!("恢复 cf_clearance 线程异常: {e}"))?
+        }
         "clearCookies" | "deleteCookie" => {
             let wv = ensure_bridge_window(&app)?;
             let is_clear_all = method == "clearCookies";
@@ -673,42 +741,8 @@ pub async fn native_call(
             Ok(json!({ "html": extracted }))
         }
         "setVerifyMask" => {
-            let visible = params.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
-            let dark = params.get("dark").and_then(|v| v.as_bool()).unwrap_or(true);
-            let msg = params
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("正在连接安全验证服务…");
-            if let Ok(wv) = ensure_bridge_window(&app) {
-                let bg = if dark { "#101218" } else { "#F7F8FA" };
-                let fg = if dark { "#A1A8B5" } else { "#525866" };
-                let msg_json = json!(msg).to_string();
-                let js = if visible {
-                    format!(
-                        r#"(() => {{
-  const root = document.body || document.documentElement;
-  if (!root) return true;
-  let m = document.getElementById('__lindoVerifyMask');
-  if (!m) {{
-    m = document.createElement('div');
-    m.id = '__lindoVerifyMask';
-    root.appendChild(m);
-  }}
-  m.style.cssText = 'position:fixed!important;inset:0!important;z-index:2147483647!important;display:flex!important;align-items:center!important;justify-content:center!important;background:{bg}!important;color:{fg}!important;font:500 13.5px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;pointer-events:auto!important;';
-  m.textContent = {msg_json};
-  return true;
-}})()"#
-                    )
-                } else {
-                    r#"(() => {
-  const m = document.getElementById('__lindoVerifyMask');
-  if (m) m.style.display = 'none';
-  return true;
-})()"#
-                        .to_string()
-                };
-                let _ = wv.eval(js);
-            }
+            // Never inject overlay DOM nodes into Cloudflare `/challenge` documents on Windows WebView2:
+            // keep the Turnstile document 100% authentic and untouched.
             Ok(json!({}))
         }
         _ => Err(format!("Unsupported bridge command: {method}")),

@@ -27,6 +27,26 @@ static BOOL isForumHost(NSString *host) {
     return [h isEqualToString:@"linux.do"] || [h hasSuffix:@".linux.do"];
 }
 
+// Match the installed macOS Safari version so WKWebView sends a 100% authentic macOS Safari User-Agent
+// (a bare WKWebView omits `Version/... Safari/605.1.15`, which Cloudflare WAF flags as an embedded non-browser client).
+static NSString *lindoSafariAppNameForUserAgent(void) {
+    static NSString *cached = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *ver = nil;
+        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:@"/Applications/Safari.app/Contents/Info.plist"];
+        id rawVer = plist[@"CFBundleShortVersionString"];
+        if ([rawVer isKindOfClass:NSString.class] && ((NSString *)rawVer).length > 0) {
+            ver = (NSString *)rawVer;
+        }
+        if (!ver.length) {
+            ver = @"18.3";
+        }
+        cached = [NSString stringWithFormat:@"Version/%@ Safari/605.1.15", ver];
+    });
+    return cached;
+}
+
 static void appendDerLength(NSMutableData *out, NSUInteger len) {
     if (len < 128) {
         uint8_t b = (uint8_t)len;
@@ -63,6 +83,90 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     appendDerLength(spki, body.length);
     [spki appendData:body];
     return spki;
+}
+
+static NSString *lindoMimeForExtension(NSString *rawExt) {
+    NSString *ext = rawExt.lowercaseString ?: @"";
+    if ([ext isEqualToString:@"png"]) return @"image/png";
+    if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) return @"image/jpeg";
+    if ([ext isEqualToString:@"gif"]) return @"image/gif";
+    if ([ext isEqualToString:@"webp"]) return @"image/webp";
+    if ([ext isEqualToString:@"svg"]) return @"image/svg+xml";
+    if ([ext isEqualToString:@"avif"]) return @"image/avif";
+    if ([ext isEqualToString:@"bmp"]) return @"image/bmp";
+    if ([ext isEqualToString:@"tif"] || [ext isEqualToString:@"tiff"]) return @"image/tiff";
+    if ([ext isEqualToString:@"heic"]) return @"image/heic";
+    if ([ext isEqualToString:@"heif"]) return @"image/heif";
+    if ([ext isEqualToString:@"pdf"]) return @"application/pdf";
+    if ([ext isEqualToString:@"txt"]) return @"text/plain";
+    if ([ext isEqualToString:@"md"]) return @"text/markdown";
+    if ([ext isEqualToString:@"json"]) return @"application/json";
+    if ([ext isEqualToString:@"zip"]) return @"application/zip";
+    if ([ext isEqualToString:@"mp4"]) return @"video/mp4";
+    if ([ext isEqualToString:@"webm"]) return @"video/webm";
+    if ([ext isEqualToString:@"mov"]) return @"video/quicktime";
+    return @"application/octet-stream";
+}
+
+static BOOL lindoNeedsPngConversion(NSString *rawExt) {
+    NSString *ext = rawExt.lowercaseString ?: @"";
+    return [ext isEqualToString:@"tif"]
+        || [ext isEqualToString:@"tiff"]
+        || [ext isEqualToString:@"heic"]
+        || [ext isEqualToString:@"heif"]
+        || [ext isEqualToString:@"bmp"];
+}
+
+static NSData *lindoConvertImageDataToPng(NSData *rawData) {
+    if (!rawData.length) return nil;
+    @autoreleasepool {
+        NSBitmapImageRep *bitmap = [NSBitmapImageRep imageRepWithData:rawData];
+        if (!bitmap) {
+            NSImage *img = [[NSImage alloc] initWithData:rawData];
+            if (img) {
+                CGImageRef cgImg = [img CGImageForProposedRect:NULL context:nil hints:nil];
+                if (cgImg) {
+                    bitmap = [[NSBitmapImageRep alloc] initWithCGImage:cgImg];
+                }
+            }
+        }
+        if (!bitmap) return nil;
+        return [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    }
+}
+
+static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes) {
+    if (!path.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDir] || isDir) return nil;
+    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+    unsigned long long fileSize = [attrs[NSFileSize] unsignedLongLongValue];
+    if (fileSize == 0 || fileSize > (unsigned long long)maxBytes * 2ULL) return nil;
+
+    NSData *raw = [NSData dataWithContentsOfFile:path];
+    if (!raw.length) return nil;
+
+    NSString *name = path.lastPathComponent ?: @"attachment";
+    NSString *ext = name.pathExtension.lowercaseString ?: @"";
+    NSData *finalData = raw;
+    NSString *mime = lindoMimeForExtension(ext);
+
+    if (lindoNeedsPngConversion(ext)) {
+        NSData *png = lindoConvertImageDataToPng(raw);
+        if (png.length > 0 && png.length <= maxBytes) {
+            finalData = png;
+            mime = @"image/png";
+            NSString *stem = [name stringByDeletingPathExtension];
+            name = [NSString stringWithFormat:@"%@.png", stem.length ? stem : @"image"];
+        }
+    }
+    if (finalData.length == 0 || finalData.length > maxBytes) return nil;
+    return @{
+        @"filename": name,
+        @"mime": mime,
+        @"dataBase64": [finalData base64EncodedStringWithOptions:0]
+    };
 }
 
 @interface LindoBridgePanel : NSPanel
@@ -131,6 +235,8 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 @property BOOL loginModeState;
 @property BOOL challengeOriginReached;
 @property BOOL challengeInteractiveRequired;
+@property BOOL userReloading;
+@property NSUInteger reloadEpoch;
 @property NSProgressIndicator *progress;
 @property NSButton *browserAuthBtn;
 @property BOOL cancelled;
@@ -138,7 +244,6 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 @property NSString *navigationError;
 @property id<NSObject> activityToken;
 - (void)handleCfScriptEvent:(NSString *)eventName;
-- (void)alignTurnstileInClipView;
 @end
 
 @implementation LindoCfScriptHandler
@@ -159,13 +264,15 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
         WKWebsiteDataStore *store = WKWebsiteDataStore.defaultDataStore;
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
         config.websiteDataStore = store;
+        config.applicationNameForUserAgent = lindoSafariAppNameForUserAgent();
 
         WKUserContentController *ucc = [WKUserContentController new];
         LindoCfScriptHandler *cfHandler = [LindoCfScriptHandler new];
         cfHandler.host = self;
-        [ucc addScriptMessageHandler:cfHandler name:@"lindoCf"];
+        // Register message handler & passive lifecycle observer strictly inside isolated `defaultClientWorld`
+        // so `window.webkit` is never exposed to page scripts and zero DOM/CSS tampering ever touches `/challenge`.
+        [ucc addScriptMessageHandler:cfHandler contentWorld:WKContentWorld.defaultClientWorld name:@"lindoCf"];
 
-        // Passive 0-frame Turnstile interactiveBegin & beforeunload observer
         NSString *cfLifecycleJs =
             @"(function(){"
              "  function post(ev){try{window.webkit.messageHandlers.lindoCf.postMessage(ev);}catch(_){}}"
@@ -188,40 +295,22 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
              "})();";
         WKUserScript *lifecycleScript = [[WKUserScript alloc] initWithSource:cfLifecycleJs
                                                                injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                                            forMainFrameOnly:YES];
+                                                            forMainFrameOnly:YES
+                                                              inContentWorld:WKContentWorld.defaultClientWorld];
         [ucc addUserScript:lifecycleScript];
-
-        // Isolated client-world surface styling ONLY on `/challenge` so surrounding boilerplate never clutters the compact card,
-        // while keeping `.main-wrapper`, `#turnstile-wrapper`, `.cf-turnstile`, and `iframe` 100% untouched in natural viewport!
-        NSString *challengeStageCleanJs =
-            @"(function(){"
-             "  if(location.origin!=='https://linux.do'||location.pathname.indexOf('/challenge')!==0)return;"
-             "  function inject(){"
-             "    var root=document.head||document.documentElement;"
-             "    if(!root||document.getElementById('__lindo_cf_clean'))return;"
-             "    var st=document.createElement('style');"
-             "    st.id='__lindo_cf_clean';"
-             "    st.textContent='html,body{margin:0!important;padding:0!important;overflow:hidden!important;background:transparent!important;}'"
-             "      +'.zone-name-title,.h2,#challenge-body-text,#challenge-explainer-expandable,.footer,.ray-id,.clearfix.footer{display:none!important;}'"
-             "      +'.main-wrapper{margin:0 auto!important;padding:18px 0 0 0!important;min-height:0!important;display:flex!important;justify-content:center!important;}'"
-             "      +'.main-content{margin:0 auto!important;padding:0!important;width:auto!important;display:flex!important;flex-direction:column!important;align-items:center!important;}'"
-             "      +'#turnstile-wrapper,.cf-turnstile{margin:0 auto!important;}';"
-             "    root.appendChild(st);"
-             "  }"
-             "  inject();"
-             "  document.addEventListener('DOMContentLoaded',inject,{once:true});"
-             "})();";
-        WKUserScript *cleanStageScript = [[WKUserScript alloc] initWithSource:challengeStageCleanJs
-                                                                injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                                             forMainFrameOnly:YES
-                                                               inContentWorld:WKContentWorld.defaultClientWorld];
-        [ucc addUserScript:cleanStageScript];
         config.userContentController = ucc;
 
-        // Keep `_web` 100% unparented (offscreen, no NSWindow/CGSWindow) until `show:loginMode:` actually displays a sheet!
-        _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 420, 480) configuration:config];
-        if ([_web respondsToSelector:@selector(setDrawsBackground:)]) {
-            [_web setValue:@NO forKey:@"drawsBackground"];
+        // Keep `_web` unparented offscreen with a normal desktop viewport until `show:loginMode:` attaches it.
+        _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 800) configuration:config];
+        if ([_web respondsToSelector:NSSelectorFromString(@"_setDrawsBackground:")]) {
+            @try {
+                [_web setValue:@NO forKey:@"drawsBackground"];
+            } @catch (NSException *ignored) {}
+        }
+        if (@available(macOS 12.0, *)) {
+            if ([_web respondsToSelector:@selector(setUnderPageBackgroundColor:)]) {
+                [_web setUnderPageBackgroundColor:[NSColor colorWithRed:0.094 green:0.114 blue:0.153 alpha:1.0]];
+            }
         }
         _web.navigationDelegate = self;
         _web.UIDelegate = self;
@@ -231,6 +320,8 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
         _loginModeState = NO;
         _challengeOriginReached = NO;
         _challengeInteractiveRequired = NO;
+        _userReloading = NO;
+        _reloadEpoch = 0;
     }
     return self;
 }
@@ -238,63 +329,35 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 - (void)handleCfScriptEvent:(NSString *)eventName {
     if ([eventName isEqualToString:@"interactive"]) {
         self.challengeInteractiveRequired = YES;
+        self.userReloading = NO;
         if (!self.loginModeState && _panel && _panel.isVisible && !self.challengeOriginReached) {
             [self setVerifyMask:NO dark:self.maskDarkState message:@""];
-            [self alignTurnstileInClipView];
         }
     } else if ([eventName isEqualToString:@"unloading"]) {
-        if (!self.loginModeState) {
+        if (!self.loginModeState && !self.userReloading) {
             // Instant 0ms mask cover BEFORE the post-challenge 404 navigation even starts!
             [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
         }
     }
 }
 
-- (void)alignTurnstileInClipView {
-    if (self.loginModeState || !_webClipView || _web.superview != _webClipView) return;
-    CGFloat clipW = _webClipView.bounds.size.width;
-    CGFloat clipH = _webClipView.bounds.size.height;
-    CGFloat webW = 420.0;
-    CGFloat webH = 480.0;
-    NSString *rectJs =
-        @"return (() => {"
-         "  const el = document.querySelector('iframe[src*=\"challenges.cloudflare.com\"], #turnstile-wrapper, .cf-turnstile, #challenge-stage');"
-         "  if (!el) return null;"
-         "  const r = el.getBoundingClientRect();"
-         "  if (!r || r.width < 40 || r.height < 20) return null;"
-         "  return { cx: r.left + r.width * 0.5, cy: r.top + r.height * 0.5 };"
-         "})();";
-    [_web callAsyncJavaScript:rectJs
-                    arguments:@{}
-                      inFrame:nil
-               inContentWorld:WKContentWorld.defaultClientWorld
-            completionHandler:^(id result, NSError *error) {
-        if (error || self.loginModeState || self.web.superview != self.webClipView) return;
-        if ([result isKindOfClass:NSDictionary.class]) {
-            NSDictionary *d = (NSDictionary *)result;
-            CGFloat cx = [d[@"cx"] doubleValue];
-            CGFloat cy = [d[@"cy"] doubleValue];
-            if (cx > 10.0 && cy > 5.0) {
-                CGFloat ox = round(clipW * 0.5 - cx);
-                CGFloat oy = round(clipH * 0.5 + cy - webH);
-                [self.web setFrame:NSMakeRect(ox, oy, webW, webH)];
-            }
-        }
-    }];
-}
-
 - (void)layoutCardForMode:(BOOL)loginMode dark:(BOOL)dark owner:(NSWindow *)owner {
-    CGFloat cardW = loginMode ? 540.0 : 384.0;
-    CGFloat cardH = loginMode ? 620.0 : 178.0;
-    if (loginMode && owner) {
-        cardW = MAX(440.0, MIN(580.0, owner.frame.size.width - 64.0));
-        cardH = MAX(480.0, MIN(640.0, owner.frame.size.height - 72.0));
+    CGFloat cardW = loginMode ? 540.0 : 480.0;
+    CGFloat cardH = loginMode ? 620.0 : 380.0;
+    if (owner) {
+        if (loginMode) {
+            cardW = MAX(440.0, MIN(580.0, owner.frame.size.width - 64.0));
+            cardH = MAX(480.0, MIN(640.0, owner.frame.size.height - 72.0));
+        } else {
+            cardW = MAX(420.0, MIN(500.0, owner.frame.size.width - 80.0));
+            cardH = MAX(340.0, MIN(420.0, owner.frame.size.height - 96.0));
+        }
     }
     CGFloat headerH = 40.0;
-    CGFloat bodyH = MAX(96.0, cardH - headerH);
+    CGFloat bodyH = MAX(260.0, cardH - headerH);
 
-    _panel.minSize = loginMode ? NSMakeSize(420, 460) : NSMakeSize(cardW, cardH);
-    _panel.maxSize = loginMode ? NSMakeSize(900, 900) : NSMakeSize(cardW, cardH);
+    _panel.minSize = loginMode ? NSMakeSize(420, 460) : NSMakeSize(400, 320);
+    _panel.maxSize = NSMakeSize(900, 900);
     [_panel setContentSize:NSMakeSize(cardW, cardH)];
 
     NSColor *cardBg = dark
@@ -309,6 +372,12 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 
     _panelRoot.frame = NSMakeRect(0, 0, cardW, cardH);
     _panelRoot.layer.backgroundColor = cardBg.CGColor;
+    _web.appearance = [NSAppearance appearanceNamed:dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+    if (@available(macOS 12.0, *)) {
+        if ([_web respondsToSelector:@selector(setUnderPageBackgroundColor:)]) {
+            [_web setUnderPageBackgroundColor:cardBg];
+        }
+    }
 
     // Seamless borderless header (ZERO horizontal divider line between header & content!)
     _headerBar.frame = NSMakeRect(0, bodyH, cardW, headerH);
@@ -340,22 +409,16 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     if (_web.superview != _webClipView) {
         [_webClipView addSubview:_web];
     }
-    if (loginMode) {
-        _web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-        [_web setFrame:NSMakeRect(0, 0, cardW, bodyH)];
-    } else {
-        _web.autoresizingMask = NSViewNotSizable;
-        // Default centered frame for standard 300x65 Turnstile inside 420x480 WebView before exact rect alignment
-        [_web setFrame:NSMakeRect(round((cardW - 420.0) * 0.5), bodyH - 480.0 - 2.0, 420.0, 480.0)];
-        [self alignTurnstileInClipView];
-    }
+    // Always fill the card body naturally so Cloudflare's challenge page is never clipped or shifted off-screen.
+    _web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [_web setFrame:NSMakeRect(0, 0, cardW, bodyH)];
 }
 
 - (void)ensurePanelCreated {
     if (_panel) return;
     _panel = [[LindoBridgePanel alloc]
-        initWithContentRect:NSMakeRect(0, 0, 384, 178)
-                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskFullSizeContentView
+        initWithContentRect:NSMakeRect(0, 0, 480, 380)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView
                     backing:NSBackingStoreBuffered
                       defer:YES];
     _panel.title = @"安全确认";
@@ -369,40 +432,43 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     [_panel standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
     [_panel standardWindowButton:NSWindowZoomButton].hidden = YES;
 
-    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 384, 178)];
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 480, 380)];
     root.wantsLayer = YES;
     root.layer.backgroundColor = [NSColor colorWithRed:0.094 green:0.114 blue:0.153 alpha:1.0].CGColor;
     _panelRoot = root;
 
-    _webClipView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 384, 138)];
+    _webClipView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 480, 340)];
     _webClipView.wantsLayer = YES;
     _webClipView.layer.masksToBounds = YES;
     _webClipView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [root addSubview:_webClipView];
 
-    _maskView = [[LindoVerifyMaskView alloc] initWithFrame:NSMakeRect(0, 0, 384, 138)];
+    _maskView = [[LindoVerifyMaskView alloc] initWithFrame:NSMakeRect(0, 0, 480, 340)];
     _maskView.wantsLayer = YES;
     _maskView.layer.backgroundColor = [NSColor colorWithRed:0.094 green:0.114 blue:0.153 alpha:1.0].CGColor;
+    _maskView.layer.zPosition = 100.0;
     _maskView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _maskView.hidden = YES;
 
-    _maskSpinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(183, 75, 18, 18)];
+    _maskSpinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(231, 176, 18, 18)];
     _maskSpinner.style = NSProgressIndicatorStyleSpinning;
     _maskSpinner.controlSize = NSControlSizeSmall;
     _maskSpinner.displayedWhenStopped = NO;
+    _maskSpinner.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin | NSViewMaxYMargin;
     [_maskView addSubview:_maskSpinner];
 
     _maskLabel = [NSTextField labelWithString:@"校验连接中…"];
     _maskLabel.textColor = NSColor.secondaryLabelColor;
     _maskLabel.font = [NSFont systemFontOfSize:12.2 weight:NSFontWeightMedium];
     _maskLabel.alignment = NSTextAlignmentCenter;
-    _maskLabel.frame = NSMakeRect(16, 48, 352, 18);
+    _maskLabel.frame = NSMakeRect(16, 150, 448, 18);
+    _maskLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin | NSViewMaxYMargin;
     [_maskView addSubview:_maskLabel];
 
     [root addSubview:_maskView];
 
     // Borderless top header bar (zero hairline between header & content!)
-    NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect(0, 138, 384, 40)];
+    NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect(0, 340, 480, 40)];
     bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     _headerBar = bar;
 
@@ -426,23 +492,27 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     _browserAuthBtn.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
     _browserAuthBtn.contentTintColor = [NSColor colorWithRed:0.988 green:0.827 blue:0.302 alpha:1.0];
     _browserAuthBtn.hidden = YES;
+    _browserAuthBtn.autoresizingMask = NSViewMinXMargin;
     [bar addSubview:_browserAuthBtn];
 
-    _progress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(302, 12, 16, 16)];
+    _progress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(398, 12, 16, 16)];
     _progress.style = NSProgressIndicatorStyleSpinning;
     _progress.controlSize = NSControlSizeSmall;
     _progress.displayedWhenStopped = NO;
+    _progress.autoresizingMask = NSViewMinXMargin;
     [bar addSubview:_progress];
 
     NSImageSymbolConfiguration *btnSymCfg = [NSImageSymbolConfiguration configurationWithPointSize:11.5 weight:NSFontWeightMedium];
     NSImage *reloadImg = [[NSImage imageWithSystemSymbolName:@"arrow.clockwise" accessibilityDescription:@"重新加载"] imageWithSymbolConfiguration:btnSymCfg];
     _reloadBtn = [NSButton buttonWithImage:reloadImg target:self action:@selector(reloadPage:)];
     _reloadBtn.bordered = NO;
+    _reloadBtn.autoresizingMask = NSViewMinXMargin;
     [bar addSubview:_reloadBtn];
 
     NSImage *closeImg = [[NSImage imageWithSystemSymbolName:@"xmark" accessibilityDescription:@"关闭"] imageWithSymbolConfiguration:btnSymCfg];
     _closeBtn = [NSButton buttonWithImage:closeImg target:self action:@selector(closePanel:)];
     _closeBtn.bordered = NO;
+    _closeBtn.autoresizingMask = NSViewMinXMargin;
     [bar addSubview:_closeBtn];
 
     [root addSubview:bar];
@@ -459,8 +529,21 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 
 - (void)reloadPage:(id)sender {
     if (!self.loginModeState) {
+        self.userReloading = YES;
+        self.reloadEpoch += 1;
         self.challengeOriginReached = NO;
-        [self setVerifyMask:YES dark:self.maskDarkState message:@"校验连接中…"];
+        self.challengeInteractiveRequired = NO;
+        self.navigationError = nil;
+        [self setVerifyMask:YES dark:self.maskDarkState message:@"正在重新加载验证…"];
+        NSURL *challengeUrl = [NSURL URLWithString:@"https://linux.do/challenge"];
+        if (challengeUrl) {
+            [_web stopLoading];
+            NSURLRequest *req = [NSURLRequest requestWithURL:challengeUrl
+                                                 cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                             timeoutInterval:20.0];
+            [_web loadRequest:req];
+            return;
+        }
     }
     [_web reload];
 }
@@ -473,10 +556,16 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 }
 - (void)closePanel:(id)sender { [self windowShouldClose:_panel]; }
 - (void)applyMaskVisuals {
-    if (!_maskView) return;
     NSColor *bg = _maskDarkState
         ? [NSColor colorWithRed:0.094 green:0.114 blue:0.153 alpha:1.0]
         : [NSColor colorWithRed:0.976 green:0.980 blue:0.988 alpha:1.0];
+    _web.appearance = [NSAppearance appearanceNamed:_maskDarkState ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+    if (@available(macOS 12.0, *)) {
+        if ([_web respondsToSelector:@selector(setUnderPageBackgroundColor:)]) {
+            [_web setUnderPageBackgroundColor:bg];
+        }
+    }
+    if (!_maskView) return;
     _maskView.layer.backgroundColor = bg.CGColor;
     _maskLabel.textColor = _maskDarkState
         ? [NSColor colorWithRed:0.640 green:0.675 blue:0.740 alpha:1.0]
@@ -486,7 +575,9 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     }
     if (_maskVisibleState) {
         _maskView.hidden = NO;
-        _web.alphaValue = 0.0;
+        // Keep WKWebView at full alpha while loading Turnstile behind the opaque mask so WebKit never throttles
+        // timers/rendering/IntersectionObserver; only drop alpha to 0 once origin is reached (post-verification).
+        _web.alphaValue = self.challengeOriginReached ? 0.0 : 1.0;
         if (_panel && _panel.isVisible) {
             [_maskSpinner startAnimation:nil];
         }
@@ -494,7 +585,6 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
         [_maskSpinner stopAnimation:nil];
         _web.alphaValue = 1.0;
         _maskView.hidden = YES;
-        [self alignTurnstileInClipView];
     }
 }
 - (void)setVerifyMask:(BOOL)visible dark:(BOOL)dark message:(NSString *)msg {
@@ -573,15 +663,10 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     }
 }
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)nav {
+    self.userReloading = NO;
     if (_panel && _panel.isVisible) {
-        if (!self.loginModeState) {
-            [self alignTurnstileInClipView];
-        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(450 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
             if (!self.panel || !self.panel.isVisible) return;
-            if (!self.loginModeState) {
-                [self alignTurnstileInClipView];
-            }
             [webView evaluateJavaScript:@"Boolean(document.querySelector('meta[name=\"csrf-token\"]') || document.getElementById('data-preloaded'))"
                       completionHandler:^(id res, NSError *err) {
                 if (!err && [res respondsToSelector:@selector(boolValue)] && [res boolValue]) {
@@ -593,9 +678,6 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
 }
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)nav {
     if (_progress) [_progress stopAnimation:nil];
-    if (_panel && _panel.isVisible && !self.loginModeState) {
-        [self alignTurnstileInClipView];
-    }
 }
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
     if (_progress) [_progress stopAnimation:nil];
@@ -609,7 +691,11 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     if (_progress) [_progress stopAnimation:nil];
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
     if ([error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 102) return;
+    self.userReloading = NO;
     self.navigationError = error.localizedDescription ?: @"Navigation failed";
+    if (!self.loginModeState && _panel && _panel.isVisible && _maskVisibleState) {
+        [self setVerifyMask:YES dark:self.maskDarkState message:@"连接中断，请点右上角刷新重试"];
+    }
 }
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)nav withError:(NSError *)error { [self failNavigation:error]; }
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)nav withError:(NSError *)error { [self failNavigation:error]; }
@@ -629,7 +715,7 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
     }
     BOOL allowed = [scheme isEqualToString:@"https"] || [url.absoluteString isEqualToString:@"about:blank"];
     // If we already displayed Turnstile and main frame is navigating back to bare `/challenge`, cover immediately before request!
-    if (allowed && !self.loginModeState && self.challengeInteractiveRequired && [url.path isEqualToString:@"/challenge"] && !url.query.length) {
+    if (allowed && !self.loginModeState && !self.userReloading && self.challengeInteractiveRequired && [url.path isEqualToString:@"/challenge"] && !url.query.length) {
         [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
     }
     decision(allowed ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
@@ -649,13 +735,20 @@ static NSData *wrapPkcs1PublicKeyInSpki(NSData *pkcs1) {
             }
         }
         BOOL isCfChallenge = (cfRaw != nil && [cfRaw rangeOfString:@"challenge"].location != NSNotFound);
-        // Synchronous 0-frame interception BEFORE WebKit commits or paints 1 pixel of Discourse's 404/200/500 HTML:
-        if (!self.loginModeState && isForumHost(host) && !isCfChallenge) {
-            if ([path hasPrefix:@"/challenge"] && (http.statusCode == 404 || (http.statusCode >= 200 && http.statusCode < 400))) {
+        if (!self.loginModeState && isForumHost(host)) {
+            if (isCfChallenge) {
+                self.challengeOriginReached = NO;
+                if (_maskVisibleState && [_maskMessageState isEqualToString:@"已通过，正在继续…"]) {
+                    [self setVerifyMask:YES dark:self.maskDarkState message:@"校验连接中…"];
+                }
+            } else if ([path hasPrefix:@"/challenge"] && (http.statusCode == 404 || (http.statusCode >= 200 && http.statusCode < 400))) {
                 self.challengeOriginReached = YES;
                 [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
-            } else if (http.statusCode == 200 || http.statusCode == 404 || http.statusCode >= 500) {
+            } else if (http.statusCode == 200 || http.statusCode == 404) {
                 [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
+            } else if (http.statusCode >= 500) {
+                self.challengeOriginReached = NO;
+                [self setVerifyMask:YES dark:self.maskDarkState message:@"站点临时繁忙，请点右上角刷新重试"];
             }
         }
     }
@@ -712,6 +805,7 @@ static LindoBridgeHost *gHost = nil;
         WKWebsiteDataStore *store = WKWebsiteDataStore.defaultDataStore;
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
         config.websiteDataStore = store;
+        config.applicationNameForUserAgent = lindoSafariAppNameForUserAgent();
 
         NSRect initRect = NSMakeRect(0, 0, 1120, 780);
         _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 1120, 736) configuration:config];
@@ -910,6 +1004,7 @@ static NSMutableSet<LindoConnectProbe *> *gActiveConnectProbes = nil;
         _finished = NO;
         WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
         cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+        cfg.applicationNameForUserAgent = lindoSafariAppNameForUserAgent();
         _web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 1024, 768) configuration:cfg];
         _web.navigationDelegate = self;
     }
@@ -1299,6 +1394,11 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                 @"processTerminated": @(gHost.processTerminated),
                 @"origin404": @(gHost.challengeOriginReached),
                 @"interactiveRequired": @(gHost.challengeInteractiveRequired),
+                @"userReloading": @(gHost.userReloading),
+                @"reloadEpoch": @(gHost.reloadEpoch),
+                @"maskVisible": @(gHost.maskVisibleState),
+                @"maskMessage": gHost.maskMessageState ?: @"",
+                @"bridgeUa": lindoSafariAppNameForUserAgent(),
                 @"error": gHost.navigationError ?: @""
             }, nil);
         } else if ([method isEqualToString:@"setDockBadge"]) {
@@ -1318,6 +1418,7 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             gHost.processTerminated = NO;
             gHost.challengeOriginReached = NO;
             gHost.challengeInteractiveRequired = NO;
+            gHost.userReloading = [url.path hasPrefix:@"/challenge"];
             if ([url.path hasPrefix:@"/login"] || [url.path hasPrefix:@"/session/otp/"]) {
                 gHost.loginModeState = YES;
             } else if ([url.path hasPrefix:@"/challenge"]) {
@@ -1501,6 +1602,54 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                     });
                 });
             }];
+        } else if ([method isEqualToString:@"deleteCfClearance"]) {
+            [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+                NSMutableArray<NSString *> *deletedValues = [NSMutableArray array];
+                dispatch_group_t group = dispatch_group_create();
+                for (NSHTTPCookie *cookie in cookies) {
+                    NSString *domain = [cookie.domain hasPrefix:@"."] ? [cookie.domain substringFromIndex:1] : cookie.domain;
+                    if (isForumHost(domain) && [cookie.name isEqualToString:@"cf_clearance"]) {
+                        if (cookie.value.length > 0 && ![deletedValues containsObject:cookie.value]) {
+                            [deletedValues addObject:cookie.value];
+                        }
+                        dispatch_group_enter(group);
+                        [store deleteCookie:cookie completionHandler:^{ dispatch_group_leave(group); }];
+                    }
+                }
+                // Also purge any stray cf_clearance in shared NSHTTPCookieStorage
+                NSHTTPCookieStorage *shared = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+                for (NSHTTPCookie *cookie in [shared.cookies copy]) {
+                    NSString *domain = [cookie.domain hasPrefix:@"."] ? [cookie.domain substringFromIndex:1] : cookie.domain;
+                    if (isForumHost(domain) && [cookie.name isEqualToString:@"cf_clearance"]) {
+                        [shared deleteCookie:cookie];
+                    }
+                }
+                dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+                    sendReply(callback, request, @{@"deleted": deletedValues}, nil);
+                });
+            }];
+        } else if ([method isEqualToString:@"restoreCfClearance"]) {
+            NSString *val = [p[@"value"] isKindOfClass:NSString.class] ? p[@"value"] : @"";
+            if (!val.length) {
+                sendReply(callback, request, @{@"restored": @NO}, nil);
+                return;
+            }
+            NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:@{
+                NSHTTPCookieName: @"cf_clearance",
+                NSHTTPCookieValue: val,
+                NSHTTPCookieDomain: @".linux.do",
+                NSHTTPCookiePath: @"/",
+                NSHTTPCookieSecure: @"TRUE",
+                @"HttpOnly": @"TRUE",
+                NSHTTPCookieExpires: [NSDate dateWithTimeIntervalSinceNow:86400]
+            }];
+            if (!cookie) {
+                sendReply(callback, request, @{@"restored": @NO}, nil);
+                return;
+            }
+            [store setCookie:cookie completionHandler:^{
+                sendReply(callback, request, @{@"restored": @YES}, nil);
+            }];
         } else if ([method isEqualToString:@"clearCookies"] || [method isEqualToString:@"deleteCookie"]) {
             [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
                 dispatch_group_t group = dispatch_group_create();
@@ -1583,6 +1732,100 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
         } else if ([method isEqualToString:@"fetchConnectHtml"]) {
             LindoConnectProbe *probe = [[LindoConnectProbe alloc] initWithCallback:callback reqId:request];
             [probe start];
+        } else if ([method isEqualToString:@"readClipboardMedia"]) {
+            BOOL onlyFileUrls = [p[@"onlyFileUrls"] boolValue];
+            NSPasteboard *pb = [NSPasteboard generalPasteboard];
+            NSMutableArray<NSDictionary *> *items = [NSMutableArray array];
+            NSString *source = @"none";
+            const NSUInteger kMaxBytes = 20 * 1024 * 1024;
+            const NSUInteger kMaxFiles = 10;
+
+            NSDictionary *readOpts = @{ NSPasteboardURLReadingFileURLsOnlyKey: @YES };
+            NSArray<NSURL *> *fileUrls = [pb readObjectsForClasses:@[NSURL.class] options:readOpts];
+            if (fileUrls.count > 0) {
+                for (NSURL *u in fileUrls) {
+                    if (items.count >= kMaxFiles) break;
+                    if (!u.isFileURL) continue;
+                    NSDictionary *entry = lindoReadLocalMediaFile(u.path, kMaxBytes);
+                    if (entry) {
+                        [items addObject:entry];
+                    }
+                }
+                if (items.count > 0) {
+                    source = @"file-url";
+                }
+            }
+
+            if (items.count == 0 && !onlyFileUrls) {
+                NSArray<NSPasteboardType> *types = pb.types ?: @[];
+                NSData *imgData = nil;
+                NSString *mime = nil;
+                NSString *ext = nil;
+
+                if ([types containsObject:NSPasteboardTypePNG]) {
+                    imgData = [pb dataForType:NSPasteboardTypePNG];
+                    mime = @"image/png";
+                    ext = @"png";
+                } else if ([types containsObject:@"com.compuserve.gif"]) {
+                    imgData = [pb dataForType:@"com.compuserve.gif"];
+                    mime = @"image/gif";
+                    ext = @"gif";
+                } else if ([types containsObject:@"public.jpeg"]) {
+                    imgData = [pb dataForType:@"public.jpeg"];
+                    mime = @"image/jpeg";
+                    ext = @"jpg";
+                } else if ([types containsObject:@"org.webmproject.webp"]) {
+                    imgData = [pb dataForType:@"org.webmproject.webp"];
+                    mime = @"image/webp";
+                    ext = @"webp";
+                } else if ([types containsObject:@"public.webp"]) {
+                    imgData = [pb dataForType:@"public.webp"];
+                    mime = @"image/webp";
+                    ext = @"webp";
+                } else if ([types containsObject:NSPasteboardTypeTIFF]) {
+                    NSData *tiff = [pb dataForType:NSPasteboardTypeTIFF];
+                    if (tiff.length > 0 && tiff.length <= kMaxBytes * 2) {
+                        imgData = lindoConvertImageDataToPng(tiff);
+                        mime = @"image/png";
+                        ext = @"png";
+                    }
+                }
+
+                if (imgData.length > 0 && imgData.length <= kMaxBytes && mime && ext) {
+                    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+                    fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+                    fmt.dateFormat = @"yyyyMMdd-HHmmss";
+                    NSString *stamp = [fmt stringFromDate:[NSDate date]] ?: @"image";
+                    NSString *fname = [NSString stringWithFormat:@"paste-%@.%@", stamp, ext];
+                    [items addObject:@{
+                        @"filename": fname,
+                        @"mime": mime,
+                        @"dataBase64": [imgData base64EncodedStringWithOptions:0]
+                    }];
+                    source = @"image-data";
+                }
+            }
+
+            sendReply(callback, request, @{ @"source": source, @"items": items }, nil);
+        } else if ([method isEqualToString:@"convertLocalImageToPng"]) {
+            NSString *path = [p[@"path"] isKindOfClass:NSString.class] ? p[@"path"] : @"";
+            if (!path.length) {
+                sendReply(callback, request, nil, @"Empty image path");
+                return;
+            }
+            NSData *raw = [NSData dataWithContentsOfFile:path];
+            if (!raw.length || raw.length > 30 * 1024 * 1024) {
+                sendReply(callback, request, nil, @"Image file unreadable or too large");
+                return;
+            }
+            NSData *png = lindoConvertImageDataToPng(raw);
+            if (!png.length || png.length > 20 * 1024 * 1024) {
+                sendReply(callback, request, nil, @"Failed to convert image to PNG");
+                return;
+            }
+            sendReply(callback, request, @{
+                @"dataBase64": [png base64EncodedStringWithOptions:0]
+            }, nil);
         } else {
             sendReply(callback, request, nil, @"Unknown native bridge command");
         }

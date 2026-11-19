@@ -168,6 +168,7 @@ export const App: React.FC = () => {
   const [readerLoading, setReaderLoading] = useState(false);
   const [readerError, setReaderError] = useState<string | null>(null);
   const [targetFloor, setTargetFloor] = useState<number | null>(null);
+  const [targetFloorHighlight, setTargetFloorHighlight] = useState(false);
   const [targetJumpNonce, setTargetJumpNonce] = useState(0);
   const [onlyOpFilter, setOnlyOpFilter] = useState(false);
 
@@ -179,6 +180,7 @@ export const App: React.FC = () => {
   const [msgReaderLoading, setMsgReaderLoading] = useState(false);
   const [msgReaderError, setMsgReaderError] = useState<string | null>(null);
   const [msgTargetFloor, setMsgTargetFloor] = useState<number | null>(null);
+  const [msgTargetFloorHighlight, setMsgTargetFloorHighlight] = useState(false);
   const [msgJumpNonce, setMsgJumpNonce] = useState(0);
   const [msgOnlyOp, setMsgOnlyOp] = useState(false);
   const [pendingPmRecipient, setPendingPmRecipient] = useState<string | null>(null);
@@ -374,6 +376,7 @@ export const App: React.FC = () => {
       topic: TopicSummary,
       opts?: {
         floor?: number | null;
+        highlightFloor?: boolean;
         onlyOp?: boolean;
         forceRefresh?: boolean;
         inPlace?: boolean;
@@ -436,6 +439,7 @@ export const App: React.FC = () => {
         setActiveSummary(topic);
         setOnlyOpFilter(nextOnlyOp);
         setTargetFloor(desiredFloor);
+        setTargetFloorHighlight(Boolean(opts?.highlightFloor && desiredFloor && desiredFloor > 1));
         setNarrowShowingReader(true);
         setReaderError(null);
         if (shouldTrack) {
@@ -544,6 +548,7 @@ export const App: React.FC = () => {
       topic: TopicSummary,
       opts?: {
         floor?: number | null;
+        highlightFloor?: boolean;
         onlyOp?: boolean;
         forceRefresh?: boolean;
         inPlace?: boolean;
@@ -598,6 +603,7 @@ export const App: React.FC = () => {
         setMsgSummary(topic);
         setMsgOnlyOp(nextOnlyOp);
         setMsgTargetFloor(desiredFloor);
+        setMsgTargetFloorHighlight(Boolean(opts?.highlightFloor && desiredFloor && desiredFloor > 1));
         setNarrowShowingReader(true);
         setMsgReaderError(null);
         recordLocalTopicVisit({
@@ -711,7 +717,11 @@ export const App: React.FC = () => {
     (topicId: number, fallbackTitle: string, postNumber?: number, forceRefresh = false) => {
       const summary = makeSummaryById(topicId, fallbackTitle, postNumber);
       setCurrentTab("HOME");
-      openTopic(summary, { floor: postNumber ?? null, forceRefresh });
+      openTopic(summary, {
+        floor: postNumber ?? null,
+        highlightFloor: Boolean(postNumber && postNumber > 1),
+        forceRefresh,
+      });
     },
     [makeSummaryById, openTopic]
   );
@@ -719,11 +729,16 @@ export const App: React.FC = () => {
   const openMessageTopicById = useCallback(
     (topicId: number, fallbackTitle: string, postNumber?: number, forceRefresh = true) => {
       const summary = makeSummaryById(topicId, fallbackTitle, postNumber);
+      const shouldFlash = Boolean(postNumber && postNumber > 1);
       if (!isWideLayout) {
         setCurrentTab("HOME");
-        openTopic(summary, { floor: postNumber ?? null, forceRefresh });
+        openTopic(summary, { floor: postNumber ?? null, highlightFloor: shouldFlash, forceRefresh });
       } else {
-        openMessageTopic(summary, { floor: postNumber ?? null, forceRefresh });
+        openMessageTopic(summary, {
+          floor: postNumber ?? null,
+          highlightFloor: shouldFlash,
+          forceRefresh,
+        });
       }
     },
     [makeSummaryById, isWideLayout, openTopic, openMessageTopic]
@@ -737,11 +752,17 @@ export const App: React.FC = () => {
     });
   }, []);
 
+  // Keep latest callbacks in refs so the mount-only Tauri event listener subscription NEVER tears down on filter/tab re-renders!
+  const syncFromRustStateRef = useRef(syncFromRustState);
+  syncFromRustStateRef.current = syncFromRustState;
+  const loadFeedRef = useRef(loadFeed);
+  loadFeedRef.current = loadFeed;
+  const isGuestModeRef = useRef(isGuestMode);
+  isGuestModeRef.current = isGuestMode;
+  const bootRanRef = useRef(false);
+
   // Initial bootstrap & Tauri event listeners (await listener registration BEFORE syncFromRustState so cold-start deep links never race)
-  const initializedRef = useRef(false);
   useEffect(() => {
-    if (initializedRef.current) return;
-    initializedRef.current = true;
     installGlobalDiagHooks(DESKTOP_APP_VERSION);
     installSmoothWheelAndScrollOptimizer();
 
@@ -759,7 +780,7 @@ export const App: React.FC = () => {
     (async () => {
       const registered = await Promise.all([
         listen("lindo://state-updated", () => {
-          syncFromRustState().then((b) => {
+          syncFromRustStateRef.current().then((b) => {
             if (b.isAuthorized) {
               if (browserAuthWatchdogRef.current) {
                 clearTimeout(browserAuthWatchdogRef.current);
@@ -776,7 +797,7 @@ export const App: React.FC = () => {
               fetchSiteCategories(true)
                 .then(setCategories)
                 .catch(() => {});
-              loadFeed({ silent: true });
+              loadFeedRef.current({ silent: true });
             }
           });
         }),
@@ -793,12 +814,12 @@ export const App: React.FC = () => {
           setLoadMoreError(null);
           setReaderError(null);
           setMsgReaderError(null);
-          syncFromRustState().then((b) => {
+          syncFromRustStateRef.current().then((b) => {
             fetchSiteCategories()
               .then(setCategories)
               .catch(() => {});
-            if (b.isAuthorized || isGuestMode) {
-              loadFeed({ silent: true });
+            if (b.isAuthorized || isGuestModeRef.current) {
+              loadFeedRef.current({ silent: true });
               if (hadReaderErr && curSummary) {
                 void openTopicRef.current(curSummary, { floor: curFloor, forceRefresh: true });
               }
@@ -852,7 +873,7 @@ export const App: React.FC = () => {
           if (ev.payload === "new_topic") {
             launchOrAppendComposer({ action: "NEW_TOPIC" });
           } else if (ev.payload === "refresh") {
-            loadFeed();
+            loadFeedRef.current();
           }
         }),
         listen<UpdateProgressPayload>("lindo://update-progress", (ev) => {
@@ -868,28 +889,31 @@ export const App: React.FC = () => {
       }
       unsubs.push(...registered);
 
-      const boot = await syncFromRustState();
-      if (boot.isAuthorized) {
-        refreshCurrentUserSession()
-          .then(({ profile, unread }) => {
-            if (profile) {
-              setIsAuthorized(true);
-              setCurrentUser(profile);
-              setUnreadCount(unread);
-            }
-          })
-          .catch(() => {});
-      }
+      if (!bootRanRef.current) {
+        bootRanRef.current = true;
+        const boot = await syncFromRustStateRef.current();
+        if (boot.isAuthorized) {
+          refreshCurrentUserSession()
+            .then(({ profile, unread }) => {
+              if (profile) {
+                setIsAuthorized(true);
+                setCurrentUser(profile);
+                setUnreadCount(unread);
+              }
+            })
+            .catch(() => {});
+        }
 
-      // Silent background check for updates 3.5s after launch
-      setTimeout(() => {
-        if (cancelled) return;
-        checkAppUpdateInRust()
-          .then((info) => {
-            if (!cancelled) setUpdateInfo(info);
-          })
-          .catch(() => {});
-      }, 3500);
+        // Silent background check for updates 3.5s after launch
+        setTimeout(() => {
+          if (cancelled) return;
+          checkAppUpdateInRust()
+            .then((info) => {
+              if (!cancelled) setUpdateInfo(info);
+            })
+            .catch(() => {});
+        }, 3500);
+      }
     })();
 
     return () => {
@@ -901,7 +925,7 @@ export const App: React.FC = () => {
       }
       unsubs.forEach((u) => u());
     };
-  }, [syncFromRustState, loadFeed, isGuestMode]);
+  }, []);
 
   // Load site category catalog calmly after main feed boots (single-flight + 5-min TTL inside api.ts)
   useEffect(() => {
@@ -1473,6 +1497,8 @@ export const App: React.FC = () => {
   const activeRightLoading = currentTab === "MESSAGES" ? msgReaderLoading : readerLoading;
   const activeRightError = currentTab === "MESSAGES" ? msgReaderError : readerError;
   const activeRightFloor = currentTab === "MESSAGES" ? msgTargetFloor : targetFloor;
+  const activeRightFloorHighlight =
+    currentTab === "MESSAGES" ? msgTargetFloorHighlight : targetFloorHighlight;
   const activeRightNonce = currentTab === "MESSAGES" ? msgJumpNonce : targetJumpNonce;
   const activeRightOnlyOp = currentTab === "MESSAGES" ? msgOnlyOp : onlyOpFilter;
 
@@ -1938,6 +1964,7 @@ export const App: React.FC = () => {
                       isLoading={activeRightLoading}
                       errorMessage={activeRightError}
                       targetFloor={activeRightFloor}
+                      highlightTargetFloor={activeRightFloorHighlight}
                       targetJumpNonce={activeRightNonce}
                       onlyOpFilter={activeRightOnlyOp}
                       isAuthorized={isAuthorized}
@@ -2050,6 +2077,7 @@ export const App: React.FC = () => {
                 isLoading={readerLoading}
                 errorMessage={readerError}
                 targetFloor={targetFloor}
+                highlightTargetFloor={targetFloorHighlight}
                 targetJumpNonce={targetJumpNonce}
                 onlyOpFilter={onlyOpFilter}
                 isAuthorized={isAuthorized}

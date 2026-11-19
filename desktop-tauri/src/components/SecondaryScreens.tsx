@@ -78,7 +78,15 @@ import {
   SiteError,
   toggleFollowUser,
   updateUserProfileInfo,
+  uploadMediaToSite,
 } from "../lib/api";
+import {
+  buildUploadPlaceholder,
+  fileToPreparedUpload,
+  formatUploadedMarkdown,
+  handleComposerTextareaPaste,
+  type PreparedUploadFile,
+} from "../lib/composerMedia";
 import {
   badgeTierMeta,
   BRAND_THEMES,
@@ -1452,9 +1460,101 @@ export const MessagesView: React.FC<{
   const [pmBody, setPmBody] = useState("");
   const [pmAttempted, setPmAttempted] = useState(false);
   const [pmSending, setPmSending] = useState(false);
+  const [pmUploading, setPmUploading] = useState(false);
   const [pmFeedback, setPmFeedback] = useState<string | null>(null);
   const [msgOffscreenDir, setMsgOffscreenDir] = useState<"above" | "below" | null>(null);
   const msgScrollRef = useRef<HTMLDivElement | null>(null);
+  const pmTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const pmFileInputRef = useRef<HTMLInputElement | null>(null);
+  const pmBodyRef = useRef(pmBody);
+  pmBodyRef.current = pmBody;
+  const pmUploadSeqRef = useRef(0);
+
+  const insertPmTextAtCursor = (text: string) => {
+    if (!text) return;
+    const el = pmTextareaRef.current;
+    const cur = pmBodyRef.current;
+    if (!el) {
+      const next = `${cur}${text}`;
+      pmBodyRef.current = next;
+      setPmBody(next);
+      return;
+    }
+    const start = el.selectionStart ?? cur.length;
+    const end = el.selectionEnd ?? cur.length;
+    const next = `${cur.slice(0, start)}${text}${cur.slice(end)}`;
+    pmBodyRef.current = next;
+    setPmBody(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const cursor = start + text.length;
+      el.setSelectionRange(cursor, cursor);
+    });
+  };
+
+  const uploadPmFiles = async (files: PreparedUploadFile[]) => {
+    if (files.length === 0) return;
+    setPmFeedback(null);
+    const entries = files.map((file) => {
+      pmUploadSeqRef.current += 1;
+      return {
+        file,
+        placeholder: buildUploadPlaceholder(file.filename, file.isImage, `uploading-${pmUploadSeqRef.current}`),
+      };
+    });
+    const el = pmTextareaRef.current;
+    const cur = pmBodyRef.current;
+    const start = el ? (el.selectionStart ?? cur.length) : cur.length;
+    const end = el ? (el.selectionEnd ?? cur.length) : cur.length;
+    const before = cur.slice(0, start);
+    const after = cur.slice(end);
+    const needLeadNl = before.length > 0 && !before.endsWith("\n");
+    const block = `${needLeadNl ? "\n" : ""}${entries.map((e) => e.placeholder).join("\n")}\n`;
+    const nextWithPh = `${before}${block}${after}`;
+    pmBodyRef.current = nextWithPh;
+    setPmBody(nextWithPh);
+
+    setPmUploading(true);
+    try {
+      for (const { file, placeholder } of entries) {
+        try {
+          const uploaded = await uploadMediaToSite(
+            file.filename,
+            file.mime || "application/octet-stream",
+            file.dataBase64
+          );
+          const snippet = formatUploadedMarkdown(uploaded, file.isImage);
+          setPmBody((prev) => {
+            const next = prev.includes(placeholder)
+              ? prev.replace(placeholder, snippet)
+              : `${prev}\n${snippet}\n`;
+            pmBodyRef.current = next;
+            return next;
+          });
+        } catch (err: any) {
+          setPmBody((prev) => {
+            const next = prev
+              .replace(`\n${placeholder}\n`, "\n")
+              .replace(`${placeholder}\n`, "")
+              .replace(placeholder, "");
+            pmBodyRef.current = next;
+            return next;
+          });
+          setPmFeedback(err?.message || "图片上传失败，请重试");
+        } finally {
+          if (file.localPreviewUrl) {
+            try {
+              URL.revokeObjectURL(file.localPreviewUrl);
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    } finally {
+      setPmUploading(false);
+    }
+  };
 
   useEffect(() => {
     if (initialComposeRecipient) {
@@ -1832,9 +1932,20 @@ export const MessagesView: React.FC<{
 
               <div className="relative">
                 <textarea
+                  ref={pmTextareaRef}
                   value={pmBody}
                   onChange={(e) => setPmBody(e.target.value)}
-                  placeholder="写下私信内容（支持 Markdown）..."
+                  onPaste={(e) =>
+                    handleComposerTextareaPaste(e, {
+                      textarea: pmTextareaRef.current,
+                      value: pmBodyRef.current,
+                      onUploadFiles: (files) => {
+                        void uploadPmFiles(files);
+                      },
+                      onInsertText: insertPmTextAtCursor,
+                    })
+                  }
+                  placeholder="写下私信内容（支持 Markdown 与直接粘贴图片）..."
                   rows={6}
                   className="w-full rounded-xl bg-transparent p-3 text-[13.5px] outline-none resize-none"
                   style={{
@@ -1846,6 +1957,22 @@ export const MessagesView: React.FC<{
                     color: "var(--ink-primary)",
                   }}
                 />
+                <input
+                  ref={pmFileInputRef}
+                  type="file"
+                  accept="image/*,*/*"
+                  multiple
+                  className="hidden"
+                  onChange={async (e) => {
+                    const list = e.target.files ? Array.from(e.target.files) : [];
+                    e.target.value = "";
+                    if (list.length === 0) return;
+                    const prepared = await Promise.all(
+                      list.map((f, idx) => fileToPreparedUpload(f, idx))
+                    );
+                    void uploadPmFiles(prepared);
+                  }}
+                />
               </div>
 
               {pmFeedback && (
@@ -1854,45 +1981,61 @@ export const MessagesView: React.FC<{
                 </p>
               )}
 
-              <button
-                type="button"
-                disabled={pmSending}
-                onClick={async () => {
-                  if (!pmRecipient.trim() || !pmTitle.trim() || !pmBody.trim()) {
-                    setPmAttempted(true);
-                    return;
-                  }
-                  setPmSending(true);
-                  setPmFeedback(null);
-                  try {
-                    const tid = await sendPrivateMessage({
-                      recipients: pmRecipient,
-                      title: pmTitle,
-                      raw: pmBody,
-                    });
-                    setPmRecipient("");
-                    setPmTitle("");
-                    setPmBody("");
-                    setSubTab("PM");
-                    if (tid > 0) onOpenNotificationTopic(tid, pmTitle, 1);
-                  } catch (err: any) {
-                    if (err instanceof SiteError && err.isVerification && onTriggerVerify) {
-                      onTriggerVerify();
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  disabled={pmSending || pmUploading}
+                  onClick={async () => {
+                    if (!pmRecipient.trim() || !pmTitle.trim() || !pmBody.trim()) {
+                      setPmAttempted(true);
+                      return;
                     }
-                    setPmFeedback(err?.message || "发送失败，内容已保留");
-                  } finally {
-                    setPmSending(false);
-                  }
-                }}
-                className="inline-flex items-center gap-1.5 rounded-full px-5 py-2 text-[13px] font-bold cursor-pointer disabled:opacity-50"
-                style={{
-                  backgroundColor: "var(--publish-btn-bg)",
-                  color: "var(--publish-btn-fg)",
-                }}
-              >
-                <LinDoIcons.Send size={15} />
-                <span>{pmSending ? "发送中..." : "发送私信"}</span>
-              </button>
+                    setPmSending(true);
+                    setPmFeedback(null);
+                    try {
+                      const tid = await sendPrivateMessage({
+                        recipients: pmRecipient,
+                        title: pmTitle,
+                        raw: pmBody,
+                      });
+                      setPmRecipient("");
+                      setPmTitle("");
+                      setPmBody("");
+                      setSubTab("PM");
+                      if (tid > 0) onOpenNotificationTopic(tid, pmTitle, 1);
+                    } catch (err: any) {
+                      if (err instanceof SiteError && err.isVerification && onTriggerVerify) {
+                        onTriggerVerify();
+                      }
+                      setPmFeedback(err?.message || "发送失败，内容已保留");
+                    } finally {
+                      setPmSending(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-full px-5 py-2 text-[13px] font-bold cursor-pointer disabled:opacity-50"
+                  style={{
+                    backgroundColor: "var(--publish-btn-bg)",
+                    color: "var(--publish-btn-fg)",
+                  }}
+                >
+                  <LinDoIcons.Send size={15} />
+                  <span>{pmSending ? "发送中..." : "发送私信"}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={pmUploading}
+                  title="上传图片或附件"
+                  onClick={() => pmFileInputRef.current?.click()}
+                  className="lindo-interactive inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium"
+                  style={{
+                    color: pmUploading ? "var(--brand-gold)" : "var(--ink-secondary)",
+                    border: "0.5px solid var(--hairline)",
+                  }}
+                >
+                  <LinDoIcons.Image size={14.5} />
+                  <span>{pmUploading ? "上传中..." : "图片"}</span>
+                </button>
+              </div>
             </div>
           ) : loading ? (
             /* 温润线性流光骨架屏 + 0.5px 内缩细线 */

@@ -1,10 +1,15 @@
 pub mod bridge;
 pub mod crypto_rsa;
 pub mod legacy;
+pub mod net_policy;
 #[cfg(not(target_os = "macos"))]
 pub mod win_webview_bridge;
 
-use bridge::{BridgeEngine, DiagRuntimeSnapshot, ForumMediaPayload, SiteHttpResponse};
+use base64::{engine::general_purpose::STANDARD as BASE64_STD, Engine as _};
+use bridge::{
+    BridgeEngine, ClipboardMediaItem, ClipboardMediaResult, DiagRuntimeSnapshot, ForumMediaPayload,
+    SiteHttpResponse,
+};
 use futures_util::StreamExt;
 use legacy::{
     load_or_migrate_state, save_state, LocalDraftRecord, PersistedState, UserPreferences,
@@ -13,14 +18,88 @@ use legacy::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State, Theme, WindowEvent};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, RunEvent, State, Theme, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
 static EXPLICIT_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static DROPPED_FILE_ALLOWLIST: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+
+fn dropped_allowlist() -> &'static Mutex<HashMap<PathBuf, Instant>> {
+    DROPPED_FILE_ALLOWLIST.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_os_dropped_paths(paths: &[PathBuf]) {
+    let Ok(mut map) = dropped_allowlist().lock() else {
+        return;
+    };
+    let now = Instant::now();
+    map.retain(|_, exp| *exp > now);
+    let exp = now + Duration::from_secs(30);
+    for p in paths.iter().take(20) {
+        map.insert(p.clone(), exp);
+        if let Ok(canon) = std::fs::canonicalize(p) {
+            map.insert(canon, exp);
+        }
+    }
+    while map.len() > 64 {
+        if let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, v)| **v)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        } else {
+            break;
+        }
+    }
+}
+
+fn is_path_os_dropped(path: &Path) -> bool {
+    let Ok(mut map) = dropped_allowlist().lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    map.retain(|_, exp| *exp > now);
+    if map.contains_key(path) {
+        return true;
+    }
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        if map.contains_key(&canon) {
+            return true;
+        }
+    }
+    false
+}
+
+fn guess_mime_from_ext(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        _ => "application/octet-stream",
+    }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,12 +144,86 @@ async fn site_request(
 
 #[tauri::command]
 async fn site_upload(
+    app: AppHandle,
     engine: State<'_, Arc<BridgeEngine>>,
     filename: String,
     mime: String,
     data_base64: String,
 ) -> Result<SiteHttpResponse, String> {
-    engine.upload(&filename, &mime, &data_base64).await
+    engine.upload(&app, &filename, &mime, &data_base64).await
+}
+
+#[tauri::command]
+async fn read_clipboard_media(
+    engine: State<'_, Arc<BridgeEngine>>,
+    only_file_urls: Option<bool>,
+) -> Result<ClipboardMediaResult, String> {
+    engine
+        .read_clipboard_media(only_file_urls.unwrap_or(false))
+        .await
+}
+
+#[tauri::command]
+async fn read_dropped_files(
+    engine: State<'_, Arc<BridgeEngine>>,
+    paths: Vec<String>,
+) -> Result<Vec<ClipboardMediaItem>, String> {
+    const MAX_FILES: usize = 10;
+    const MAX_BYTES: usize = 20 * 1024 * 1024;
+    let mut out = Vec::new();
+    for raw_path in paths.into_iter().take(MAX_FILES) {
+        let p = PathBuf::from(&raw_path);
+        if !is_path_os_dropped(&p) {
+            continue;
+        }
+        let Ok(meta) = tokio::fs::metadata(&p).await else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() == 0 || meta.len() as usize > MAX_BYTES * 2 {
+            continue;
+        }
+        let orig_name = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("attachment")
+            .to_string();
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if matches!(ext.as_str(), "heic" | "heif" | "tif" | "tiff" | "bmp") {
+            if let Ok(Some(png_b64)) = engine.convert_local_image_to_png(&raw_path).await {
+                let stem = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("image");
+                out.push(ClipboardMediaItem {
+                    filename: format!("{stem}.png"),
+                    mime: "image/png".to_string(),
+                    data_base64: png_b64,
+                });
+                continue;
+            }
+        }
+        if meta.len() as usize > MAX_BYTES {
+            continue;
+        }
+        let Ok(bytes) = tokio::fs::read(&p).await else {
+            continue;
+        };
+        if bytes.is_empty() || bytes.len() > MAX_BYTES {
+            continue;
+        }
+        out.push(ClipboardMediaItem {
+            filename: orig_name,
+            mime: guess_mime_from_ext(&ext).to_string(),
+            data_base64: BASE64_STD.encode(&bytes),
+        });
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -87,8 +240,11 @@ async fn site_verify(
     engine: State<'_, Arc<BridgeEngine>>,
     login: bool,
     is_dark: bool,
+    manual: Option<bool>,
 ) -> Result<bool, String> {
-    engine.verify_or_login(&app, login, is_dark).await
+    engine
+        .verify_or_login(&app, login, is_dark, manual.unwrap_or(true))
+        .await
 }
 
 #[tauri::command]
@@ -1101,22 +1257,28 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    if !EXPLICIT_QUIT_REQUESTED.load(Ordering::SeqCst) {
-                        // Keep app running in background (Tray / Dock) across macOS, Windows & Linux
-                        api.prevent_close();
-                        #[cfg(target_os = "macos")]
-                        if window.is_fullscreen().unwrap_or(false) {
-                            let _ = window.set_fullscreen(false);
-                            let win_clone = window.clone();
-                            tauri::async_runtime::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_millis(620)).await;
-                                let _ = win_clone.hide();
-                            });
-                            return;
-                        }
-                        let _ = window.hide();
+                match event {
+                    WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
+                        record_os_dropped_paths(paths);
                     }
+                    WindowEvent::CloseRequested { api, .. } => {
+                        if !EXPLICIT_QUIT_REQUESTED.load(Ordering::SeqCst) {
+                            // Keep app running in background (Tray / Dock) across macOS, Windows & Linux
+                            api.prevent_close();
+                            #[cfg(target_os = "macos")]
+                            if window.is_fullscreen().unwrap_or(false) {
+                                let _ = window.set_fullscreen(false);
+                                let win_clone = window.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_millis(620)).await;
+                                    let _ = win_clone.hide();
+                                });
+                                return;
+                            }
+                            let _ = window.hide();
+                        }
+                    }
+                    _ => {}
                 }
             }
         })
@@ -1124,6 +1286,8 @@ pub fn run() {
             bootstrap_state,
             site_request,
             site_upload,
+            read_clipboard_media,
+            read_dropped_files,
             site_fetch_media,
             site_verify,
             start_browser_auth,

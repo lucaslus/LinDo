@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   LinDoIcons,
   resolveOfficialCategoryVisual,
@@ -27,7 +28,17 @@ import {
   updateExistingPost,
   uploadMediaToSite,
 } from "../lib/api";
+import {
+  buildUploadPlaceholder,
+  extractSyncClipboardFiles,
+  fileToPreparedUpload,
+  formatUploadedMarkdown,
+  handleComposerTextareaPaste,
+  prepareDroppedPaths,
+  type PreparedUploadFile,
+} from "../lib/composerMedia";
 import { optimizePanguSpacing, prepareCookedHtml } from "../lib/cooked";
+import { observeCookedForumImages } from "../lib/forumMedia";
 import { formatCompactCount, resolveCategoryVisual } from "../lib/palette";
 import { AvatarWithFlair, ConfirmDialog } from "./SecondaryScreens";
 
@@ -181,7 +192,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [uploadingCount, setUploadingCount] = useState(0);
+  const [uploadProgressLabel, setUploadProgressLabel] = useState<string>("");
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [uploadedPreviewMap, setUploadedPreviewMap] = useState<Record<string, string>>({});
+  const uploading = uploadingCount > 0;
   const [uploadedImg, setUploadedImg] = useState<{
     filename: string;
     shortUrl: string;
@@ -197,7 +212,28 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const bodyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const drawerRef = useRef<HTMLDivElement | null>(null);
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  const rawRef = useRef<string>(raw);
+  rawRef.current = raw;
+  const uploadSeqRef = useRef<number>(0);
+  const createdBlobUrlsRef = useRef<string[]>([]);
   const lastAppendedNonceRef = useRef<number>(0);
+  const composerOpenedAtRef = useRef<number>(Date.now());
+  const firstTypedAtRef = useRef<number | null>(null);
+
+  // Revoke locally created preview blob URLs when composer closes
+  useEffect(() => {
+    return () => {
+      for (const url of createdBlobUrlsRef.current) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      }
+      createdBlobUrlsRef.current = [];
+    };
+  }, []);
 
   // Append newly selected reader quote directly into the active composer without resetting draft!
   useEffect(() => {
@@ -519,72 +555,265 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const showTagError = submitAttempted && Boolean(tagErrorMsg);
   const showBodyError = submitAttempted && Boolean(bodyErrorMsg);
 
-  const insertAroundSelection = (before: string, after = "") => {
+  const insertAroundSelection = useCallback((before: string, after = "") => {
     const el = bodyTextareaRef.current;
+    const cur = rawRef.current;
     if (!el) {
       setRaw((prev) => `${prev}${before}${after}`);
       return;
     }
-    const start = el.selectionStart ?? raw.length;
-    const end = el.selectionEnd ?? raw.length;
-    const selected = raw.slice(start, end);
-    const next = `${raw.slice(0, start)}${before}${selected}${after}${raw.slice(end)}`;
+    const start = el.selectionStart ?? cur.length;
+    const end = el.selectionEnd ?? cur.length;
+    const selected = cur.slice(start, end);
+    const next = `${cur.slice(0, start)}${before}${selected}${after}${cur.slice(end)}`;
+    rawRef.current = next;
     setRaw(next);
     requestAnimationFrame(() => {
       el.focus();
       const cursor = start + before.length + selected.length;
       el.setSelectionRange(cursor, cursor);
     });
-  };
+  }, []);
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    setUploading(true);
+  const insertTextAtCursor = useCallback((text: string) => {
+    if (!text) return;
+    const el = bodyTextareaRef.current;
+    const cur = rawRef.current;
+    if (!el) {
+      const next = `${cur}${text}`;
+      rawRef.current = next;
+      setRaw(next);
+      return;
+    }
+    const start = el.selectionStart ?? cur.length;
+    const end = el.selectionEnd ?? cur.length;
+    const next = `${cur.slice(0, start)}${text}${cur.slice(end)}`;
+    rawRef.current = next;
+    setRaw(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const cursor = start + text.length;
+      el.setSelectionRange(cursor, cursor);
+    });
+  }, []);
+
+  const wrapSelectionWithUrl = useCallback((url: string): boolean => {
+    const el = bodyTextareaRef.current;
+    const cur = rawRef.current;
+    if (!el) return false;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    if (end <= start) return false;
+    const selected = cur.slice(start, end);
+    if (!selected.trim() || /^https?:\/\/\S+$/i.test(selected.trim()) || selected.includes("\n")) {
+      return false;
+    }
+    const wrapped = `[${selected}](${url})`;
+    const next = `${cur.slice(0, start)}${wrapped}${cur.slice(end)}`;
+    rawRef.current = next;
+    setRaw(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const cursor = start + wrapped.length;
+      el.setSelectionRange(cursor, cursor);
+    });
+    return true;
+  }, []);
+
+  const uploadPreparedFiles = useCallback(async (files: PreparedUploadFile[]) => {
+    if (files.length === 0) return;
     setSubmitError(null);
+
+    // 1. Insert instant inline placeholders at the exact cursor position (official Discourse UX)
+    const entries = files.map((file) => {
+      uploadSeqRef.current += 1;
+      const tag = `uploading-${uploadSeqRef.current}`;
+      const placeholder = buildUploadPlaceholder(file.filename, file.isImage, tag);
+      if (file.localPreviewUrl) {
+        createdBlobUrlsRef.current.push(file.localPreviewUrl);
+      }
+      return { file, placeholder };
+    });
+
+    const el = bodyTextareaRef.current;
+    const cur = rawRef.current;
+    const start = el ? (el.selectionStart ?? cur.length) : cur.length;
+    const end = el ? (el.selectionEnd ?? cur.length) : cur.length;
+    const before = cur.slice(0, start);
+    const after = cur.slice(end);
+    const needLeadNl = before.length > 0 && !before.endsWith("\n");
+    const needTrailNl = after.length > 0 && !after.startsWith("\n");
+    const block = `${needLeadNl ? "\n" : ""}${entries.map((e) => e.placeholder).join("\n")}${needTrailNl ? "\n" : "\n"}`;
+    const nextWithPlaceholders = `${before}${block}${after}`;
+    rawRef.current = nextWithPlaceholders;
+    setRaw(nextWithPlaceholders);
+
+    if (el) {
+      requestAnimationFrame(() => {
+        el.focus();
+        const cursor = start + block.length;
+        el.setSelectionRange(cursor, cursor);
+      });
+    }
+
+    setUploadingCount((c) => c + entries.length);
+    const total = entries.length;
+    let completed = 0;
+
     try {
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let bin = "";
-      for (let i = 0; i < bytes.length; i += 8192) {
-        bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
-      }
-      const b64 = btoa(bin);
-      const uploaded = await uploadMediaToSite(
-        file.name,
-        file.type || "application/octet-stream",
-        b64
-      );
-      const isImg =
-        file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|svg)$/i.test(file.name);
-      const safeName = uploaded.originalFilename.replace(/[[\]|]/g, "_");
-      const snippet =
-        isImg && uploaded.width > 0 && uploaded.height > 0
-          ? `![${safeName}|${uploaded.width}x${uploaded.height}](${uploaded.shortUrl})`
-          : `[${safeName}|attachment](${uploaded.shortUrl})`;
-      insertAroundSelection(`\n${snippet}\n`);
-      if (isImg && uploaded.width > 0) {
-        setUploadedImg({
-          filename: safeName,
-          shortUrl: uploaded.shortUrl,
-          width: uploaded.width,
-          height: uploaded.height,
-          snippet,
-        });
-      }
-    } catch (err: any) {
-      if (!(err instanceof SiteError && err.isVerification)) {
-        setSubmitError(err?.message || "上传失败，请重试");
+      for (const { file, placeholder } of entries) {
+        completed += 1;
+        setUploadProgressLabel(
+          total > 1 ? `正在上传 (${completed}/${total})...` : "正在上传..."
+        );
+        try {
+          const uploaded = await uploadMediaToSite(
+            file.filename,
+            file.mime || "application/octet-stream",
+            file.dataBase64
+          );
+          const snippet = formatUploadedMarkdown(uploaded, file.isImage);
+          const safeName = uploaded.originalFilename.replace(/[[\]|]/g, "_");
+          if (file.isImage && file.localPreviewUrl) {
+            const previewUrl = file.localPreviewUrl;
+            setUploadedPreviewMap((prev) => ({
+              ...prev,
+              [uploaded.shortUrl]: previewUrl,
+              ...(uploaded.url ? { [uploaded.url]: previewUrl } : {}),
+            }));
+          }
+          setRaw((prev) => {
+            const next = prev.includes(placeholder)
+              ? prev.replace(placeholder, snippet)
+              : `${prev}${prev.endsWith("\n") || !prev ? "" : "\n"}${snippet}\n`;
+            rawRef.current = next;
+            return next;
+          });
+          if (file.isImage && uploaded.width > 0) {
+            setUploadedImg({
+              filename: safeName,
+              shortUrl: uploaded.shortUrl,
+              width: uploaded.width,
+              height: uploaded.height,
+              snippet,
+            });
+          }
+        } catch (err: any) {
+          setRaw((prev) => {
+            const next = prev
+              .replace(`\n${placeholder}\n`, "\n")
+              .replace(`${placeholder}\n`, "")
+              .replace(`\n${placeholder}`, "")
+              .replace(placeholder, "");
+            rawRef.current = next;
+            return next;
+          });
+          if (err instanceof SiteError && err.isVerification) {
+            setSubmitError("安全确认未完成，图片未上传");
+          } else {
+            setSubmitError(err?.message || "上传失败，请重试");
+          }
+        } finally {
+          setUploadingCount((c) => Math.max(0, c - 1));
+        }
       }
     } finally {
-      setUploading(false);
+      setUploadProgressLabel("");
+    }
+  }, []);
+
+  // Listen for native OS file drag-and-drop (Finder / Desktop / Explorer) via Tauri 2 webview dragDropEvent
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const webview = getCurrentWebview();
+        const off = await webview.onDragDropEvent((event) => {
+          if (!active) return;
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") {
+            setIsDragActive(true);
+          } else if (payload.type === "leave") {
+            setIsDragActive(false);
+          } else if (payload.type === "drop") {
+            setIsDragActive(false);
+            if (payload.paths && payload.paths.length > 0) {
+              void prepareDroppedPaths(payload.paths).then((prepared) => {
+                if (active && prepared.length > 0) {
+                  void uploadPreparedFiles(prepared);
+                }
+              });
+            }
+          }
+        });
+        if (active) {
+          unlisten = off;
+        } else {
+          off();
+        }
+      } catch {
+        // Non-Tauri environment fallback uses HTML5 onDrop
+      }
+    })();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [uploadPreparedFiles]);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = "";
+    if (fileList.length === 0) return;
+    const prepared = await Promise.all(fileList.map((f, idx) => fileToPreparedUpload(f, idx)));
+    void uploadPreparedFiles(prepared);
+  };
+
+  const handleComposerDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      if (!isDragActive) setIsDragActive(true);
     }
   };
+
+  const handleComposerDragLeave = (e: React.DragEvent) => {
+    if (e.currentTarget === e.target) {
+      setIsDragActive(false);
+    }
+  };
+
+  const handleComposerDrop = (e: React.DragEvent) => {
+    const files = extractSyncClipboardFiles(e.dataTransfer);
+    setIsDragActive(false);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void Promise.all(files.map((f, idx) => fileToPreparedUpload(f, idx))).then((prepared) => {
+      if (prepared.length > 0) {
+        void uploadPreparedFiles(prepared);
+      }
+    });
+  };
+
+  const previewHtml = useMemo(() => {
+    if (viewMode === "SOURCE" || !raw.trim()) return "";
+    return prepareCookedHtml(simpleMarkdownToHtml(raw, uploadedPreviewMap));
+  }, [viewMode, raw, uploadedPreviewMap]);
+
+  useEffect(() => {
+    if (viewMode === "SOURCE" || !previewHtml) return;
+    return observeCookedForumImages(previewContainerRef.current);
+  }, [viewMode, previewHtml]);
 
   const executePublish = async () => {
     setSubmitting(true);
     setSubmitError(null);
+    const now = Date.now();
+    const composerOpenDurationMs = Math.max(1000, now - composerOpenedAtRef.current);
+    const typingDurationMs = firstTypedAtRef.current
+      ? Math.max(800, Math.min(composerOpenDurationMs, now - firstTypedAtRef.current))
+      : Math.max(800, Math.min(composerOpenDurationMs, raw.length * 45));
     try {
       if (request.action === "NEW_TOPIC") {
         const res = await publishTopic({
@@ -592,6 +821,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           raw,
           categoryId,
           tags,
+          typingDurationMs,
+          composerOpenDurationMs,
         });
         await deleteLocalDraftInRust(draftKey).catch(() => {});
         onPublished({ topicId: res.topicId, pendingReview: res.pendingReview });
@@ -600,6 +831,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           topicId: request.topicId,
           raw,
           replyToPostNumber: request.replyToPostNumber,
+          typingDurationMs,
+          composerOpenDurationMs,
         });
         await deleteLocalDraftInRust(draftKey).catch(() => {});
         onPublished({
@@ -619,7 +852,10 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         onPublished({ topicId: request.topicId, post: updated });
       }
     } catch (err: any) {
-      if (!(err instanceof SiteError && err.isVerification)) {
+      if (
+        !(err instanceof SiteError && err.isVerification) ||
+        (err.message && (err.message.includes("冷却") || err.message.includes("拦截")))
+      ) {
         setSubmitError(err?.message || "提交未完成，内容已保留在本地");
       }
     } finally {
@@ -1449,13 +1685,13 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               ref={fileInputRef}
               type="file"
               accept="image/*,*/*"
+              multiple
               className="hidden"
               onChange={handleFileChange}
             />
             <button
               type="button"
-              title="上传图片或附件"
-              disabled={uploading}
+              title="上传图片或附件（支持粘贴 / 拖拽）"
               onClick={() => fileInputRef.current?.click()}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: uploading ? "var(--brand-gold)" : "var(--ink-secondary)" }}
@@ -1484,7 +1720,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title="插入链接或引用社区帖子"
+              title={isWindows ? "插入链接或引用帖子 (Ctrl+K)" : "插入链接或引用帖子 (⌘+K)"}
               onClick={() => setActivePicker((p) => (p === "LINK" ? "NONE" : "LINK"))}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: activePicker === "LINK" ? "var(--brand-gold)" : "var(--ink-secondary)" }}
@@ -1493,7 +1729,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title="粗体"
+              title={isWindows ? "粗体 (Ctrl+B)" : "粗体 (⌘+B)"}
               onClick={() => insertAroundSelection("**", "**")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
@@ -1502,7 +1738,16 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title="代码块"
+              title={isWindows ? "斜体 (Ctrl+I)" : "斜体 (⌘+I)"}
+              onClick={() => insertAroundSelection("*", "*")}
+              className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              <LinDoIcons.Italic size={17.5} />
+            </button>
+            <button
+              type="button"
+              title={isWindows ? "代码 / 代码块 (Ctrl+E)" : "代码 / 代码块 (⌘+E)"}
               onClick={() => insertAroundSelection("\n```\n", "\n```\n")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
@@ -1555,6 +1800,17 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
+              title="折叠详情"
+              onClick={() =>
+                insertAroundSelection('\n[details="摘要"]\n', "\n[/details]\n")
+              }
+              className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              <LinDoIcons.ChevronDown size={16.5} />
+            </button>
+            <button
+              type="button"
               title="剧透模糊"
               onClick={() => insertAroundSelection("[spoiler]", "[/spoiler]")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
@@ -1576,8 +1832,8 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
           <div className="flex shrink-0 items-center gap-2 pl-2">
             {uploading && (
-              <span className="text-[12px]" style={{ color: "var(--brand-gold)" }}>
-                正在上传...
+              <span className="text-[12px] tabular-nums" style={{ color: "var(--brand-gold)" }}>
+                {uploadProgressLabel || "正在上传..."}
               </span>
             )}
             {showBodyError && (
@@ -1874,7 +2130,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                 type="button"
                 onClick={() => {
                   const nextTag = `![${uploadedImg.filename}|${uploadedImg.width}x${uploadedImg.height}, ${pct}](${uploadedImg.shortUrl})`;
-                  setRaw((prev) => prev.replace(uploadedImg.snippet, nextTag));
+                  setRaw((prev) => {
+                    const next = prev.replace(uploadedImg.snippet, nextTag);
+                    rawRef.current = next;
+                    return next;
+                  });
                   setUploadedImg({ ...uploadedImg, snippet: nextTag });
                 }}
                 className="lindo-interactive rounded px-2 py-0.5 font-medium"
@@ -1912,7 +2172,26 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       )}
 
       {/* 5. 编辑画布 / 双栏实时对照预览 / 纯预览 */}
-      <div className="flex flex-1 min-h-0">
+      <div
+        className="relative flex flex-1 min-h-0"
+        onDragOver={handleComposerDragOver}
+        onDragLeave={handleComposerDragLeave}
+        onDrop={handleComposerDrop}
+      >
+        {isDragActive && (
+          <div
+            className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-2 rounded-xl"
+            style={{
+              backgroundColor: "color-mix(in srgb, var(--card-surface) 90%, transparent)",
+              border: "1.5px dashed var(--brand-gold)",
+            }}
+          >
+            <LinDoIcons.Image size={24} style={{ color: "var(--brand-gold)" }} />
+            <span className="text-[13px] font-medium" style={{ color: "var(--ink-primary)" }}>
+              松开鼠标上传图片或附件
+            </span>
+          </div>
+        )}
         {loadingRawEdit ? (
           <div
             className="flex h-full w-full items-center justify-center text-[13px]"
@@ -1926,20 +2205,149 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               <textarea
                 ref={bodyTextareaRef}
                 value={raw}
-                onChange={(e) => setRaw(e.target.value)}
+                onChange={(e) => {
+                  if (firstTypedAtRef.current === null) {
+                    firstTypedAtRef.current = Date.now();
+                  }
+                  setRaw(e.target.value);
+                }}
+                onPaste={(e) =>
+                  handleComposerTextareaPaste(e, {
+                    textarea: bodyTextareaRef.current,
+                    value: rawRef.current,
+                    onUploadFiles: (files) => {
+                      void uploadPreparedFiles(files);
+                    },
+                    onInsertText: insertTextAtCursor,
+                    onWrapSelectionWithUrl: wrapSelectionWithUrl,
+                  })
+                }
                 placeholder={
                   request.action === "NEW_TOPIC"
-                    ? `写下正文（支持 Markdown 与 Discourse 语法，${submitShortcutLabel} 快速提交）`
+                    ? `写下正文（支持粘贴或拖拽图片、Markdown 与 Discourse 语法，${submitShortcutLabel} 快速提交）`
                     : request.action === "EDIT"
-                      ? `修改正文（${submitShortcutLabel} 快速保存）`
-                      : `写下回复（${submitShortcutLabel} 快速发送）`
+                      ? `修改正文（支持粘贴或拖拽图片，${submitShortcutLabel} 快速保存）`
+                      : `写下回复（支持粘贴或拖拽图片，${submitShortcutLabel} 快速发送）`
                 }
                 autoFocus={!isNewTopic}
                 onKeyDown={(e) => {
-                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                  const mod = e.metaKey || e.ctrlKey;
+                  if (mod && e.key === "Enter") {
                     e.preventDefault();
                     handleAttemptSubmit();
-                  } else if (e.key === "Escape" && !raw.trim() && !title.trim()) {
+                    return;
+                  }
+                  if (mod && !e.altKey) {
+                    const keyLower = e.key.toLowerCase();
+                    if (keyLower === "b") {
+                      e.preventDefault();
+                      insertAroundSelection("**", "**");
+                      return;
+                    }
+                    if (keyLower === "i") {
+                      e.preventDefault();
+                      insertAroundSelection("*", "*");
+                      return;
+                    }
+                    if (keyLower === "k") {
+                      e.preventDefault();
+                      const el = bodyTextareaRef.current;
+                      const sel =
+                        el && el.selectionEnd > el.selectionStart
+                          ? rawRef.current.slice(el.selectionStart, el.selectionEnd)
+                          : "";
+                      if (sel && !sel.includes("\n")) {
+                        setLinkText(sel);
+                      }
+                      setLinkMode("URL");
+                      setActivePicker("LINK");
+                      return;
+                    }
+                    if (keyLower === "e") {
+                      e.preventDefault();
+                      const el = bodyTextareaRef.current;
+                      const sel =
+                        el && el.selectionEnd > el.selectionStart
+                          ? rawRef.current.slice(el.selectionStart, el.selectionEnd)
+                          : "";
+                      if (sel.includes("\n")) {
+                        insertAroundSelection("\n```\n", "\n```\n");
+                      } else {
+                        insertAroundSelection("`", "`");
+                      }
+                      return;
+                    }
+                    if (e.shiftKey && keyLower === "c") {
+                      e.preventDefault();
+                      insertAroundSelection("\n```\n", "\n```\n");
+                      return;
+                    }
+                  }
+                  if (e.key === "Tab") {
+                    e.preventDefault();
+                    const el = bodyTextareaRef.current;
+                    if (!el) return;
+                    const cur = rawRef.current;
+                    const start = el.selectionStart ?? 0;
+                    const end = el.selectionEnd ?? 0;
+                    if (e.shiftKey) {
+                      const lineStart = cur.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+                      const linePrefix = cur.slice(lineStart, lineStart + 2);
+                      if (linePrefix === "  " || linePrefix.startsWith("\t")) {
+                        const removeLen = linePrefix.startsWith("\t") ? 1 : 2;
+                        const next = `${cur.slice(0, lineStart)}${cur.slice(lineStart + removeLen)}`;
+                        rawRef.current = next;
+                        setRaw(next);
+                        requestAnimationFrame(() => {
+                          const s = Math.max(lineStart, start - removeLen);
+                          const en = Math.max(s, end - removeLen);
+                          el.setSelectionRange(s, en);
+                        });
+                      }
+                    } else {
+                      insertTextAtCursor("  ");
+                    }
+                    return;
+                  }
+                  if (e.key === "Enter" && !e.shiftKey && !mod && !e.altKey) {
+                    const el = bodyTextareaRef.current;
+                    if (el && el.selectionStart === el.selectionEnd) {
+                      const pos = el.selectionStart ?? 0;
+                      const cur = rawRef.current;
+                      const lineStart = cur.lastIndexOf("\n", Math.max(0, pos - 1)) + 1;
+                      const currentLine = cur.slice(lineStart, pos);
+                      const ulMatch = currentLine.match(/^(\s*)([-*+])\s(.*)$/);
+                      const olMatch = currentLine.match(/^(\s*)(\d+)\.\s(.*)$/);
+                      if (ulMatch) {
+                        e.preventDefault();
+                        const [, indent, marker, rest] = ulMatch;
+                        if (!rest.trim()) {
+                          const next = `${cur.slice(0, lineStart)}${cur.slice(pos)}`;
+                          rawRef.current = next;
+                          setRaw(next);
+                          requestAnimationFrame(() => el.setSelectionRange(lineStart, lineStart));
+                        } else {
+                          insertTextAtCursor(`\n${indent}${marker} `);
+                        }
+                        return;
+                      }
+                      if (olMatch) {
+                        e.preventDefault();
+                        const [, indent, numStr, rest] = olMatch;
+                        if (!rest.trim()) {
+                          const next = `${cur.slice(0, lineStart)}${cur.slice(pos)}`;
+                          rawRef.current = next;
+                          setRaw(next);
+                          requestAnimationFrame(() => el.setSelectionRange(lineStart, lineStart));
+                        } else {
+                          insertTextAtCursor(`\n${indent}${Number(numStr) + 1}. `);
+                        }
+                        return;
+                      }
+                    }
+                  }
+                  if (e.key === "Escape" && !raw.trim() && !title.trim()) {
                     e.preventDefault();
                     onClose();
                   }
@@ -1953,6 +2361,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
             {viewMode !== "SOURCE" && (
               <div
+                ref={previewContainerRef}
                 className={`lindo-scroll h-full ${
                   viewMode === "SPLIT" ? "w-1/2" : "w-full"
                 } ${isDrawer ? "px-4 py-3" : "px-5 py-4"}`}
@@ -1962,11 +2371,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                     : undefined
                 }
               >
-                {raw.trim() ? (
+                {previewHtml ? (
                   <div
                     className="lindo-cooked whitespace-pre-wrap"
                     dangerouslySetInnerHTML={{
-                      __html: prepareCookedHtml(simpleMarkdownToHtml(raw)),
+                      __html: previewHtml,
                     }}
                   />
                 ) : (
@@ -2078,21 +2487,86 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   );
 };
 
-function simpleMarkdownToHtml(md: string): string {
+function resolvePreviewImageUrl(
+  rawUrl: string,
+  previewMap: Record<string, string>
+): string {
+  const trimmed = rawUrl.trim();
+  if (previewMap[trimmed]) return previewMap[trimmed];
+  if (trimmed.startsWith("upload://")) {
+    return `https://linux.do/uploads/short-url/${trimmed.slice("upload://".length)}`;
+  }
+  return trimmed;
+}
+
+function simpleMarkdownToHtml(
+  md: string,
+  previewMap: Record<string, string> = {}
+): string {
+  // Preserve fenced code blocks before inline formatting so code contents stay literal
+  const codeBlocks: string[] = [];
   const esc = md
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  return esc
-    .replace(/```([\s\S]*?)```/g, "<pre><code>$1</code></pre>")
+    .replace(/>/g, "&gt;")
+    .replace(/```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, (_m, lang: string, body: string) => {
+      const idx = codeBlocks.length;
+      const cls = lang ? ` class="lang-${lang}"` : "";
+      codeBlocks.push(`<pre><code${cls}>${body.replace(/\n$/, "")}</code></pre>`);
+      return `@@LINDO_CODE_${idx}@@`;
+    });
+
+  let html = esc
     .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2" />')
+    // Uploading inline placeholders
+    .replace(
+      /!?\[([^\]]+)\]\((uploading-\d+)\)/g,
+      '<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;background:var(--subtle-surface);color:var(--brand-gold);font-size:12px;">$1</span>'
+    )
+    // Discourse images with optional `|WxH, 50%` scale metadata + `upload://` resolution
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, rawAlt: string, rawSrc: string) => {
+      const resolvedSrc = resolvePreviewImageUrl(rawSrc, previewMap);
+      const parts = rawAlt.split("|");
+      const altText = parts[0] || "";
+      const meta = parts.slice(1).join("|");
+      const pctMatch = meta.match(/(\d{2,3})%/);
+      const dimMatch = meta.match(/(\d+)x(\d+)/);
+      let style = "max-width:100%;height:auto;border-radius:8px;margin:6px 0;";
+      if (pctMatch) {
+        const pct = Math.max(15, Math.min(100, Number(pctMatch[1])));
+        if (dimMatch) {
+          const scaledW = Math.round((Number(dimMatch[1]) * pct) / 100);
+          style = `width:${scaledW}px;max-width:${pct}%;height:auto;border-radius:8px;margin:6px 0;`;
+        } else {
+          style = `max-width:${pct}%;height:auto;border-radius:8px;margin:6px 0;`;
+        }
+      }
+      return `<img alt="${altText}" src="${resolvedSrc}" style="${style}" />`;
+    })
     .replace(/\[([^\]]+)\]\(<?([^)>]+)>?\)/g, '<a href="$2">$1</a>')
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    .replace(/(^|[^\w*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
+    .replace(/^---+\s*$/gm, "<hr />")
     .replace(/^### (.+)$/gm, "<h3>$1</h3>")
     .replace(/^## (.+)$/gm, "<h2>$1</h2>")
     .replace(/^# (.+)$/gm, "<h1>$1</h1>")
     .replace(/^&gt; (.+)$/gm, "<blockquote>$1</blockquote>")
+    .replace(
+      /\[details=&quot;([^&]*?)&quot;\]([\s\S]*?)\[\/details\]/g,
+      "<details><summary>$1</summary><div>$2</div></details>"
+    )
+    .replace(
+      /\[details="([^"]*?)"\]([\s\S]*?)\[\/details\]/g,
+      "<details><summary>$1</summary><div>$2</div></details>"
+    )
+    .replace(
+      /\[quote(?:=[^\]]+)?\]([\s\S]*?)\[\/quote\]/g,
+      "<blockquote>$1</blockquote>"
+    )
     .replace(/\[spoiler\]([\s\S]*?)\[\/spoiler\]/g, '<span class="spoiled">$1</span>')
     .replace(/\n\n/g, "</p><p>");
+
+  html = html.replace(/@@LINDO_CODE_(\d+)@@/g, (_m, i: string) => codeBlocks[Number(i)] || "");
+  return html;
 }

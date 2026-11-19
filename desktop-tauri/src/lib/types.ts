@@ -88,6 +88,10 @@ export interface SiteHttpDiag {
   cooldownWaitMs?: number;
   retried?: boolean;
   silentCfRevalidated?: boolean;
+  verifyAttempted?: boolean;
+  verifyRound?: number | null;
+  verifyCooldownMs?: number;
+  ineffectiveClearance?: boolean;
   csrfRefreshed?: boolean;
   guestFallback?: boolean;
   bodyBytes?: number;
@@ -96,6 +100,7 @@ export interface SiteHttpDiag {
 export interface DiagRuntimeSnapshot {
   os: string;
   arch: string;
+  bridgeUa?: string;
   originReady: boolean;
   verifying: boolean;
   bootstrapChallenged: boolean;
@@ -103,12 +108,19 @@ export interface DiagRuntimeSnapshot {
   hasCookieT: boolean;
   hasForumSession: boolean;
   hasCfClearance: boolean;
+  cfClearanceAgeSecs?: number | null;
   savedAccountsCount: number;
   rateLimitRemainMs: number;
   fgChallengeRemainMs: number;
   bgChallengeRemainMs: number;
   mediaCooldownRemainMs: number;
   challenge429Streak: number;
+  verifyRound?: number;
+  verifyConsecutiveFailures?: number;
+  verifyCooldownRemainMs?: number;
+  verifyIneffectiveBreaker?: boolean;
+  pacerRatePerSec?: number;
+  sessionGeneration?: number;
   mediaCacheEntries: number;
   mediaCacheBytes: number;
 }

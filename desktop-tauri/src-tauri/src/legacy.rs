@@ -119,6 +119,8 @@ pub struct PersistedState {
     #[serde(default)]
     pub cf_clearance_updated_at_ms: u64,
     #[serde(default)]
+    pub last_bridge_ua: String,
+    #[serde(default)]
     pub client_id: String,
     #[serde(default)]
     pub expired_username: Option<String>,

@@ -68,6 +68,7 @@ interface TopicReaderPaneProps {
   isLoading: boolean;
   errorMessage: string | null;
   targetFloor: number | null;
+  highlightTargetFloor?: boolean;
   targetJumpNonce: number;
   onlyOpFilter: boolean;
   isAuthorized: boolean;
@@ -260,6 +261,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   isLoading,
   errorMessage,
   targetFloor,
+  highlightTargetFloor = false,
   targetJumpNonce,
   onlyOpFilter,
   isAuthorized,
@@ -295,8 +297,31 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   const [aiSummaryOpen, setAiSummaryOpen] = useState(false);
   const [aiSummaryText, setAiSummaryText] = useState<string | null>(null);
   const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
-  const [highlightedFloor, setHighlightedFloor] = useState<number | null>(null);
+  const [flashTarget, setFlashTarget] = useState<{ topicId: number; floor: number } | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [currentVisibleFloor, setCurrentVisibleFloor] = useState(1);
+
+  const clearFloorFlash = useCallback(() => {
+    if (flashTimerRef.current) {
+      clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = null;
+    }
+    setFlashTarget(null);
+  }, []);
+
+  const triggerFloorFlash = useCallback((topicId: number, floor: number) => {
+    if (flashTimerRef.current) {
+      clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = null;
+    }
+    setFlashTarget({ topicId, floor });
+    flashTimerRef.current = setTimeout(() => {
+      flashTimerRef.current = null;
+      setFlashTarget(null);
+    }, 1450);
+  }, []);
+
+  useEffect(() => clearFloorFlash, [clearFloorFlash]);
   const [floorNavOpen, setFloorNavOpen] = useState(false);
   const [floorInputVal, setFloorInputVal] = useState("1");
   const [loadingMoreBottom, setLoadingMoreBottom] = useState(false);
@@ -669,17 +694,20 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         el.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
         visibleFloorRef.current = targetFloor;
         setCurrentVisibleFloor(targetFloor);
-        setHighlightedFloor(targetFloor);
-        const timer = setTimeout(() => setHighlightedFloor(null), 2200);
-        return () => clearTimeout(timer);
+        if (highlightTargetFloor) {
+          triggerFloorFlash(detail.id, targetFloor);
+        } else {
+          clearFloorFlash();
+        }
       }
     } else if (!targetFloor) {
+      clearFloorFlash();
       container.scrollTop = 0;
       const initialFloor = detail.posts[0]?.postNumber ?? 1;
       visibleFloorRef.current = initialFloor;
       setCurrentVisibleFloor(initialFloor);
     }
-  }, [detail?.id, targetFloor, targetJumpNonce]);
+  }, [detail?.id, targetFloor, highlightTargetFloor, targetJumpNonce, triggerFloorFlash, clearFloorFlash]);
 
   // Keep imperative 144Hz floor badge text strictly synchronized with topic switches, jumps & refreshes
   useLayoutEffect(() => {
@@ -962,8 +990,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     const existing = container?.querySelector<HTMLElement>(`[data-floor="${floorNum}"]`);
     if (existing) {
       existing.scrollIntoView({ behavior: "smooth", block: "center" });
-      setHighlightedFloor(floorNum);
-      setTimeout(() => setHighlightedFloor(null), 2000);
+      triggerFloorFlash(detail.id, floorNum);
       return;
     }
     const targetStreamIdx = Math.max(0, Math.min(detail.streamIds.length - 1, floorNum - 1));
@@ -985,8 +1012,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               `[data-floor="${floorNum}"]`
             );
             el?.scrollIntoView({ block: "center" });
-            setHighlightedFloor(floorNum);
-            setTimeout(() => setHighlightedFloor(null), 2000);
+            triggerFloorFlash(detail.id, floorNum);
           });
         }
       } catch (e: any) {
@@ -1693,8 +1719,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             )}
 
             {detail?.posts.map((post, postIdx) => {
-              const isTargetHighlight = highlightedFloor === post.postNumber;
-
               if (post.isDeletedTombstone) {
                 return (
                   <div
@@ -3258,23 +3282,17 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 <React.Fragment key={post.id}>
                   <article
                     data-floor={post.postNumber}
-                    className={`${isReplyFloor ? "py-2.5" : "py-3.5"} ${
+                    className={`${isReplyFloor ? "py-2.5" : "py-3.5"}${
                       Math.abs(post.postNumber - currentVisibleFloor) > 3
-                        ? "lindo-offscreen-floor "
+                        ? " lindo-offscreen-floor"
                         : ""
                     }${
-                      isTargetHighlight
-                        ? "-mx-2 rounded-lg px-2 transition-colors duration-700"
+                      flashTarget !== null &&
+                      flashTarget.topicId === detail?.id &&
+                      flashTarget.floor === post.postNumber
+                        ? " lindo-floor-flash -mx-2 rounded-lg px-2"
                         : ""
                     }`}
-                    style={
-                      isTargetHighlight
-                        ? {
-                            backgroundColor:
-                              "color-mix(in srgb, var(--brand-gold) 10%, transparent)",
-                          }
-                        : undefined
-                    }
                   >
                     {isReplyFloor ? (
                       <div className="flex items-start gap-3">

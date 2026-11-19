@@ -190,9 +190,11 @@ export function buildDiagReport(
   ];
   if (snapshot) {
     headerLines.push(
+      `BridgeUA     : ${snapshot.bridgeUa ? redactDiagText(snapshot.bridgeUa) : "unknown"}`,
       `BridgeState  : originReady=${snapshot.originReady}, verifying=${snapshot.verifying}, bootChallenged=${snapshot.bootstrapChallenged}, cfAttention=${snapshot.cfAttentionNotified}`,
-      `CookieFlags  : _t=${snapshot.hasCookieT}, _forum_session=${snapshot.hasForumSession}, cf_clearance=${snapshot.hasCfClearance}`,
-      `GuardState   : rateLimitRemainMs=${snapshot.rateLimitRemainMs}, fgChallengeRemainMs=${snapshot.fgChallengeRemainMs}, bgChallengeRemainMs=${snapshot.bgChallengeRemainMs}, mediaCooldownRemainMs=${snapshot.mediaCooldownRemainMs}, challenge429Streak=${snapshot.challenge429Streak}`,
+      `CookieFlags  : _t=${snapshot.hasCookieT}, _forum_session=${snapshot.hasForumSession}, cf_clearance=${snapshot.hasCfClearance}${snapshot.cfClearanceAgeSecs != null ? ` (age=${snapshot.cfClearanceAgeSecs}s)` : ""}`,
+      `VerifyPolicy : round=${snapshot.verifyRound ?? 0}, fails=${snapshot.verifyConsecutiveFailures ?? 0}, cooldownRemainMs=${snapshot.verifyCooldownRemainMs ?? 0}, ineffectiveBreaker=${Boolean(snapshot.verifyIneffectiveBreaker)}`,
+      `GuardState   : rateLimitRemainMs=${snapshot.rateLimitRemainMs}, fgChallengeRemainMs=${snapshot.fgChallengeRemainMs}, bgChallengeRemainMs=${snapshot.bgChallengeRemainMs}, mediaCooldownRemainMs=${snapshot.mediaCooldownRemainMs}, pacer=${snapshot.pacerRatePerSec ?? 0}/s, gen=${snapshot.sessionGeneration ?? 1}`,
       `MediaCache   : entries=${snapshot.mediaCacheEntries}, bytes=${snapshot.mediaCacheBytes}`
     );
   }

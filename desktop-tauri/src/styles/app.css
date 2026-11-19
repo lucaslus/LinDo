@@ -708,3 +708,23 @@ html.lindo-scrolling .lindo-interactive:hover:not(:active) {
 .lindo-cooked span.spoiler:hover {
   filter: none;
 }
+
+@keyframes lindo-floor-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--brand-gold) 13%, transparent);
+  }
+  38% {
+    background-color: color-mix(in srgb, var(--brand-gold) 9%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.lindo-floor-flash {
+  animation: lindo-floor-flash 1.4s ease-out forwards;
+}
+
+.lindo-reduce-motion .lindo-floor-flash {
+  animation-duration: 0.75s;
+}

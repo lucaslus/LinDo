@@ -2,6 +2,11 @@ use crate::legacy::{
     clear_pending_rsa, load_pending_rsa, save_pending_rsa, save_state, PendingRsaDiskRecord,
     PersistedState, SavedAccountEntry, UserProfile,
 };
+use crate::net_policy::{
+    is_transient_retryable_status, parse_retry_after_secs, transient_backoff_ms,
+    AdaptiveTokenBucket, AttemptBudget, CfClearanceAuthority, PriorityGate, RequestPriority,
+    VerifyCoordinator, VerifyFlightGuard, VerifyJoin, VerifyOutcome, VerifyPresentation,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -11,7 +16,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicI64;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
@@ -20,7 +25,6 @@ use tokio::sync::oneshot;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 
 const CF_CHALLENGE_PREFIX: &str = "<!--lindo-cf-challenge-->";
-const CF_COLD_SEED_MAX_AGE_MS: u64 = 12 * 3600 * 1000;
 const MAX_MEDIA_CACHE_ITEMS: usize = 192;
 const MAX_MEDIA_CACHE_SINGLE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MEDIA_CACHE_TOTAL_BYTES: usize = 36 * 1024 * 1024;
@@ -38,159 +42,6 @@ pub struct ForumMediaPayload {
     pub status: u16,
     pub content_type: String,
     pub data_base64: String,
-}
-
-/// Authoritative state machine for `cf_clearance` (aligned with FluxDO `CfClearanceAuthority` insights):
-/// - Protects a healthy unchallenged `incumbent` against transient WebKit empty cookie reads or stale host-only variant overwrites.
-/// - Immediately marks a clearance ticket dead (`challenged`) upon `cf-mitigated: challenge`, opening clean rotation.
-/// - Only cold-seeds `cf_clearance` into WebKit/WebView2 when the browser store has none and the persisted ticket is unchallenged & fresh (< 12h).
-#[derive(Debug, Clone, Default)]
-pub struct CfClearanceAuthority {
-    pub incumbent: Option<String>,
-    pub challenged: Option<String>,
-    pub challenged_history: VecDeque<String>,
-    pub updated_at_ms: u64,
-}
-
-impl CfClearanceAuthority {
-    pub fn from_persisted(raw_cookies: &str, saved_updated_at_ms: u64, now_ms: u64) -> Self {
-        let mut auth = Self::default();
-        if let Some(cf) = BridgeEngine::parse_cookie_map(raw_cookies).remove("cf_clearance") {
-            if !cf.is_empty() && saved_updated_at_ms > 0 && now_ms.saturating_sub(saved_updated_at_ms) <= CF_COLD_SEED_MAX_AGE_MS {
-                auth.incumbent = Some(cf);
-                auth.updated_at_ms = saved_updated_at_ms;
-            }
-        }
-        auth
-    }
-
-    pub fn is_challenged(&self, value: &str) -> bool {
-        let trimmed = value.trim();
-        !trimmed.is_empty()
-            && (self.challenged.as_deref() == Some(trimmed)
-                || self.challenged_history.iter().any(|item| item == trimmed))
-    }
-
-    pub fn confirm_healthy(&mut self, value: &str, now_ms: u64) {
-        let trimmed = value.trim();
-        if trimmed.is_empty() || self.is_challenged(trimmed) {
-            return;
-        }
-        self.incumbent = Some(trimmed.to_string());
-        self.updated_at_ms = now_ms;
-    }
-
-    pub fn note_challenged(&mut self, carried_value: Option<&str>) {
-        let target = carried_value
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .or_else(|| self.incumbent.clone());
-        if let Some(dead) = target {
-            if self.incumbent.as_deref() == Some(dead.as_str()) {
-                self.incumbent = None;
-            }
-            if !self.challenged_history.iter().any(|item| item == &dead) {
-                if self.challenged_history.len() >= 16 {
-                    self.challenged_history.pop_front();
-                }
-                self.challenged_history.push_back(dead.clone());
-            }
-            self.challenged = Some(dead);
-        }
-    }
-
-    /// `candidates` is `Vec<(value, host_only)>`. Canonical Cloudflare `cf_clearance` has `host_only == false` (`Domain=.linux.do`).
-    pub fn select_winner(
-        &mut self,
-        candidates: &[(String, bool)],
-        verified: bool,
-        now_ms: u64,
-    ) -> Option<String> {
-        let valid: Vec<&(String, bool)> = candidates
-            .iter()
-            .filter(|(v, _)| {
-                let t = v.trim();
-                !t.is_empty() && !self.is_challenged(t)
-            })
-            .collect();
-
-        if verified {
-            // Right after user passes site verification / login, prefer a newly rotated `.linux.do` ticket over the old incumbent
-            let rotated_domain = valid.iter().rev().find(|(v, host_only)| {
-                !*host_only && self.incumbent.as_deref() != Some(v.as_str())
-            });
-            let any_domain = valid.iter().rev().find(|(_, host_only)| !*host_only);
-            let chosen = rotated_domain
-                .or(any_domain)
-                .or_else(|| valid.last())
-                .map(|(v, _)| v.clone());
-            if let Some(ref win) = chosen {
-                self.incumbent = Some(win.clone());
-                self.challenged = None;
-                self.updated_at_ms = now_ms;
-                return chosen;
-            }
-        }
-
-        // Sticky incumbent rule: if incumbent is healthy and still present in browser cookies, keep it regardless of enumeration order
-        if let Some(ref inc) = self.incumbent {
-            if !self.is_challenged(inc) {
-                if valid.iter().any(|(v, _)| v == inc) {
-                    if self.updated_at_ms == 0 {
-                        self.updated_at_ms = now_ms;
-                    }
-                    return Some(inc.clone());
-                }
-            }
-        }
-
-        // Natural Cloudflare background rotation: adopt canonical `.linux.do` (`host_only == false`) candidate first
-        let natural = valid
-            .iter()
-            .rev()
-            .find(|(_, host_only)| !*host_only)
-            .or_else(|| valid.last())
-            .map(|(v, _)| v.clone());
-        if let Some(ref win) = natural {
-            self.incumbent = Some(win.clone());
-            if self.updated_at_ms == 0 || !verified {
-                self.updated_at_ms = now_ms;
-            }
-            return natural;
-        }
-
-        // Transient empty read protection: if browser returned 0 valid cf_clearance cookies transiently while incumbent is fresh & unchallenged
-        if candidates.is_empty() {
-            if let Some(ref inc) = self.incumbent {
-                if !self.is_challenged(inc)
-                    && self.updated_at_ms > 0
-                    && now_ms.saturating_sub(self.updated_at_ms) <= CF_COLD_SEED_MAX_AGE_MS
-                {
-                    return Some(inc.clone());
-                }
-            }
-        }
-
-        None
-    }
-
-    pub fn should_seed_cold_start(
-        &self,
-        saved_cf: &str,
-        saved_updated_at_ms: u64,
-        browser_has_cf: bool,
-        now_ms: u64,
-    ) -> bool {
-        if browser_has_cf {
-            return false;
-        }
-        let clean = saved_cf.trim();
-        if clean.is_empty() || self.is_challenged(clean) {
-            return false;
-        }
-        saved_updated_at_ms > 0 && now_ms.saturating_sub(saved_updated_at_ms) <= CF_COLD_SEED_MAX_AGE_MS
-    }
 }
 
 struct MediaCacheState {
@@ -377,6 +228,21 @@ async fn native_call(method: &str, params: Value, timeout_secs: u64) -> Result<V
         .await
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardMediaItem {
+    pub filename: String,
+    pub mime: String,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardMediaResult {
+    pub source: String,
+    pub items: Vec<ClipboardMediaItem>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteHttpDiag {
@@ -396,6 +262,11 @@ pub struct SiteHttpDiag {
     pub cooldown_wait_ms: u64,
     pub retried: bool,
     pub silent_cf_revalidated: bool,
+    pub verify_attempted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify_round: Option<u64>,
+    pub verify_cooldown_ms: u64,
+    pub ineffective_clearance: bool,
     pub csrf_refreshed: bool,
     pub guest_fallback: bool,
     pub body_bytes: usize,
@@ -406,6 +277,7 @@ pub struct SiteHttpDiag {
 pub struct DiagRuntimeSnapshot {
     pub os: String,
     pub arch: String,
+    pub bridge_ua: String,
     pub origin_ready: bool,
     pub verifying: bool,
     pub bootstrap_challenged: bool,
@@ -413,12 +285,20 @@ pub struct DiagRuntimeSnapshot {
     pub has_cookie_t: bool,
     pub has_forum_session: bool,
     pub has_cf_clearance: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cf_clearance_age_secs: Option<u64>,
     pub saved_accounts_count: usize,
     pub rate_limit_remain_ms: u64,
     pub fg_challenge_remain_ms: u64,
     pub bg_challenge_remain_ms: u64,
     pub media_cooldown_remain_ms: u64,
     pub challenge_429_streak: u32,
+    pub verify_round: u64,
+    pub verify_consecutive_failures: u32,
+    pub verify_cooldown_remain_ms: u64,
+    pub verify_ineffective_breaker: bool,
+    pub pacer_rate_per_sec: f64,
+    pub session_generation: u64,
     pub media_cache_entries: usize,
     pub media_cache_bytes: usize,
 }
@@ -442,65 +322,23 @@ struct PendingRsaGrant {
     created_at_ms: u64,
 }
 
-struct TokenBucketPacer {
-    tokens: f64,
-    capacity: f64,
-    refill_per_sec: f64,
-    last_refill: Instant,
-}
-
-impl TokenBucketPacer {
-    fn new(capacity: f64, refill_per_sec: f64) -> Self {
-        Self {
-            tokens: capacity,
-            capacity,
-            refill_per_sec,
-            last_refill: Instant::now(),
-        }
-    }
-
-    /// Reserves 1 request slot using virtual-time debt so concurrent bursts are spaced smoothly
-    /// without thundering herds or holding a mutex across `.await`.
-    /// `min_floor` reserves extra headroom so background tasks yield burst tokens to foreground clicks.
-    fn reserve(&mut self, now: Instant, min_floor: f64) -> Duration {
-        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
-        if elapsed > 0.0 {
-            self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
-            self.last_refill = now;
-        }
-        let needed_level = 1.0 + min_floor;
-        let wait_secs = if self.tokens >= needed_level {
-            0.0
-        } else {
-            ((needed_level - self.tokens) / self.refill_per_sec).min(6.5)
-        };
-        self.tokens -= 1.0;
-        Duration::from_secs_f64(wait_secs)
-    }
-
-    fn drain_on_429(&mut self, now: Instant) {
-        self.last_refill = now;
-        if self.tokens > 0.0 {
-            self.tokens = 0.0;
-        }
-    }
-}
-
 pub struct BridgeEngine {
     pub state: StdMutex<PersistedState>,
     bootstrap_lock: Mutex<()>,
     verify_lock: Mutex<()>,
     account_lock: RwLock<()>,
-    fg_sem: Semaphore,
-    bg_sem: Semaphore,
+    nav_lock: RwLock<()>,
+    priority_gate: PriorityGate,
     avatar_sem: Semaphore,
     emoji_sem: Semaphore,
     media_sem: Semaphore,
-    api_pacer: StdMutex<TokenBucketPacer>,
-    media_pacer: StdMutex<TokenBucketPacer>,
+    api_pacer: StdMutex<AdaptiveTokenBucket>,
+    media_pacer: StdMutex<AdaptiveTokenBucket>,
     active_fg_requests: AtomicUsize,
+    session_generation: AtomicU64,
     warmup_spawned: AtomicBool,
     inner: StdMutex<BridgeRuntime>,
+    verify_coord: Arc<StdMutex<VerifyCoordinator>>,
     cf_authority: StdMutex<CfClearanceAuthority>,
     media_cache: StdMutex<MediaCacheState>,
     media_inflight: StdMutex<HashMap<String, Arc<Notify>>>,
@@ -566,6 +404,7 @@ struct BridgeRuntime {
     initialized: bool,
     origin_ready: bool,
     bootstrap_challenged: bool,
+    bridge_ua: String,
     last_seeded_token: String,
     last_challenge_url: Option<String>,
     last_cookie_sync: Option<Instant>,
@@ -575,11 +414,8 @@ struct BridgeRuntime {
     last_429_probe_at: Option<Instant>,
     fg_challenge_until: Option<Instant>,
     bg_challenge_until: Option<Instant>,
-    silent_revalidate_until: Option<Instant>,
-    last_silent_cleared_at: Option<Instant>,
     media_cooldown_until: Option<Instant>,
     challenge_429_streak: u32,
-    last_challenge_429_at: Option<Instant>,
     cf_attention_notified: bool,
     verifying: bool,
     pending_rsa: Option<PendingRsaGrant>,
@@ -605,25 +441,28 @@ impl BridgeEngine {
         initial.raw_cookies = cleaned_cookies.join("; ");
         initial.cf_clearance_updated_at_ms = 0;
 
+        let saved_ua = initial.last_bridge_ua.clone();
         Arc::new(Self {
             state: StdMutex::new(initial),
             bootstrap_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
             account_lock: RwLock::new(()),
-            fg_sem: Semaphore::new(2),
-            bg_sem: Semaphore::new(1),
-            // Conservative 3-lane media concurrency + token-bucket pacer so same-origin `/uploads/` never starve or 429 JSON APIs
+            nav_lock: RwLock::new(()),
+            priority_gate: PriorityGate::new(3, 1),
+            // Conservative 3-lane media concurrency + AIMD media pacer so same-origin `/uploads/` never starve or 429 JSON APIs
             avatar_sem: Semaphore::new(2),
             emoji_sem: Semaphore::new(4),
             media_sem: Semaphore::new(2),
-            api_pacer: StdMutex::new(TokenBucketPacer::new(5.0, 3.2)),
-            media_pacer: StdMutex::new(TokenBucketPacer::new(3.0, 5.2)),
+            api_pacer: StdMutex::new(AdaptiveTokenBucket::new(5.0, 3.4, 1.1, 3.8)),
+            media_pacer: StdMutex::new(AdaptiveTokenBucket::new(3.0, 5.2, 2.0, 5.6)),
             active_fg_requests: AtomicUsize::new(0),
+            session_generation: AtomicU64::new(1),
             warmup_spawned: AtomicBool::new(false),
             inner: StdMutex::new(BridgeRuntime {
                 initialized: false,
                 origin_ready: false,
                 bootstrap_challenged: false,
+                bridge_ua: saved_ua,
                 last_seeded_token: "__unseeded__".to_string(),
                 last_challenge_url: None,
                 last_cookie_sync: None,
@@ -633,16 +472,14 @@ impl BridgeEngine {
                 last_429_probe_at: None,
                 fg_challenge_until: None,
                 bg_challenge_until: None,
-                silent_revalidate_until: None,
-                last_silent_cleared_at: None,
                 media_cooldown_until: None,
                 challenge_429_streak: 0,
-                last_challenge_429_at: None,
                 cf_attention_notified: false,
                 verifying: false,
                 pending_rsa: None,
                 consumed_nonces: Vec::new(),
             }),
+            verify_coord: Arc::new(StdMutex::new(VerifyCoordinator::default())),
             cf_authority: StdMutex::new(CfClearanceAuthority::default()),
             media_cache: StdMutex::new(MediaCacheState::default()),
             media_inflight: StdMutex::new(HashMap::new()),
@@ -712,6 +549,63 @@ impl BridgeEngine {
                 || lower.contains("_cf_chl_opt"))
     }
 
+    /// Authoritative Cloudflare challenge classifier (aligned with FluxDO `isCfChallengeResponse`):
+    /// - `cf-mitigated: challenge` is an authoritative CF challenge signal on BOTH 403 AND 429/503 (never treat CF challenge 429 as a blind retryable rate limit!).
+    /// - Explicit non-HTML responses (e.g. Discourse JSON 429/403) are never CF challenges.
+    pub fn is_cf_challenge_response(
+        status: u16,
+        cf_header: &str,
+        content_type: &str,
+        raw_body: &str,
+    ) -> bool {
+        if raw_body.starts_with(CF_CHALLENGE_PREFIX) {
+            return true;
+        }
+        if cf_header.to_ascii_lowercase().contains("challenge") {
+            return true;
+        }
+        if status != 403 && status != 429 && status != 503 {
+            return false;
+        }
+        let ct = content_type.to_ascii_lowercase();
+        if !ct.is_empty() && !ct.contains("text/html") {
+            return false;
+        }
+        Self::looks_like_challenge(raw_body)
+    }
+
+    async fn purge_cf_clearance_for_reverify(&self) -> Vec<String> {
+        let deleted: Vec<String> = native_call("deleteCfClearance", json!({}), 6)
+            .await
+            .ok()
+            .and_then(|v| {
+                v.get("deleted")?.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        if !deleted.is_empty() {
+            let mut auth = self.cf_authority.lock().unwrap();
+            for val in &deleted {
+                auth.note_challenged(Some(val));
+            }
+        }
+        deleted
+    }
+
+    async fn restore_cf_clearance_backup(&self, backup: &[String]) {
+        let Some(first) = backup.first().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if !self.browser_cf_clearances().await.is_empty() {
+            return;
+        }
+        let _ = native_call("restoreCfClearance", json!({ "value": first }), 6).await;
+    }
+
     fn is_unauthenticated_response(status: u16, body: &str) -> bool {
         if status == 401 {
             return true;
@@ -761,10 +655,56 @@ impl BridgeEngine {
             .unwrap_or_default()
     }
 
+    fn current_is_dark(&self) -> bool {
+        self.state
+            .lock()
+            .map(|st| st.preferences.appearance != "light")
+            .unwrap_or(true)
+    }
+
+    fn emit_net_health_diag(&self, app: &AppHandle, level: &str, trigger: &str, extra: Option<&str>) {
+        let snap = self.diag_runtime_snapshot();
+        let (inflight, waiters) = self.priority_gate.stats();
+        let mut detail = format!(
+            "trigger={trigger}\nua={}\nverify: round={} active={} fails={} cooldownMs={} ineffective={} | pacer={:.2}/s gate={inflight}/{waiters} gen={}\ncookies: _t={} _forum_session={} cf_clearance={} cfAgeSec={:?} | rlRemainMs={} fgChalMs={} bgChalMs={}",
+            if snap.bridge_ua.is_empty() { "unknown" } else { snap.bridge_ua.as_str() },
+            snap.verify_round,
+            snap.verifying,
+            snap.verify_consecutive_failures,
+            snap.verify_cooldown_remain_ms,
+            snap.verify_ineffective_breaker,
+            snap.pacer_rate_per_sec,
+            snap.session_generation,
+            snap.has_cookie_t,
+            snap.has_forum_session,
+            snap.has_cf_clearance,
+            snap.cf_clearance_age_secs,
+            snap.rate_limit_remain_ms,
+            snap.fg_challenge_remain_ms,
+            snap.bg_challenge_remain_ms,
+        );
+        if let Some(ex) = extra.filter(|s| !s.trim().is_empty()) {
+            detail.push('\n');
+            detail.push_str(ex);
+        }
+        let summary = match trigger {
+            "cf_challenge_detected" => "命中站点安全验证，已记录当前网络健康快照",
+            "ineffective_clearance_breaker" => "安全确认已通过但重放仍被拦截，已启动 60 秒熔断冷却",
+            "verify_cooldown_active" => "安全确认处于自动冷却期，已阻止重复弹窗",
+            _ => "网络与验证健康快照",
+        };
+        emit_diag(app, level, "NETWORK", "NetHealth", summary, Some(&detail));
+    }
+
     /// Background silent prewarm of `cf_clearance` via `https://linux.do/challenge` when missing.
-    /// Never opens a panel or blocks foreground requests; if Cloudflare requires interactive Turnstile,
-    /// quietly restores `/about` so normal unchallenged GETs continue uninterrupted.
+    /// Runs through the unified single-flight `VerifyCoordinator`:
+    /// - Never opens a panel on its own (`VerifyPresentation::Silent`) and never counts abort as a user failure.
+    /// - If a foreground request arrives mid-prewarm, it seamlessly escalates the live `/challenge` page
+    ///   without double-loading `/challenge`!
     pub async fn prewarm_cf_clearance_if_needed(&self) -> bool {
+        let Some(app) = GLOBAL_APP_HANDLE.get().cloned() else {
+            return false;
+        };
         {
             let rt = self.inner.lock().unwrap();
             if rt.verifying || !rt.initialized {
@@ -787,145 +727,509 @@ impl BridgeEngine {
         if has_healthy {
             return true;
         }
-        self.silent_revalidate_challenge(false).await
+        let is_dark = self.current_is_dark();
+        self.coordinate_cf_verification(&app, VerifyPresentation::Silent, is_dark, false)
+            .await
+            .passed
     }
 
-    /// Single-flight silent `/challenge` revalidation in the hidden bridge WebView (aligned with xuemk/Fluxdo):
-    /// - Coalesces concurrent requests within an 8s window (`COALESCE_CLEAR_WINDOW`).
-    /// - Navigates hidden WebView to `https://linux.do/challenge` (never showing UI).
-    /// - If non-interactive JS challenge auto-passes (fresh `cf_clearance` or Discourse origin 404), restores `/about` and returns `true`.
-    /// - If interactive `.cf-turnstile` widget stays active past ~1050ms, bails out promptly (`false`) so foreground UI can show the clean masked sheet without lag.
-    async fn silent_revalidate_challenge(&self, for_foreground_retry: bool) -> bool {
-        {
-            let rt = self.inner.lock().unwrap();
-            if rt.verifying {
-                return false;
-            }
-            if let Some(cleared_at) = rt.last_silent_cleared_at {
-                if cleared_at.elapsed() <= Duration::from_secs(8) {
-                    return true;
-                }
-            }
-            if let Some(blocked_until) = rt.silent_revalidate_until {
-                if Instant::now() < blocked_until {
-                    return false;
-                }
-            }
-        }
-
-        let _guard = self.bootstrap_lock.lock().await;
-        {
-            let rt = self.inner.lock().unwrap();
-            if rt.verifying {
-                return false;
-            }
-            if let Some(cleared_at) = rt.last_silent_cleared_at {
-                if cleared_at.elapsed() <= Duration::from_secs(8) {
-                    return true;
-                }
-            }
-            if let Some(blocked_until) = rt.silent_revalidate_until {
-                if Instant::now() < blocked_until {
-                    return false;
-                }
-            }
-        }
-
-        let need_init = !self.inner.lock().unwrap().initialized;
-        if need_init {
-            if native_call("init", json!({}), 10).await.is_err() {
-                return false;
-            }
-            self.inner.lock().unwrap().initialized = true;
-        }
-        let _ = self.seed_session().await;
-
-        let stale_cf: std::collections::HashSet<String> = self
-            .browser_cf_clearances()
+    /// Navigates the hidden shared bridge WebView back to lightweight `https://linux.do/about`
+    /// and waits for `/about` to actually commit before returning so immediate POST/GET replays never abort with `Load failed`.
+    async fn restore_about_origin_context(&self) {
+        let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            let ready = native_call(
+                "evaluate",
+                json!({
+                    "isolated": true,
+                    "script": "(() => { if (location.origin !== 'https://linux.do') return false; if (location.pathname.indexOf('/about') !== 0) return false; return document.readyState !== 'loading'; })()"
+                }),
+                4,
+            )
             .await
-            .into_iter()
-            .collect();
-
-        if native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8)
-            .await
-            .is_err()
-        {
-            return false;
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+            if ready {
+                let _ = native_call(
+                    "evaluate",
+                    json!({
+                        "script": "(() => { const tok = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; window.__lindoCsrf = tok; window.__lindoIgnoreDomCsrf = !tok; try { if (window.MessageBus && typeof window.MessageBus.stop === 'function') window.MessageBus.stop(); } catch (_) {} return true; })()"
+                    }),
+                    4,
+                )
+                .await;
+                self.inner.lock().unwrap().origin_ready = true;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(60)).await;
         }
+        let _ = native_call(
+            "evaluate",
+            json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+            4,
+        )
+        .await;
+        self.inner.lock().unwrap().origin_ready = true;
+    }
 
-        let started = Instant::now();
-        let max_wait = if for_foreground_retry {
-            Duration::from_millis(3200)
-        } else {
-            Duration::from_millis(4200)
+    /// Unified single-flight Cloudflare verification coordinator:
+    /// - Coalesces all concurrent callers into ONE active `/challenge` round via `tokio::sync::watch`.
+    /// - Monotonically escalates presentation (`Silent -> Blocking -> Manual`) mid-flight without reloading `/challenge`.
+    /// - Enforces round-deduplicated failure cooldown (3 failed rounds -> 30s) and 60s ineffective-clearance circuit breaker.
+    /// - Explicit `Manual` clicks always bypass auto-cooldowns.
+    pub async fn coordinate_cf_verification(
+        &self,
+        app: &AppHandle,
+        requested: VerifyPresentation,
+        is_dark: bool,
+        is_post_pass_replay: bool,
+    ) -> VerifyOutcome {
+        let join = {
+            let mut coord = self.verify_coord.lock().unwrap();
+            coord.join_or_start(requested, Instant::now(), is_post_pass_replay)
         };
+
+        match join {
+            VerifyJoin::RecentPass { round } => VerifyOutcome {
+                passed: true,
+                round,
+                ineffective_blocked: false,
+                cooldown_remain_ms: 0,
+            },
+            VerifyJoin::BlockedByCooldown {
+                remain_ms,
+                ineffective,
+            } => {
+                if requested == VerifyPresentation::Blocking {
+                    self.emit_net_health_diag(
+                        app,
+                        "WARN",
+                        "verify_cooldown_active",
+                        Some(&format!("remainMs={remain_ms} ineffective={ineffective}")),
+                    );
+                }
+                VerifyOutcome {
+                    passed: false,
+                    round: 0,
+                    ineffective_blocked: ineffective,
+                    cooldown_remain_ms: remain_ms,
+                }
+            }
+            VerifyJoin::Follower { round, mut rx } => {
+                loop {
+                    if let Some(outcome) = *rx.borrow_and_update() {
+                        return outcome;
+                    }
+                    if rx.changed().await.is_err() {
+                        return VerifyOutcome {
+                            passed: false,
+                            round,
+                            ineffective_blocked: false,
+                            cooldown_remain_ms: 0,
+                        };
+                    }
+                }
+            }
+            VerifyJoin::Leader {
+                round,
+                presentation,
+                escalate_notify,
+            } => {
+                let flight_guard = VerifyFlightGuard::new(
+                    Arc::clone(&self.verify_coord),
+                    round,
+                    Arc::clone(&presentation),
+                );
+                let _verify_guard = self.verify_lock.lock().await;
+                let _verifying_flag = VerifyingFlagGuard::enter(&self.inner);
+
+                let passed = self
+                    .run_unified_cf_verify(app, is_dark, round, &presentation, &escalate_notify)
+                    .await
+                    .unwrap_or(false);
+
+                let _ = native_call("hide", json!({}), 5).await;
+                {
+                    let _nav = self.nav_lock.write().await;
+                    self.restore_about_origin_context().await;
+                }
+                if passed {
+                    let mut rt = self.inner.lock().unwrap();
+                    rt.origin_ready = true;
+                    rt.bootstrap_challenged = false;
+                    rt.last_challenge_url = None;
+                    rt.fg_challenge_until = None;
+                    rt.bg_challenge_until = None;
+                    rt.rate_limit_until = None;
+                    rt.challenge_429_streak = 0;
+                    rt.cf_attention_notified = false;
+                }
+                let outcome = flight_guard.complete(passed, Instant::now());
+                if passed {
+                    let _ = app.emit("lindo://cf-attention-needed", false);
+                    let _ = app.emit("lindo://verified", ());
+                }
+                outcome
+            }
+        }
+    }
+
+    async fn run_unified_cf_verify(
+        &self,
+        app: &AppHandle,
+        is_dark: bool,
+        round: u64,
+        presentation: &Arc<AtomicU8>,
+        escalate_notify: &Arc<Notify>,
+    ) -> Result<bool, String> {
+        native_call("init", json!({}), 10).await?;
+        self.inner.lock().unwrap().initialized = true;
+        let _ = self.seed_session_verified(true).await;
+
+        // Drain any in-flight `evaluate()` fetches cleanly BEFORE navigating away from `/about` to `/challenge`!
+        let backup_cfs = {
+            let _nav = self.nav_lock.write().await;
+            let backups = self.purge_cf_clearance_for_reverify().await;
+            let cur_pres = VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst));
+            if cur_pres.allows_ui() {
+                let _ = native_call(
+                    "setVerifyMask",
+                    json!({ "visible": true, "dark": is_dark, "message": "校验连接中…" }),
+                    4,
+                )
+                .await;
+            }
+            if let Err(e) = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 10).await {
+                self.restore_cf_clearance_backup(&backups).await;
+                return Err(e);
+            }
+            backups
+        };
+
+        let stale_cf: std::collections::HashSet<String> = backup_cfs.iter().cloned().collect();
+        let mut mask_visible = VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst)).allows_ui();
+        let mut panel_shown = false;
+        if VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst)) == VerifyPresentation::Manual {
+            panel_shown = true;
+            let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
+        }
+
+        let mut oops_reloaded = false;
+        let mut challenge_ticks = 0u32;
         let mut quiet_rounds = 0u32;
+        let mut last_reload_epoch: Option<u64> = None;
+        let mut pass_mask_stuck_ticks = 0u32;
+        let mut stuck_reloaded = false;
+        let mut terminated_reloaded = false;
+        let loop_started = Instant::now();
         let mut cleared = false;
 
-        while started.elapsed() < max_wait {
-            tokio::time::sleep(Duration::from_millis(220)).await;
-            if self.inner.lock().unwrap().verifying {
-                return false;
-            }
-
-            let st_obj = native_call("status", json!({}), 4).await.ok();
-            let native_origin_404 = st_obj
-                .as_ref()
-                .and_then(|s| s.get("origin404")?.as_bool())
-                .unwrap_or(false);
-            let native_interactive = st_obj
-                .as_ref()
-                .and_then(|s| s.get("interactiveRequired")?.as_bool())
-                .unwrap_or(false);
-
-            // Instant bailout when Cloudflare Turnstile explicitly posts `interactiveBegin`:
-            // foreground actions promote straight to the compact card; background tasks notify the non-intrusive bar!
-            if native_interactive {
+        loop {
+            let cur_pres = VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst));
+            let max_dur = if cur_pres == VerifyPresentation::Silent {
+                Duration::from_millis(3800)
+            } else {
+                Duration::from_secs(180)
+            };
+            if loop_started.elapsed() >= max_dur {
                 break;
             }
 
-            let state = native_call(
+            // Sleep 220ms OR wake up instantaneously if a foreground caller escalates `Silent -> Blocking/Manual`!
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(220)) => {}
+                _ = escalate_notify.notified() => {}
+            }
+
+            let cur_pres = VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst));
+            if cur_pres == VerifyPresentation::Manual && !panel_shown {
+                if !mask_visible {
+                    mask_visible = true;
+                    let _ = native_call(
+                        "setVerifyMask",
+                        json!({ "visible": true, "dark": is_dark, "message": "校验连接中…" }),
+                        4,
+                    )
+                    .await;
+                }
+                panel_shown = true;
+                let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
+            }
+
+            let Ok(status_obj) = native_call("status", json!({}), 6).await else {
+                continue;
+            };
+            let user_cancelled = status_obj.get("cancelled").and_then(|v| v.as_bool()) == Some(true);
+            let native_origin_404 = status_obj.get("origin404").and_then(|v| v.as_bool()) == Some(true);
+            let native_interactive = status_obj
+                .get("interactiveRequired")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let native_user_reloading = status_obj
+                .get("userReloading")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let native_reload_epoch = status_obj
+                .get("reloadEpoch")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let native_mask_visible = status_obj.get("maskVisible").and_then(|v| v.as_bool());
+            let native_mask_message = status_obj
+                .get("maskMessage")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let native_nav_error = status_obj
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let native_terminated = status_obj
+                .get("processTerminated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if let Some(vis) = native_mask_visible {
+                mask_visible = vis;
+            }
+            match last_reload_epoch {
+                None => last_reload_epoch = Some(native_reload_epoch),
+                Some(prev) if prev != native_reload_epoch => {
+                    last_reload_epoch = Some(native_reload_epoch);
+                    challenge_ticks = 0;
+                    quiet_rounds = 0;
+                    pass_mask_stuck_ticks = 0;
+                    stuck_reloaded = false;
+                    emit_diag(
+                        app,
+                        "INFO",
+                        "AUTH",
+                        "VerifyReload",
+                        "安全确认弹窗已手动刷新，重新加载验证",
+                        Some(&format!("round={round}")),
+                    );
+                }
+                _ => {}
+            }
+
+            if cur_pres.allows_ui() && user_cancelled && (native_user_reloading || native_terminated) {
+                break;
+            }
+
+            if native_terminated && !terminated_reloaded {
+                terminated_reloaded = true;
+                challenge_ticks = 0;
+                quiet_rounds = 0;
+                pass_mask_stuck_ticks = 0;
+                emit_diag(
+                    app,
+                    "WARN",
+                    "AUTH",
+                    "VerifyRecover",
+                    "安全确认 WebView 进程异常中断，自动重新加载",
+                    Some(&format!("round={round}")),
+                );
+                if cur_pres.allows_ui() {
+                    mask_visible = true;
+                    let _ = native_call(
+                        "setVerifyMask",
+                        json!({ "visible": true, "dark": is_dark, "message": "正在重新加载验证…" }),
+                        4,
+                    )
+                    .await;
+                }
+                let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
+                continue;
+            }
+
+            if native_user_reloading {
+                challenge_ticks = 0;
+                quiet_rounds = 0;
+                pass_mask_stuck_ticks = 0;
+                if cur_pres.allows_ui() && !panel_shown && loop_started.elapsed() >= Duration::from_millis(1200) {
+                    panel_shown = true;
+                    let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
+                }
+                continue;
+            }
+
+            // Silent probe bails immediately on `interactiveBegin` unless escalated to Blocking/Manual!
+            if cur_pres == VerifyPresentation::Silent && native_interactive {
+                break;
+            }
+
+            let probe = native_call(
                 "evaluate",
                 json!({
                     "isolated": true,
                     "script": r#"(() => {
-                        if (location.origin !== 'https://linux.do') return { phase: 'waiting' };
-                        const html = ((document.documentElement?.innerHTML || '') + ' ' + (document.title || '')).toLowerCase();
-                        const origin404 = html.includes('page-not-found')
-                            || html.includes('discourse-no-results')
-                            || html.includes('"errortype":"notfound"')
-                            || html.includes('404-body')
-                            || html.includes('exist or is private')
-                            || html.includes('page you requested')
-                            || html.includes('该页面不存在');
-                        const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+                        const site = location.origin === 'https://linux.do';
                         const complete = document.readyState === 'complete';
-                        if (origin404 || (complete && csrf.length > 5)) {
-                            return { phase: 'origin', csrf };
+                        const domReady = document.readyState === 'interactive' || complete;
+                        const csrfVal = document.querySelector('meta[name="csrf-token"]')?.content || null;
+                        const hasCsrf = !!csrfVal;
+                        const preloadedEl = document.getElementById('data-preloaded');
+                        const hasPreloaded = !!preloadedEl;
+                        const hasDiscourseDom = hasPreloaded || !!document.querySelector('header.d-header, #main-outlet .topic-list, #main-outlet #topic-title, #main-outlet .container, #d-splash');
+                        const bodyText = (document.body?.innerText || '').trim();
+                        const lowerHtml = ((document.documentElement?.innerHTML || '') + ' ' + (document.title || '')).toLowerCase();
+                        const isOrigin404 = site && (
+                            !!document.querySelector('.page-not-found, .discourse-no-results, #main-outlet .not-found-container')
+                            || lowerHtml.includes('page-not-found')
+                            || lowerHtml.includes('discourse-no-results')
+                            || lowerHtml.includes('"errortype":"notfound"')
+                            || lowerHtml.includes('404-body')
+                            || lowerHtml.includes('exist or is private')
+                            || lowerHtml.includes('page you requested')
+                            || lowerHtml.includes('该页面不存在')
+                        );
+                        const explicitChallenge = !isOrigin404 && (
+                            !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
+                            || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '')
+                        );
+                        const widgetIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], #turnstile-wrapper iframe, .cf-turnstile iframe');
+                        const widgetIframeRect = widgetIframe ? widgetIframe.getBoundingClientRect() : null;
+                        const widgetHost = document.querySelector('#turnstile-wrapper, .cf-turnstile, #challenge-stage > div');
+                        const widgetHostRect = widgetHost ? widgetHost.getBoundingClientRect() : null;
+                        const hasRenderedWidget =
+                            !!(widgetIframeRect && widgetIframeRect.width >= 80 && widgetIframeRect.height >= 30)
+                            || !!(widgetHostRect && widgetHostRect.width >= 220 && widgetHostRect.height >= 55);
+                        const isDiscourseOops = site && complete && !explicitChallenge && /discussion forum encountered an unexpected problem/i.test(bodyText);
+                        const missingDiscourseBoot = site && complete && !hasCsrf && !isOrigin404 && !isDiscourseOops && !bodyText.startsWith('{');
+                        let preloadedUserJson = null;
+                        if (site && domReady && hasCsrf && hasPreloaded && !explicitChallenge) {
+                            try {
+                                const raw = preloadedEl.getAttribute('data-preloaded') || preloadedEl.textContent || '';
+                                if (raw) {
+                                    const outer = JSON.parse(raw);
+                                    if (outer && typeof outer.currentUser === 'string' && outer.currentUser.length > 2) {
+                                        preloadedUserJson = JSON.stringify({ current_user: JSON.parse(outer.currentUser) });
+                                    } else if (outer && outer.currentUser && typeof outer.currentUser === 'object') {
+                                        preloadedUserJson = JSON.stringify({ current_user: outer.currentUser });
+                                    }
+                                }
+                            } catch (_) {}
                         }
-                        const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
-                            || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
-                        if (explicitChallenge) return { phase: 'challenge' };
-                        return { phase: 'waiting' };
+                        return {
+                            site, domReady, complete, hasCsrf, hasPreloaded, hasDiscourseDom,
+                            isOrigin404, isDiscourseOops, preloadedUserJson,
+                            explicitChallenge, hasRenderedWidget,
+                            challenge: !isOrigin404 && (explicitChallenge || missingDiscourseBoot)
+                        };
                     })()"#
                 }),
-                5,
+                8,
             )
             .await
             .ok();
 
-            let phase = if native_origin_404 {
-                "origin"
-            } else {
-                state
+            let is_discourse_oops = probe
+                .as_ref()
+                .and_then(|p| p.get("isDiscourseOops")?.as_bool())
+                .unwrap_or(false);
+            let dom_origin_404 = probe
+                .as_ref()
+                .and_then(|p| p.get("isOrigin404")?.as_bool())
+                .unwrap_or(false);
+            let is_origin_404 = native_origin_404 || dom_origin_404;
+            let explicit_challenge = !is_origin_404
+                && probe
                     .as_ref()
-                    .and_then(|v| v.get("phase")?.as_str())
-                    .unwrap_or("waiting")
-            };
+                    .and_then(|p| p.get("explicitChallenge")?.as_bool())
+                    .unwrap_or(false);
+            let has_rendered_widget = !is_origin_404
+                && probe
+                    .as_ref()
+                    .and_then(|p| p.get("hasRenderedWidget")?.as_bool())
+                    .unwrap_or(false);
+            let in_challenge = !is_origin_404
+                && probe
+                    .as_ref()
+                    .and_then(|p| p.get("challenge")?.as_bool())
+                    .unwrap_or(false);
+            let ready = probe
+                .as_ref()
+                .map(|p| {
+                    p.get("site").and_then(|v| v.as_bool()) == Some(true)
+                        && p.get("domReady").and_then(|v| v.as_bool()) == Some(true)
+                        && p.get("hasCsrf").and_then(|v| v.as_bool()) == Some(true)
+                        && p.get("hasDiscourseDom").and_then(|v| v.as_bool()) == Some(true)
+                })
+                .unwrap_or(false);
 
-            if phase == "challenge" {
+            if is_discourse_oops {
+                let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+                if !oops_reloaded {
+                    oops_reloaded = true;
+                    let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
+                    continue;
+                }
+                cleared = true;
+                break;
+            }
+
+            if cur_pres.allows_ui() && user_cancelled {
+                if (ready || is_origin_404) && !in_challenge {
+                    // User closed right as verification finished
+                } else {
+                    break;
+                }
+            }
+
+            if in_challenge {
                 quiet_rounds = 0;
+                pass_mask_stuck_ticks = 0;
+                challenge_ticks += 1;
+
+                if cur_pres == VerifyPresentation::Silent {
+                    // Pure silent check: if Turnstile widget requires human click past ~1.1s, bail cleanly without UI
+                    if has_rendered_widget && challenge_ticks >= 5 {
+                        break;
+                    }
+                    continue;
+                }
+
+                // Interactive/Blocking presentation: promote seamlessly on the ALREADY-LOADED `/challenge` page!
+                let ready_to_reveal = native_interactive
+                    || has_rendered_widget
+                    || (explicit_challenge && challenge_ticks >= 6)
+                    || challenge_ticks >= 10;
+                if (native_interactive || has_rendered_widget || challenge_ticks >= 2) && !panel_shown {
+                    if !ready_to_reveal && !mask_visible {
+                        mask_visible = true;
+                        let _ = native_call(
+                            "setVerifyMask",
+                            json!({ "visible": true, "dark": is_dark, "message": "校验连接中…" }),
+                            4,
+                        )
+                        .await;
+                    }
+                    panel_shown = true;
+                    let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
+                }
+                if ready_to_reveal && mask_visible {
+                    mask_visible = false;
+                    let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
+                } else if mask_visible && native_mask_message == "已通过，正在继续…" {
+                    let _ = native_call(
+                        "setVerifyMask",
+                        json!({ "visible": true, "dark": is_dark, "message": "校验连接中…" }),
+                        4,
+                    )
+                    .await;
+                }
                 continue;
+            }
+            challenge_ticks = 0;
+
+            if cur_pres.allows_ui() && !mask_visible && (is_origin_404 || ready) {
+                mask_visible = true;
+                let _ = native_call(
+                    "setVerifyMask",
+                    json!({ "visible": true, "dark": is_dark, "message": "已通过，正在继续…" }),
+                    4,
+                )
+                .await;
             }
 
             let current_cfs = self.browser_cf_clearances().await;
@@ -936,66 +1240,125 @@ impl BridgeEngine {
                     .any(|c| !stale_cf.contains(c) && !auth.is_challenged(c))
             };
 
-            if has_fresh_cf {
+            if has_fresh_cf || is_origin_404 || ready {
+                pass_mask_stuck_ticks = 0;
                 quiet_rounds += 1;
-                if quiet_rounds >= 2 || phase == "origin" {
-                    cleared = true;
-                    break;
+            } else {
+                quiet_rounds = 0;
+                if cur_pres.allows_ui() && !panel_shown && loop_started.elapsed() >= Duration::from_millis(1200) {
+                    panel_shown = true;
+                    let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
                 }
-            } else if phase == "origin" {
-                quiet_rounds += 1;
-                if quiet_rounds >= 2 {
-                    cleared = has_fresh_cf || stale_cf.is_empty();
-                    break;
+                if cur_pres.allows_ui() && mask_visible && native_mask_message == "已通过，正在继续…" {
+                    pass_mask_stuck_ticks += 1;
+                    if pass_mask_stuck_ticks >= 18 {
+                        let detail = format!(
+                            "round={round}, elapsedMs={}, hasFreshCf={}, origin404={}, ready={}, navError={}",
+                            loop_started.elapsed().as_millis(),
+                            has_fresh_cf,
+                            is_origin_404,
+                            ready,
+                            if native_nav_error.is_empty() { "none" } else { native_nav_error }
+                        );
+                        emit_diag(
+                            app,
+                            "WARN",
+                            "AUTH",
+                            "VerifyWatchdog",
+                            "安全确认停留在过渡状态超过 4 秒，触发自动恢复",
+                            Some(&detail),
+                        );
+                        pass_mask_stuck_ticks = 0;
+                        if !stuck_reloaded {
+                            stuck_reloaded = true;
+                            let _ = native_call(
+                                "setVerifyMask",
+                                json!({ "visible": true, "dark": is_dark, "message": "正在重新加载验证…" }),
+                                4,
+                            )
+                            .await;
+                            let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
+                        } else {
+                            mask_visible = false;
+                            let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
+                        }
+                    }
+                } else {
+                    pass_mask_stuck_ticks = 0;
                 }
+                continue;
             }
-        }
 
-        if cleared {
+            let needed_rounds = if has_fresh_cf && (is_origin_404 || ready) { 1 } else { 2 };
+            if quiet_rounds < needed_rounds {
+                continue;
+            }
+
+            // Self-heal zombie local session if Discourse `data-preloaded` proves `_t` expired
+            let has_preloaded = probe
+                .as_ref()
+                .and_then(|p| p.get("hasPreloaded")?.as_bool())
+                .unwrap_or(false);
+            let preloaded_user = probe
+                .as_ref()
+                .and_then(|p| p.get("preloadedUserJson")?.as_str())
+                .and_then(Self::extract_current_user);
+
+            if has_preloaded && preloaded_user.is_none() {
+                let mut expired_changed = false;
+                {
+                    let mut st = self.state.lock().unwrap();
+                    if let Some(prev) = st.current_user.take() {
+                        st.expired_username = Some(prev.username.clone());
+                        Self::upsert_saved_account(&mut st, prev, String::new(), true);
+                        let cf_only: Vec<String> = st
+                            .raw_cookies
+                            .split(';')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty() && !s.starts_with("_t=") && !s.starts_with("_forum_session="))
+                            .map(|s| s.to_string())
+                            .collect();
+                        st.raw_cookies = cf_only.join("; ");
+                        st.unread_notifications = 0;
+                        save_state(&st);
+                        expired_changed = true;
+                    }
+                }
+                if expired_changed {
+                    self.sweep_auth_cookies(true, None).await;
+                    self.inner.lock().unwrap().last_seeded_token = String::new();
+                    let _ = app.emit("lindo://state-updated", ());
+                }
+            } else if let Some(profile) = preloaded_user {
+                let _ = self.sync_cookies_from_webkit_verified(true, true).await;
+                self.commit_authenticated_user(app, profile);
+            }
+
             let _ = self.sync_cookies_from_webkit_verified(false, true).await;
-            {
-                let mut rt = self.inner.lock().unwrap();
-                rt.last_silent_cleared_at = Some(Instant::now());
-                rt.fg_challenge_until = None;
-                rt.bg_challenge_until = None;
-                rt.bootstrap_challenged = false;
-                rt.silent_revalidate_until = None;
-            }
-        } else if for_foreground_retry {
-            self.inner.lock().unwrap().silent_revalidate_until =
-                Some(Instant::now() + Duration::from_secs(60));
+            let pass_detail = format!(
+                "round={round}, panelShown={panel_shown}, elapsedMs={}, hasFreshCf={has_fresh_cf}, origin404={is_origin_404}, ready={ready}",
+                loop_started.elapsed().as_millis()
+            );
+            emit_diag(
+                app,
+                "INFO",
+                "AUTH",
+                "VerifyPassed",
+                if panel_shown {
+                    "安全确认已完成并恢复请求通道"
+                } else {
+                    "静默安全确认已通过，自动恢复请求通道"
+                },
+                Some(&pass_detail),
+            );
+            cleared = true;
+            break;
         }
 
-        // Restore clean lightweight `/about` document context for subsequent `fetch()` calls
-        let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while Instant::now() < deadline {
-            let ok = native_call(
-                "evaluate",
-                json!({
-                    "isolated": true,
-                    "script": "location.origin === 'https://linux.do' && document.readyState !== 'loading'"
-                }),
-                4,
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-            if ok {
-                let _ = native_call(
-                    "evaluate",
-                    json!({ "script": "(() => { window.__lindoCsrf = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; window.__lindoIgnoreDomCsrf = false; return true; })()" }),
-                    4,
-                )
-                .await;
-                self.inner.lock().unwrap().origin_ready = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(60)).await;
+        if !cleared && !backup_cfs.is_empty() {
+            self.restore_cf_clearance_backup(&backup_cfs).await;
         }
-
-        cleared
+        Ok(cleared)
     }
 
     async fn ensure_ready(&self, force_reload: bool) -> Result<(), String> {
@@ -1028,11 +1391,57 @@ impl BridgeEngine {
         }
         self.seed_session().await?;
 
-        let status_terminated = native_call("status", json!({}), 5)
-            .await
-            .ok()
+        let status_obj = native_call("status", json!({}), 5).await.ok();
+        let status_terminated = status_obj
+            .as_ref()
             .and_then(|s| s.get("processTerminated")?.as_bool())
             .unwrap_or(false);
+        let bridge_ua = status_obj
+            .as_ref()
+            .and_then(|s| s.get("bridgeUa")?.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        // Cloudflare binds `cf_clearance` to the exact User-Agent string.
+        // Whenever the bridge UA changes (e.g. upgrading to authentic Safari UA or after a macOS Safari update),
+        // purge any UA-mismatched `cf_clearance` in WKHTTPCookieStore once so startup never loops on 429/403 challenge!
+        if !bridge_ua.is_empty() {
+            self.inner.lock().unwrap().bridge_ua = bridge_ua.clone();
+            let ua_changed = {
+                let st = self.state.lock().unwrap();
+                st.last_bridge_ua != bridge_ua
+            };
+            if ua_changed {
+                let _ = self.purge_cf_clearance_for_reverify().await;
+                self.cf_authority.lock().unwrap().reset();
+                self.verify_coord.lock().unwrap().reset_on_session_change();
+                {
+                    let mut st = self.state.lock().unwrap();
+                    let cleaned: Vec<String> = st
+                        .raw_cookies
+                        .split(';')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty() && !s.starts_with("cf_clearance="))
+                        .map(|s| s.to_string())
+                        .collect();
+                    st.raw_cookies = cleaned.join("; ");
+                    st.cf_clearance_updated_at_ms = 0;
+                    st.last_bridge_ua = bridge_ua.clone();
+                    save_state(&st);
+                }
+                if let Some(app) = GLOBAL_APP_HANDLE.get() {
+                    emit_diag(
+                        app,
+                        "INFO",
+                        "AUTH",
+                        "UaMigration",
+                        "检测到浏览器指纹版本更新，已清理旧 cf_clearance 以重新建立可信会话",
+                        Some(&format!("bridgeUa={bridge_ua}")),
+                    );
+                }
+            }
+        }
 
         let current_href = if force_reload || status_terminated {
             None
@@ -1047,6 +1456,7 @@ impl BridgeEngine {
             Some(u) => !u.starts_with("https://linux.do"),
         };
         if (force_reload || status_terminated || needs_nav) && !self.inner.lock().unwrap().verifying {
+            let _nav_guard = self.nav_lock.write().await;
             {
                 let mut rt = self.inner.lock().unwrap();
                 rt.origin_ready = false;
@@ -1058,6 +1468,7 @@ impl BridgeEngine {
             native_call("navigate", json!({ "url": "https://linux.do/about" }), 10).await?;
             tokio::time::sleep(Duration::from_millis(80)).await;
             let deadline = Instant::now() + Duration::from_secs(12);
+            let mut challenge_seen_since: Option<Instant> = None;
             while Instant::now() < deadline {
                 if self.inner.lock().unwrap().verifying {
                     break;
@@ -1066,6 +1477,10 @@ impl BridgeEngine {
                 let is_loading = st_obj
                     .as_ref()
                     .and_then(|s| s.get("loading")?.as_bool())
+                    .unwrap_or(false);
+                let is_interactive = st_obj
+                    .as_ref()
+                    .and_then(|s| s.get("interactiveRequired")?.as_bool())
                     .unwrap_or(false);
 
                 let boot_state = native_call(
@@ -1108,11 +1523,15 @@ impl BridgeEngine {
                             rt.bootstrap_challenged = false;
                             break;
                         }
-                        Some("challenge") if !is_loading => {
-                            let mut rt = self.inner.lock().unwrap();
-                            rt.origin_ready = false;
-                            rt.bootstrap_challenged = true;
-                            break;
+                        Some("challenge") => {
+                            let first_at = *challenge_seen_since.get_or_insert_with(Instant::now);
+                            // Give Cloudflare's invisible JS challenge up to ~3.2s to auto-pass before flagging `bootstrap_challenged`
+                            if is_interactive || (!is_loading && first_at.elapsed() >= Duration::from_millis(3200)) {
+                                let mut rt = self.inner.lock().unwrap();
+                                rt.origin_ready = false;
+                                rt.bootstrap_challenged = true;
+                                break;
+                            }
                         }
                         _ => {}
                     }
@@ -1465,7 +1884,6 @@ impl BridgeEngine {
         form: Option<HashMap<String, String>>,
         headers: Option<HashMap<String, String>>,
     ) -> Result<SiteHttpResponse, String> {
-        let _acct = self.account_lock.read().await;
         self.request_unlocked(app, url, method, form, headers, false).await
     }
 
@@ -1481,6 +1899,7 @@ impl BridgeEngine {
         if !Self::is_allowed_forum_url(url) {
             return Err("Blocked non-forum URL".to_string());
         }
+        let session_gen = self.session_generation.load(Ordering::Acquire);
         let method_upper = method.to_uppercase();
         let is_logged_in = { self.state.lock().unwrap().current_user.is_some() };
         let mut safe_headers = HashMap::new();
@@ -1491,11 +1910,18 @@ impl BridgeEngine {
         let mut is_background = false;
         let mut expects_html = false;
         let mut force_retry = false;
+        let mut custom_referrer = "https://linux.do/".to_string();
         if let Some(h) = headers {
             for (k, v) in h {
                 let lower = k.to_lowercase();
                 if lower == "x-lindo-force-retry" {
                     force_retry = v == "1" || v.eq_ignore_ascii_case("true");
+                    continue;
+                }
+                if lower == "x-lindo-referer" {
+                    if v.starts_with("https://linux.do/") {
+                        custom_referrer = v;
+                    }
                     continue;
                 }
                 if lower == "discourse-background" && v == "true" {
@@ -1512,37 +1938,35 @@ impl BridgeEngine {
             }
         }
 
+        let is_timings_req = url.contains("/topics/timings");
+        let is_write = method_upper != "GET" && method_upper != "HEAD";
+        let req_priority = if is_background || is_timings_req {
+            RequestPriority::Low
+        } else if is_write {
+            RequestPriority::High
+        } else {
+            RequestPriority::Normal
+        };
+
         let mut pending_cooldown_wait: Option<Duration> = None;
         let mut cooldown_wait_ms: u64 = 0;
         let mut pace_wait_ms: u64 = 0;
         let mut retried = false;
         let mut silent_cf_revalidated = false;
+        let mut verify_attempted = false;
+        let mut verify_round: Option<u64> = None;
+        let mut verify_cooldown_ms: u64 = 0;
+        let mut ineffective_clearance = false;
+        let mut joined_active_verify = false;
+
         {
             let mut rt = self.inner.lock().unwrap();
             if !in_verification {
                 if rt.verifying {
-                    return Ok(SiteHttpResponse {
-                        status: 403,
-                        body: format!("{CF_CHALLENGE_PREFIX}verifying"),
-                        is_challenge: true,
-                        is_unauthenticated: false,
-                        rate_limited_ms: None,
-                        diag: Some(SiteHttpDiag {
-                            local_cooldown: true,
-                            ..Default::default()
-                        }),
-                    });
-                }
-                let active_until = if is_background {
-                    rt.bg_challenge_until
-                } else {
-                    rt.fg_challenge_until
-                };
-                if let Some(until) = active_until {
-                    if Instant::now() < until {
+                    if is_background || is_timings_req {
                         return Ok(SiteHttpResponse {
                             status: 403,
-                            body: format!("{CF_CHALLENGE_PREFIX}cooldown"),
+                            body: format!("{CF_CHALLENGE_PREFIX}verifying"),
                             is_challenge: true,
                             is_unauthenticated: false,
                             rate_limited_ms: None,
@@ -1551,6 +1975,29 @@ impl BridgeEngine {
                                 ..Default::default()
                             }),
                         });
+                    }
+                    joined_active_verify = true;
+                }
+                if !joined_active_verify {
+                    let active_until = if is_background {
+                        rt.bg_challenge_until
+                    } else {
+                        rt.fg_challenge_until
+                    };
+                    if let Some(until) = active_until {
+                        if Instant::now() < until {
+                            return Ok(SiteHttpResponse {
+                                status: 403,
+                                body: format!("{CF_CHALLENGE_PREFIX}cooldown"),
+                                is_challenge: true,
+                                is_unauthenticated: false,
+                                rate_limited_ms: None,
+                                diag: Some(SiteHttpDiag {
+                                    local_cooldown: true,
+                                    ..Default::default()
+                                }),
+                            });
+                        }
                     }
                 }
                 if let Some(until) = rt.rate_limit_until {
@@ -1589,59 +2036,18 @@ impl BridgeEngine {
             }
         }
 
-        if let Some(wait_dur) = pending_cooldown_wait {
-            tokio::time::sleep(wait_dur).await;
-        }
-
-        let _permit = if in_verification {
-            None
-        } else if is_background {
-            self.bg_sem.acquire().await.ok()
-        } else {
-            self.fg_sem.acquire().await.ok()
-        };
-        let _fg_guard = if !in_verification && !is_background {
-            Some(FgRequestGuard::enter(&self.active_fg_requests))
-        } else {
-            None
-        };
-
-        // Smooth Token-Bucket Pacer: foreground calls consume burst immediately, sustained bursts glide at ~312ms spacing,
-        // and background calls yield extra headroom whenever foreground activity is present.
-        if !in_verification {
-            if is_background && self.active_fg_requests.load(Ordering::Relaxed) > 0 {
-                pace_wait_ms += 240;
-                tokio::time::sleep(Duration::from_millis(240)).await;
+        // Foreground request arrived while another round is verifying: join the single-flight round
+        // (monotonically escalating Silent -> Blocking if needed) instead of failing immediately!
+        if joined_active_verify {
+            let is_dark = self.current_is_dark();
+            let outcome = self
+                .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
+                .await;
+            verify_attempted = true;
+            if outcome.round > 0 {
+                verify_round = Some(outcome.round);
             }
-            let pace_wait = {
-                let min_floor = if is_background || url.contains("/topics/timings") {
-                    1.6
-                } else {
-                    0.0
-                };
-                self.api_pacer
-                    .lock()
-                    .unwrap()
-                    .reserve(Instant::now(), min_floor)
-            };
-            if !pace_wait.is_zero() {
-                pace_wait_ms += pace_wait.as_millis() as u64;
-                tokio::time::sleep(pace_wait).await;
-            }
-        }
-
-        if !in_verification {
-            self.ensure_ready(false).await?;
-            let (verifying_now, boot_challenged) = {
-                let rt = self.inner.lock().unwrap();
-                (rt.verifying, rt.bootstrap_challenged)
-            };
-            if verifying_now || boot_challenged {
-                if boot_challenged && !is_background && method_upper == "GET" {
-                    if !url.contains("/session/") && !url.contains("/user-api-key/") {
-                        self.inner.lock().unwrap().last_challenge_url = Some(url.to_string());
-                    }
-                }
+            if !outcome.passed {
                 return Ok(SiteHttpResponse {
                     status: 403,
                     body: format!("{CF_CHALLENGE_PREFIX}verifying"),
@@ -1650,14 +2056,26 @@ impl BridgeEngine {
                     rate_limited_ms: None,
                     diag: Some(SiteHttpDiag {
                         local_cooldown: true,
-                        pace_wait_ms,
-                        cooldown_wait_ms,
+                        verify_attempted: true,
+                        verify_round,
+                        verify_cooldown_ms: outcome.cooldown_remain_ms,
+                        ineffective_clearance: outcome.ineffective_blocked,
                         ..Default::default()
                     }),
                 });
             }
+            if self.session_generation.load(Ordering::Acquire) != session_gen {
+                return Err("账号会话已切换，请求已取消".to_string());
+            }
         }
-        let is_timings_req = url.contains("/topics/timings");
+
+        if let Some(wait_dur) = pending_cooldown_wait {
+            tokio::time::sleep(wait_dur).await;
+            if !in_verification && self.session_generation.load(Ordering::Acquire) != session_gen {
+                return Err("账号会话已切换，请求已取消".to_string());
+            }
+        }
+
         if !expects_html {
             safe_headers
                 .entry("X-Requested-With".to_string())
@@ -1685,7 +2103,8 @@ impl BridgeEngine {
             "url": url,
             "method": method_upper,
             "headers": safe_headers,
-            "form": form
+            "form": form,
+            "referrer": custom_referrer
         });
 
         let script = format!(
@@ -1697,6 +2116,9 @@ impl BridgeEngine {
                     const isOtp = c.url.indexOf('/session/otp/') !== -1;
                     const isTimings = c.url.indexOf('/topics/timings') !== -1;
                     const reqTimeoutMs = isTimings ? 6000 : (write ? 15000 : 10000);
+                    const reqReferrer = c.referrer || 'https://linux.do/';
+                    const readResetHdr = (hdrs) =>
+                        hdrs.get('x-ratelimit-reset') || hdrs.get('ratelimit-reset') || hdrs.get('x-rate-limit-reset');
                     async function fetchFreshCsrf() {{
                         if (window.__lindoCsrfPromise) {{
                             return await window.__lindoCsrfPromise;
@@ -1706,7 +2128,7 @@ impl BridgeEngine {
                                 const cr = await fetch('/session/csrf.json', {{
                                     credentials: 'include',
                                     cache: 'no-store',
-                                    referrer: 'https://linux.do/',
+                                    referrer: reqReferrer,
                                     referrerPolicy: 'strict-origin-when-cross-origin',
                                     headers: {{ 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest', 'Discourse-Present': 'true' }},
                                     signal: AbortSignal.timeout(10000)
@@ -1717,7 +2139,10 @@ impl BridgeEngine {
                                             status: cr.status,
                                             body: await cr.text(),
                                             retryAfter: cr.headers.get('Retry-After'),
-                                            challenge: cr.headers.get('cf-mitigated')
+                                            rateLimitReset: readResetHdr(cr.headers),
+                                            challenge: cr.headers.get('cf-mitigated'),
+                                            cfRay: cr.headers.get('cf-ray'),
+                                            contentType: cr.headers.get('content-type')
                                         }}
                                     }};
                                 }}
@@ -1747,7 +2172,7 @@ impl BridgeEngine {
                         method: c.method,
                         headers: c.headers,
                         credentials: 'include',
-                        referrer: 'https://linux.do/',
+                        referrer: reqReferrer,
                         referrerPolicy: 'strict-origin-when-cross-origin',
                         cache: noStore ? 'no-store' : 'default',
                         body: c.form ? new URLSearchParams(c.form) : undefined,
@@ -1763,7 +2188,7 @@ impl BridgeEngine {
                             method: c.method,
                             headers: guestHdrs,
                             credentials: 'include',
-                            referrer: 'https://linux.do/',
+                            referrer: reqReferrer,
                             referrerPolicy: 'strict-origin-when-cross-origin',
                             cache: 'no-store',
                             signal: AbortSignal.timeout(15000)
@@ -1773,6 +2198,7 @@ impl BridgeEngine {
                                 status: gr.status,
                                 body: await gr.text(),
                                 retryAfter: gr.headers.get('Retry-After'),
+                                rateLimitReset: readResetHdr(gr.headers),
                                 challenge: gr.headers.get('cf-mitigated'),
                                 cfRay: gr.headers.get('cf-ray'),
                                 contentType: gr.headers.get('content-type'),
@@ -1793,7 +2219,7 @@ impl BridgeEngine {
                                 method: c.method,
                                 headers: c.headers,
                                 credentials: 'include',
-                                referrer: 'https://linux.do/',
+                                referrer: reqReferrer,
                                 referrerPolicy: 'strict-origin-when-cross-origin',
                                 cache: 'no-store',
                                 body: c.form ? new URLSearchParams(c.form) : undefined,
@@ -1807,6 +2233,7 @@ impl BridgeEngine {
                         status: r.status,
                         body: bodyText,
                         retryAfter: r.headers.get('Retry-After'),
+                        rateLimitReset: readResetHdr(r.headers),
                         challenge: cfHeader,
                         cfRay: r.headers.get('cf-ray'),
                         contentType: r.headers.get('content-type'),
@@ -1822,117 +2249,247 @@ impl BridgeEngine {
             }})()"#
         );
 
-        let idempotent = !in_verification
-            && !self.inner.lock().unwrap().verifying
-            && (method_upper == "GET" || method_upper == "HEAD");
+        let idempotent = !in_verification && (method_upper == "GET" || method_upper == "HEAD");
+        let mut budget = AttemptBudget::for_request(idempotent);
 
-        let mut eval_res = native_call("evaluate", json!({ "script": script }), 16).await;
-        let needs_retry = match &eval_res {
-            Ok(v) if v.is_object() => {
-                v.get("originLost").and_then(|b| b.as_bool()) == Some(true)
-                    || v.get("netErr").is_some()
+        // Execute fetch inside scoped `account_lock.read()` + `PriorityGate` (always released before verification!)
+        let eval_res: Value = loop {
+            let _acct = if in_verification {
+                None
+            } else {
+                Some(self.account_lock.read().await)
+            };
+            if !in_verification && self.session_generation.load(Ordering::Acquire) != session_gen {
+                return Err("账号会话已切换，请求已取消".to_string());
             }
-            _ => true,
-        };
-        if needs_retry && idempotent && !self.inner.lock().unwrap().verifying {
-            retried = true;
-            let force_reinit = eval_res
-                .as_ref()
-                .ok()
-                .and_then(|v| v.get("originLost"))
-                .and_then(|b| b.as_bool())
-                .unwrap_or(false)
-                || eval_res.is_err();
-            if force_reinit {
-                self.inner.lock().unwrap().origin_ready = false;
-                self.ensure_ready(true).await?;
-                if self.inner.lock().unwrap().bootstrap_challenged {
-                    if !is_background && method_upper == "GET" && !url.contains("/session/") && !url.contains("/user-api-key/") {
-                        self.inner.lock().unwrap().last_challenge_url = Some(url.to_string());
+
+            let _permit = if in_verification {
+                None
+            } else {
+                Some(self.priority_gate.acquire(req_priority).await)
+            };
+            let _fg_guard = if !in_verification && !is_background {
+                Some(FgRequestGuard::enter(&self.active_fg_requests))
+            } else {
+                None
+            };
+
+            if !in_verification {
+                let pace_wait = {
+                    let min_floor = if is_background || is_timings_req {
+                        1.6
+                    } else {
+                        0.0
+                    };
+                    self.api_pacer
+                        .lock()
+                        .unwrap()
+                        .reserve(Instant::now(), min_floor)
+                };
+                if !pace_wait.is_zero() {
+                    pace_wait_ms += pace_wait.as_millis() as u64;
+                    tokio::time::sleep(pace_wait).await;
+                }
+                self.ensure_ready(false).await?;
+                let (verifying_now, boot_challenged) = {
+                    let rt = self.inner.lock().unwrap();
+                    (rt.verifying, rt.bootstrap_challenged)
+                };
+                if verifying_now || boot_challenged {
+                    if boot_challenged && !is_background && method_upper == "GET" {
+                        if !url.contains("/session/") && !url.contains("/user-api-key/") {
+                            self.inner.lock().unwrap().last_challenge_url = Some(url.to_string());
+                        }
+                    }
+                    if !is_background && !is_timings_req && !url.contains("/session/otp/") && budget.try_consume_cf() {
+                        // Drop concurrency permit & account lock before coordinating verification!
+                        drop(_fg_guard);
+                        drop(_permit);
+                        drop(_acct);
+                        let is_dark = self.current_is_dark();
+                        self.emit_net_health_diag(
+                            app,
+                            "WARN",
+                            "cf_challenge_detected",
+                            Some(&format!("phase=bootstrap method={method_upper} url={url}")),
+                        );
+                        let outcome = self
+                            .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
+                            .await;
+                        verify_attempted = true;
+                        if outcome.round > 0 {
+                            verify_round = Some(outcome.round);
+                        }
+                        if outcome.passed {
+                            silent_cf_revalidated = true;
+                            continue;
+                        }
+                        return Ok(SiteHttpResponse {
+                            status: 403,
+                            body: format!("{CF_CHALLENGE_PREFIX}bootstrap"),
+                            is_challenge: true,
+                            is_unauthenticated: false,
+                            rate_limited_ms: None,
+                            diag: Some(SiteHttpDiag {
+                                local_cooldown: true,
+                                pace_wait_ms,
+                                cooldown_wait_ms,
+                                verify_attempted: true,
+                                verify_round,
+                                verify_cooldown_ms: outcome.cooldown_remain_ms,
+                                ineffective_clearance: outcome.ineffective_blocked,
+                                ..Default::default()
+                            }),
+                        });
                     }
                     return Ok(SiteHttpResponse {
                         status: 403,
-                        body: format!("{CF_CHALLENGE_PREFIX}bootstrap"),
+                        body: format!("{CF_CHALLENGE_PREFIX}verifying"),
                         is_challenge: true,
                         is_unauthenticated: false,
                         rate_limited_ms: None,
                         diag: Some(SiteHttpDiag {
-                            retried,
+                            local_cooldown: true,
                             pace_wait_ms,
                             cooldown_wait_ms,
                             ..Default::default()
                         }),
                     });
                 }
-            } else {
-                tokio::time::sleep(Duration::from_millis(180)).await;
             }
-            eval_res = native_call("evaluate", json!({ "script": script }), 16).await;
-        }
-        let mut eval_res = eval_res?;
-        if eval_res.get("originLost").and_then(|v| v.as_bool()) == Some(true) {
-            return Err("内置网页上下文正在唤醒，请重试".to_string());
-        }
-        if let Some(net_err) = eval_res.get("netErr").and_then(|v| v.as_str()) {
-            return Err(format!("网络请求超时或中断: {net_err}"));
-        }
 
-        // First-strike silent CF self-healing:
-        // On foreground 403/503 CF challenge (both GET and edge-blocked POST like Boost/Like, which never reached Discourse!),
-        // attempt single-flight silent `/challenge` revalidation first; if non-interactive JS challenge clears, refresh CSRF & replay seamlessly!
-        // NOTE: Never blind-retry HTTP 429 after 850ms — immediate double-taps refresh WAF penalty windows and escalate cooldowns!
-        if !in_verification && !is_background && !is_timings_req && !self.inner.lock().unwrap().verifying {
-            let first_status = eval_res.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-            let first_cf = eval_res.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
-            let first_body = eval_res.get("body").and_then(|v| v.as_str()).unwrap_or("");
-            let first_is_cf_challenge =
-                first_status != 429 && (first_cf == "challenge" || Self::looks_like_challenge(first_body));
+            let raw_eval = if in_verification {
+                native_call("evaluate", json!({ "script": script }), 16).await
+            } else {
+                let _nav = self.nav_lock.read().await;
+                native_call("evaluate", json!({ "script": script }), 16).await
+            };
 
-            if first_is_cf_challenge && !url.contains("/session/otp/") {
-                let carried_cf = {
-                    let raw = self.state.lock().unwrap().raw_cookies.clone();
-                    Self::parse_cookie_map(&raw).remove("cf_clearance")
-                };
-                self.cf_authority
-                    .lock()
-                    .unwrap()
-                    .note_challenged(carried_cf.as_deref());
-                if self.silent_revalidate_challenge(true).await && !self.inner.lock().unwrap().verifying {
-                    silent_cf_revalidated = true;
-                    emit_diag(
-                        app,
-                        "INFO",
-                        "AUTH",
-                        "SilentCF",
-                        "静默安全验证已通过，正在自动重放请求",
-                        Some(&format!("method={method_upper} url={url} firstStatus={first_status}")),
-                    );
-                    let _ = native_call(
-                        "evaluate",
-                        json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
-                        4,
+            // Check transient network/origin failure or retryable 502/503/504 (STRICTLY idempotent GET/HEAD only!)
+            let (is_net_or_origin_err, is_origin_lost, is_transient_5xx) = match &raw_eval {
+                Ok(v) if v.is_object() => {
+                    let origin_lost = v.get("originLost").and_then(|b| b.as_bool()) == Some(true);
+                    let net_err = v.get("netErr").is_some();
+                    let st = v.get("status").and_then(|s| s.as_u64()).unwrap_or(0) as u16;
+                    let cf = v.get("challenge").and_then(|s| s.as_str()).unwrap_or("");
+                    let ct = v.get("contentType").and_then(|s| s.as_str()).unwrap_or("");
+                    let bd = v.get("body").and_then(|s| s.as_str()).unwrap_or("");
+                    let is_cf = Self::is_cf_challenge_response(st, cf, ct, bd);
+                    (
+                        origin_lost || net_err,
+                        origin_lost,
+                        !origin_lost && !net_err && is_transient_retryable_status(st, is_cf),
                     )
-                    .await;
-                    if let Ok(replayed) = native_call("evaluate", json!({ "script": script }), 16).await {
-                        if replayed.is_object()
-                            && replayed.get("originLost").and_then(|v| v.as_bool()) != Some(true)
-                            && replayed.get("netErr").is_none()
-                        {
-                            eval_res = replayed;
-                        }
+                }
+                _ => (true, true, false),
+            };
+
+            if (is_net_or_origin_err || is_transient_5xx)
+                && idempotent
+                && !self.inner.lock().unwrap().verifying
+            {
+                if let Some(attempt_idx) = budget.try_consume_transient() {
+                    retried = true;
+                    if is_origin_lost {
+                        self.inner.lock().unwrap().origin_ready = false;
+                        let _ = self.ensure_ready(true).await;
+                    } else {
+                        let wait_ms = transient_backoff_ms(attempt_idx, rand::random::<f64>());
+                        // Release permit during backoff sleep so other lanes keep moving!
+                        drop(_fg_guard);
+                        drop(_permit);
+                        drop(_acct);
+                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                     }
-                } else {
-                    emit_diag(
-                        app,
-                        "WARN",
-                        "AUTH",
-                        "SilentCF",
-                        "静默安全验证未自动通过，可能需要人工确认",
-                        Some(&format!("method={method_upper} url={url} firstStatus={first_status}")),
-                    );
+                    continue;
                 }
             }
-        }
+
+            let val = raw_eval?;
+            if val.get("originLost").and_then(|v| v.as_bool()) == Some(true) {
+                return Err("内置网页上下文正在唤醒，请重试".to_string());
+            }
+            if let Some(net_err) = val.get("netErr").and_then(|v| v.as_str()) {
+                return Err(format!("网络请求超时或中断: {net_err}"));
+            }
+
+            // Unified single-flight foreground CF challenge recovery (Silent -> seamless Blocking escalation on the SAME `/challenge` page!)
+            if !in_verification && !is_background && !is_timings_req && !url.contains("/session/otp/") {
+                let st = val.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let cf = val.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
+                let ct = val.get("contentType").and_then(|v| v.as_str()).unwrap_or("");
+                let bd = val.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                if Self::is_cf_challenge_response(st, cf, ct, bd) {
+                    let carried_cf = {
+                        let raw = self.state.lock().unwrap().raw_cookies.clone();
+                        Self::parse_cookie_map(&raw).remove("cf_clearance")
+                    };
+                    self.cf_authority
+                        .lock()
+                        .unwrap()
+                        .note_challenged(carried_cf.as_deref());
+
+                    if budget.try_consume_cf() {
+                        // Drop concurrency permit & account lock BEFORE waiting on verification!
+                        drop(_fg_guard);
+                        drop(_permit);
+                        drop(_acct);
+
+                        self.emit_net_health_diag(
+                            app,
+                            "WARN",
+                            "cf_challenge_detected",
+                            Some(&format!("method={method_upper} url={url} status={st} cf={cf}")),
+                        );
+                        let is_dark = self.current_is_dark();
+                        let outcome = self
+                            .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
+                            .await;
+                        verify_attempted = true;
+                        if outcome.round > 0 {
+                            verify_round = Some(outcome.round);
+                        }
+                        if outcome.passed {
+                            silent_cf_revalidated = true;
+                            if self.session_generation.load(Ordering::Acquire) != session_gen {
+                                return Err("账号会话已切换，请求已取消".to_string());
+                            }
+                            let _ = native_call(
+                                "evaluate",
+                                json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                                4,
+                            )
+                            .await;
+                            continue;
+                        } else {
+                            verify_cooldown_ms = outcome.cooldown_remain_ms;
+                            ineffective_clearance = outcome.ineffective_blocked;
+                            break val;
+                        }
+                    } else if let Some(passed_round) = verify_round {
+                        // Verification just passed for `passed_round`, yet the immediate replay STILL hit CF challenge!
+                        // Trip 60s ineffective-clearance circuit breaker to eliminate infinite popup loops!
+                        let breaker_ms = self
+                            .verify_coord
+                            .lock()
+                            .unwrap()
+                            .record_ineffective_clearance(passed_round, Instant::now());
+                        verify_cooldown_ms = breaker_ms;
+                        ineffective_clearance = true;
+                        self.emit_net_health_diag(
+                            app,
+                            "WARN",
+                            "ineffective_clearance_breaker",
+                            Some(&format!(
+                                "round={passed_round} method={method_upper} url={url} status={st} breakerMs={breaker_ms}"
+                            )),
+                        );
+                    }
+                }
+            }
+
+            break val;
+        };
 
         let status = eval_res
             .get("status")
@@ -1947,22 +2504,30 @@ impl BridgeEngine {
             .get("challenge")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let raw_content_type = eval_res
+            .get("contentType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
-        // CRITICAL (aligned with xuemk `ChallengeDetector.isChallenge`):
-        // HTTP 429 (even with `cf-mitigated: challenge`) is a WAF rate-limit rule, NOT a dead `cf_clearance`!
-        // Never tag 429 as `is_challenge`, never invalidate `cf_clearance`, and never pop a verification modal on 429!
+        // Authoritative Cloudflare challenge detection (aligned with FluxDO `isCfChallengeResponse`):
+        // - `403` / `429` / `503` with `cf-mitigated: challenge` (or HTML challenge page) is a REAL Cloudflare challenge:
+        //   route into CF verification so dead/UA-mismatched `cf_clearance` gets rotated instead of looping on fake 429 countdowns!
+        // - Genuine Discourse JSON 429 (heart/reply rate limit, `application/json`, no `cf-mitigated`) stays strictly in rate-limit handling.
         let raw_body_is_html = raw_body.trim_start().starts_with('<');
-        let is_challenge_429 =
-            status == 429 && (cf_header == "challenge" || Self::looks_like_challenge(&raw_body));
-        let body = if status != 429 && cf_header == "challenge" {
-            format!("{CF_CHALLENGE_PREFIX}{raw_body}")
+        let is_challenge =
+            Self::is_cf_challenge_response(status, cf_header, raw_content_type, &raw_body);
+        let is_challenge_429 = status == 429 && is_challenge;
+        let body = if is_challenge {
+            if raw_body.starts_with(CF_CHALLENGE_PREFIX) {
+                raw_body
+            } else {
+                format!("{CF_CHALLENGE_PREFIX}{raw_body}")
+            }
         } else if status == 429 && raw_body_is_html {
             "{\"errors\":[\"操作较为频繁，请稍候片刻再试\"]}".to_string()
         } else {
             raw_body
         };
-
-        let is_challenge = status != 429 && Self::looks_like_challenge(&body);
         let had_unauth_logged_hdr = eval_res
             .get("hadUnauthLoggedHeader")
             .and_then(|v| v.as_bool())
@@ -1984,24 +2549,27 @@ impl BridgeEngine {
                 let mut rt = self.inner.lock().unwrap();
                 rt.bg_challenge_until = Some(now + Duration::from_secs(30));
                 if !is_background {
-                    rt.fg_challenge_until = Some(now + Duration::from_millis(1500));
+                    rt.fg_challenge_until = Some(now + Duration::from_millis(1200));
                     false
                 } else {
                     !rt.verifying && !rt.cf_attention_notified
                 }
             };
-            // Background challenge: attempt silent `/challenge` revalidation first; ONLY if human click is genuinely needed,
+            // Background challenge: run silent probe through unified `VerifyCoordinator`; ONLY if human click is needed,
             // surface the non-intrusive 32px hairline bar (`lindo://cf-attention-needed`) without interrupting reading!
             if should_probe_bg {
                 if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
                     let eng_clone = Arc::clone(&eng);
                     let app_clone = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let auto_cleared = eng_clone.silent_revalidate_challenge(false).await;
+                        let is_dark = eng_clone.current_is_dark();
+                        let outcome = eng_clone
+                            .coordinate_cf_verification(&app_clone, VerifyPresentation::Silent, is_dark, false)
+                            .await;
                         let mut emit_attention = None;
                         {
                             let mut rt = eng_clone.inner.lock().unwrap();
-                            if auto_cleared {
+                            if outcome.passed {
                                 if rt.cf_attention_notified {
                                     rt.cf_attention_notified = false;
                                     emit_attention = Some(false);
@@ -2018,6 +2586,11 @@ impl BridgeEngine {
                 }
             }
         } else if (200..300).contains(&status) {
+            let now = Instant::now();
+            self.api_pacer.lock().unwrap().on_success(now);
+            if !is_background {
+                self.verify_coord.lock().unwrap().reset_on_healthy_response();
+            }
             let clear_banner = {
                 let mut rt = self.inner.lock().unwrap();
                 rt.rate_limit_until = None;
@@ -2050,51 +2623,25 @@ impl BridgeEngine {
                 }
             }
         }
-        if status == 429 {
-            let retry_after_secs = eval_res
-                .get("retryAfter")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .or_else(|| {
-                    serde_json::from_str::<Value>(&body).ok().and_then(|v| {
-                        v.get("extras")
-                            .and_then(|e| e.get("wait_seconds"))
-                            .and_then(|w| w.as_u64())
-                    })
-                });
-            let is_discourse_action_429 =
-                method_upper != "GET" && !is_challenge_429 && !raw_body_is_html;
+        if status == 429 && !is_challenge {
+            let retry_after_hdr = eval_res.get("retryAfter").and_then(|v| v.as_str());
+            let reset_hdr = eval_res.get("rateLimitReset").and_then(|v| v.as_str());
+            let now_epoch_secs = (now_epoch_ms() / 1000) as i64;
+            let retry_after_secs =
+                parse_retry_after_secs(retry_after_hdr, reset_hdr, &body, now_epoch_secs);
+            let is_discourse_action_429 = method_upper != "GET" && !raw_body_is_html;
             // `/topics/timings` is a discardable background stat: never lock out main app browsing on timings 429!
             // Discourse JSON write-action 429s (e.g. reaction toggle / reply cooldown) are action-scoped:
             // surface exact wait seconds to the caller without triggering a global app-wide lockout!
             if is_discourse_action_429 {
                 let now = Instant::now();
-                self.api_pacer.lock().unwrap().drain_on_429(now);
-                let secs = retry_after_secs.unwrap_or(5).clamp(2, 60);
+                self.api_pacer.lock().unwrap().on_rate_limit(now);
+                let secs = retry_after_secs.unwrap_or(5).clamp(2, 120);
                 rate_limited_ms = Some(secs * 1000);
             } else if !is_timings_req {
                 let now = Instant::now();
-                self.api_pacer.lock().unwrap().drain_on_429(now);
-                let secs = if is_challenge_429 {
-                    let step_secs = {
-                        let mut rt = self.inner.lock().unwrap();
-                        if rt
-                            .last_challenge_429_at
-                            .map(|t| now.duration_since(t) > Duration::from_secs(90))
-                            .unwrap_or(true)
-                        {
-                            rt.challenge_429_streak = 0;
-                        }
-                        rt.last_challenge_429_at = Some(now);
-                        let steps = [5u64, 9u64, 15u64];
-                        let idx = (rt.challenge_429_streak as usize).min(steps.len() - 1);
-                        rt.challenge_429_streak = rt.challenge_429_streak.saturating_add(1);
-                        steps[idx]
-                    };
-                    retry_after_secs.unwrap_or(step_secs).clamp(3, 45)
-                } else {
-                    retry_after_secs.unwrap_or(3).clamp(2, 45)
-                };
+                self.api_pacer.lock().unwrap().on_rate_limit(now);
+                let secs = retry_after_secs.unwrap_or(3).clamp(2, 45);
                 let dur = Duration::from_secs(secs);
                 {
                     let mut rt = self.inner.lock().unwrap();
@@ -2102,17 +2649,6 @@ impl BridgeEngine {
                     rt.last_429_probe_at = Some(now);
                 }
                 rate_limited_ms = Some(dur.as_millis() as u64);
-
-                // If 429 rate-challenge occurred while we held zero `cf_clearance`, schedule a quiet prewarm after cooldown
-                if is_challenge_429 {
-                    if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
-                        let eng_clone = Arc::clone(&eng);
-                        tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(dur + Duration::from_millis(400)).await;
-                            let _ = eng_clone.prewarm_cf_clearance_if_needed().await;
-                        });
-                    }
-                }
             }
         }
 
@@ -2234,6 +2770,10 @@ impl BridgeEngine {
                 cooldown_wait_ms,
                 retried,
                 silent_cf_revalidated,
+                verify_attempted,
+                verify_round,
+                verify_cooldown_ms,
+                ineffective_clearance,
                 csrf_refreshed,
                 guest_fallback,
                 body_bytes,
@@ -2377,12 +2917,12 @@ impl BridgeEngine {
 
     pub async fn upload(
         &self,
+        app: &AppHandle,
         filename: &str,
         mime: &str,
         data_base64: &str,
     ) -> Result<SiteHttpResponse, String> {
-        let _acct = self.account_lock.read().await;
-        self.ensure_ready(false).await?;
+        let session_gen = self.session_generation.load(Ordering::Acquire);
         let cfg = json!({
             "name": filename,
             "mime": mime,
@@ -2390,10 +2930,10 @@ impl BridgeEngine {
         });
         let script = format!(
             r#"(async () => {{
-                if (location.origin !== 'https://linux.do') return null;
+                if (location.origin !== 'https://linux.do') return {{ originLost: true }};
                 const c = {cfg};
-                const csrfRes = await fetch('/session/csrf.json', {{ credentials: 'include', signal: AbortSignal.timeout(12000) }});
-                if (!csrfRes.ok) return {{ status: csrfRes.status, body: await csrfRes.text(), challenge: csrfRes.headers.get('cf-mitigated') }};
+                const csrfRes = await fetch('/session/csrf.json', {{ credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(12000) }});
+                if (!csrfRes.ok) return {{ status: csrfRes.status, body: await csrfRes.text(), challenge: csrfRes.headers.get('cf-mitigated'), cfRay: csrfRes.headers.get('cf-ray'), contentType: csrfRes.headers.get('content-type') }};
                 const token = (await csrfRes.json()).csrf;
                 if (!token) return {{ status: 422, body: '{{"errors":["请先完成登录"]}}' }};
                 const bin = atob(c.data);
@@ -2406,28 +2946,102 @@ impl BridgeEngine {
                 const r = await fetch('/uploads.json', {{
                     method: 'POST',
                     credentials: 'include',
-                    headers: {{ 'X-CSRF-Token': token, 'X-Requested-With': 'XMLHttpRequest' }},
+                    headers: {{ 'X-CSRF-Token': token, 'X-Requested-With': 'XMLHttpRequest', 'Discourse-Present': 'true' }},
                     body: form,
                     signal: AbortSignal.timeout(90000)
                 }});
                 return {{ status: r.status, body: await r.text(), challenge: r.headers.get('cf-mitigated'), cfRay: r.headers.get('cf-ray'), contentType: r.headers.get('content-type') }};
             }})()"#
         );
-        let res = native_call("evaluate", json!({ "script": script }), 105).await?;
+
+        let mut budget = AttemptBudget::for_request(false);
+        let mut verify_attempted = false;
+        let mut verify_round: Option<u64> = None;
+        let mut verify_cooldown_ms: u64 = 0;
+        let mut ineffective_clearance = false;
+        let mut silent_cf_revalidated = false;
+
+        let res: Value = loop {
+            let _acct = self.account_lock.read().await;
+            if self.session_generation.load(Ordering::Acquire) != session_gen {
+                return Err("账号会话已切换，上传已取消".to_string());
+            }
+            let _permit = self.priority_gate.acquire(RequestPriority::High).await;
+            let _fg = FgRequestGuard::enter(&self.active_fg_requests);
+            self.ensure_ready(false).await?;
+
+            let eval_val = {
+                let _nav = self.nav_lock.read().await;
+                native_call("evaluate", json!({ "script": script }), 105).await?
+            };
+            let st = eval_val.get("status").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
+            let bd = eval_val.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let cf = eval_val.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
+            let ct = eval_val.get("contentType").and_then(|v| v.as_str()).unwrap_or("");
+            let is_cf = Self::is_cf_challenge_response(st, cf, ct, bd);
+
+            if is_cf {
+                let carried_cf = {
+                    let raw = self.state.lock().unwrap().raw_cookies.clone();
+                    Self::parse_cookie_map(&raw).remove("cf_clearance")
+                };
+                self.cf_authority
+                    .lock()
+                    .unwrap()
+                    .note_challenged(carried_cf.as_deref());
+                if budget.try_consume_cf() {
+                    drop(_fg);
+                    drop(_permit);
+                    drop(_acct);
+                    self.emit_net_health_diag(
+                        app,
+                        "WARN",
+                        "cf_challenge_detected",
+                        Some(&format!("method=POST url=https://linux.do/uploads.json status={st}")),
+                    );
+                    let is_dark = self.current_is_dark();
+                    let outcome = self
+                        .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
+                        .await;
+                    verify_attempted = true;
+                    if outcome.round > 0 {
+                        verify_round = Some(outcome.round);
+                    }
+                    if outcome.passed {
+                        silent_cf_revalidated = true;
+                        continue;
+                    }
+                    verify_cooldown_ms = outcome.cooldown_remain_ms;
+                    ineffective_clearance = outcome.ineffective_blocked;
+                    break eval_val;
+                } else if let Some(passed_round) = verify_round {
+                    let breaker_ms = self
+                        .verify_coord
+                        .lock()
+                        .unwrap()
+                        .record_ineffective_clearance(passed_round, Instant::now());
+                    verify_cooldown_ms = breaker_ms;
+                    ineffective_clearance = true;
+                    self.emit_net_health_diag(
+                        app,
+                        "WARN",
+                        "ineffective_clearance_breaker",
+                        Some(&format!("round={passed_round} method=POST url=/uploads.json breakerMs={breaker_ms}")),
+                    );
+                }
+            }
+            break eval_val;
+        };
+
         let status = res.get("status").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
         let body = res.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let cf_hdr = res.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
-        let is_challenge = cf_hdr == "challenge" || Self::looks_like_challenge(&body);
+        let ct_hdr = res.get("contentType").and_then(|v| v.as_str()).unwrap_or("");
+        let is_challenge = Self::is_cf_challenge_response(status, cf_hdr, ct_hdr, &body);
         let is_unauthenticated = Self::is_unauthenticated_response(status, &body);
-        if is_challenge {
-            let carried_cf = {
-                let raw = self.state.lock().unwrap().raw_cookies.clone();
-                Self::parse_cookie_map(&raw).remove("cf_clearance")
-            };
-            self.cf_authority
-                .lock()
-                .unwrap()
-                .note_challenged(carried_cf.as_deref());
+        if (200..300).contains(&status) && !is_challenge {
+            self.api_pacer.lock().unwrap().on_success(Instant::now());
+            self.verify_coord.lock().unwrap().reset_on_healthy_response();
         }
         let body_bytes = body.len();
         Ok(SiteHttpResponse {
@@ -2443,24 +3057,74 @@ impl BridgeEngine {
                 } else {
                     Some(cf_hdr.to_string())
                 },
-                content_type: res
-                    .get("contentType")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
+                content_type: if ct_hdr.is_empty() {
+                    None
+                } else {
+                    Some(ct_hdr.to_string())
+                },
+                silent_cf_revalidated,
+                verify_attempted,
+                verify_round,
+                verify_cooldown_ms,
+                ineffective_clearance,
                 body_bytes,
                 ..Default::default()
             }),
         })
     }
 
+    pub async fn read_clipboard_media(
+        &self,
+        only_file_urls: bool,
+    ) -> Result<ClipboardMediaResult, String> {
+        #[cfg(target_os = "macos")]
+        {
+            let val = native_call(
+                "readClipboardMedia",
+                json!({ "onlyFileUrls": only_file_urls }),
+                6,
+            )
+            .await?;
+            let parsed: ClipboardMediaResult = serde_json::from_value(val).unwrap_or_default();
+            Ok(parsed)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = only_file_urls;
+            Ok(ClipboardMediaResult {
+                source: "none".to_string(),
+                items: Vec::new(),
+            })
+        }
+    }
+
+    pub async fn convert_local_image_to_png(&self, path: &str) -> Result<Option<String>, String> {
+        #[cfg(target_os = "macos")]
+        {
+            let val = native_call("convertLocalImageToPng", json!({ "path": path }), 12).await?;
+            Ok(val
+                .get("dataBase64")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = path;
+            Ok(None)
+        }
+    }
+
     pub fn diag_runtime_snapshot(&self) -> DiagRuntimeSnapshot {
         let now = Instant::now();
+        let now_ms = now_epoch_ms();
         let rem = |opt: Option<Instant>| -> u64 {
             opt.and_then(|t| t.checked_duration_since(now))
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0)
         };
         let (
+            bridge_ua,
             origin_ready,
             verifying,
             bootstrap_challenged,
@@ -2473,6 +3137,7 @@ impl BridgeEngine {
         ) = {
             let rt = self.inner.lock().unwrap();
             (
+                rt.bridge_ua.clone(),
                 rt.origin_ready,
                 rt.verifying,
                 rt.bootstrap_challenged,
@@ -2498,6 +3163,11 @@ impl BridgeEngine {
                 st.saved_accounts.len(),
             )
         };
+        let cf_clearance_age_secs = self.cf_authority.lock().unwrap().age_secs(now_ms);
+        let v_snap = self.verify_coord.lock().unwrap().snapshot(now);
+        let pacer_rate_per_sec =
+            (self.api_pacer.lock().unwrap().current_rate() * 100.0).round() / 100.0;
+        let session_generation = self.session_generation.load(Ordering::Acquire);
         let (media_cache_entries, media_cache_bytes) = {
             let mc = self.media_cache.lock().unwrap();
             (mc.entries.len(), mc.total_bytes)
@@ -2505,19 +3175,28 @@ impl BridgeEngine {
         DiagRuntimeSnapshot {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
+            bridge_ua,
             origin_ready,
-            verifying,
+            verifying: verifying || v_snap.active,
             bootstrap_challenged,
             cf_attention_notified,
             has_cookie_t,
             has_forum_session,
             has_cf_clearance,
+            cf_clearance_age_secs,
             saved_accounts_count,
             rate_limit_remain_ms,
             fg_challenge_remain_ms,
             bg_challenge_remain_ms,
             media_cooldown_remain_ms,
             challenge_429_streak,
+            verify_round: v_snap.round,
+            verify_consecutive_failures: v_snap.consecutive_failures,
+            verify_cooldown_remain_ms: v_snap.cooldown_remain_ms,
+            verify_ineffective_breaker: v_snap.cooldown_is_ineffective
+                && v_snap.cooldown_remain_ms > 0,
+            pacer_rate_per_sec,
+            session_generation,
             media_cache_entries,
             media_cache_bytes,
         }
@@ -2664,7 +3343,10 @@ impl BridgeEngine {
             }})()"#
         );
 
-        let res = native_call("evaluate", json!({ "script": script }), 25).await?;
+        let res = {
+            let _nav = self.nav_lock.read().await;
+            native_call("evaluate", json!({ "script": script }), 25).await?
+        };
         let status = res.get("status").and_then(|v| v.as_u64()).unwrap_or(502) as u16;
         let content_type = res
             .get("contentType")
@@ -2679,9 +3361,13 @@ impl BridgeEngine {
         let cf_hdr = res.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
         if status == 429 || cf_hdr == "challenge" {
             // Isolate image throttling to `media_cooldown_until` so subresource fetches never lock out foreground API calls!
+            let now = Instant::now();
+            self.media_pacer.lock().unwrap().on_rate_limit(now);
             let cooldown = if cf_hdr == "challenge" { 8 } else { 4 };
             self.inner.lock().unwrap().media_cooldown_until =
-                Some(Instant::now() + Duration::from_secs(cooldown));
+                Some(now + Duration::from_secs(cooldown));
+        } else if (200..300).contains(&status) {
+            self.media_pacer.lock().unwrap().on_success(Instant::now());
         }
         Ok(ForumMediaPayload {
             status,
@@ -2695,8 +3381,18 @@ impl BridgeEngine {
         app: &AppHandle,
         login: bool,
         is_dark: bool,
+        manual: bool,
     ) -> Result<bool, String> {
-        self.verify_internal(app, login, is_dark, None).await
+        if !login {
+            let pres = if manual {
+                VerifyPresentation::Manual
+            } else {
+                VerifyPresentation::Blocking
+            };
+            let outcome = self.coordinate_cf_verification(app, pres, is_dark, false).await;
+            return Ok(outcome.passed);
+        }
+        self.verify_internal(app, true, is_dark, None).await
     }
 
     pub async fn verify_with_otp(
@@ -2733,6 +3429,11 @@ impl BridgeEngine {
             .run_verify_loop(app, login, is_dark, otp_token.as_deref())
             .await;
 
+        let _ = native_call("hide", json!({}), 5).await;
+        if !matches!(result, Ok(true)) {
+            let _nav = self.nav_lock.write().await;
+            self.restore_about_origin_context().await;
+        }
         {
             let mut rt = self.inner.lock().unwrap();
             rt.verifying = false;
@@ -2741,7 +3442,6 @@ impl BridgeEngine {
                 rt.bootstrap_challenged = false;
             }
         }
-        let _ = native_call("hide", json!({}), 5).await;
         result
     }
 
@@ -2800,6 +3500,35 @@ impl BridgeEngine {
         is_dark: bool,
         otp_token: Option<&str>,
     ) -> Result<bool, String> {
+        let is_otp_flow = otp_token.is_some();
+        let backup_cfs = if !login && !is_otp_flow {
+            native_call("init", json!({}), 10).await?;
+            self.inner.lock().unwrap().initialized = true;
+            // Backup & delete any challenged/stale `cf_clearance` BEFORE loading `/challenge`
+            // (FluxDO proven fix: otherwise Cloudflare may pass the dead cookie straight to 404 without minting a fresh one!)
+            self.purge_cf_clearance_for_reverify().await
+        } else {
+            Vec::new()
+        };
+
+        let res = self
+            .run_verify_loop_inner(app, login, is_dark, otp_token, &backup_cfs)
+            .await;
+
+        if !matches!(res, Ok(true)) && !backup_cfs.is_empty() {
+            self.restore_cf_clearance_backup(&backup_cfs).await;
+        }
+        res
+    }
+
+    async fn run_verify_loop_inner(
+        &self,
+        app: &AppHandle,
+        login: bool,
+        is_dark: bool,
+        otp_token: Option<&str>,
+        purged_backup_cfs: &[String],
+    ) -> Result<bool, String> {
         native_call("init", json!({}), 10).await?;
         self.inner.lock().unwrap().initialized = true;
 
@@ -2830,11 +3559,14 @@ impl BridgeEngine {
         };
         let probe_get_url = Self::challenge_url_to_probe_get_url(&recovery_url);
 
-        let stale_cf: std::collections::HashSet<String> = if !login && !is_otp_flow {
+        let mut stale_cf: std::collections::HashSet<String> = if !login && !is_otp_flow {
             self.browser_cf_clearances().await.into_iter().collect()
         } else {
             std::collections::HashSet::new()
         };
+        for old in purged_backup_cfs {
+            stale_cf.insert(old.clone());
+        }
 
         let mut mask_visible = false;
         if !login && !is_otp_flow {
@@ -2865,6 +3597,10 @@ impl BridgeEngine {
         let mut oops_reloaded = false;
         let mut challenge_ticks = 0u32;
         let mut quiet_rounds = 0u32;
+        let mut last_reload_epoch: Option<u64> = None;
+        let mut pass_mask_stuck_ticks = 0u32;
+        let mut stuck_reloaded = false;
+        let mut terminated_reloaded = false;
         let mut last_current_session_poll: Option<Instant> = None;
         let loop_started = Instant::now();
         let deadline = loop_started + Duration::from_secs(180);
@@ -2880,6 +3616,89 @@ impl BridgeEngine {
                 .get("interactiveRequired")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let native_user_reloading = status_obj
+                .get("userReloading")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let native_reload_epoch = status_obj
+                .get("reloadEpoch")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let native_mask_visible = status_obj.get("maskVisible").and_then(|v| v.as_bool());
+            let native_mask_message = status_obj
+                .get("maskMessage")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let native_nav_error = status_obj
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let native_terminated = status_obj
+                .get("processTerminated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            // Always sync Rust's mask flag with native WKWebView truth so manual reload or native callbacks never desync!
+            if let Some(vis) = native_mask_visible {
+                mask_visible = vis;
+            }
+            match last_reload_epoch {
+                None => {
+                    last_reload_epoch = Some(native_reload_epoch);
+                }
+                Some(prev) if prev != native_reload_epoch => {
+                    last_reload_epoch = Some(native_reload_epoch);
+                    challenge_ticks = 0;
+                    quiet_rounds = 0;
+                    pass_mask_stuck_ticks = 0;
+                    stuck_reloaded = false;
+                    emit_diag(
+                        app,
+                        "INFO",
+                        "AUTH",
+                        "VerifyReload",
+                        "安全确认弹窗已手动刷新，重新加载验证",
+                        None,
+                    );
+                }
+                _ => {}
+            }
+            if user_cancelled && (native_user_reloading || native_terminated) {
+                return Ok(false);
+            }
+            if !login && !requested_login && native_terminated && !terminated_reloaded {
+                terminated_reloaded = true;
+                challenge_ticks = 0;
+                quiet_rounds = 0;
+                pass_mask_stuck_ticks = 0;
+                emit_diag(
+                    app,
+                    "WARN",
+                    "AUTH",
+                    "VerifyRecover",
+                    "安全确认 WebView 进程异常中断，自动重新加载",
+                    None,
+                );
+                mask_visible = true;
+                let _ = native_call(
+                    "setVerifyMask",
+                    json!({ "visible": true, "dark": is_dark, "message": "正在重新加载验证…" }),
+                    4,
+                )
+                .await;
+                let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
+                continue;
+            }
+            if !login && !requested_login && native_user_reloading {
+                challenge_ticks = 0;
+                quiet_rounds = 0;
+                pass_mask_stuck_ticks = 0;
+                if !panel_shown && loop_started.elapsed() >= Duration::from_millis(1200) {
+                    panel_shown = true;
+                    let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
+                }
+                continue;
+            }
 
             // Passive read-only DOM observation in isolated `defaultClientWorld` (macOS) / zero-global sync eval (Windows):
             // NEVER include `script[src*="challenge-platform"]` (present passively on normal & 404 Discourse pages!),
@@ -2921,6 +3740,13 @@ impl BridgeEngine {
                             !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
                             || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '')
                         );
+                        const widgetIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], #turnstile-wrapper iframe, .cf-turnstile iframe');
+                        const widgetIframeRect = widgetIframe ? widgetIframe.getBoundingClientRect() : null;
+                        const widgetHost = document.querySelector('#turnstile-wrapper, .cf-turnstile, #challenge-stage > div');
+                        const widgetHostRect = widgetHost ? widgetHost.getBoundingClientRect() : null;
+                        const hasRenderedWidget =
+                            !!(widgetIframeRect && widgetIframeRect.width >= 80 && widgetIframeRect.height >= 30)
+                            || !!(widgetHostRect && widgetHostRect.width >= 220 && widgetHostRect.height >= 55);
                         const isDiscourseOops = site && complete && !explicitChallenge && /discussion forum encountered an unexpected problem/i.test(bodyText);
                         const missingDiscourseBoot = site && complete && !hasCsrf && !isOrigin404 && !isDiscourseOops && !bodyText.startsWith('{');
                         let preloadedUserJson = null;
@@ -2952,6 +3778,7 @@ impl BridgeEngine {
                             isDiscourseOops,
                             preloadedUserJson,
                             explicitChallenge,
+                            hasRenderedWidget,
                             challenge: !isOrigin404 && (explicitChallenge || missingDiscourseBoot)
                         };
                     })()"#
@@ -2974,6 +3801,11 @@ impl BridgeEngine {
                 && probe
                     .as_ref()
                     .and_then(|p| p.get("explicitChallenge")?.as_bool())
+                    .unwrap_or(false);
+            let has_rendered_widget = !is_origin_404
+                && probe
+                    .as_ref()
+                    .and_then(|p| p.get("hasRenderedWidget")?.as_bool())
                     .unwrap_or(false);
             let in_challenge = !is_origin_404
                 && probe
@@ -3010,11 +3842,13 @@ impl BridgeEngine {
                         rt.fg_challenge_until = None;
                         rt.bg_challenge_until = None;
                         rt.bootstrap_challenged = false;
-                        rt.silent_revalidate_until = None;
                         rt.cf_attention_notified = false;
                     }
                     let _ = native_call("hide", json!({}), 5).await;
-                    let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
+                    {
+                        let _nav = self.nav_lock.write().await;
+                        self.restore_about_origin_context().await;
+                    }
                     let _ = app.emit("lindo://cf-attention-needed", false);
                     let _ = app.emit("lindo://verified", ());
                     return Ok(true);
@@ -3035,15 +3869,33 @@ impl BridgeEngine {
 
             if in_challenge {
                 quiet_rounds = 0;
+                pass_mask_stuck_ticks = 0;
                 challenge_ticks += 1;
-                // Show compact card immediately when `interactiveBegin` fired, or after 2 ticks (~440ms)
-                if (native_interactive || challenge_ticks >= 2) && !panel_shown {
+                // Show compact card immediately when `interactiveBegin` or widget rendered, or after 2 ticks (~440ms)
+                if (native_interactive || has_rendered_widget || challenge_ticks >= 2) && !panel_shown {
                     panel_shown = true;
                     let _ = native_call("show", json!({ "dark": is_dark, "login": login }), 8).await;
                 }
-                if (native_interactive || explicit_challenge) && mask_visible {
+                // Reveal the unclipped 480x380 verification sheet once Turnstile is interactive/rendered,
+                // or promptly after ~1.3s so Cloudflare's challenge page is always fully visible & interactive.
+                let ready_to_reveal = native_interactive
+                    || has_rendered_widget
+                    || (explicit_challenge && challenge_ticks >= 6)
+                    || challenge_ticks >= 10;
+                if ready_to_reveal && mask_visible {
                     mask_visible = false;
                     let _ = native_call("setVerifyMask", json!({ "visible": false, "dark": is_dark }), 4).await;
+                } else if mask_visible && native_mask_message == "已通过，正在继续…" {
+                    let _ = native_call(
+                        "setVerifyMask",
+                        json!({
+                            "visible": true,
+                            "dark": is_dark,
+                            "message": "校验连接中…"
+                        }),
+                        4,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -3075,12 +3927,68 @@ impl BridgeEngine {
                 };
 
                 if has_fresh_cf || is_origin_404 || ready {
+                    pass_mask_stuck_ticks = 0;
                     quiet_rounds += 1;
                 } else {
                     quiet_rounds = 0;
                     if !panel_shown && loop_started.elapsed() >= Duration::from_millis(1200) {
                         panel_shown = true;
                         let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
+                    }
+                    if mask_visible && native_mask_message == "已通过，正在继续…" {
+                        pass_mask_stuck_ticks += 1;
+                        if pass_mask_stuck_ticks >= 18 {
+                            let detail = format!(
+                                "elapsedMs={}, hasFreshCf={}, origin404={}, ready={}, navError={}",
+                                loop_started.elapsed().as_millis(),
+                                has_fresh_cf,
+                                is_origin_404,
+                                ready,
+                                if native_nav_error.is_empty() {
+                                    "none"
+                                } else {
+                                    native_nav_error
+                                }
+                            );
+                            emit_diag(
+                                app,
+                                "WARN",
+                                "AUTH",
+                                "VerifyWatchdog",
+                                "安全确认停留在过渡状态超过 4 秒，触发自动恢复",
+                                Some(&detail),
+                            );
+                            pass_mask_stuck_ticks = 0;
+                            if !stuck_reloaded {
+                                stuck_reloaded = true;
+                                let _ = native_call(
+                                    "setVerifyMask",
+                                    json!({
+                                        "visible": true,
+                                        "dark": is_dark,
+                                        "message": "正在重新加载验证…"
+                                    }),
+                                    4,
+                                )
+                                .await;
+                                let _ = native_call(
+                                    "navigate",
+                                    json!({ "url": "https://linux.do/challenge" }),
+                                    8,
+                                )
+                                .await;
+                            } else {
+                                mask_visible = false;
+                                let _ = native_call(
+                                    "setVerifyMask",
+                                    json!({ "visible": false, "dark": is_dark }),
+                                    4,
+                                )
+                                .await;
+                            }
+                        }
+                    } else {
+                        pass_mask_stuck_ticks = 0;
                     }
                     continue;
                 }
@@ -3131,7 +4039,7 @@ impl BridgeEngine {
                     }
                 } else if let Some(profile) = preloaded_user {
                     let _ = self.sync_cookies_from_webkit_verified(true, true).await;
-                    self.commit_authenticated_user(app, profile).await;
+                    self.commit_authenticated_user(app, profile);
                 }
 
                 let _ = self.sync_cookies_from_webkit_verified(false, true).await;
@@ -3142,21 +4050,31 @@ impl BridgeEngine {
                     rt.bg_challenge_until = None;
                     rt.bootstrap_challenged = false;
                     rt.rate_limit_until = None;
-                    rt.silent_revalidate_until = None;
-                    rt.last_silent_cleared_at = Some(Instant::now());
                     rt.challenge_429_streak = 0;
                     rt.cf_attention_notified = false;
                 }
                 let _ = native_call("hide", json!({}), 5).await;
-                // Restore clean `/about` origin document in the hidden bridge WebView and invalidate stale CSRF
-                let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
-                let _ = native_call(
-                    "evaluate",
-                    json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
-                    4,
-                )
-                .await;
-                self.inner.lock().unwrap().origin_ready = true;
+                // Restore clean `/about` origin document and WAIT for commit before returning `Ok(true)`
+                // so an immediate POST/GET replay never collides with the `/about` navigation and aborts with `Load failed`!
+                {
+                    let _nav = self.nav_lock.write().await;
+                    self.restore_about_origin_context().await;
+                }
+                let pass_detail = format!(
+                    "elapsedMs={}, hasFreshCf={}, origin404={}, ready={}",
+                    loop_started.elapsed().as_millis(),
+                    has_fresh_cf,
+                    is_origin_404,
+                    ready
+                );
+                emit_diag(
+                    app,
+                    "INFO",
+                    "AUTH",
+                    "VerifyPassed",
+                    "安全确认已完成并恢复请求通道",
+                    Some(&pass_detail),
+                );
                 let _ = app.emit("lindo://cf-attention-needed", false);
                 let _ = app.emit("lindo://verified", ());
                 return Ok(true);
@@ -3214,7 +4132,7 @@ impl BridgeEngine {
                             4,
                         )
                         .await;
-                        self.commit_authenticated_user(app, profile).await;
+                        self.commit_authenticated_user(app, profile);
                         let _ = native_call("hide", json!({}), 5).await;
                         let _ = app.emit("lindo://verified", ());
                         return Ok(true);
@@ -3291,7 +4209,7 @@ impl BridgeEngine {
                         4,
                     )
                     .await;
-                    self.commit_authenticated_user(app, profile).await;
+                    self.commit_authenticated_user(app, profile);
                     let _ = native_call("hide", json!({}), 5).await;
                     let _ = native_call("navigate", json!({ "url": "https://linux.do/" }), 8).await;
                     let _ = app.emit("lindo://verified", ());
@@ -3356,8 +4274,10 @@ impl BridgeEngine {
         })
     }
 
-    async fn commit_authenticated_user(&self, app: &AppHandle, profile: UserProfile) {
+    fn commit_authenticated_user(&self, app: &AppHandle, profile: UserProfile) {
         let logged_username = profile.username.clone();
+        self.session_generation.fetch_add(1, Ordering::SeqCst);
+        self.verify_coord.lock().unwrap().reset_on_healthy_response();
         {
             let mut rt = self.inner.lock().unwrap();
             rt.last_login_at = Some(Instant::now());
@@ -3909,7 +4829,7 @@ impl BridgeEngine {
                         )
                         .await;
                         self.inner.lock().unwrap().origin_ready = true;
-                        self.commit_authenticated_user(app, profile).await;
+                        self.commit_authenticated_user(app, profile);
                         let _ = app.emit("lindo://auth-notice", "");
                         return Ok(true);
                     }
@@ -3968,7 +4888,7 @@ impl BridgeEngine {
             self.inner.lock().unwrap().origin_ready = true;
 
             if let Some(profile) = preloaded_profile {
-                self.commit_authenticated_user(app, profile).await;
+                self.commit_authenticated_user(app, profile);
                 let _ = app.emit("lindo://auth-notice", "");
                 return Ok(true);
             }
@@ -4010,6 +4930,8 @@ impl BridgeEngine {
 
     pub async fn replace_account_cookies(&self, raw_cookies: &str) -> Result<(), String> {
         let _acct = self.account_lock.write().await;
+        self.session_generation.fetch_add(1, Ordering::SeqCst);
+        self.verify_coord.lock().unwrap().reset_on_session_change();
         native_call("init", json!({}), 10).await?;
         {
             let mut rt = self.inner.lock().unwrap();
@@ -4170,7 +5092,7 @@ impl BridgeEngine {
             (st.current_user.clone(), st.raw_cookies.clone())
         };
         let _ = self.replace_account_cookies("").await;
-        let ok = self.verify_or_login(app, true, is_dark).await?;
+        let ok = self.verify_or_login(app, true, is_dark, true).await?;
         if !ok {
             if let (Some(prev_user), prev_cookies) = backup {
                 let _ = self.replace_account_cookies(&prev_cookies).await;
@@ -4245,7 +5167,7 @@ impl BridgeEngine {
             .request(app, "https://linux.do/session/current.json", "GET", None, None)
             .await?;
         if me.is_challenge {
-            if self.verify_or_login(app, false, is_dark).await.unwrap_or(false) {
+            if self.verify_or_login(app, false, is_dark, true).await.unwrap_or(false) {
                 me = self
                     .request(app, "https://linux.do/session/current.json", "GET", None, None)
                     .await?;
@@ -4257,7 +5179,7 @@ impl BridgeEngine {
                 st.raw_cookies = cookie_str;
             }
             let _ = self.sync_cookies_from_webkit(true).await;
-            self.commit_authenticated_user(app, profile).await;
+            self.commit_authenticated_user(app, profile);
             return Ok(true);
         }
         Err("凭证校验未通过，请确认复制了最新的 _t Cookie 或回调链接".to_string())
@@ -4293,54 +5215,6 @@ impl BridgeEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cf_authority_protects_healthy_incumbent_from_stale_or_transient_reads() {
-        let now = 1_700_000_000_000u64;
-        let mut auth = CfClearanceAuthority::default();
-        auth.confirm_healthy("healthy_cf_1", now);
-
-        // Even if a stray host-only cookie appears after `.linux.do` in enumeration, sticky incumbent wins!
-        let candidates = vec![
-            ("healthy_cf_1".to_string(), false),
-            ("stray_host_only_old".to_string(), true),
-        ];
-        assert_eq!(
-            auth.select_winner(&candidates, false, now + 1_000).as_deref(),
-            Some("healthy_cf_1")
-        );
-
-        // Transient empty read from WKHTTPCookieStore preserves healthy fresh incumbent
-        assert_eq!(
-            auth.select_winner(&[], false, now + 5_000).as_deref(),
-            Some("healthy_cf_1")
-        );
-    }
-
-    #[test]
-    fn cf_authority_evicts_challenged_ticket_and_adopts_fresh_domain_clearance() {
-        let now = 1_700_000_000_000u64;
-        let mut auth = CfClearanceAuthority::default();
-        auth.confirm_healthy("dead_cf", now);
-
-        // Challenge hit invalidates dead_cf immediately
-        auth.note_challenged(Some("dead_cf"));
-        assert_eq!(auth.incumbent, None);
-        assert_eq!(auth.challenged.as_deref(), Some("dead_cf"));
-        assert!(!auth.should_seed_cold_start("dead_cf", now, false, now + 1_000));
-
-        // After Turnstile verification, even if dead_cf is still lingering alongside fresh_cf, fresh_cf wins!
-        let candidates = vec![
-            ("dead_cf".to_string(), true),
-            ("fresh_cf".to_string(), false),
-        ];
-        assert_eq!(
-            auth.select_winner(&candidates, true, now + 2_000).as_deref(),
-            Some("fresh_cf")
-        );
-        assert_eq!(auth.challenged, None);
-        assert_eq!(auth.incumbent.as_deref(), Some("fresh_cf"));
-    }
 
     #[test]
     fn cf_authority_cold_seed_respects_browser_presence_and_ttl() {
@@ -4385,23 +5259,6 @@ mod tests {
             BridgeEngine::challenge_url_to_probe_get_url("https://linux.do/posts.json"),
             "https://linux.do/latest.json?no_definitions=true"
         );
-
-        // Bounded challenged_history rejects all previously invalidated clearances, not just the latest one
-        let now = 1_700_000_000_000u64;
-        let mut auth = CfClearanceAuthority::default();
-        auth.note_challenged(Some("dead_1"));
-        auth.note_challenged(Some("dead_2"));
-        assert!(auth.is_challenged("dead_1"));
-        assert!(auth.is_challenged("dead_2"));
-        let candidates = vec![
-            ("dead_1".to_string(), false),
-            ("dead_2".to_string(), false),
-            ("fresh_3".to_string(), false),
-        ];
-        assert_eq!(
-            auth.select_winner(&candidates, true, now).as_deref(),
-            Some("fresh_3")
-        );
     }
 
     #[test]
@@ -4413,6 +5270,14 @@ mod tests {
             assert!(eng.inner.lock().unwrap().verifying);
         }
         assert!(!eng.inner.lock().unwrap().verifying);
+
+        // Verify diagnostic runtime snapshot reports healthy initial policy state
+        let snap = eng.diag_runtime_snapshot();
+        assert_eq!(snap.session_generation, 1);
+        assert_eq!(snap.verify_round, 0);
+        assert_eq!(snap.verify_consecutive_failures, 0);
+        assert!(!snap.verify_ineffective_breaker);
+        assert!(snap.pacer_rate_per_sec >= 3.0);
 
         // Simulate Ruby Discourse CGI.escape(Base64.encode64(...)) with 60-col `%0A` line wraps and `+`/`/`/`=`
         use base64::engine::general_purpose::STANDARD as B64;
@@ -4446,25 +5311,39 @@ mod tests {
     }
 
     #[test]
-    fn token_bucket_pacer_allows_initial_burst_and_spaces_sustained_load() {
-        let t0 = Instant::now();
-        let mut pacer = TokenBucketPacer::new(5.0, 4.0); // 250ms per token after burst of 5
-        for _ in 0..5 {
-            assert_eq!(pacer.reserve(t0, 0.0), Duration::ZERO);
-        }
-        // 6th and 7th concurrent arrivals get spaced smoothly without thundering herd
-        let w6 = pacer.reserve(t0, 0.0);
-        let w7 = pacer.reserve(t0, 0.0);
-        assert!(w6 >= Duration::from_millis(240) && w6 <= Duration::from_millis(260));
-        assert!(w7 >= Duration::from_millis(490) && w7 <= Duration::from_millis(510));
-
-        // After 2 seconds idle, burst refills cleanly up to capacity
-        let t1 = t0 + Duration::from_secs(2);
-        assert_eq!(pacer.reserve(t1, 0.0), Duration::ZERO);
-
-        // On 429, burst tokens are drained so recovery ramps up gently
-        pacer.drain_on_429(t1);
-        let w_after_429 = pacer.reserve(t1, 0.0);
-        assert!(w_after_429 >= Duration::from_millis(240));
+    fn cf_challenge_classifier_separates_cf_429_from_discourse_json_429() {
+        // 1. CF managed challenge on 429 MUST be classified as CF challenge (never blind rate-limit loop)
+        assert!(BridgeEngine::is_cf_challenge_response(
+            429,
+            "challenge",
+            "text/html; charset=UTF-8",
+            "<html><title>Just a moment...</title></html>"
+        ));
+        assert!(BridgeEngine::is_cf_challenge_response(
+            429,
+            "",
+            "text/html; charset=UTF-8",
+            "<!DOCTYPE html><html><head><title>Just a moment...</title></head><script>window._cf_chl_opt={};</script></html>"
+        ));
+        // 2. Genuine Discourse JSON 429 (e.g., reaction toggle / reply cooldown) MUST NOT be classified as CF challenge
+        assert!(!BridgeEngine::is_cf_challenge_response(
+            429,
+            "",
+            "application/json; charset=utf-8",
+            r#"{"errors":["您执行此操作的次数过多。请等待 29 秒后再试。"],"error_type":"rate_limit","extras":{"wait_seconds":29}}"#
+        ));
+        // 3. Genuine Discourse JSON 403 MUST NOT be classified as CF challenge, while CF 403 IS
+        assert!(!BridgeEngine::is_cf_challenge_response(
+            403,
+            "",
+            "application/json; charset=utf-8",
+            r#"{"errors":["You need to be logged in"]}"#
+        ));
+        assert!(BridgeEngine::is_cf_challenge_response(
+            403,
+            "challenge",
+            "text/html; charset=UTF-8",
+            "<html><title>Just a moment...</title></html>"
+        ));
     }
 }

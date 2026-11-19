@@ -171,7 +171,11 @@ function formatHttpDiagDetail(
   if (d?.cooldownWaitMs) bridgeParts.push(`cooldownWait=${d.cooldownWaitMs}ms`);
   if (d?.paceWaitMs) bridgeParts.push(`paceWait=${d.paceWaitMs}ms`);
   if (d?.retried) bridgeParts.push("retried=true");
-  if (d?.silentCfRevalidated) bridgeParts.push("silentCfRevalidated=true");
+  if (d?.silentCfRevalidated) bridgeParts.push("cfRevalidated=true");
+  if (d?.verifyAttempted) bridgeParts.push("verifyAttempted=true");
+  if (d?.verifyRound) bridgeParts.push(`verifyRound=${d.verifyRound}`);
+  if (d?.verifyCooldownMs) bridgeParts.push(`verifyCooldown=${d.verifyCooldownMs}ms`);
+  if (d?.ineffectiveClearance) bridgeParts.push("ineffectiveClearance=true");
   if (d?.csrfRefreshed) bridgeParts.push("csrfRefreshed=true");
   if (d?.guestFallback) bridgeParts.push("guestFallback=true");
   if (bridgeParts.length > 0) {
@@ -213,7 +217,7 @@ export async function siteRequest(
       const ms = Math.round(performance.now() - t0);
       if (res.status >= 200 && res.status < 300 && !res.isChallenge) {
         globalRateLimitUntilMs = 0;
-      } else if (res.status === 429) {
+      } else if (res.status === 429 && !res.isChallenge) {
         const isActionOnly429 =
           isWrite &&
           !res.diag?.isChallenge429 &&
@@ -374,22 +378,26 @@ export function setApiDarkTheme(isDark: boolean): void {
   currentApiDarkTheme = isDark;
 }
 
-export function triggerInteractiveVerifyOnce(): Promise<boolean> {
+export function triggerInteractiveVerifyOnce(manual = true): Promise<boolean> {
   if (inflightVerifyReplayPromise) return inflightVerifyReplayPromise;
-  inflightVerifyReplayPromise = siteVerify(false, currentApiDarkTheme).finally(() => {
+  inflightVerifyReplayPromise = siteVerify(false, currentApiDarkTheme, manual).finally(() => {
     inflightVerifyReplayPromise = null;
   });
   return inflightVerifyReplayPromise;
 }
 
-export async function siteVerify(login: boolean, isDark: boolean): Promise<boolean> {
+export async function siteVerify(
+  login: boolean,
+  isDark: boolean,
+  manual = true
+): Promise<boolean> {
   diagLog(
     "INFO",
     "AUTH",
     "AuthPending",
     login ? "已打开内置登录窗口，等待完成登录" : "已打开站点安全验证窗口，等待完成验证"
   );
-  const ok = await invoke<boolean>("site_verify", { login, isDark });
+  const ok = await invoke<boolean>("site_verify", { login, isDark, manual });
   if (ok) {
     globalRateLimitUntilMs = 0;
     shortFeedCache.clear();
@@ -402,6 +410,24 @@ export async function siteVerify(login: boolean, isDark: boolean): Promise<boole
     ok ? (login ? "内置窗口登录已完成" : "站点安全验证已通过") : "登录/验证窗口已关闭（未完成）"
   );
   return ok;
+}
+
+function buildChallengeSiteError(res: SiteHttpResponse, defaultMsg: string): SiteError {
+  if (res.diag?.ineffectiveClearance) {
+    const sec = Math.max(1, Math.ceil(Number(res.diag.verifyCooldownMs || 60000) / 1000));
+    return new SiteError(
+      `安全确认已通过但请求仍被站点拦截（冷却 ${sec} 秒），请检查网络代理后点击「安全验证」手动重试`,
+      { isVerification: true, status: res.status }
+    );
+  }
+  if ((res.diag?.verifyCooldownMs ?? 0) > 0) {
+    const sec = Math.max(1, Math.ceil(Number(res.diag?.verifyCooldownMs || 30000) / 1000));
+    return new SiteError(
+      `安全确认自动重试冷却中（剩余 ${sec} 秒），可点击「安全验证」手动完成`,
+      { isVerification: true, status: res.status }
+    );
+  }
+  return new SiteError(defaultMsg, { isVerification: true, status: res.status });
 }
 
 export async function startBrowserOneClickAuth(): Promise<string> {
@@ -480,28 +506,94 @@ export async function setUnreadBadgeInRust(count: number): Promise<void> {
   return invoke("set_unread_badge", { count });
 }
 
+export interface ClipboardMediaItem {
+  filename: string;
+  mime: string;
+  dataBase64: string;
+}
+
+export interface ClipboardMediaResult {
+  source: "none" | "file-url" | "image-data" | string;
+  items: ClipboardMediaItem[];
+}
+
+export async function readClipboardMediaInRust(
+  onlyFileUrls = false
+): Promise<ClipboardMediaResult> {
+  try {
+    return await invoke<ClipboardMediaResult>("read_clipboard_media", { onlyFileUrls });
+  } catch {
+    return { source: "none", items: [] };
+  }
+}
+
+export async function readDroppedFilesInRust(paths: string[]): Promise<ClipboardMediaItem[]> {
+  if (!paths.length) return [];
+  try {
+    return await invoke<ClipboardMediaItem[]>("read_dropped_files", { paths });
+  } catch {
+    return [];
+  }
+}
+
 export async function uploadMediaToSite(
   filename: string,
   mime: string,
   dataBase64: string
 ): Promise<{ shortUrl: string; url: string; width: number; height: number; originalFilename: string }> {
+  const t0 = performance.now();
+  const approxBytes = Math.floor((dataBase64.length * 3) / 4);
   let res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
-  if (res.isChallenge) {
-    const passed = await triggerInteractiveVerifyOnce();
+  if (res.isChallenge && !res.diag?.verifyAttempted && !(res.diag?.verifyCooldownMs ?? 0)) {
+    const passed = await triggerInteractiveVerifyOnce(false);
     if (passed) {
       res = await invoke<SiteHttpResponse>("site_upload", { filename, mime, dataBase64 });
     }
   }
+  const durationMs = Math.round(performance.now() - t0);
   if (res.isChallenge) {
-    throw new SiteError("需要完成安全确认", { isVerification: true, status: res.status });
+    diagLog(
+      "WARN",
+      "NETWORK",
+      "Upload",
+      `POST /uploads.json 需要安全确认 (${filename}, ${durationMs}ms)`,
+      `filename: ${filename}\nmime: ${mime}\nsizeBytes: ${approxBytes}\nstatus: ${res.status}`,
+      { method: "POST", path: "/uploads.json", status: res.status, durationMs, note: "需要安全确认" }
+    );
+    throw buildChallengeSiteError(res, "需要完成安全确认");
   }
   if (res.isUnauthenticated) {
+    diagLog(
+      "WARN",
+      "AUTH",
+      "Upload",
+      `POST /uploads.json 未登录 (${filename}, ${durationMs}ms)`,
+      undefined,
+      { method: "POST", path: "/uploads.json", status: res.status, durationMs }
+    );
     throw new SiteError("请先登录账号", { isAuthRequired: true, status: res.status });
   }
   const parsed = safeJson(res.body);
   if (res.status < 200 || res.status >= 300 || !parsed) {
-    throw new SiteError(extractDiscourseError(parsed) || "文件上传失败，请重试", { status: res.status });
+    const errMsg = extractDiscourseError(parsed) || `文件上传失败 (${res.status})`;
+    diagLog(
+      "WARN",
+      "NETWORK",
+      "Upload",
+      `POST /uploads.json -> HTTP ${res.status} (${filename}, ${durationMs}ms)`,
+      `filename: ${filename}\nmime: ${mime}\nsizeBytes: ${approxBytes}\nstatus: ${res.status}\nerror: ${errMsg}`,
+      { method: "POST", path: "/uploads.json", status: res.status, durationMs, note: errMsg }
+    );
+    throw new SiteError(errMsg, { status: res.status });
   }
+  diagLog(
+    "INFO",
+    "NETWORK",
+    "Upload",
+    `POST /uploads.json -> HTTP ${res.status} (${filename}, ${Math.max(1, Math.round(approxBytes / 1024))}KB, ${durationMs}ms)`,
+    undefined,
+    { method: "POST", path: "/uploads.json", status: res.status, durationMs, note: `${Math.max(1, Math.round(approxBytes / 1024))}KB` }
+  );
   return {
     shortUrl: String(parsed.short_url || parsed.url || ""),
     url: String(parsed.url || parsed.short_url || ""),
@@ -544,7 +636,7 @@ async function getJsonOrThrow(
   }
   const res = await siteRequest(url, "GET", undefined, Object.keys(headers).length ? headers : undefined);
   if (res.isChallenge) {
-    throw new SiteError("需要完成站点验证", { isVerification: true, status: res.status });
+    throw buildChallengeSiteError(res, "需要完成站点验证");
   }
   if (res.isUnauthenticated) {
     if (background) {
@@ -566,17 +658,18 @@ async function getJsonOrThrow(
 async function mutateJsonOrThrow(
   url: string,
   method: "POST" | "PUT" | "DELETE",
-  form?: Record<string, string>
+  form?: Record<string, string>,
+  extraHeaders?: Record<string, string>
 ): Promise<any> {
-  let res = await siteRequest(url, method, form);
-  if (res.isChallenge) {
-    const passed = await triggerInteractiveVerifyOnce();
+  let res = await siteRequest(url, method, form, extraHeaders);
+  if (res.isChallenge && !res.diag?.verifyAttempted && !(res.diag?.verifyCooldownMs ?? 0)) {
+    const passed = await triggerInteractiveVerifyOnce(false);
     if (passed) {
-      res = await siteRequest(url, method, form);
+      res = await siteRequest(url, method, form, extraHeaders);
     }
   }
   if (res.isChallenge) {
-    throw new SiteError("需要完成安全确认", { isVerification: true, status: res.status });
+    throw buildChallengeSiteError(res, "需要完成安全确认");
   }
   if (res.isUnauthenticated) {
     throw new SiteError("请先登录账号后再执行此操作", { isAuthRequired: true, status: res.status });
@@ -1721,11 +1814,13 @@ export async function fetchTopicAiSummary(topicId: number): Promise<string> {
   // 1. Check existing cached summary first (`GET .../t/{id}.json`)
   const firstRes = await siteRequest(endpointJson, "GET");
   if (firstRes.isChallenge) {
-    const passed = await triggerInteractiveVerifyOnce();
-    if (!passed) {
-      throw new SiteError("需要完成安全确认", { isVerification: true, status: firstRes.status });
+    if (!firstRes.diag?.verifyAttempted && !(firstRes.diag?.verifyCooldownMs ?? 0)) {
+      const passed = await triggerInteractiveVerifyOnce(false);
+      if (passed) {
+        return fetchTopicAiSummary(topicId);
+      }
     }
-    return fetchTopicAiSummary(topicId);
+    throw buildChallengeSiteError(firstRes, "需要完成安全确认");
   }
   if (firstRes.status >= 200 && firstRes.status < 300) {
     const firstJson = safeJson(firstRes.body);
@@ -2324,12 +2419,21 @@ export async function publishTopic(params: {
   raw: string;
   categoryId: number;
   tags: string[];
+  typingDurationMs?: number;
+  composerOpenDurationMs?: number;
 }): Promise<{ topicId: number; pendingReview: boolean }> {
+  const openMs = Math.max(1200, Math.round(params.composerOpenDurationMs ?? 3200));
+  const typingMs = Math.max(800, Math.min(openMs, Math.round(params.typingDurationMs ?? 2100)));
   const form: Record<string, string> = {
     title: params.title.trim(),
     raw: params.raw,
     category: String(params.categoryId),
     archetype: "regular",
+    nested_post: "true",
+    is_warning: "false",
+    draft_key: "new_topic",
+    typing_duration_msecs: String(typingMs),
+    composer_open_duration_msecs: String(openMs),
   };
   params.tags
     .map((t) => t.trim())
@@ -2337,7 +2441,9 @@ export async function publishTopic(params: {
     .forEach((t, idx) => {
       form[`tags[${idx}]`] = t;
     });
-  const res = await mutateJsonOrThrow("https://linux.do/posts.json", "POST", form);
+  const res = await mutateJsonOrThrow("https://linux.do/posts.json", "POST", form, {
+    "X-LinDo-Referer": "https://linux.do/latest",
+  });
   if (res?.action === "enqueued" || res?.pending_post) {
     return { topicId: 0, pendingReview: true };
   }
@@ -2351,15 +2457,27 @@ export async function publishReply(params: {
   topicId: number;
   raw: string;
   replyToPostNumber?: number;
+  typingDurationMs?: number;
+  composerOpenDurationMs?: number;
 }): Promise<{ post: PostItemModel | null; pendingReview: boolean }> {
+  const openMs = Math.max(1000, Math.round(params.composerOpenDurationMs ?? 2800));
+  const typingMs = Math.max(600, Math.min(openMs, Math.round(params.typingDurationMs ?? 1800)));
   const form: Record<string, string> = {
     topic_id: String(params.topicId),
     raw: params.raw,
+    archetype: "regular",
+    nested_post: "true",
+    is_warning: "false",
+    draft_key: `topic_${params.topicId}`,
+    typing_duration_msecs: String(typingMs),
+    composer_open_duration_msecs: String(openMs),
   };
   if (params.replyToPostNumber && params.replyToPostNumber > 0) {
     form.reply_to_post_number = String(params.replyToPostNumber);
   }
-  const res = await mutateJsonOrThrow("https://linux.do/posts.json", "POST", form);
+  const res = await mutateJsonOrThrow("https://linux.do/posts.json", "POST", form, {
+    "X-LinDo-Referer": `https://linux.do/t/topic/${params.topicId}`,
+  });
   if (res?.action === "enqueued" || res?.pending_post) {
     return { post: null, pendingReview: true };
   }
@@ -2378,6 +2496,7 @@ export async function updateExistingPost(params: {
   categoryId?: number;
   tags?: string[];
 }): Promise<PostItemModel | null> {
+  const topicReferer = { "X-LinDo-Referer": `https://linux.do/t/topic/${params.topicId}` };
   if (params.title && params.topicId) {
     const metaForm: Record<string, string> = {
       title: params.title.trim(),
@@ -2386,11 +2505,19 @@ export async function updateExistingPost(params: {
     (params.tags ?? []).forEach((t, idx) => {
       metaForm[`tags[${idx}]`] = t;
     });
-    await mutateJsonOrThrow(`https://linux.do/t/-/${params.topicId}.json`, "PUT", metaForm);
+    await mutateJsonOrThrow(
+      `https://linux.do/t/-/${params.topicId}.json`,
+      "PUT",
+      metaForm,
+      topicReferer
+    );
   }
-  const res = await mutateJsonOrThrow(`https://linux.do/posts/${params.postId}.json`, "PUT", {
-    "post[raw]": params.raw,
-  });
+  const res = await mutateJsonOrThrow(
+    `https://linux.do/posts/${params.postId}.json`,
+    "PUT",
+    { "post[raw]": params.raw },
+    topicReferer
+  );
   const postObj = res?.post || res;
   return postObj?.id ? parsePostModel(postObj, params.topicId) : null;
 }
