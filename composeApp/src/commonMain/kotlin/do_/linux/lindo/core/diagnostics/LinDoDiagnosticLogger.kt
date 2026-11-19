@@ -51,8 +51,8 @@ data class DiagnosticLogEntry(
  * 3. 本地双文件滚动持久化（上限约 1.5 MB），支持跨重启保留上次崩溃现场，并支持一键导出 `.log` 或在清理缓存时一并清空。
  */
 object LinDoDiagnosticLogger {
-    const val APP_VERSION_NAME: String = "0.2.40"
-    const val APP_BUILD: Int = 74
+    const val APP_VERSION_NAME: String = "0.2.41"
+    const val APP_BUILD: Int = 75
     const val APP_VERSION_DISPLAY: String = "Lindo v$APP_VERSION_NAME · build $APP_BUILD"
 
     private const val MAX_MEMORY_ENTRIES = 320
@@ -255,10 +255,16 @@ object LinDoDiagnosticLogger {
         cfMitigated: String? = null,
         cfRay: String? = null,
         responseSnippet: String? = null,
-        error: Throwable? = null
+        error: Throwable? = null,
+        failureReason: String? = null,
+        diagnosticMeta: String? = null
     ) {
         val safeUrl = sanitizeUrl(url)
-        val statusLabel = if (statusCode > 0) "HTTP $statusCode" else "IO_ERR"
+        val statusLabel = when {
+            statusCode > 0 -> "HTTP $statusCode"
+            !failureReason.isNullOrBlank() -> "IO_ERR(${failureReason.trim()})"
+            else -> "IO_ERR"
+        }
         val cfFlags = buildList {
             if (!cfMitigated.isNullOrBlank()) add("cfMitigated=${cfMitigated.trim()}")
             if (!cfRay.isNullOrBlank()) add("cfRay=${cfRay.trim()}")
@@ -281,6 +287,9 @@ object LinDoDiagnosticLogger {
             append(')')
         }
         val detail = buildString {
+            if (!diagnosticMeta.isNullOrBlank()) {
+                appendLine("diag: ${diagnosticMeta.trim()}")
+            }
             if (error != null) {
                 appendLine("exception: ${error::class.java.name}: ${error.message.orEmpty()}")
             }

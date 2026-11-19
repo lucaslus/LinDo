@@ -1305,7 +1305,7 @@ export const MessagesView: React.FC<{
   const [pmAttempted, setPmAttempted] = useState(false);
   const [pmSending, setPmSending] = useState(false);
   const [pmFeedback, setPmFeedback] = useState<string | null>(null);
-  const [isMsgSelectedOffscreen, setIsMsgSelectedOffscreen] = useState(false);
+  const [msgOffscreenDir, setMsgOffscreenDir] = useState<"above" | "below" | null>(null);
   const msgScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -1406,18 +1406,24 @@ export const MessagesView: React.FC<{
   useEffect(() => {
     const root = msgScrollRef.current;
     if (!root || !selectedTopicId || !msgSelectedInList || loading) {
-      setIsMsgSelectedOffscreen(false);
+      setMsgOffscreenDir(null);
       return;
     }
     const targetEl = root.querySelector<HTMLElement>(`[data-msg-topic-id="${selectedTopicId}"]`);
     if (!targetEl) {
-      setIsMsgSelectedOffscreen(false);
+      setMsgOffscreenDir(null);
       return;
     }
     const observer = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
-        if (entry) setIsMsgSelectedOffscreen(!entry.isIntersecting);
+        if (!entry) return;
+        if (entry.isIntersecting) {
+          setMsgOffscreenDir(null);
+        } else {
+          const rootTop = entry.rootBounds?.top ?? root.getBoundingClientRect().top;
+          setMsgOffscreenDir(entry.boundingClientRect.top < rootTop ? "above" : "below");
+        }
       },
       { root, threshold: 0.15 }
     );
@@ -2071,7 +2077,7 @@ export const MessagesView: React.FC<{
         </div>
       )}
 
-      {msgSelectedInList && isMsgSelectedOffscreen && (
+      {msgSelectedInList && msgOffscreenDir && (
         <button
           type="button"
           onClick={() => {
@@ -2080,22 +2086,33 @@ export const MessagesView: React.FC<{
               ?.querySelector<HTMLElement>(`[data-msg-topic-id="${selectedTopicId}"]`)
               ?.scrollIntoView({ behavior: "smooth", block: "center" });
           }}
-          title="定位到正在阅读的消息"
-          aria-label="定位到正在阅读的消息"
+          title="回到正在阅读的消息"
+          aria-label="回到正在阅读的消息"
           className="lindo-interactive absolute right-3.5 bottom-3.5 z-20 flex h-8 w-8 items-center justify-center rounded-full shadow-lg active:scale-95"
           style={{
             backgroundColor: "var(--subtle-surface)",
-            border: "0.5px solid color-mix(in srgb, var(--brand-gold) 36%, var(--hairline))",
+            border: "0.5px solid var(--hairline)",
             color: "var(--ink-secondary)",
           }}
         >
-          <svg width={15.5} height={15.5} viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="6.8" stroke="currentColor" strokeWidth="1.75" />
-            <line x1="12" y1="2.4" x2="12" y2="5.4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-            <line x1="12" y1="18.6" x2="12" y2="21.6" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-            <line x1="2.4" y1="12" x2="5.4" y2="12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-            <line x1="18.6" y1="12" x2="21.6" y2="12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-            <circle cx="12" cy="12" r="2.3" fill="var(--brand-gold)" />
+          <svg width={15} height={15} viewBox="0 0 24 24" fill="none">
+            {msgOffscreenDir === "above" ? (
+              <path
+                d="M12 18.5V5.5M12 5.5L6.5 11M12 5.5L17.5 11"
+                stroke="currentColor"
+                strokeWidth="1.9"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ) : (
+              <path
+                d="M12 5.5V18.5M12 18.5L6.5 13M12 18.5L17.5 13"
+                stroke="currentColor"
+                strokeWidth="1.9"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
           </svg>
         </button>
       )}

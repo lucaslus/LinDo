@@ -80,7 +80,6 @@ interface FeedTopicRowProps {
   isUnread: boolean;
   currentSort: FeedSort;
   onSelectTopic: (topic: TopicSummary) => void;
-  onSelectTag: (tag: string | null) => void;
 }
 
 const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
@@ -94,7 +93,6 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
     isUnread,
     currentSort,
     onSelectTopic,
-    onSelectTag,
   }) => {
     const catVis = resolveCategoryVisual(topic.categoryName || "", topic.categoryColorHex);
     const authorName = topic.originalPoster.name?.trim() || topic.originalPoster.username;
@@ -125,10 +123,9 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
           style={
             selected
               ? {
-                  backgroundColor: "var(--selected-card-bg)",
-                  boxShadow: locatedFlash
-                    ? "inset 0 0 0 1px var(--brand-gold)"
-                    : "inset 0 0 0 0.5px var(--selected-card-border)",
+                  backgroundColor: locatedFlash
+                    ? "color-mix(in srgb, var(--selected-card-bg) 84%, var(--brand-gold) 16%)"
+                    : "var(--selected-card-bg)",
                 }
               : undefined
           }
@@ -192,15 +189,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
                     />
                   )}
                   {topic.tags.slice(0, 2).map((tg) => (
-                    <LinDoTopicTagChip
-                      key={tg}
-                      tag={tg}
-                      compact
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectTag(tg);
-                      }}
-                    />
+                    <LinDoTopicTagChip key={tg} tag={tg} compact />
                   ))}
                   {topic.tags.length > 2 && (
                     <span className="shrink-0 text-[10.8px] font-medium">
@@ -267,14 +256,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
                     />
                   )}
                   {visibleLooseTags.map((tg) => (
-                    <LinDoTopicTagChip
-                      key={tg}
-                      tag={tg}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectTag(tg);
-                      }}
-                    />
+                    <LinDoTopicTagChip key={tg} tag={tg} />
                   ))}
                   {hiddenLooseTagCount > 0 && (
                     <span
@@ -324,9 +306,10 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
             </div>
           )}
         </div>
-        {!hideBottomDivider && (
-          <div className={isCompact ? "lindo-divider-feed-compact" : "lindo-divider-feed"} />
-        )}
+        <div
+          className={isCompact ? "lindo-divider-feed-compact" : "lindo-divider-feed"}
+          style={{ opacity: hideBottomDivider ? 0 : 1 }}
+        />
       </>
     );
   }
@@ -365,7 +348,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
   const [catDrawerOpen, setCatDrawerOpen] = useState(false);
   const [focusedParentCatId, setFocusedParentCatId] = useState<number | null>(null);
   const [pinnedExpanded, setPinnedExpanded] = useState(false);
-  const [isSelectedOffscreen, setIsSelectedOffscreen] = useState(false);
+  const [selectedOffscreenDir, setSelectedOffscreenDir] = useState<"above" | "below" | null>(null);
   const [locatedFlashId, setLocatedFlashId] = useState<number | null>(null);
   const locateFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -441,7 +424,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
   useEffect(() => {
     const root = scrollRef.current;
     if (!root || !selectedTopicId || !selectedInList || isLoading) {
-      setIsSelectedOffscreen(false);
+      setSelectedOffscreenDir(null);
       return;
     }
     const isCollapsedPinned =
@@ -450,14 +433,18 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
       ? root.querySelector<HTMLElement>('[data-pinned-bar="1"]')
       : root.querySelector<HTMLElement>(`[data-topic-id="${selectedTopicId}"]`);
     if (!targetEl) {
-      setIsSelectedOffscreen(false);
+      setSelectedOffscreenDir(null);
       return;
     }
     const observer = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
-        if (entry) {
-          setIsSelectedOffscreen(!entry.isIntersecting);
+        if (!entry) return;
+        if (entry.isIntersecting) {
+          setSelectedOffscreenDir(null);
+        } else {
+          const rootTop = entry.rootBounds?.top ?? root.getBoundingClientRect().top;
+          setSelectedOffscreenDir(entry.boundingClientRect.top < rootTop ? "above" : "below");
         }
       },
       { root, threshold: 0.15 }
@@ -1117,7 +1104,6 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                     isUnread={isUnread}
                     currentSort={currentSort}
                     onSelectTopic={onSelectTopic}
-                    onSelectTag={onSelectTag}
                   />
                 );
               })}
@@ -1154,27 +1140,38 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
           )}
         </div>
 
-        {/* 右下角轻量「定位到正在阅读的话题」悬浮小按钮（仅当已选帖子滑出视口时自动浮现，滚回后自动消失） */}
-        {selectedInList && isSelectedOffscreen && (
+        {/* 右下角极简方向箭头：回到正在阅读的话题（仅当已选帖子滑出视口时自动浮现） */}
+        {selectedInList && selectedOffscreenDir && (
           <button
             type="button"
             onClick={handleLocateSelectedTopic}
-            title="定位到正在阅读的话题"
-            aria-label="定位到正在阅读的话题"
+            title="回到正在阅读的话题"
+            aria-label="回到正在阅读的话题"
             className="lindo-interactive absolute right-3.5 bottom-3.5 z-20 flex h-8 w-8 items-center justify-center rounded-full shadow-lg active:scale-95"
             style={{
               backgroundColor: "var(--subtle-surface)",
-              border: "0.5px solid color-mix(in srgb, var(--brand-gold) 36%, var(--hairline))",
+              border: "0.5px solid var(--hairline)",
               color: "var(--ink-secondary)",
             }}
           >
-            <svg width={15.5} height={15.5} viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="6.8" stroke="currentColor" strokeWidth="1.75" />
-              <line x1="12" y1="2.4" x2="12" y2="5.4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-              <line x1="12" y1="18.6" x2="12" y2="21.6" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-              <line x1="2.4" y1="12" x2="5.4" y2="12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-              <line x1="18.6" y1="12" x2="21.6" y2="12" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-              <circle cx="12" cy="12" r="2.3" fill="var(--brand-gold)" />
+            <svg width={15} height={15} viewBox="0 0 24 24" fill="none">
+              {selectedOffscreenDir === "above" ? (
+                <path
+                  d="M12 18.5V5.5M12 5.5L6.5 11M12 5.5L17.5 11"
+                  stroke="currentColor"
+                  strokeWidth="1.9"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ) : (
+                <path
+                  d="M12 5.5V18.5M12 18.5L6.5 13M12 18.5L17.5 13"
+                  stroke="currentColor"
+                  strokeWidth="1.9"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              )}
             </svg>
           </button>
         )}

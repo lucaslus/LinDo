@@ -106,4 +106,60 @@ class AndroidNetworkRecoveryTest {
         read.await()
         assertTrue(LinuxDoRepository.isRateLimitedNow())
     }
+
+    @Test fun androidPreSendWriteFailureAutoRetriesOnceAndRecovers(): Unit = runBlocking {
+        val calls = AtomicInteger()
+        UserApiKeyAuthManager.webViewHttpExecutor = { _, _, _, _ ->
+            if (calls.incrementAndGet() == 1) {
+                0 to "[BRIDGE_DIAG:csrf_timeout] phase=csrf_fetch jsMs=4010 err=AbortError: aborted"
+            } else {
+                200 to """{"id":999,"post_number":5,"username":"tester","cooked":"<p>ok</p>","created_at":"2026-11-19T12:00:00Z"}"""
+            }
+        }
+        val submission = LinuxDoRepository.createPost(topicId = 3201681, raw = "hello world")
+        assertTrue(submission is PostSubmission.Published)
+        assertEquals(2, calls.get())
+    }
+
+    @Test fun androidPreSendWriteFailureExhaustedIsDistinguishedFromUnconfirmedPost(): Unit = runBlocking {
+        val preCalls = AtomicInteger()
+        UserApiKeyAuthManager.webViewHttpExecutor = { _, _, _, _ ->
+            preCalls.incrementAndGet()
+            0 to "[BRIDGE_DIAG:csrf_timeout] phase=csrf_fetch jsMs=4010 err=AbortError: aborted"
+        }
+        val preSendErr = assertFailsWith<ApiMutationException> {
+            LinuxDoRepository.createPost(topicId = 3201681, raw = "hello world")
+        }
+        assertEquals(2, preCalls.get())
+        assertTrue(preSendErr.message.orEmpty().contains("尚未发送"))
+
+        val postCalls = AtomicInteger()
+        UserApiKeyAuthManager.webViewHttpExecutor = { _, _, _, _ ->
+            postCalls.incrementAndGet()
+            0 to "[BRIDGE_DIAG:js_timeout] phase=http_fetch jsMs=15010 err=AbortError: aborted"
+        }
+        assertFailsWith<PostSubmissionUnconfirmed> {
+            LinuxDoRepository.createPost(topicId = 3201681, raw = "hello world")
+        }
+        assertEquals(1, postCalls.get(), "Post-send timeout must NEVER auto-retry to prevent duplicate posts")
+    }
+
+    @Test fun androidAppPausedDiagnosticDoesNotAutoRetry() = runBlocking {
+        val calls = AtomicInteger()
+        UserApiKeyAuthManager.webViewHttpExecutor = { _, _, _, _ ->
+            calls.incrementAndGet()
+            0 to "[BRIDGE_DIAG:app_paused] wallAge=1200ms"
+        }
+        LinuxDoRepository.fetchCurrentUserProfile()
+        assertEquals(1, calls.get())
+    }
+
+    @Test fun androidCanaryErrorClassifierNeverRetriesRateLimitOrCloudflare() {
+        assertTrue(do_.linux.lindo.ui.isSafeCanaryRecoverableError("网络连接不稳定，请稍后重试"))
+        assertTrue(do_.linux.lindo.ui.isSafeCanaryRecoverableError("加载失败，请重试"))
+        assertFalse(do_.linux.lindo.ui.isSafeCanaryRecoverableError("请求较频繁，请稍后再试"))
+        assertFalse(do_.linux.lindo.ui.isSafeCanaryRecoverableError("HTTP 429 限流中"))
+        assertFalse(do_.linux.lindo.ui.isSafeCanaryRecoverableError("需要完成站点验证后重试"))
+        assertFalse(do_.linux.lindo.ui.isSafeCanaryRecoverableError("登录状态已过期，请重新登录"))
+    }
 }

@@ -2579,17 +2579,18 @@ object LinuxDoRepository {
         url: String, method: String = "GET", formParams: Map<String, String>? = null,
         extraHeaders: Map<String, String> = emptyMap(), preserveFailure: Boolean = false,
         clientOverride: HttpClient = sharedClient,
-        explicitAuthExchange: Boolean = false
+        explicitAuthExchange: Boolean = false,
+        onPreSendFailure: ((String) -> Unit)? = null
     ): Pair<Int, String>? = AccountSessionGate.read {
         if (!NetworkRecoveryPolicy.enabled || method.uppercase() !in setOf("GET", "HEAD")) {
-            return@read executeHttpUncoalesced(url, method, formParams, extraHeaders, preserveFailure, clientOverride, explicitAuthExchange)
+            return@read executeHttpUncoalesced(url, method, formParams, extraHeaders, preserveFailure, clientOverride, explicitAuthExchange, onPreSendFailure)
         }
         val key = "${UserApiKeyAuthManager.sessionGeneration}|$method|$url|${extraHeaders.toSortedMap()}|${System.identityHashCode(clientOverride)}"
         val generation = UserApiKeyAuthManager.sessionGeneration
         NetworkRecoveryPolicy.shareRead(key) {
             readRateLimitRecovery.read(foreground = extraHeaders["Discourse-Background"] != "true") {
                 if (generation != UserApiKeyAuthManager.sessionGeneration) throw CancellationException("Session changed while waiting")
-                executeHttpUncoalesced(url, method, formParams, extraHeaders, true, clientOverride)
+                executeHttpUncoalesced(url, method, formParams, extraHeaders, true, clientOverride, onPreSendFailure = onPreSendFailure)
             }?.takeIf { preserveFailure || isSuccessfulApiResponse(it.first, it.second) }
         }
     }
@@ -2601,7 +2602,8 @@ object LinuxDoRepository {
         extraHeaders: Map<String, String> = emptyMap(),
         preserveFailure: Boolean = false,
         clientOverride: HttpClient = sharedClient,
-        explicitAuthExchange: Boolean = false
+        explicitAuthExchange: Boolean = false,
+        onPreSendFailure: ((String) -> Unit)? = null
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
         // A fresh user-authorized OTP gets one attempt; all other traffic remains paused.
         // The rate-limit gate below still applies, and an actual challenge re-arms the pause.
@@ -2655,14 +2657,49 @@ object LinuxDoRepository {
             if (UserApiKeyAuthManager.requireBrowserTransportOnly && UserApiKeyAuthManager.webViewHttpExecutor == null) {
                 return@withContext null
             }
+            var lastWebViewDiagReason: String? = null
             suspend fun callWebView(overrideHeaders: Map<String, String> = mergedHeaders): Pair<Int, String>? {
                 val executor = UserApiKeyAuthManager.webViewHttpExecutor ?: return null
                 val startMs = System.currentTimeMillis()
+                lastWebViewDiagReason = null
                 return try {
-                    val result = executor(url, method, formParams, overrideHeaders)?.takeIf { it.first != 0 }
+                    val rawResult = executor(url, method, formParams, overrideHeaders)
+                    val result = rawResult?.takeIf { it.first != 0 }
                     val elapsedMs = System.currentTimeMillis() - startMs
+                    var diagReason: String? = null
+                    var diagMeta: String? = null
+                    val zeroBody = if (rawResult != null && rawResult.first == 0) rawResult.second else null
+                    if (!zeroBody.isNullOrBlank() && zeroBody.startsWith("[BRIDGE_DIAG:")) {
+                        val closeIdx = zeroBody.indexOf(']')
+                        if (closeIdx > 13) {
+                            diagReason = zeroBody.substring(13, closeIdx).trim().takeIf { it.isNotEmpty() }
+                            diagMeta = zeroBody.substring(closeIdx + 1).trim().takeIf { it.isNotEmpty() }
+                        } else {
+                            diagMeta = zeroBody
+                        }
+                    }
+                    lastWebViewDiagReason = diagReason
+                    if (result == null && diagReason != null && diagReason in setOf(
+                            "csrf_timeout",
+                            "csrf_net_err",
+                            "csrf_failed",
+                            "webview_not_ready",
+                            "webview_not_ready_pre",
+                            "webview_null",
+                            "webview_null_pre",
+                            "rebuild_aborted",
+                            "app_paused"
+                        )
+                    ) {
+                        onPreSendFailure?.invoke(diagReason)
+                    }
                     if (!isSilentTiming && (result == null || !isExpectedResponse(result.first, result.second))) {
                         val cfFlag = if (result != null && looksLikeCloudflareChallenge(result.second)) "challenge" else null
+                        val cleanSnippet = when {
+                            result != null -> result.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)
+                            zeroBody != null && !zeroBody.startsWith("[BRIDGE_DIAG:") -> zeroBody
+                            else -> null
+                        }
                         LinDoDiagnosticLogger.recordHttpFailure(
                             method = method,
                             url = url,
@@ -2670,7 +2707,9 @@ object LinuxDoRepository {
                             transport = "WebView",
                             elapsedMs = elapsedMs,
                             cfMitigated = cfFlag,
-                            responseSnippet = result?.second?.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)
+                            responseSnippet = cleanSnippet,
+                            failureReason = diagReason,
+                            diagnosticMeta = diagMeta
                         )
                     }
                     result
@@ -2747,7 +2786,8 @@ object LinuxDoRepository {
                     if (candidate != null) {
                         firstBrowserResult = candidate
                     }
-                    val retryable = candidate == null || (
+                    val retryable = (candidate == null && lastWebViewDiagReason != "app_paused") || (
+                        candidate != null &&
                         candidate.first in setOf(429, 502, 503, 504) &&
                             !looksLikeCloudflareChallenge(candidate.second)
                     )
@@ -3887,15 +3927,44 @@ object LinuxDoRepository {
         val extraHeaders = params["topic_id"]?.toIntOrNull()?.takeIf { it > 0 }?.let { tid ->
             mapOf("Referer" to "https://linux.do/t/$tid")
         }.orEmpty()
-        val response = executeHttp(
-            url = "https://linux.do/posts.json",
-            method = "POST",
-            formParams = form,
-            extraHeaders = extraHeaders,
-            preserveFailure = true
-        ) ?: throw PostSubmissionUnconfirmed()
+        var preSendFailureTag: String? = null
+        suspend fun attemptSubmit(): Pair<Int, String>? {
+            preSendFailureTag = null
+            return executeHttp(
+                url = "https://linux.do/posts.json",
+                method = "POST",
+                formParams = form,
+                extraHeaders = extraHeaders,
+                preserveFailure = true,
+                onPreSendFailure = { preSendFailureTag = it }
+            )
+        }
+        var response = attemptSubmit()
+        if (response == null &&
+            preSendFailureTag != null &&
+            preSendFailureTag != "app_paused" &&
+            !isRateLimitedNow() &&
+            !shouldPauseForSiteVerification("https://linux.do/posts.json")
+        ) {
+            // 100% 确认 POST 尚未离机（仅在 CSRF 预取或 WebView 就绪/轮换阶段中断），安全退避静默重试 1 次
+            kotlinx.coroutines.delay(1_200L)
+            try {
+                UserApiKeyAuthManager.onPrepareManualRecovery?.invoke()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+            }
+            if (!isRateLimitedNow() && !shouldPauseForSiteVerification("https://linux.do/posts.json")) {
+                response = attemptSubmit()
+            }
+        }
+        val finalResponse = response ?: if (preSendFailureTag != null) {
+            throw ApiMutationException("网络超时，内容尚未发送（草稿已保留），请直接重试")
+        } else {
+            throw PostSubmissionUnconfirmed()
+        }
         val result = try {
-            requireMutationObject(response)
+            requireMutationObject(finalResponse)
         } catch (error: ApiReadException) {
             if (error.kind in setOf(
                     ApiFailureKind.Verification,
@@ -3906,7 +3975,7 @@ object LinuxDoRepository {
             ) {
                 throw error
             }
-            if (response.first in 200..299 || response.first in 500..599 || response.first == 408) {
+            if (finalResponse.first in 200..299 || finalResponse.first in 500..599 || finalResponse.first == 408) {
                 throw PostSubmissionUnconfirmed()
             }
             throw error

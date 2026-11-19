@@ -3,7 +3,7 @@
 @theme {
   --font-sans: "PingFang SC", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Hiragino Sans GB", "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  --font-weight-semibold: 600;
+  --font-weight-semibold: 500;
   --font-weight-bold: 600;
   --font-weight-extrabold: 600;
 }
@@ -54,6 +54,7 @@
 
 html[data-platform="windows"] {
   --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-weight-semibold: 600;
   --font-weight-bold: 700;
   --font-weight-extrabold: 700;
 }
@@ -68,7 +69,8 @@ body,
   background-color: var(--canvas);
   color: var(--ink-primary);
   font-family: var(--font-sans);
-  -webkit-font-smoothing: auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: auto;
   font-synthesis: style;
   font-synthesis-weight: none;
@@ -246,7 +248,7 @@ html.lindo-theme-switching *::after {
   background-clip: text;
   color: transparent !important;
   -webkit-text-fill-color: transparent;
-  font-weight: 600 !important;
+  font-weight: var(--font-weight-semibold) !important;
   animation: lindo-holo-text 12s ease-in-out infinite;
 }
 
@@ -421,11 +423,15 @@ html.lindo-scrolling .lindo-interactive:hover:not(:active) {
 .lindo-cooked h2,
 .lindo-cooked h3,
 .lindo-cooked h4 {
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   letter-spacing: -0.01em;
   color: var(--ink-primary);
   margin: 1.15em 0 0.45em;
   line-height: 1.38;
+}
+.lindo-cooked strong,
+.lindo-cooked b {
+  font-weight: var(--font-weight-semibold);
 }
 .lindo-cooked h1 { font-size: 1.36em; }
 .lindo-cooked h2 { font-size: 1.22em; }
@@ -533,7 +539,7 @@ html.lindo-scrolling .lindo-interactive:hover:not(:active) {
   align-items: center;
   gap: 6px;
   font-size: 0.86em;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   color: var(--ink-primary);
   margin-bottom: 0.35em;
 }
@@ -578,7 +584,7 @@ html.lindo-scrolling .lindo-interactive:hover:not(:active) {
 }
 .lindo-cooked th {
   background: var(--subtle-surface);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   color: var(--ink-primary);
 }
 
@@ -591,7 +597,7 @@ html.lindo-scrolling .lindo-interactive:hover:not(:active) {
 }
 .lindo-cooked details > summary {
   cursor: pointer;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   color: var(--ink-primary);
   user-select: none;
 }

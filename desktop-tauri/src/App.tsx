@@ -34,6 +34,7 @@ import {
   logoutAccount,
   markManualRetryIntent,
   openInAppForumPanel,
+  putCachedTopicDetail,
   recordLocalTopicVisit,
   recordReadFloorInRust,
   refreshCurrentUserSession,
@@ -79,6 +80,50 @@ const DEFAULT_PREFS: UserPreferences = {
   enableAnimations: true,
 };
 
+function mergePostPreservingBadges(
+  existing: PostItemModel | undefined,
+  next: PostItemModel
+): PostItemModel {
+  if (!existing) return next;
+  return {
+    ...next,
+    authorBadges:
+      next.authorBadges && next.authorBadges.length > 0
+        ? next.authorBadges
+        : existing.authorBadges,
+    badgesGranted:
+      next.badgesGranted && next.badgesGranted.length > 0
+        ? next.badgesGranted
+        : existing.badgesGranted,
+  };
+}
+
+function mergeTopicDetailInPlace(
+  prev: TopicDetailModel | null,
+  fresh: TopicDetailModel,
+  onlyOp: boolean
+): TopicDetailModel {
+  if (!prev || prev.id !== fresh.id || onlyOp) return fresh;
+  const validStreamSet = fresh.streamIds.length > 0 ? new Set(fresh.streamIds) : null;
+  const map = new Map<number, PostItemModel>();
+  for (const existing of prev.posts) {
+    if (!validStreamSet || validStreamSet.has(existing.id)) {
+      map.set(existing.id, existing);
+    }
+  }
+  for (const incoming of fresh.posts) {
+    map.set(incoming.id, mergePostPreservingBadges(map.get(incoming.id), incoming));
+  }
+  const merged: TopicDetailModel = {
+    ...fresh,
+    posts: Array.from(map.values()).sort((a, b) => a.postNumber - b.postNumber),
+  };
+  if (merged.posts[0]?.postNumber === 1) {
+    putCachedTopicDetail(merged);
+  }
+  return merged;
+}
+
 export const App: React.FC = () => {
   const [bootstrapped, setBootstrapped] = useState(false);
   const [platform, setPlatform] = useState<"macos" | "windows" | "linux">("macos");
@@ -118,6 +163,8 @@ export const App: React.FC = () => {
   // Home topic reader state
   const [activeSummary, setActiveSummary] = useState<TopicSummary | null>(null);
   const [activeDetail, setActiveDetail] = useState<TopicDetailModel | null>(null);
+  const activeDetailRef = useRef<TopicDetailModel | null>(null);
+  activeDetailRef.current = activeDetail;
   const [readerLoading, setReaderLoading] = useState(false);
   const [readerError, setReaderError] = useState<string | null>(null);
   const [targetFloor, setTargetFloor] = useState<number | null>(null);
@@ -127,6 +174,8 @@ export const App: React.FC = () => {
   // Messages split-pane reader state (independent from Home reader!)
   const [msgSummary, setMsgSummary] = useState<TopicSummary | null>(null);
   const [msgDetail, setMsgDetail] = useState<TopicDetailModel | null>(null);
+  const msgDetailRef = useRef<TopicDetailModel | null>(null);
+  msgDetailRef.current = msgDetail;
   const [msgReaderLoading, setMsgReaderLoading] = useState(false);
   const [msgReaderError, setMsgReaderError] = useState<string | null>(null);
   const [msgTargetFloor, setMsgTargetFloor] = useState<number | null>(null);
@@ -323,12 +372,14 @@ export const App: React.FC = () => {
         floor?: number | null;
         onlyOp?: boolean;
         forceRefresh?: boolean;
+        inPlace?: boolean;
         trackVisit?: boolean;
         bypassGuard?: boolean;
       }
-    ) => {
+    ): Promise<{ addedReplies?: number; error?: string } | void> => {
       if (
         !opts?.forceRefresh &&
+        !opts?.inPlace &&
         opts?.floor == null &&
         opts?.onlyOp == null &&
         isWideLayout &&
@@ -361,31 +412,42 @@ export const App: React.FC = () => {
       const seq = ++topicReqSeqRef.current;
       const nextOnlyOp = opts?.onlyOp ?? false;
       const desiredFloor = opts?.floor ?? null;
-      const shouldTrack = opts?.trackVisit !== false;
+      const curDetail = activeDetailRef.current;
+      const isInPlace = Boolean(
+        opts?.inPlace &&
+        curDetail &&
+        curDetail.id === topic.id &&
+        curDetail.posts.length > 0
+      );
+      const prevPostsCount = curDetail?.postsCount ?? topic.postsCount ?? 0;
+      const shouldTrack = isInPlace ? false : opts?.trackVisit !== false;
       const canHitCache =
         !opts?.forceRefresh &&
+        !isInPlace &&
         !nextOnlyOp &&
         (!desiredFloor || desiredFloor <= 1);
       const instantCached = canHitCache ? getCachedTopicDetail(topic.id) : null;
 
-      setActiveSummary(topic);
-      setOnlyOpFilter(nextOnlyOp);
-      setTargetFloor(desiredFloor);
-      setNarrowShowingReader(true);
-      setReaderError(null);
-      if (shouldTrack) {
-        recordLocalTopicVisit({
-          topicId: topic.id,
-          title: topic.title,
-          categoryId: topic.categoryId,
-          categoryName: topic.categoryName,
-          categoryColorHex: topic.categoryColorHex,
-          authorUsername: topic.originalPoster.username,
-          authorName: topic.originalPoster.name,
-          authorAvatar: topic.originalPoster.avatarTemplate,
-          replyCount: topic.replyCount,
-          views: topic.views,
-        });
+      if (!isInPlace) {
+        setActiveSummary(topic);
+        setOnlyOpFilter(nextOnlyOp);
+        setTargetFloor(desiredFloor);
+        setNarrowShowingReader(true);
+        setReaderError(null);
+        if (shouldTrack) {
+          recordLocalTopicVisit({
+            topicId: topic.id,
+            title: topic.title,
+            categoryId: topic.categoryId,
+            categoryName: topic.categoryName,
+            categoryColorHex: topic.categoryColorHex,
+            authorUsername: topic.originalPoster.username,
+            authorName: topic.originalPoster.name,
+            authorAvatar: topic.originalPoster.avatarTemplate,
+            replyCount: topic.replyCount,
+            views: topic.views,
+          });
+        }
       }
 
       if (instantCached) {
@@ -395,7 +457,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (opts?.forceRefresh || activeDetail?.id !== topic.id) {
+      if (!isInPlace && (opts?.forceRefresh || activeDetail?.id !== topic.id)) {
         setActiveDetail(null);
       }
       setReaderLoading(true);
@@ -405,16 +467,21 @@ export const App: React.FC = () => {
       lastTopicClickMsRef.current = nowClickMs;
 
       try {
-        if (!opts?.forceRefresh && prevClickMs > 0 && nowClickMs - prevClickMs < 750) {
+        if (!opts?.forceRefresh && !isInPlace && prevClickMs > 0 && nowClickMs - prevClickMs < 750) {
           // Rapid topic skimming protection: wait 165ms; if user clicked another topic, abort BEFORE firing any network call!
           await new Promise((r) => setTimeout(r, 165));
           if (seq !== topicReqSeqRef.current) return;
         }
+        const fetchTargetFloor = isInPlace
+          ? desiredFloor && desiredFloor > 12 && !nextOnlyOp
+            ? desiredFloor
+            : null
+          : desiredFloor;
         const detail = await fetchTopicDetail(topic.id, {
-          targetPostNumber: desiredFloor,
+          targetPostNumber: fetchTargetFloor,
           onlyOpUsername: nextOnlyOp ? topic.originalPoster.username : null,
           trackVisit: shouldTrack,
-          forceRefresh: opts?.forceRefresh,
+          forceRefresh: opts?.forceRefresh || isInPlace,
         });
         if (seq !== topicReqSeqRef.current) return;
         const opPost = detail.posts.find((p) => p.postNumber === 1) ?? detail.posts[0];
@@ -432,11 +499,33 @@ export const App: React.FC = () => {
             views: detail.views,
           });
         }
+        if (isInPlace) {
+          setReaderError(null);
+          setActiveDetail((prev) => mergeTopicDetailInPlace(prev, detail, nextOnlyOp));
+          setTopics((prev) =>
+            prev.map((t) =>
+              t.id === detail.id
+                ? {
+                    ...t,
+                    postsCount: detail.postsCount,
+                    replyCount: Math.max(0, detail.postsCount - 1),
+                    views: Math.max(t.views, detail.views),
+                    likeCount: Math.max(t.likeCount, detail.likeCount),
+                  }
+                : t
+            )
+          );
+          return { addedReplies: Math.max(0, detail.postsCount - prevPostsCount) };
+        }
         setActiveDetail(detail);
         setTargetJumpNonce((n) => n + 1);
       } catch (err: any) {
         if (seq !== topicReqSeqRef.current) return;
-        setReaderError(err?.message || "帖子加载失败，请重试");
+        const msg = err?.message || (isInPlace ? "刷新失败，请稍后重试" : "帖子加载失败，请重试");
+        if (isInPlace) {
+          return { error: msg };
+        }
+        setReaderError(msg);
       } finally {
         if (seq === topicReqSeqRef.current) {
           setReaderLoading(false);
@@ -453,11 +542,13 @@ export const App: React.FC = () => {
         floor?: number | null;
         onlyOp?: boolean;
         forceRefresh?: boolean;
+        inPlace?: boolean;
         bypassGuard?: boolean;
       }
-    ) => {
+    ): Promise<{ addedReplies?: number; error?: string } | void> => {
       if (
         !opts?.forceRefresh &&
+        !opts?.inPlace &&
         opts?.floor == null &&
         opts?.onlyOp == null &&
         isWideLayout &&
@@ -490,55 +581,82 @@ export const App: React.FC = () => {
       const seq = ++msgReqSeqRef.current;
       const nextOnlyOp = opts?.onlyOp ?? false;
       const desiredFloor = opts?.floor ?? null;
-      setMsgSummary(topic);
-      setMsgOnlyOp(nextOnlyOp);
-      setMsgTargetFloor(desiredFloor);
-      setNarrowShowingReader(true);
-      setMsgReaderError(null);
-      recordLocalTopicVisit({
-        topicId: topic.id,
-        title: topic.title,
-        categoryId: topic.categoryId,
-        categoryName: topic.categoryName,
-        categoryColorHex: topic.categoryColorHex,
-        authorUsername: topic.originalPoster.username,
-        authorName: topic.originalPoster.name,
-        authorAvatar: topic.originalPoster.avatarTemplate,
-        replyCount: topic.replyCount,
-        views: topic.views,
-      });
+      const curMsgDetail = msgDetailRef.current;
+      const isInPlace = Boolean(
+        opts?.inPlace &&
+        curMsgDetail &&
+        curMsgDetail.id === topic.id &&
+        curMsgDetail.posts.length > 0
+      );
+      const prevPostsCount = curMsgDetail?.postsCount ?? topic.postsCount ?? 0;
 
-      if (opts?.forceRefresh || msgDetail?.id !== topic.id) {
+      if (!isInPlace) {
+        setMsgSummary(topic);
+        setMsgOnlyOp(nextOnlyOp);
+        setMsgTargetFloor(desiredFloor);
+        setNarrowShowingReader(true);
+        setMsgReaderError(null);
+        recordLocalTopicVisit({
+          topicId: topic.id,
+          title: topic.title,
+          categoryId: topic.categoryId,
+          categoryName: topic.categoryName,
+          categoryColorHex: topic.categoryColorHex,
+          authorUsername: topic.originalPoster.username,
+          authorName: topic.originalPoster.name,
+          authorAvatar: topic.originalPoster.avatarTemplate,
+          replyCount: topic.replyCount,
+          views: topic.views,
+        });
+      }
+
+      if (!isInPlace && (opts?.forceRefresh || msgDetail?.id !== topic.id)) {
         setMsgDetail(null);
       }
       setMsgReaderLoading(true);
 
       try {
+        const fetchTargetFloor = isInPlace
+          ? desiredFloor && desiredFloor > 12 && !nextOnlyOp
+            ? desiredFloor
+            : null
+          : desiredFloor;
         const detail = await fetchTopicDetail(topic.id, {
-          targetPostNumber: desiredFloor,
+          targetPostNumber: fetchTargetFloor,
           onlyOpUsername: nextOnlyOp ? topic.originalPoster.username : null,
-          trackVisit: true,
-          forceRefresh: opts?.forceRefresh,
+          trackVisit: !isInPlace,
+          forceRefresh: opts?.forceRefresh || isInPlace,
         });
         if (seq !== msgReqSeqRef.current) return;
         const opPost = detail.posts.find((p) => p.postNumber === 1) ?? detail.posts[0];
-        recordLocalTopicVisit({
-          topicId: detail.id,
-          title: detail.title,
-          categoryId: detail.categoryId,
-          categoryName: detail.categoryName,
-          categoryColorHex: detail.categoryColorHex,
-          authorUsername: detail.opUsername || opPost?.username,
-          authorName: opPost?.displayName,
-          authorAvatar: opPost?.avatarTemplate,
-          replyCount: Math.max(0, detail.postsCount - 1),
-          views: detail.views,
-        });
+        if (!isInPlace) {
+          recordLocalTopicVisit({
+            topicId: detail.id,
+            title: detail.title,
+            categoryId: detail.categoryId,
+            categoryName: detail.categoryName,
+            categoryColorHex: detail.categoryColorHex,
+            authorUsername: detail.opUsername || opPost?.username,
+            authorName: opPost?.displayName,
+            authorAvatar: opPost?.avatarTemplate,
+            replyCount: Math.max(0, detail.postsCount - 1),
+            views: detail.views,
+          });
+        }
+        if (isInPlace) {
+          setMsgReaderError(null);
+          setMsgDetail((prev) => mergeTopicDetailInPlace(prev, detail, nextOnlyOp));
+          return { addedReplies: Math.max(0, detail.postsCount - prevPostsCount) };
+        }
         setMsgDetail(detail);
         setMsgJumpNonce((n) => n + 1);
       } catch (err: any) {
         if (seq !== msgReqSeqRef.current) return;
-        setMsgReaderError(err?.message || "消息内容加载失败，请重试");
+        const msg = err?.message || (isInPlace ? "刷新失败，请稍后重试" : "消息内容加载失败，请重试");
+        if (isInPlace) {
+          return { error: msg };
+        }
+        setMsgReaderError(msg);
       } finally {
         if (seq === msgReqSeqRef.current) {
           setMsgReaderLoading(false);
@@ -1354,21 +1472,6 @@ export const App: React.FC = () => {
   const activeRightNonce = currentTab === "MESSAGES" ? msgJumpNonce : targetJumpNonce;
   const activeRightOnlyOp = currentTab === "MESSAGES" ? msgOnlyOp : onlyOpFilter;
 
-  const mergePostPreservingBadges = (existing: PostItemModel | undefined, next: PostItemModel): PostItemModel => {
-    if (!existing) return next;
-    return {
-      ...next,
-      authorBadges:
-        next.authorBadges && next.authorBadges.length > 0
-          ? next.authorBadges
-          : existing.authorBadges,
-      badgesGranted:
-        next.badgesGranted && next.badgesGranted.length > 0
-          ? next.badgesGranted
-          : existing.badgesGranted,
-    };
-  };
-
   const appendPostsToActiveReader = (
     incoming: PostItemModel[],
     position: "before" | "after" | "replace"
@@ -1847,19 +1950,22 @@ export const App: React.FC = () => {
                           : "选择左侧话题开始阅读"
                       }
                       onBack={() => {}}
-                      onRefresh={() => {
+                      onRefresh={(opts) => {
                         markManualRetryIntent();
+                        const useInPlace = opts?.inPlace ?? true;
                         if (currentTab === "MESSAGES" && msgSummary) {
-                          openMessageTopic(msgSummary, {
-                            floor: msgTargetFloor,
+                          return openMessageTopic(msgSummary, {
+                            floor: opts?.currentFloor ?? msgTargetFloor,
                             onlyOp: msgOnlyOp,
                             forceRefresh: true,
+                            inPlace: useInPlace,
                           });
                         } else if (activeSummary) {
-                          openTopic(activeSummary, {
-                            floor: targetFloor,
+                          return openTopic(activeSummary, {
+                            floor: opts?.currentFloor ?? targetFloor,
                             onlyOp: onlyOpFilter,
                             forceRefresh: true,
+                            inPlace: useInPlace,
                           });
                         }
                       }}
@@ -1950,12 +2056,13 @@ export const App: React.FC = () => {
                 )}
                 showBackButton={true}
                 onBack={() => setNarrowShowingReader(false)}
-                onRefresh={() => {
+                onRefresh={(opts) => {
                   markManualRetryIntent();
-                  openTopic(activeSummary, {
-                    floor: targetFloor,
+                  return openTopic(activeSummary, {
+                    floor: opts?.currentFloor ?? targetFloor,
                     onlyOp: onlyOpFilter,
                     forceRefresh: true,
+                    inPlace: opts?.inPlace ?? true,
                   });
                 }}
                 onToggleOnlyOp={() =>

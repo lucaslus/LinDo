@@ -139,7 +139,23 @@ private fun parseCleanDiagnosticSummary(entry: DiagnosticLogEntry): ParsedDiagno
         } else {
             rawPath
         }
-        val status = match.groupValues[3].trim().replace("IO_ERR", "连接中断")
+        val rawStatus = match.groupValues[3].trim()
+        val status = when {
+            rawStatus == "IO_ERR(js_timeout)" -> "请求超时"
+            rawStatus == "IO_ERR(csrf_timeout)" -> "CSRF 获取超时"
+            rawStatus == "IO_ERR(csrf_net_err)" -> "CSRF 网络异常"
+            rawStatus == "IO_ERR(csrf_failed)" -> "CSRF 获取失败"
+            rawStatus == "IO_ERR(js_fetch_err)" -> "网络请求失败"
+            rawStatus == "IO_ERR(kotlin_timeout)" -> "桥接无响应超时"
+            rawStatus == "IO_ERR(rebuild_aborted)" -> "WebView 重建中断"
+            rawStatus == "IO_ERR(webview_not_ready)" || rawStatus == "IO_ERR(webview_not_ready_pre)" -> "WebView 初始化超时"
+            rawStatus == "IO_ERR(webview_null)" || rawStatus == "IO_ERR(webview_null_pre)" -> "WebView 未就绪"
+            rawStatus == "IO_ERR(kotlin_cancelled)" -> "请求已取消"
+            rawStatus == "IO_ERR(app_paused)" -> "切后台取消"
+            rawStatus == "IO_ERR(stale_after_pause)" -> "切回前台已清理超时请求"
+            rawStatus.startsWith("IO_ERR(") -> "连接中断 " + rawStatus.removePrefix("IO_ERR")
+            else -> rawStatus.replace("IO_ERR", "连接中断")
+        }
         val flags = match.groupValues[4]
         val rawMs = match.groupValues[5].removeSuffix("ms").toLongOrNull()
         val latency = when {

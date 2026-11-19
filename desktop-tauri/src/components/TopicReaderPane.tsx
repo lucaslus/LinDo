@@ -79,7 +79,10 @@ interface TopicReaderPaneProps {
   hideQuickReplyBar?: boolean;
   emptyPlaceholderText?: string;
   onBack: () => void;
-  onRefresh: () => void;
+  onRefresh: (opts?: {
+    currentFloor?: number;
+    inPlace?: boolean;
+  }) => Promise<{ addedReplies?: number; error?: string } | void> | void;
   onToggleOnlyOp: () => void;
   onAppendPosts: (posts: PostItemModel[], position: "before" | "after" | "replace") => void;
   onRemovePost?: (postId: number) => void;
@@ -598,6 +601,8 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     setLoadingParentFloors(new Set());
     setExpandedParentPreviewIds(new Set());
     setReturnFloor(null);
+    visibleFloorRef.current = 1;
+    setCurrentVisibleFloor(1);
     attemptedParentFloorsRef.current = new Set();
     locallyViewedRef.current = new Set();
     setLocallyViewedFloors(new Set());
@@ -655,6 +660,14 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       setCurrentVisibleFloor(initialFloor);
     }
   }, [detail?.id, targetFloor, targetJumpNonce]);
+
+  // Keep imperative 144Hz floor badge text strictly synchronized with topic switches, jumps & refreshes
+  useLayoutEffect(() => {
+    if (!floorBadgeTextRef.current) return;
+    const total = Math.max(detail?.postsCount ?? summary?.postsCount ?? 1, 1);
+    const cur = Math.min(Math.max(1, visibleFloorRef.current || currentVisibleFloor || 1), total);
+    floorBadgeTextRef.current.textContent = `${cur} / ${total} 楼`;
+  }, [currentVisibleFloor, detail?.postsCount, summary?.postsCount, detail?.id, summary?.id]);
 
   // 144Hz zero-jank scroll tracking: ZERO React re-renders during active scrolling (updates floor badge via direct DOM ref, settles React state & unread dwell only on scroll idle!)
   useEffect(() => {
@@ -1236,6 +1249,31 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
           <button
             type="button"
+            disabled={isLoading}
+            onClick={async () => {
+              const res = await onRefresh({
+                currentFloor: visibleFloorRef.current,
+                inPlace: true,
+              });
+              if (res && typeof res === "object") {
+                if (res.error) {
+                  setToastMsg(res.error);
+                } else if (res.addedReplies && res.addedReplies > 0) {
+                  setToastMsg(`已更新，新增 ${res.addedReplies} 条回复`);
+                }
+              }
+            }}
+            title="刷新当前话题"
+            className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full disabled:opacity-70"
+            style={{
+              color: isLoading ? "var(--brand-gold)" : "var(--ink-secondary)",
+            }}
+          >
+            <SmoothRefreshIcon spinning={isLoading} size={16.5} />
+          </button>
+
+          <button
+            type="button"
             onClick={async () => {
               if (!isAuthorized) {
                 onRequestGuestLogin("登录后收藏话题", "收藏后可在「我的 · 收藏」随时回看");
@@ -1507,19 +1545,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           >
             <LinDoIcons.ExternalLink size={14} />
             <span>浏览器打开</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setMoreMenuOpen(false);
-              onRefresh();
-            }}
-            className="lindo-interactive flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1"
-            style={{ color: "var(--ink-primary)" }}
-          >
-            <SmoothRefreshIcon spinning={isLoading} size={14} />
-            <span>刷新</span>
           </button>
         </div>
       )}
@@ -3362,12 +3387,12 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         </div>
       )}
 
-      {/* 底部渐隐悬浮快捷回复栏 + 楼层进度导航器（去掉生硬横穿顶线，与侧栏收折耳扣像素级水平平行） */}
+      {/* 底部渐隐悬浮快捷回复栏 + 楼层进度导航器（与 900px 正文版心同宽居中对齐） */}
       <div
         className={
           hideQuickReplyBar
-            ? "pointer-events-none absolute inset-x-0 bottom-2.5 z-20 flex items-center justify-end px-6"
-            : "pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-center justify-between gap-3 px-6 py-2.5"
+            ? "pointer-events-none absolute inset-x-0 bottom-2.5 z-20"
+            : "pointer-events-none absolute inset-x-0 bottom-0 z-20 py-2.5"
         }
         style={
           hideQuickReplyBar
@@ -3378,6 +3403,13 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               }
         }
       >
+        <div
+          className={
+            hideQuickReplyBar
+              ? "mx-auto flex w-full max-w-[900px] items-center justify-end px-5"
+              : "mx-auto flex w-full max-w-[900px] items-center justify-between gap-3 px-5"
+          }
+        >
         {!hideQuickReplyBar && (
           <button
             type="button"
@@ -3393,7 +3425,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 topicTitle: detail?.title || summary.title,
               });
             }}
-            className="pointer-events-auto flex h-[34px] max-w-[340px] flex-1 items-center gap-2 rounded-full px-4 text-[13px] transition-colors cursor-pointer disabled:opacity-55"
+            className="pointer-events-auto flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-full px-4 text-[13px] transition-colors cursor-pointer disabled:opacity-55"
             style={{
               backgroundColor: "var(--subtle-surface)",
               border: "0.5px solid var(--hairline)",
@@ -3401,12 +3433,12 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             }}
           >
             {detail?.closed ? <LinDoIcons.Lock size={14} /> : <LinDoIcons.Edit size={14} />}
-            <span>{detail?.closed ? "话题已关闭回复" : "回复话题"}</span>
+            <span className="truncate">{detail?.closed ? "话题已关闭回复" : "回复话题"}</span>
           </button>
         )}
 
         {/* 楼层导航胶囊 + 跨楼层跳转一键返回原楼胶囊 */}
-        <div className="pointer-events-auto relative flex items-center gap-2">
+        <div className="pointer-events-auto relative flex shrink-0 items-center gap-2">
           {returnFloor !== null && returnFloor !== currentVisibleFloor && (
             <button
               type="button"
@@ -3437,9 +3469,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               color: "var(--ink-secondary)",
             }}
           >
-            <span ref={floorBadgeTextRef}>
-              {currentVisibleFloor} / {totalFloors} 楼
-            </span>
+            <span ref={floorBadgeTextRef} />
             <LinDoIcons.ChevronUp size={12} />
           </button>
 
@@ -3523,6 +3553,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               </div>
             </div>
           )}
+        </div>
         </div>
       </div>
 

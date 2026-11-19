@@ -212,12 +212,14 @@ import do_.linux.lindo.core.network.FollowUserEntry
 import do_.linux.lindo.core.network.LinuxDoCategoryMeta
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.MentionCandidate
+import do_.linux.lindo.core.network.NetworkRecoveryPolicy
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UploadedMediaResult
 import do_.linux.lindo.core.network.UserAccountPreferencesSnapshot
 import do_.linux.lindo.core.network.SavedAccounts
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.compose.*
+import do_.linux.lindo.core.diagnostics.DiagnosticCategory
 import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
 import do_.linux.lindo.core.badge.UniversalBadgeEngine
 import do_.linux.lindo.core.render.postPreviewText
@@ -244,6 +246,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -2528,42 +2531,152 @@ internal fun LinDoApp(
 
     LaunchedEffect(networkRestoreVersion) {
         if (networkRestoreVersion == 0) return@LaunchedEffect
-        val shouldRetryLoadMore = loadMoreError && isTransientRecoverableLoadError(loadMoreErrorMessage)
-        if (shouldRetryLoadMore) {
-            loadMoreError = false
-            loadMoreErrorMessage = LinDoCommonCopy.NETWORK_ERROR.text
-        }
-        val hasRecoverableFeedError = (isAuthorized || isGuestMode) && !isLoadingTopics && isTransientRecoverableLoadError(feedError)
-        if (hasRecoverableFeedError) {
-            if (topics.isEmpty()) {
-                loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
-            } else {
-                feedError = null
-                loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
-            }
-        } else if (shouldRetryLoadMore &&
-            (isAuthorized || isGuestMode) &&
-            !isLoadingTopics &&
-            !isLoadingMoreTopics &&
-            topics.isNotEmpty()
+        if (LinuxDoRepository.isRateLimitedNow() ||
+            LinuxDoRepository.isChallengeCooldownActive() ||
+            NetworkRecoveryPolicy.verifying
         ) {
-            loadNextPageTopics(forcePrepareRecovery = true)
+            return@LaunchedEffect
         }
-        if (isAuthorized) {
-            syncUnreadNotificationsNow(background = true, force = true)
-        }
-        if (isAuthorized && fullUserProfile == null) {
-            syncUserProfile(force = true)
-        }
+        val shouldRetryLoadMore = loadMoreError && isSafeCanaryRecoverableError(loadMoreErrorMessage)
+        val hasRecoverableFeedError = (isAuthorized || isGuestMode) && !isLoadingTopics && isSafeCanaryRecoverableError(feedError)
         val currentSummary = activeTopicSummary
         val currentDetailErr = activeTopicDetail?.loadError
-        if ((isAuthorized || isGuestMode) &&
+        val hasRecoverableDetailError = (isAuthorized || isGuestMode) &&
+            (mobileShowingDetail || isWideLayout) &&
             currentSummary != null &&
             !isLoadingDetail &&
             activeTopicDetail?.posts.isNullOrEmpty() &&
-            isTransientRecoverableLoadError(currentDetailErr)
+            isSafeCanaryRecoverableError(currentDetailErr)
+
+        // 错峰恢复：先只恢复用户当前眼睛正在看的 1 个主视图，彻底避免切网瞬间齐射 4~6 个请求触发 Cloudflare 429 限流
+        when {
+            hasRecoverableDetailError -> {
+                currentSummary?.let { openTopic(it, activeTargetPostNumber, isManualRetry = true) }
+            }
+            hasRecoverableFeedError -> {
+                if (topics.isNotEmpty()) feedError = null
+                loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+            }
+            shouldRetryLoadMore && (isAuthorized || isGuestMode) && !isLoadingTopics && !isLoadingMoreTopics && topics.isNotEmpty() -> {
+                loadMoreError = false
+                loadMoreErrorMessage = LinDoCommonCopy.NETWORK_ERROR.text
+                loadNextPageTopics(forcePrepareRecovery = true)
+            }
+        }
+
+        // 次要后台同步延后 1.8s 错峰执行，且遇限流/验证自动让路
+        kotlinx.coroutines.delay(1_800L)
+        if (LinuxDoRepository.isRateLimitedNow() ||
+            LinuxDoRepository.isChallengeCooldownActive() ||
+            NetworkRecoveryPolicy.verifying
         ) {
-            openTopic(currentSummary, activeTargetPostNumber, isManualRetry = true)
+            return@LaunchedEffect
+        }
+        if (isAuthorized && feedError == null) {
+            syncUnreadNotificationsNow(background = true, force = true)
+        }
+        if (isAuthorized && fullUserProfile == null) {
+            kotlinx.coroutines.delay(600L)
+            if (!LinuxDoRepository.isRateLimitedNow() && !LinuxDoRepository.isChallengeCooldownActive()) {
+                syncUserProfile(force = true)
+            }
+        }
+    }
+
+    // 全局单飞防限流「金丝雀后台自愈器」：
+    // 当 VPN 内部切节点或瞬时丢包导致前台列表/翻页/帖子停在瞬时网络错（严格排除 429 限流、CF 挑战、权限错与已发写请求）时，
+    // 仅在前台可见且无冷却状态下按 4s -> 8s -> 16s 温和退避最多探测 3 次（每次只发 1 个主请求），遇限流/验证立刻熔断停手。
+    val canaryNeedsDetail = (isAuthorized || isGuestMode) &&
+        (mobileShowingDetail || isWideLayout) &&
+        activeTopicSummary != null &&
+        activeTopicDetail?.posts.isNullOrEmpty() &&
+        isSafeCanaryRecoverableError(activeTopicDetail?.loadError)
+    val canaryNeedsFeed = (isAuthorized || isGuestMode) &&
+        currentTab == MainTab.HOME &&
+        isSafeCanaryRecoverableError(feedError)
+    val canaryNeedsLoadMore = (isAuthorized || isGuestMode) &&
+        currentTab == MainTab.HOME &&
+        loadMoreError &&
+        topics.isNotEmpty() &&
+        isSafeCanaryRecoverableError(loadMoreErrorMessage)
+    LaunchedEffect(
+        canaryNeedsDetail,
+        canaryNeedsFeed,
+        canaryNeedsLoadMore,
+        activeTopicSummary?.id,
+        currentTab
+    ) {
+        if (!canaryNeedsDetail && !canaryNeedsFeed && !canaryNeedsLoadMore) return@LaunchedEffect
+        val backoffDelays = listOf(4_000L, 8_000L, 16_000L)
+        for ((idx, waitMs) in backoffDelays.withIndex()) {
+            kotlinx.coroutines.delay(waitMs)
+            // 等待当前正在进行的加载结束，防止重叠并发
+            androidx.compose.runtime.snapshotFlow {
+                !isLoadingTopics && !isLoadingMoreTopics && !isLoadingDetail
+            }.first { it }
+            if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) break
+            if (activeWebLoginUrl != null || showSiteVerifySheet) break
+            if (LinuxDoRepository.isRateLimitedNow() ||
+                LinuxDoRepository.isChallengeCooldownActive() ||
+                NetworkRecoveryPolicy.verifying
+            ) {
+                break
+            }
+            val detailSummary = activeTopicSummary
+            val retryDetailNow = (mobileShowingDetail || isWideLayout) &&
+                detailSummary != null &&
+                activeTopicDetail?.posts.isNullOrEmpty() &&
+                isSafeCanaryRecoverableError(activeTopicDetail?.loadError)
+            val retryFeedNow = currentTab == MainTab.HOME && isSafeCanaryRecoverableError(feedError)
+            val retryLoadMoreNow = currentTab == MainTab.HOME &&
+                loadMoreError &&
+                topics.isNotEmpty() &&
+                isSafeCanaryRecoverableError(loadMoreErrorMessage)
+            if (!retryDetailNow && !retryFeedNow && !retryLoadMoreNow) break
+
+            val targetLabel = when {
+                retryDetailNow -> "topic#${detailSummary?.id}"
+                retryFeedNow -> "feed"
+                else -> "feed_page_${currentPage + 1}"
+            }
+            LinDoDiagnosticLogger.info(
+                DiagnosticCategory.NETWORK,
+                "RecoveryCanary",
+                "Single-flight auto-recovery probe ($targetLabel, attempt=${idx + 1}/${backoffDelays.size})"
+            )
+            when {
+                retryDetailNow -> {
+                    detailSummary?.let { openTopic(it, activeTargetPostNumber, isManualRetry = true) }
+                }
+                retryFeedNow -> {
+                    if (topics.isNotEmpty()) feedError = null
+                    loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod, isManualRefresh = true)
+                }
+                retryLoadMoreNow -> {
+                    loadMoreError = false
+                    loadMoreErrorMessage = LinDoCommonCopy.NETWORK_ERROR.text
+                    loadNextPageTopics(forcePrepareRecovery = true)
+                }
+            }
+            // 等待本次探针结束再决定是否继续退避
+            kotlinx.coroutines.delay(350L)
+            androidx.compose.runtime.snapshotFlow {
+                !isLoadingTopics && !isLoadingMoreTopics && !isLoadingDetail
+            }.first { it }
+            val stillBroken = ((mobileShowingDetail || isWideLayout) &&
+                activeTopicSummary != null &&
+                activeTopicDetail?.posts.isNullOrEmpty() &&
+                isSafeCanaryRecoverableError(activeTopicDetail?.loadError)) ||
+                (currentTab == MainTab.HOME && isSafeCanaryRecoverableError(feedError)) ||
+                (currentTab == MainTab.HOME && loadMoreError && isSafeCanaryRecoverableError(loadMoreErrorMessage))
+            if (!stillBroken) {
+                LinDoDiagnosticLogger.info(
+                    DiagnosticCategory.NETWORK,
+                    "RecoveryCanary",
+                    "Auto-recovery succeeded ($targetLabel, attempt=${idx + 1})"
+                )
+                break
+            }
         }
     }
 
@@ -4914,6 +5027,15 @@ internal fun isTransientRecoverableLoadError(err: String?): Boolean {
     return UiErrorKind.classify(err, isAuthorized = true) == UiErrorKind.TRANSIENT_RECOVERABLE
 }
 
+internal fun isRateLimitErrorMessage(err: String?): Boolean {
+    val clean = err?.trim().orEmpty()
+    return clean.contains("频繁") || clean.contains("429") || clean.contains("限流")
+}
+
+internal fun isSafeCanaryRecoverableError(err: String?): Boolean {
+    return isTransientRecoverableLoadError(err) && !isRateLimitErrorMessage(err) && !err.isSiteVerificationError()
+}
+
 internal fun clampSplitPaneFraction(raw: Float): Float {
     if (raw.isNaN() || raw.isInfinite()) return DEFAULT_SPLIT_PANE_FRACTION
     return raw.coerceIn(MIN_SPLIT_PANE_FRACTION, MAX_SPLIT_PANE_FRACTION)
@@ -6597,16 +6719,26 @@ internal fun CommunityHomeFeedPane(
                         if (errorMessage != null && !isLoading) {
                             item(key = "feed_inline_error_banner", contentType = "error_banner") {
                                 val inlineSiteVerify = errorMessage.isSiteVerificationError()
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(palette.cardSurface)
-                                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                                ) {
-                                    LinDoLoadFailure(
-                                        message = errorMessage,
-                                        onRetry = if (inlineSiteVerify) ({ onOpenWebUrl("https://linux.do/") }) else onRefresh
+                                if (inlineSiteVerify) {
+                                    VerificationInlineStatus(
+                                        onVerify = { onOpenWebUrl("https://linux.do/challenge#lindo-verify") },
+                                        forSubmission = false,
+                                        modifier = Modifier
+                                            .background(palette.cardSurface)
+                                            .padding(horizontal = 16.dp)
                                     )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(palette.cardSurface)
+                                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                                    ) {
+                                        LinDoLoadFailure(
+                                            message = errorMessage,
+                                            onRetry = onRefresh
+                                        )
+                                    }
                                 }
                                 HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                             }
@@ -8347,6 +8479,142 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
+    val readerDensity = LocalDensity.current
+    var isInPlaceRefreshing by remember(summary.id) { mutableStateOf(false) }
+    var readerRefreshNotice by remember(summary.id) { mutableStateOf<String?>(null) }
+    var readerNeedsSiteVerify by remember(summary.id) { mutableStateOf(false) }
+    LaunchedEffect(siteVerifyVer) {
+        if (siteVerifyVer > 0 && readerNeedsSiteVerify) {
+            readerNeedsSiteVerify = false
+        }
+    }
+    LaunchedEffect(readerRefreshNotice) {
+        if (readerRefreshNotice != null) {
+            delay(2200L)
+            readerRefreshNotice = null
+        }
+    }
+    fun refreshTopicInPlace(fromPull: Boolean = false) {
+        if (isInPlaceRefreshing || isLoading || changingReaderFilter || fetchingJumpWindow) return
+        val current = latestDetail
+        if (current == null || current.posts.isEmpty()) {
+            onRefresh()
+            return
+        }
+        isInPlaceRefreshing = true
+        readerRefreshNotice = null
+        readerNeedsSiteVerify = false
+        val curFloor = visibleFloorState.value
+        val fetchTarget = if (!fromPull && !onlyOpFilter && curFloor > 12) curFloor else null
+        val prevPostsCount = current.postsCount
+        scope.launch {
+            try {
+                LinuxDoRepository.prepareForManualRecovery()
+                val fresh = LinuxDoRepository.fetchTopicDetail(
+                    topicId = summary.id,
+                    summaryFallback = summary,
+                    trackVisit = false,
+                    filterUsername = effectiveOpUsername.takeIf { onlyOpFilter },
+                    targetPostNumber = fetchTarget
+                )
+                if (fresh.unavailable) {
+                    onUnavailable()
+                } else if (fresh.loadError != null) {
+                    if (fresh.loadError.isSiteVerificationError()) {
+                        readerNeedsSiteVerify = true
+                    } else {
+                        readerRefreshNotice = fresh.loadError
+                    }
+                } else {
+                    val basePosts = if (onlyOpFilter) {
+                        emptyList()
+                    } else if (fresh.streamIds.isNotEmpty()) {
+                        val validIds = fresh.streamIds.toSet()
+                        current.posts.filter { it.id in validIds }
+                    } else {
+                        current.posts
+                    }
+                    val mergedPosts = mergeTopicPosts(basePosts, fresh.posts)
+                    onDetailUpdated(fresh.copy(posts = mergedPosts))
+                    val added = (fresh.postsCount - prevPostsCount).coerceAtLeast(0)
+                    if (added > 0) {
+                        readerRefreshNotice = "已更新，新增 $added 条回复"
+                    } else if (fromPull) {
+                        readerRefreshNotice = LinDoFeedCopy.PULL_UP_TO_DATE.text
+                    }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                readerRefreshNotice = error.message ?: "刷新失败，请稍后重试"
+            } finally {
+                isInPlaceRefreshing = false
+            }
+        }
+    }
+    val readerRefreshAction by rememberUpdatedState(::refreshTopicInPlace)
+    var readerPullDownPx by remember(summary.id) { mutableStateOf(0f) }
+    val readerPullDeadZonePx = with(readerDensity) { 28.dp.toPx() }
+    val readerPullThresholdPx = with(readerDensity) { 88.dp.toPx() }
+    val readerMaxPullPx = with(readerDensity) { 140.dp.toPx() }
+    val canReaderPullRefresh by rememberUpdatedState(
+        !isLoading && !isInPlaceRefreshing && !changingReaderFilter && !fetchingJumpWindow && previousPostIds.isEmpty()
+    )
+    val readerPostsEmpty by rememberUpdatedState(posts.isEmpty())
+    LaunchedEffect(readerListState, isLoading, isInPlaceRefreshing, readerPullThresholdPx) {
+        androidx.compose.runtime.snapshotFlow { readerListState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling && !isLoading && !isInPlaceRefreshing && readerPullDownPx > 0f) {
+                val shouldRefresh = readerPullDownPx >= readerPullThresholdPx && canReaderPullRefresh
+                readerPullDownPx = 0f
+                if (shouldRefresh) readerRefreshAction(true)
+            }
+        }
+    }
+    val readerPullNestedScroll = remember(readerListState, readerPullThresholdPx, readerMaxPullPx) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (readerPullDownPx > 0f && available.y < 0f) {
+                    val consumed = maxOf(available.y, -readerPullDownPx)
+                    readerPullDownPx = (readerPullDownPx + consumed).coerceAtLeast(0f)
+                    return Offset(0f, consumed)
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource
+            ): Offset {
+                val atTop = readerPostsEmpty || (
+                    readerListState.firstVisibleItemIndex == 0 &&
+                        readerListState.firstVisibleItemScrollOffset == 0
+                )
+                if (source == NestedScrollSource.UserInput &&
+                    available.y > 0f &&
+                    consumed.y == 0f &&
+                    canReaderPullRefresh &&
+                    atTop
+                ) {
+                    readerPullDownPx = (readerPullDownPx + available.y * 0.45f).coerceAtMost(readerMaxPullPx)
+                    return Offset(0f, available.y)
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (readerPullDownPx >= readerPullThresholdPx && canReaderPullRefresh) {
+                    readerPullDownPx = 0f
+                    readerRefreshAction(true)
+                } else {
+                    readerPullDownPx = 0f
+                }
+                return Velocity.Zero
+            }
+        }
+    }
+    val isReaderRefreshing = isInPlaceRefreshing || isLoading
+
     val isTopicImeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -8405,6 +8673,38 @@ internal fun CommunityTopicReaderPane(
             }
 
             Spacer(modifier = Modifier.width(6.dp))
+
+            // 顶栏常驻原地刷新按钮（看长帖时无需滑回 1 楼即可刷新新评论与助力）
+            val refreshSpinAngle = if (isReaderRefreshing) {
+                val spinTransition = rememberInfiniteTransition(label = "reader_refresh_spin")
+                val angle by spinTransition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 360f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 850, easing = LinearEasing)
+                    ),
+                    label = "reader_refresh_angle"
+                )
+                angle
+            } else 0f
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .clickable(enabled = !isReaderRefreshing) { refreshTopicInPlace(fromPull = false) },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.Refresh,
+                    contentDescription = LinDoCommonCopy.REFRESH.text,
+                    modifier = Modifier
+                        .size(18.5.dp)
+                        .graphicsLayer { rotationZ = refreshSpinAngle },
+                    tint = if (isReaderRefreshing) palette.brandGold else palette.inkSecondary
+                )
+            }
+
+            Spacer(modifier = Modifier.width(2.dp))
 
             // 收藏书签图标（与左侧返回及标题首行严格顶部对齐）
             TonalCircleIconButton(
@@ -8555,32 +8855,21 @@ internal fun CommunityTopicReaderPane(
                         color = palette.inkPrimary
                     )
                 }
-
-                Row(
-                    modifier = moreActionChipMod.clickable {
-                        showTopMoreMenu = false
-                        onRefresh()
-                    }.padding(horizontal = 5.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = LinDoIcons.Refresh,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                        tint = palette.inkSecondary
-                    )
-                    Text(
-                        text = LinDoCommonCopy.REFRESH.text,
-                        fontSize = 12.2.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.inkPrimary
-                    )
-                }
             }
         }
 
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+
+        if (readerNeedsSiteVerify) {
+            VerificationInlineStatus(
+                onVerify = { onOpenWebUrl("https://linux.do/t/topic/${summary.id}#lindo-verify") },
+                forSubmission = false,
+                modifier = Modifier
+                    .background(palette.cardSurface)
+                    .padding(horizontal = 16.dp)
+            )
+            HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        }
 
         if (!showRemoveBookmark) bookmarkError?.let { LinDoFeedbackRow(it, LinDoMascotState.NetworkError) }
         navigationError?.let { message ->
@@ -8589,12 +8878,18 @@ internal fun CommunityTopicReaderPane(
             }
         }
         filterError?.let { message -> LinDoLoadFailure(message, ::toggleOnlyOpMode) }
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(palette.cardSurface)
+                .nestedScroll(readerPullNestedScroll)
+        ) {
         CompositionLocalProvider(LocalLinDoListScrolling provides readerListState.isScrollInProgress) {
         LazyColumn(
             state = readerListState,
             modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
+                .fillMaxSize()
                 .background(palette.cardSurface),
             contentPadding = PaddingValues(bottom = 24.dp)
         ) {
@@ -8946,6 +9241,75 @@ internal fun CommunityTopicReaderPane(
                         doneText = LinDoReaderCopy.TOPIC_END_REACHED.text,
                         onLoadMore = { loadMoreFloorBatch(20, isManualRetry = true) }
                     )
+                }
+            }
+        }
+        }
+
+        // 首楼顶部下拉刷新指示胶囊 & 原地刷新轻提示胶囊（Overlay 悬浮，零闪屏不挤推正文）
+        val readerPullStage by remember(readerPullDeadZonePx, readerPullThresholdPx) {
+            derivedStateOf {
+                when {
+                    readerPullDownPx >= readerPullThresholdPx -> PullRefreshStage.READY
+                    readerPullDownPx > readerPullDeadZonePx -> PullRefreshStage.PULLING
+                    else -> PullRefreshStage.IDLE
+                }
+            }
+        }
+        val showReaderPullOverlay = readerPullStage != PullRefreshStage.IDLE || isInPlaceRefreshing
+        val activeNotice = readerRefreshNotice
+        if (showReaderPullOverlay || activeNotice != null) {
+            val ready = readerPullStage == PullRefreshStage.READY
+            val mascotState = when {
+                isInPlaceRefreshing || showReaderPullOverlay -> LinDoMascotState.Refreshing
+                else -> LinDoMascotState.End
+            }
+            val pillText = when {
+                isInPlaceRefreshing -> LinDoFeedCopy.PULL_REFRESHING.text
+                showReaderPullOverlay && ready -> LinDoFeedCopy.PULL_RELEASE_TO_REFRESH.text
+                showReaderPullOverlay -> LinDoFeedCopy.PULL_DOWN_TO_REFRESH.text
+                else -> activeNotice.orEmpty()
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 8.dp, start = 12.dp, end = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    modifier = Modifier
+                        .height(36.dp)
+                        .shadow(
+                            elevation = if (palette.isDark) 6.dp else 3.dp,
+                            shape = CircleShape,
+                            clip = false,
+                            ambientColor = Color.Black.copy(alpha = 0.28f),
+                            spotColor = Color.Black.copy(alpha = 0.40f)
+                        )
+                        .background(palette.cardSurface.copy(alpha = 0.96f), CircleShape)
+                        .border(0.6.dp, palette.hairline, CircleShape)
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    LinDoMascot(
+                        state = mascotState,
+                        compact = true,
+                        size = 20.dp,
+                        animate = isInPlaceRefreshing || showReaderPullOverlay,
+                        useIconArtwork = true
+                    )
+                    Text(
+                        text = pillText,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.inkPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (isInPlaceRefreshing) {
+                        LinDoWaveDots(color = palette.inkSecondary, dotSize = 3.5.dp)
+                    }
                 }
             }
         }
