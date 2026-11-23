@@ -54,6 +54,8 @@ class ComposerFormValidationTest {
         CookieSentinel.clearAll()
         LocalComposerDrafts.clearAll()
         LinuxDoRepository.clearAllLocalCaches()
+        LinuxDoRepository.clearChallengeCooldown()
+        LinuxDoRepository.clearTransientRateLimit()
     }
 
     private fun <T> onEdt(block: () -> T): T {
@@ -109,6 +111,12 @@ class ComposerFormValidationTest {
         }
 
         // 3. Clicking 发布 triggers form-style inline validation highlights on the incomplete fields/chips
+        waitUntil(timeoutMillis = 3_000L) {
+            runCatching {
+                onEdt { onNodeWithText("发布").assertIsEnabled() }
+                true
+            }.getOrDefault(false)
+        }
         onEdt {
             onNodeWithText("发布").performClick()
         }

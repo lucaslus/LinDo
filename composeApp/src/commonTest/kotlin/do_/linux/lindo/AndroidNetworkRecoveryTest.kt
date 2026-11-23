@@ -11,6 +11,8 @@ class AndroidNetworkRecoveryTest {
         DesktopNetworkPolicy.enabled = false
         NetworkRecoveryPolicy.androidEnabled = true
         UserApiKeyAuthManager.requireBrowserTransportOnly = true
+        NetworkRecoveryPolicy.reads.clear()
+        NetworkPolicyEngine.resetForTesting()
         LinuxDoRepository.clearTransientRateLimit()
         LinuxDoRepository.clearChallengeCooldown()
     }
@@ -20,6 +22,8 @@ class AndroidNetworkRecoveryTest {
         NetworkRecoveryPolicy.androidEnabled = false
         UserApiKeyAuthManager.requireBrowserTransportOnly = false
         UserApiKeyAuthManager.webViewHttpExecutor = null
+        NetworkRecoveryPolicy.reads.clear()
+        NetworkPolicyEngine.resetForTesting()
         LinuxDoRepository.clearTransientRateLimit()
         LinuxDoRepository.clearChallengeCooldown()
     }

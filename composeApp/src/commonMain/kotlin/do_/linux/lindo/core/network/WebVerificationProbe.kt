@@ -8,28 +8,32 @@ package do_.linux.lindo.core.network
 internal fun webVerificationProbeScript(): String = """
 (function() {
     function result(value) { return JSON.stringify(value); }
-    if (location.origin !== 'https://linux.do' || document.readyState === 'loading') {
+    if (location.origin !== 'https://linux.do' || typeof document === 'undefined' || !document) {
         return result({waiting:true});
     }
+    var pathname = location.pathname || '/';
     var title = (document.title || '').trim();
     var bodyText = (document.body && document.body.innerText) || '';
     var lowerHtml = (((document.documentElement && document.documentElement.innerHTML) || '') + ' ' + title).toLowerCase();
-    var isOrigin404 = !!document.querySelector('.page-not-found,.discourse-no-results,#main-outlet .not-found-container') ||
-        lowerHtml.indexOf('page-not-found') !== -1 ||
+    var isOrigin404Body = lowerHtml.indexOf('page-not-found') !== -1 ||
         lowerHtml.indexOf('"errortype":"notfound"') !== -1 ||
         lowerHtml.indexOf('404-body') !== -1 ||
         /exist or is private|page you requested|该页面不存在|页面不存在或为私密/i.test(bodyText);
-    if (!isOrigin404) {
-        var hasWidget = !!document.querySelector('#challenge-stage,.cf-turnstile,#turnstile-wrapper,iframe[src*="challenges.cloudflare.com"]');
-        if (hasWidget) {
-            return result({challenge:true, widget:true});
-        }
-        if (/^(Just a moment|请稍候|Attention Required|Security Check)/i.test(title)) {
-            return result({challenge:true});
-        }
-        if (document.querySelector('#challenge-running,#challenge-form')) {
-            return result({challenge:true});
-        }
+    var hasWidget = !!document.querySelector('#challenge-stage,.cf-turnstile,#turnstile-wrapper,iframe[src*="challenges.cloudflare.com"]');
+    var hasChallenge = hasWidget ||
+        /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(title) ||
+        !!document.querySelector('#challenge-running,#challenge-form');
+    if (hasChallenge && !isOrigin404Body) {
+        return result(hasWidget ? {challenge:true, widget:true} : {challenge:true});
+    }
+    var isCfErrorPage = /^(Something went wrong|Access denied)/i.test(title) ||
+        /error code:\s*1034\b/i.test(bodyText);
+    if (isCfErrorPage && !isOrigin404Body) {
+        return result({ cfErrorPage: true });
+    }
+    var isOrigin404 = isOrigin404Body || !!document.querySelector('.page-not-found,.discourse-no-results,#main-outlet .not-found-container');
+    if (document.readyState === 'loading') {
+        return result({waiting:true});
     }
     var isDiscourseOops = /discussion forum encountered an unexpected problem/i.test(bodyText);
     if (isDiscourseOops && document.readyState === 'complete' && !window.__lindoOopsRetried) {
@@ -78,7 +82,6 @@ internal fun webVerificationProbeScript(): String = """
             return result({ ok: true, csrf: csrfVal, user: parsePreloadedUser(preload) });
         }
     } catch (_) {}
-    var pathname = location.pathname || '/';
     if (isOrigin404 || (pathname.indexOf('/challenge') === 0 && document.readyState === 'complete' && metaCsrf)) {
         return result({ ok: true, originReached: true, csrf: csrfVal, user: readBootedDiscourseUser() });
     }

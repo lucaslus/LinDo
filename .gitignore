@@ -28,6 +28,9 @@ desktop-tauri/dist-release/
 desktop-tauri/src-tauri/target/
 desktop-tauri/src-tauri/gen/
 
+# Native ECH Rust gateway build artifacts
+/native-ech/target/
+
 # Official website (Next.js / Nextra) build artifacts
 website/node_modules/
 website/.next/

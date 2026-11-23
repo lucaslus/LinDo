@@ -28,7 +28,11 @@ internal fun createOtpExchangeClient(engine: HttpClientEngine = OkHttp.create {
     }
 }): HttpClient = HttpClient(engine) { followRedirects = false }
 
-internal suspend fun exchangeOtpSessionCookies(otp: String, client: HttpClient): Boolean {
+internal suspend fun exchangeOtpSessionCookies(
+    otp: String,
+    client: HttpClient,
+    onOtpRejected: (() -> Unit)? = null
+): Boolean {
     fun saveCookies(values: List<String>?) {
         values.orEmpty().forEach { cookie ->
             CookieSentinel.ingestSetCookieHeader(cookie, domain = "linux.do")
@@ -72,5 +76,9 @@ internal suspend fun exchangeOtpSessionCookies(otp: String, client: HttpClient):
     val challenge = looksLikeCloudflareChallenge(body) ||
         response.headers["cf-mitigated"].equals("challenge", ignoreCase = true)
     report("redeem", response.status.value, challenge)
+    if (!challenge && LinuxDoRepository.isOtpRejectedByDiscourse(response.status.value, body)) {
+        onOtpRejected?.invoke()
+        return false
+    }
     return response.status.value in 200..399 && !challenge
 }

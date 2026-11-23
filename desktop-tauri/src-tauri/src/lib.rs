@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod crypto_rsa;
+pub mod ech_desktop;
 pub mod legacy;
 pub mod net_policy;
 #[cfg(not(target_os = "macos"))]
@@ -107,6 +108,11 @@ pub struct BootstrapPayload {
     pub is_authorized: bool,
     pub state: PersistedState,
     pub platform: String,
+}
+
+#[tauri::command]
+fn set_app_cursor(pointer: bool) {
+    bridge::set_app_cursor(pointer);
 }
 
 #[tauri::command]
@@ -351,10 +357,19 @@ async fn save_preferences(
     preferences: UserPreferences,
 ) -> Result<(), String> {
     let appearance = preferences.appearance.clone();
-    {
+    let next_ech_mode = preferences.ech_routing_mode.clone();
+    let ech_changed = {
         let mut st = engine.state.lock().unwrap();
+        let changed = st.preferences.ech_routing_mode != next_ech_mode;
         st.preferences = preferences;
         save_state(&st);
+        changed
+    };
+    if ech_changed {
+        engine.on_ech_mode_switched(&app).await;
+    } else {
+        let snap = ech_desktop::refresh_status_snapshot(&next_ech_mode);
+        ech_desktop::notify_ui_ech_updated(&app, &snap);
     }
     if let Some(w) = app.get_webview_window("main") {
         let theme_opt = match appearance.as_str() {
@@ -865,6 +880,17 @@ async fn get_diag_runtime_snapshot(
 }
 
 #[tauri::command]
+async fn get_ech_status(
+    engine: State<'_, Arc<BridgeEngine>>,
+) -> Result<ech_desktop::EchDesktopSnapshot, String> {
+    let mode_pref = {
+        let st = engine.state.lock().unwrap();
+        st.preferences.ech_routing_mode.clone()
+    };
+    Ok(ech_desktop::refresh_status_snapshot(&mode_pref))
+}
+
+#[tauri::command]
 async fn export_diagnostic_log(file_name: String, content: String) -> Result<String, String> {
     let safe_name: String = file_name
         .chars()
@@ -1283,6 +1309,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            set_app_cursor,
             bootstrap_state,
             site_request,
             site_upload,
@@ -1309,6 +1336,7 @@ pub fn run() {
             check_app_update,
             download_and_install_update,
             get_diag_runtime_snapshot,
+            get_ech_status,
             export_diagnostic_log
         ]);
 

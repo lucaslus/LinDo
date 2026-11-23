@@ -338,6 +338,57 @@ data class BoostInputStats(
     }
 }
 
+@Immutable
+@Serializable
+data class PostLinkCountItem(
+    val url: String,
+    val title: String = "",
+    val clicks: Int = 0,
+    val internal: Boolean = false,
+    val reflection: Boolean = false
+)
+
+@Immutable
+@Serializable
+data class PostRevisionDetail(
+    val postId: Int,
+    val currentRevision: Int,
+    val previousRevision: Int? = null,
+    val nextRevision: Int? = null,
+    val versionCount: Int = 1,
+    val username: String = "",
+    val displayName: String? = null,
+    val avatarTemplate: String = "",
+    val createdAtText: String = "",
+    val editReason: String? = null,
+    val bodyChangesHtml: String? = null,
+    val titleChangesHtml: String? = null
+)
+
+@Immutable
+@Serializable
+data class ReactionUserEntry(
+    val username: String,
+    val displayName: String? = null,
+    val avatarTemplate: String = ""
+)
+
+@Immutable
+@Serializable
+data class ReactionUserGroup(
+    val id: String,
+    val count: Int,
+    val users: List<ReactionUserEntry> = emptyList()
+)
+
+@Immutable
+@Serializable
+data class PollVoterEntry(
+    val username: String,
+    val displayName: String? = null,
+    val avatarTemplate: String = ""
+)
+
 /**
  * 话题详情中的单层楼 (Post)
  */
@@ -387,7 +438,15 @@ data class PostItemModel(
     val canEdit: Boolean = true,
     val canDelete: Boolean = false,
     val raw: String? = null,
-    val topicId: Int = 0
+    val topicId: Int = 0,
+    val version: Int = 1,
+    val updatedAtIso: String? = null,
+    val editReason: String? = null,
+    val canViewEditHistory: Boolean = false,
+    val linkCounts: List<PostLinkCountItem> = emptyList(),
+    val bookmarkId: Int? = null,
+    val bookmarkName: String? = null,
+    val bookmarkReminderAt: String? = null
 )
 
 /**
@@ -418,7 +477,13 @@ data class TopicDetailModel(
     val closed: Boolean = false,
     val archived: Boolean = false,
     val canEditTopic: Boolean = false,
-    val categoryId: Int = 4
+    val categoryId: Int = 4,
+    val hasSummary: Boolean = false,
+    val archetype: String = "regular",
+    val suggestedTopics: List<TopicSummary> = emptyList(),
+    val allowedUsers: List<TopicUser> = emptyList(),
+    val canInviteTo: Boolean = false,
+    val canRemoveAllowedUsers: Boolean = false
 )
 
 /**
@@ -558,14 +623,32 @@ data class CommunitySearchResult(
 
 typealias SearchHitItem = CommunitySearchResult
 
+@Immutable
+@Serializable
+data class CommunitySearchUserHit(
+    val username: String,
+    val name: String? = null,
+    val avatarTemplate: String = "",
+    val trustLevel: Int = 1
+)
+
+@Immutable
+@Serializable
+data class CommunitySearchTagHit(
+    val name: String,
+    val topicCount: Int = 0
+)
+
 /**
- * 全站搜索分页结果（携带 Discourse `grouped_search_result.more_full_page_results` 权威分页标记）
+ * 全站搜索分页结果（携带 Discourse `grouped_search_result.more_full_page_results` 权威分页标记，以及匹配用户与标签）
  */
 @Immutable
 @Serializable
 data class SearchPageResult(
     val items: List<CommunitySearchResult>,
-    val hasMore: Boolean
+    val hasMore: Boolean,
+    val users: List<CommunitySearchUserHit> = emptyList(),
+    val tags: List<CommunitySearchTagHit> = emptyList()
 )
 
 /**

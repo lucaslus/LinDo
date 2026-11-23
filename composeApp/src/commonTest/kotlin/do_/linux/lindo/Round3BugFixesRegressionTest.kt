@@ -1562,7 +1562,7 @@ class Round3BugFixesRegressionTest {
                 null
             }
             val resp = LinuxDoRepository.imageHttpClient.get(
-                "https://linux.do/images/emoji/twitter/rocket.png?v=12&_r=12345"
+                "https://linux.do/uploads/default/original/1X/bridge_isolation_test.png?_r=12345"
             )
             // Must immediately return synthetic 504 from interceptor rather than dialing linux.do with OkHttp Java TLS + Chrome UA
             assertEquals(504, resp.status.value)

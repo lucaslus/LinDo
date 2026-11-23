@@ -1,6 +1,182 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <Security/Security.h>
+#import <Network/Network.h>
+#import <CFNetwork/CFNetwork.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+
+extern int lindo_ech_verify_leaf_der(const uint8_t *der_ptr, size_t der_len, const char *host_utf8);
+
+static void lindoHandleWebKitAuthChallenge(
+    NSURLAuthenticationChallenge *challenge,
+    void (^completionHandler)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable)
+) {
+    if (![challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+        return;
+    }
+    SecTrustRef trust = challenge.protectionSpace.serverTrust;
+    NSString *host = challenge.protectionSpace.host ?: @"";
+    if (!trust || !host.length) {
+        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+        return;
+    }
+    CFDataRef leafDer = NULL;
+    if (@available(macOS 12.0, *)) {
+        CFArrayRef chain = SecTrustCopyCertificateChain(trust);
+        if (chain) {
+            if (CFArrayGetCount(chain) > 0) {
+                SecCertificateRef leaf = (SecCertificateRef)CFArrayGetValueAtIndex(chain, 0);
+                if (leaf) {
+                    leafDer = SecCertificateCopyData(leaf);
+                }
+            }
+            CFRelease(chain);
+        }
+    }
+    if (!leafDer) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if (SecTrustGetCertificateCount(trust) > 0) {
+            SecCertificateRef leaf = SecTrustGetCertificateAtIndex(trust, 0);
+            if (leaf) {
+                leafDer = SecCertificateCopyData(leaf);
+            }
+        }
+        #pragma clang diagnostic pop
+    }
+    BOOL verified = NO;
+    if (leafDer) {
+        const uint8_t *bytes = (const uint8_t *)CFDataGetBytePtr(leafDer);
+        size_t len = (size_t)CFDataGetLength(leafDer);
+        const char *hostUtf8 = host.UTF8String;
+        if (bytes && len > 0 && hostUtf8) {
+            verified = (lindo_ech_verify_leaf_der(bytes, len, hostUtf8) == 1);
+        }
+        CFRelease(leafDer);
+    }
+    if (verified) {
+        completionHandler(NSURLSessionAuthChallengeUseCredential, [NSURLCredential credentialForTrust:trust]);
+    } else {
+        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+    }
+}
+
+__attribute__((visibility("default"))) int lindo_macos_supports_wk_proxy(void) {
+    if (@available(macOS 14.0, *)) {
+        return 1;
+    }
+    return 0;
+}
+
+__attribute__((visibility("default"))) void lindo_macos_set_webkit_proxy(uint16_t port) {
+    void (^applyBlock)(void) = ^{
+        if (@available(macOS 14.0, *)) {
+            WKWebsiteDataStore *store = WKWebsiteDataStore.defaultDataStore;
+            if (!store) return;
+            if (port > 0) {
+                char portBuf[16];
+                snprintf(portBuf, sizeof(portBuf), "%u", (unsigned int)port);
+                nw_endpoint_t ep = nw_endpoint_create_host("127.0.0.1", portBuf);
+                nw_proxy_config_t cfg = ep ? nw_proxy_config_create_http_connect(ep, NULL) : nil;
+                if (cfg) {
+                    nw_proxy_config_add_match_domain(cfg, "linux.do");
+                    nw_proxy_config_add_match_domain(cfg, "ldstatic.com");
+                    nw_proxy_config_add_match_domain(cfg, "idcflare.com");
+                    nw_proxy_config_add_excluded_domain(cfg, "challenges.cloudflare.com");
+                    nw_proxy_config_add_excluded_domain(cfg, "localhost");
+                    store.proxyConfigurations = @[cfg];
+                }
+            } else {
+                store.proxyConfigurations = @[];
+            }
+        }
+    };
+    if ([NSThread isMainThread]) {
+        applyBlock();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), applyBlock);
+    }
+}
+
+__attribute__((visibility("default"))) void lindo_macos_detect_proxy_json(const char *local_ip_utf8, char *buf, size_t buf_len) {
+    if (!buf || buf_len == 0) return;
+    buf[0] = '\0';
+    @autoreleasepool {
+        BOOL sysProxy = NO;
+        NSString *httpProxy = @"";
+        NSDictionary *settings = CFBridgingRelease(CFNetworkCopySystemProxySettings());
+        if ([settings isKindOfClass:NSDictionary.class]) {
+            BOOL httpEn = [settings[(__bridge NSString *)kCFNetworkProxiesHTTPEnable] boolValue];
+            BOOL httpsEn = [settings[(__bridge NSString *)kCFNetworkProxiesHTTPSEnable] boolValue];
+            BOOL socksEn = [settings[(__bridge NSString *)kCFNetworkProxiesSOCKSEnable] boolValue];
+            BOOL pacEn = [settings[(__bridge NSString *)kCFNetworkProxiesProxyAutoConfigEnable] boolValue];
+            BOOL autoDisc = [settings[(__bridge NSString *)kCFNetworkProxiesProxyAutoDiscoveryEnable] boolValue];
+            sysProxy = httpEn || httpsEn || socksEn || pacEn || autoDisc;
+            if (httpEn) {
+                NSString *h = settings[(__bridge NSString *)kCFNetworkProxiesHTTPProxy];
+                NSNumber *p = settings[(__bridge NSString *)kCFNetworkProxiesHTTPPort];
+                if ([h isKindOfClass:NSString.class] && h.length > 0 && p.intValue > 0) {
+                    httpProxy = [NSString stringWithFormat:@"%@:%d", h, p.intValue];
+                }
+            } else if (httpsEn) {
+                NSString *h = settings[(__bridge NSString *)kCFNetworkProxiesHTTPSProxy];
+                NSNumber *p = settings[(__bridge NSString *)kCFNetworkProxiesHTTPSPort];
+                if ([h isKindOfClass:NSString.class] && h.length > 0 && p.intValue > 0) {
+                    httpProxy = [NSString stringWithFormat:@"%@:%d", h, p.intValue];
+                }
+            }
+        }
+
+        NSString *routeIface = @"";
+        BOOL hasTunIface = NO;
+        NSString *targetIp = (local_ip_utf8 && local_ip_utf8[0] != '\0')
+            ? [NSString stringWithUTF8String:local_ip_utf8]
+            : @"";
+        if (targetIp.length > 0) {
+            struct ifaddrs *ifap = NULL;
+            if (getifaddrs(&ifap) == 0 && ifap != NULL) {
+                for (struct ifaddrs *ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+                    if (!ifa->ifa_addr || !ifa->ifa_name) continue;
+                    if (ifa->ifa_addr->sa_family == AF_INET) {
+                        char addrStr[INET_ADDRSTRLEN] = {0};
+                        struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+                        if (inet_ntop(AF_INET, &sin->sin_addr, addrStr, sizeof(addrStr))) {
+                            if ([targetIp isEqualToString:[NSString stringWithUTF8String:addrStr]]) {
+                                routeIface = [NSString stringWithUTF8String:ifa->ifa_name] ?: @"";
+                                break;
+                            }
+                        }
+                    }
+                }
+                freeifaddrs(ifap);
+            }
+            NSString *lowerIface = routeIface.lowercaseString;
+            if ([lowerIface hasPrefix:@"utun"] ||
+                [lowerIface hasPrefix:@"ppp"] ||
+                [lowerIface hasPrefix:@"ipsec"] ||
+                [targetIp hasPrefix:@"198.18."] ||
+                [targetIp hasPrefix:@"198.19."]) {
+                hasTunIface = YES;
+            }
+        }
+
+        NSDictionary *out = @{
+            @"sysProxy": @(sysProxy),
+            @"httpProxy": httpProxy,
+            @"routeIface": routeIface,
+            @"hasTunIface": @(hasTunIface),
+        };
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
+        if (jsonData.length > 0) {
+            size_t copyLen = MIN(jsonData.length, buf_len - 1);
+            memcpy(buf, jsonData.bytes, copyLen);
+            buf[copyLen] = '\0';
+        }
+    }
+}
 
 typedef void (*LindoBridgeReply)(long long request, const char *json);
 static LindoBridgeReply gEventReply = NULL;
@@ -20,6 +196,41 @@ static void sendReply(LindoBridgeReply callback, long long request, id value, NS
     NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"{\"error\":\"Invalid response\"}";
     callback(request, text.UTF8String);
+}
+
+static nw_path_monitor_t gNetPathMonitor = NULL;
+static NSString *gLastNetPathSignature = nil;
+
+static void installNetworkPathMonitorOnce(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        nw_path_monitor_t monitor = nw_path_monitor_create();
+        if (!monitor) return;
+        gNetPathMonitor = monitor;
+        dispatch_queue_t q = dispatch_queue_create("do.linux.lindo.netpath", DISPATCH_QUEUE_SERIAL);
+        nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+            nw_path_status_t st = nw_path_get_status(path);
+            if (st != nw_path_status_satisfied) return;
+            BOOL wifi = nw_path_uses_interface_type(path, nw_interface_type_wifi);
+            BOOL wired = nw_path_uses_interface_type(path, nw_interface_type_wired);
+            BOOL cell = nw_path_uses_interface_type(path, nw_interface_type_cellular);
+            BOOL other = nw_path_uses_interface_type(path, nw_interface_type_other); // VPN / utun
+            BOOL expensive = nw_path_is_expensive(path);
+            NSString *sig = [NSString stringWithFormat:@"w%d_e%d_c%d_v%d_x%d", wifi, wired, cell, other, expensive];
+            if (!gLastNetPathSignature) {
+                gLastNetPathSignature = sig;
+                return;
+            }
+            if (![gLastNetPathSignature isEqualToString:sig]) {
+                gLastNetPathSignature = sig;
+                if (gEventReply) {
+                    sendReply(gEventReply, 0, @{ @"networkChanged": sig }, nil);
+                }
+            }
+        });
+        nw_path_monitor_set_queue(monitor, q);
+        nw_path_monitor_start(monitor);
+    });
 }
 
 static BOOL isForumHost(NSString *host) {
@@ -761,6 +972,9 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
     }
     return nil;
 }
+- (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
+    lindoHandleWebKitAuthChallenge(challenge, completionHandler);
+}
 @end
 
 static LindoBridgeHost *gHost = nil;
@@ -980,6 +1194,9 @@ static LindoBridgeHost *gHost = nil;
     }
     return nil;
 }
+- (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
+    lindoHandleWebKitAuthChallenge(challenge, completionHandler);
+}
 @end
 
 static LindoBrowseHost *gBrowser = nil;
@@ -1084,51 +1301,80 @@ static NSMutableSet<LindoConnectProbe *> *gActiveConnectProbes = nil;
         [self finishWithHtml:@""];
     }
 }
+- (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
+    lindoHandleWebKitAuthChallenge(challenge, completionHandler);
+}
 @end
 
-static NSHashTable<WKWebView *> *gUnlockedWebViews = nil;
+static id gFeatNear60Fps = nil;
+static id gFeatCustomFrameRate = nil;
+static BOOL gHighRefreshFeaturesResolved = NO;
 static id gScrollWheelMonitor = nil;
 static BOOL gSmoothWheelJsReady = NO;
 static CFAbsoluteTime gLastZeroPhaseWheelTime = 0;
 static NSInteger gSmoothDaemonBurstCount = 0;
 
+static void resolveHighRefreshFeatureRefs(void) {
+    if (gHighRefreshFeaturesResolved) return;
+    gHighRefreshFeaturesResolved = YES;
+    SEL featSel = NSSelectorFromString(@"_features");
+    if (![WKPreferences respondsToSelector:featSel]) return;
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    NSArray *features = [WKPreferences performSelector:featSel];
+    for (id feat in features) {
+        NSString *key = [feat valueForKey:@"key"];
+        if ([key isEqualToString:@"PreferPageRenderingUpdatesNear60FPSEnabled"]) {
+            gFeatNear60Fps = feat;
+        } else if ([key isEqualToString:@"WebAnimationsCustomFrameRateEnabled"]) {
+            gFeatCustomFrameRate = feat;
+        }
+    }
+    #pragma clang diagnostic pop
+}
+
+static BOOL isWebKitFeatureEnabled(WKPreferences *prefs, id feat, BOOL fallback) {
+    if (!prefs || !feat) return fallback;
+    SEL getSel = NSSelectorFromString(@"_isEnabledForFeature:");
+    if (![prefs respondsToSelector:getSel]) return fallback;
+    NSMethodSignature *sig = [prefs methodSignatureForSelector:getSel];
+    if (!sig) return fallback;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    inv.target = prefs;
+    inv.selector = getSel;
+    id featVar = feat;
+    [inv setArgument:&featVar atIndex:2];
+    [inv invoke];
+    BOOL enabled = fallback;
+    [inv getReturnValue:&enabled];
+    return enabled;
+}
+
+static void setWebKitFeatureEnabled(WKPreferences *prefs, id feat, BOOL enable) {
+    if (!prefs || !feat) return;
+    SEL setSel = NSSelectorFromString(@"_setEnabled:forFeature:");
+    if (![prefs respondsToSelector:setSel]) return;
+    NSMethodSignature *sig = [prefs methodSignatureForSelector:setSel];
+    if (!sig) return;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    inv.target = prefs;
+    inv.selector = setSel;
+    id featVar = feat;
+    [inv setArgument:&enable atIndex:2];
+    [inv setArgument:&featVar atIndex:3];
+    [inv invoke];
+}
+
 static void unlockHighRefreshRateForWebView(WKWebView *wv) {
     if (!wv) return;
-    if (!gUnlockedWebViews) {
-        gUnlockedWebViews = [NSHashTable weakObjectsHashTable];
-    }
-    if ([gUnlockedWebViews containsObject:wv]) {
-        return;
-    }
-    [gUnlockedWebViews addObject:wv];
-
     WKPreferences *prefs = wv.configuration.preferences;
     if (!prefs) return;
-
-    SEL featSel = NSSelectorFromString(@"_features");
-    SEL setSel = NSSelectorFromString(@"_setEnabled:forFeature:");
-    if ([WKPreferences respondsToSelector:featSel] && [prefs respondsToSelector:setSel]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        NSArray *features = [WKPreferences performSelector:featSel];
-        NSMethodSignature *sig = [prefs methodSignatureForSelector:setSel];
-        if (sig) {
-            for (id feat in features) {
-                id featVar = feat;
-                NSString *key = [featVar valueForKey:@"key"];
-                if ([key isEqualToString:@"PreferPageRenderingUpdatesNear60FPSEnabled"] ||
-                    [key isEqualToString:@"WebAnimationsCustomFrameRateEnabled"]) {
-                    BOOL enable = [key isEqualToString:@"WebAnimationsCustomFrameRateEnabled"];
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    inv.target = prefs;
-                    inv.selector = setSel;
-                    [inv setArgument:&enable atIndex:2];
-                    [inv setArgument:&featVar atIndex:3];
-                    [inv invoke];
-                }
-            }
-        }
-        #pragma clang diagnostic pop
+    resolveHighRefreshFeatureRefs();
+    if (gFeatNear60Fps && isWebKitFeatureEnabled(prefs, gFeatNear60Fps, YES)) {
+        setWebKitFeatureEnabled(prefs, gFeatNear60Fps, NO);
+    }
+    if (gFeatCustomFrameRate && !isWebKitFeatureEnabled(prefs, gFeatCustomFrameRate, NO)) {
+        setWebKitFeatureEnabled(prefs, gFeatCustomFrameRate, YES);
     }
 }
 
@@ -1145,6 +1391,34 @@ static WKWebView *findFirstWKWebView(NSView *view) {
 }
 
 static id gInactiveHoverGuardMonitor = nil;
+static BOOL gDesiredPointerCursor = NO;
+static BOOL gHasDesiredCursor = NO;
+
+static BOOL isMouseInsideMainContentInset(NSWindow *win) {
+    if (!win || !win.contentView) return NO;
+    if ((gHost && win == gHost.panel) || (gBrowser && win == gBrowser.window)) return NO;
+    NSPoint mouseScreen = [NSEvent mouseLocation];
+    NSPoint ptInWin = [win convertPointFromScreen:mouseScreen];
+    NSRect inner = NSInsetRect(win.contentView.bounds, 6.0, 6.0);
+    return NSPointInRect(ptInWin, inner);
+}
+
+static void applyStrictTwoStateCursor(NSWindow *win, BOOL pointer) {
+    if (!NSApp.isActive || !win || !win.isKeyWindow) return;
+    if (!isMouseInsideMainContentInset(win)) return;
+    NSCursor *target = pointer ? [NSCursor pointingHandCursor] : [NSCursor arrowCursor];
+    if ([NSCursor currentCursor] != target) {
+        [target set];
+    }
+}
+
+__attribute__((visibility("default"))) void lindo_bridge_set_cursor(int pointer) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gDesiredPointerCursor = (pointer != 0);
+        gHasDesiredCursor = YES;
+        applyStrictTwoStateCursor(NSApp.keyWindow, gDesiredPointerCursor);
+    });
+}
 
 static void unlockAllAppWebViews(void) {
     for (NSWindow *win in [NSApp windows]) {
@@ -1173,16 +1447,37 @@ static double mapDiscreteWheelLinesToPixels(double lines) {
 static void installHighRefreshAndSmoothWheelMonitor(void) {
     unlockAllAppWebViews();
     if (!gInactiveHoverGuardMonitor) {
-        // Prevent WKWebView's `NSTrackingActiveAlways` tracking areas from overriding `NSCursor` (e.g. `col-resize` on the split seam)
-        // or popping up native `NSToolTipPanel` windows while external screenshot overlays (macOS / Feishu / WeChat / Snipaste) are active!
-        NSEventMask hoverMask = NSEventMaskMouseMoved | NSEventMaskCursorUpdate | NSEventMaskMouseEntered | NSEventMaskMouseExited;
+        // 1. Prevent WKWebView's `NSTrackingActiveAlways` tracking areas from overriding `NSCursor` or showing tooltips
+        //    while external screenshot overlays (macOS / Feishu / WeChat / Snipaste) or other apps are active (never swallowing MouseExited).
+        // 2. Inside the active main window's content area (excluding the 6px outer window-resize rim), enforce our strict
+        //    two-state cursor policy (arrow vs pointing hand) so WKWebView never gets stuck on pointing hand / I-beam / resize cursors.
+        NSEventMask hoverMask = NSEventMaskMouseMoved | NSEventMaskCursorUpdate | NSEventMaskMouseEntered | NSEventMaskMouseExited | NSEventMaskLeftMouseDragged;
         gInactiveHoverGuardMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:hoverMask handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
-            if (!NSApp.isActive) {
+            NSEventType etype = event.type;
+            NSWindow *win = event.window;
+            if (!NSApp.isActive || (win && !win.isKeyWindow)) {
+                if (etype == NSEventTypeMouseExited) {
+                    gDesiredPointerCursor = NO;
+                    return event;
+                }
                 return nil;
             }
-            NSWindow *win = event.window;
-            if (win && !win.isKeyWindow) {
-                return nil;
+            if (etype == NSEventTypeMouseExited) {
+                gDesiredPointerCursor = NO;
+                return event;
+            }
+            if (win && isMouseInsideMainContentInset(win)) {
+                if (etype == NSEventTypeLeftMouseDragged) {
+                    gDesiredPointerCursor = NO;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        applyStrictTwoStateCursor(win, NO);
+                    });
+                } else if (etype == NSEventTypeCursorUpdate && gHasDesiredCursor) {
+                    BOOL wantPointer = gDesiredPointerCursor;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        applyStrictTwoStateCursor(win, wantPointer);
+                    });
+                }
             }
             return event;
         }];
@@ -1239,13 +1534,14 @@ static void installHighRefreshAndSmoothWheelMonitor(void) {
         } else {
             // Pixel-mode event with zero phase: distinguish 60-144Hz smooth-scroll daemons (Mos / Mac Mouse Fix)
             // from stepped pixel-chunk mouse drivers (e.g. Logi / gaming mice without smooth interpolation)
-            if (dtMs < 22.0) {
-                gSmoothDaemonBurstCount++;
-            } else if (dtMs > 90.0) {
-                gSmoothDaemonBurstCount = 0;
-            }
             double absY = fabs((double)event.scrollingDeltaY);
             double absX = fabs((double)event.scrollingDeltaX);
+            BOOL smallSubStep = (absY < 28.0 && absX < 28.0);
+            if (smallSubStep && dtMs < 22.0) {
+                gSmoothDaemonBurstCount++;
+            } else if (!smallSubStep || dtMs > 90.0) {
+                gSmoothDaemonBurstCount = 0;
+            }
             if (gSmoothDaemonBurstCount >= 1 || (absY < 24.0 && absX < 24.0)) {
                 return event;
             }
@@ -1364,6 +1660,7 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             registerDefaultUrlSchemesForCurrentBundle();
             purgeSharedStorageAuthCookies(NO);
             installHighRefreshAndSmoothWheelMonitor();
+            installNetworkPathMonitorOnce();
             sendReply(callback, request, @{}, nil);
         } else if ([method isEqualToString:@"openBrowser"]) {
             NSURL *url = [NSURL URLWithString:p[@"url"] ?: @""];
@@ -1467,48 +1764,58 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
             purgeSharedStorageAuthCookies(NO);
             NSArray<NSDictionary *> *incoming = [p[@"cookies"] isKindOfClass:NSArray.class] ? p[@"cookies"] : @[];
             NSMutableSet<NSString *> *targetNames = [NSMutableSet new];
+            NSMutableArray<NSHTTPCookie *> *canonicalCookies = [NSMutableArray new];
             for (NSDictionary *item in incoming) {
-                NSString *n = item[@"name"];
+                NSString *name = item[@"name"];
+                NSString *val = item[@"value"];
                 // Site-owned Cloudflare cookies remain 100% managed by WKHTTPCookieStore; never delete or synthesize them.
-                if ([n isKindOfClass:NSString.class] && n.length > 0 && !isCloudflareDomainCookieName(n)) {
-                    [targetNames addObject:n];
+                if (![name isKindOfClass:NSString.class] || !name.length || isCloudflareDomainCookieName(name)) continue;
+                if (![val isKindOfClass:NSString.class] || !val.length) continue;
+                BOOL persistent = [name isEqualToString:@"_t"];
+                NSHTTPCookie *cookie = makeHostOnlyForumCookie(name, val, persistent);
+                if (cookie) {
+                    [targetNames addObject:name];
+                    [canonicalCookies addObject:cookie];
                 }
             }
-            if (!targetNames.count) {
+            if (!canonicalCookies.count) {
                 sendReply(callback, request, @{}, nil);
                 return;
             }
-            // 1. Delete existing variants for target Discourse session cookie names first
-            [store getAllCookies:^(NSArray<NSHTTPCookie *> *existing) {
-                dispatch_group_t delGroup = dispatch_group_create();
-                for (NSHTTPCookie *c in existing) {
-                    NSString *dom = [c.domain hasPrefix:@"."] ? [c.domain substringFromIndex:1] : c.domain;
-                    if ([dom.lowercaseString isEqualToString:@"linux.do"] && [targetNames containsObject:c.name]) {
-                        dispatch_group_enter(delGroup);
-                        [store deleteCookie:c completionHandler:^{ dispatch_group_leave(delGroup); }];
-                    }
-                }
-                dispatch_group_notify(delGroup, dispatch_get_main_queue(), ^{
-                    // 2. Insert canonical host-only Discourse session cookies (`_t`, `_forum_session`)
-                    dispatch_group_t setGroup = dispatch_group_create();
-                    for (NSDictionary *item in incoming) {
-                        NSString *name = item[@"name"];
-                        NSString *val = item[@"value"];
-                        if (![name isKindOfClass:NSString.class] || ![val isKindOfClass:NSString.class] || !val.length) continue;
-                        if (isCloudflareDomainCookieName(name)) continue;
-                        BOOL persistent = [name isEqualToString:@"_t"];
-                        NSHTTPCookie *cookie = makeHostOnlyForumCookie(name, val, persistent);
-                        if (cookie) {
-                            dispatch_group_enter(setGroup);
-                            [store setCookie:cookie completionHandler:^{ dispatch_group_leave(setGroup); }];
+            // 1. Insert canonical host-only Discourse session cookies FIRST (atomic in-place replacement; ZERO empty-_t window for concurrent fetch!).
+            dispatch_group_t setGroup = dispatch_group_create();
+            for (NSHTTPCookie *cookie in canonicalCookies) {
+                dispatch_group_enter(setGroup);
+                [store setCookie:cookie completionHandler:^{ dispatch_group_leave(setGroup); }];
+            }
+            dispatch_group_notify(setGroup, dispatch_get_main_queue(), ^{
+                // 2. Prune ONLY non-canonical variants (`.linux.do` dot-domain or non-`/` path) while keeping the canonical host-only entry intact.
+                [store getAllCookies:^(NSArray<NSHTTPCookie *> *existing) {
+                    dispatch_group_t delGroup = dispatch_group_create();
+                    BOOL deletedAny = NO;
+                    for (NSHTTPCookie *c in existing) {
+                        NSString *dom = [c.domain hasPrefix:@"."] ? [c.domain substringFromIndex:1] : c.domain;
+                        BOOL isNonCanonical = [c.domain hasPrefix:@"."] || ![c.path isEqualToString:@"/"];
+                        if ([dom.lowercaseString isEqualToString:@"linux.do"] && [targetNames containsObject:c.name] && isNonCanonical) {
+                            deletedAny = YES;
+                            dispatch_group_enter(delGroup);
+                            [store deleteCookie:c completionHandler:^{ dispatch_group_leave(delGroup); }];
                         }
                     }
-                    dispatch_group_notify(setGroup, dispatch_get_main_queue(), ^{
+                    dispatch_group_notify(delGroup, dispatch_get_main_queue(), ^{
                         purgeSharedStorageAuthCookies(NO);
-                        sendReply(callback, request, @{}, nil);
+                        if (deletedAny) {
+                            // Read-back barrier so WebKit Networking XPC flushes cookie store updates before caller dispatches fetch()
+                            [store getAllCookies:^(NSArray<NSHTTPCookie *> *after) {
+                                (void)after;
+                                sendReply(callback, request, @{}, nil);
+                            }];
+                        } else {
+                            sendReply(callback, request, @{}, nil);
+                        }
                     });
-                });
-            }];
+                }];
+            });
         } else if ([method isEqualToString:@"sweepAuthCookies"]) {
             NSString *mode = [p[@"mode"] isKindOfClass:NSString.class] ? p[@"mode"] : @"dedupe";
             BOOL isClearMode = [mode isEqualToString:@"clear"];
@@ -1544,24 +1851,46 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                         else if ([c.name isEqualToString:@"_forum_session"] && c.value.length > 0) [fsVariants addObject:c];
                     }
                 }
-                BOOL tNeedsRewrite = tVariants.count > 1 || (tVariants.count == 1 && [tVariants.firstObject.domain hasPrefix:@"."]);
-                BOOL fsNeedsRewrite = fsVariants.count > 1 || (fsVariants.count == 1 && [fsVariants.firstObject.domain hasPrefix:@"."]);
+                BOOL tNeedsRewrite = tVariants.count > 1 || (tVariants.count == 1 && ([tVariants.firstObject.domain hasPrefix:@"."] || ![tVariants.firstObject.path isEqualToString:@"/"]));
+                BOOL fsNeedsRewrite = fsVariants.count > 1 || (fsVariants.count == 1 && ([fsVariants.firstObject.domain hasPrefix:@"."] || ![fsVariants.firstObject.path isEqualToString:@"/"]));
                 if (!tNeedsRewrite && !fsNeedsRewrite) {
                     sendReply(callback, request, @{@"swept": @NO}, nil);
                     return;
                 }
 
+                // Prefer the freshest host-only cookie (latest expiresDate, since Discourse sets Max-Age=60d on every `_t` rotation)
+                // so dedupe NEVER downgrades a live rotated `_t` to a stale disk `preferredT`!
                 NSString *winnerT = nil;
                 if (tNeedsRewrite && tVariants.count > 0) {
+                    NSHTTPCookie *bestHostOnly = nil;
                     for (NSHTTPCookie *c in tVariants) {
-                        if (preferredT.length > 0 && [c.value isEqualToString:preferredT]) { winnerT = c.value; break; }
-                    }
-                    if (!winnerT) {
-                        for (NSHTTPCookie *c in [tVariants reverseObjectEnumerator]) {
-                            if (![c.domain hasPrefix:@"."]) { winnerT = c.value; break; }
+                        if (![c.domain hasPrefix:@"."]) {
+                            if (!bestHostOnly) {
+                                bestHostOnly = c;
+                            } else if (c.expiresDate && (!bestHostOnly.expiresDate || [c.expiresDate compare:bestHostOnly.expiresDate] == NSOrderedDescending)) {
+                                bestHostOnly = c;
+                            } else if (!c.expiresDate && !bestHostOnly.expiresDate) {
+                                bestHostOnly = c;
+                            }
                         }
                     }
-                    if (!winnerT) winnerT = tVariants.lastObject.value;
+                    if (bestHostOnly) {
+                        winnerT = bestHostOnly.value;
+                    }
+                    if (!winnerT && preferredT.length > 0) {
+                        for (NSHTTPCookie *c in tVariants) {
+                            if ([c.value isEqualToString:preferredT]) { winnerT = c.value; break; }
+                        }
+                    }
+                    if (!winnerT) {
+                        NSHTTPCookie *bestAny = tVariants.lastObject;
+                        for (NSHTTPCookie *c in tVariants) {
+                            if (c.expiresDate && (!bestAny.expiresDate || [c.expiresDate compare:bestAny.expiresDate] == NSOrderedDescending)) {
+                                bestAny = c;
+                            }
+                        }
+                        winnerT = bestAny.value;
+                    }
                 }
                 NSString *winnerFs = nil;
                 if (fsNeedsRewrite && fsVariants.count > 0) {
@@ -1571,34 +1900,50 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                     if (!winnerFs) winnerFs = fsVariants.lastObject.value;
                 }
 
-                NSMutableArray<NSHTTPCookie *> *toDelete = [NSMutableArray new];
-                if (tNeedsRewrite) [toDelete addObjectsFromArray:tVariants];
-                if (fsNeedsRewrite) [toDelete addObjectsFromArray:fsVariants];
-
-                dispatch_group_t delGrp = dispatch_group_create();
-                for (NSHTTPCookie *c in toDelete) {
-                    dispatch_group_enter(delGrp);
-                    [store deleteCookie:c completionHandler:^{ dispatch_group_leave(delGrp); }];
+                // 1. Write canonical host-only winner FIRST (zero empty-cookie gap for concurrent fetch()!)
+                dispatch_group_t writeGrp = dispatch_group_create();
+                if (tNeedsRewrite && winnerT.length > 0) {
+                    NSHTTPCookie *tc = makeHostOnlyForumCookie(@"_t", winnerT, YES);
+                    if (tc) {
+                        dispatch_group_enter(writeGrp);
+                        [store setCookie:tc completionHandler:^{ dispatch_group_leave(writeGrp); }];
+                    }
                 }
-                dispatch_group_notify(delGrp, dispatch_get_main_queue(), ^{
-                    dispatch_group_t writeGrp = dispatch_group_create();
-                    if (tNeedsRewrite && winnerT.length > 0) {
-                        NSHTTPCookie *tc = makeHostOnlyForumCookie(@"_t", winnerT, YES);
-                        if (tc) {
-                            dispatch_group_enter(writeGrp);
-                            [store setCookie:tc completionHandler:^{ dispatch_group_leave(writeGrp); }];
+                if (fsNeedsRewrite && winnerFs.length > 0) {
+                    NSHTTPCookie *fc = makeHostOnlyForumCookie(@"_forum_session", winnerFs, NO);
+                    if (fc) {
+                        dispatch_group_enter(writeGrp);
+                        [store setCookie:fc completionHandler:^{ dispatch_group_leave(writeGrp); }];
+                    }
+                }
+                dispatch_group_notify(writeGrp, dispatch_get_main_queue(), ^{
+                    // 2. Delete ONLY non-canonical duplicate variants (`.linux.do` or non-`/` path), never the winning host-only entry.
+                    NSMutableArray<NSHTTPCookie *> *toDelete = [NSMutableArray new];
+                    if (tNeedsRewrite) {
+                        for (NSHTTPCookie *c in tVariants) {
+                            if ([c.domain hasPrefix:@"."] || ![c.path isEqualToString:@"/"]) {
+                                [toDelete addObject:c];
+                            }
                         }
                     }
-                    if (fsNeedsRewrite && winnerFs.length > 0) {
-                        NSHTTPCookie *fc = makeHostOnlyForumCookie(@"_forum_session", winnerFs, NO);
-                        if (fc) {
-                            dispatch_group_enter(writeGrp);
-                            [store setCookie:fc completionHandler:^{ dispatch_group_leave(writeGrp); }];
+                    if (fsNeedsRewrite) {
+                        for (NSHTTPCookie *c in fsVariants) {
+                            if ([c.domain hasPrefix:@"."] || ![c.path isEqualToString:@"/"]) {
+                                [toDelete addObject:c];
+                            }
                         }
                     }
-                    dispatch_group_notify(writeGrp, dispatch_get_main_queue(), ^{
+                    dispatch_group_t delGrp = dispatch_group_create();
+                    for (NSHTTPCookie *c in toDelete) {
+                        dispatch_group_enter(delGrp);
+                        [store deleteCookie:c completionHandler:^{ dispatch_group_leave(delGrp); }];
+                    }
+                    dispatch_group_notify(delGrp, dispatch_get_main_queue(), ^{
                         purgeSharedStorageAuthCookies(NO);
-                        sendReply(callback, request, @{@"swept": @YES}, nil);
+                        [store getAllCookies:^(NSArray<NSHTTPCookie *> *after) {
+                            (void)after;
+                            sendReply(callback, request, @{@"swept": @YES}, nil);
+                        }];
                     });
                 });
             }];
@@ -1608,47 +1953,25 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                 dispatch_group_t group = dispatch_group_create();
                 for (NSHTTPCookie *cookie in cookies) {
                     NSString *domain = [cookie.domain hasPrefix:@"."] ? [cookie.domain substringFromIndex:1] : cookie.domain;
-                    if (isForumHost(domain) && [cookie.name isEqualToString:@"cf_clearance"]) {
-                        if (cookie.value.length > 0 && ![deletedValues containsObject:cookie.value]) {
+                    if (isForumHost(domain) && ([cookie.name isEqualToString:@"cf_clearance"] || [cookie.name isEqualToString:@"__cf_bm"])) {
+                        if ([cookie.name isEqualToString:@"cf_clearance"] && cookie.value.length > 0 && ![deletedValues containsObject:cookie.value]) {
                             [deletedValues addObject:cookie.value];
                         }
                         dispatch_group_enter(group);
                         [store deleteCookie:cookie completionHandler:^{ dispatch_group_leave(group); }];
                     }
                 }
-                // Also purge any stray cf_clearance in shared NSHTTPCookieStorage
+                // Also purge any stray cf_clearance/__cf_bm in shared NSHTTPCookieStorage
                 NSHTTPCookieStorage *shared = [NSHTTPCookieStorage sharedHTTPCookieStorage];
                 for (NSHTTPCookie *cookie in [shared.cookies copy]) {
                     NSString *domain = [cookie.domain hasPrefix:@"."] ? [cookie.domain substringFromIndex:1] : cookie.domain;
-                    if (isForumHost(domain) && [cookie.name isEqualToString:@"cf_clearance"]) {
+                    if (isForumHost(domain) && ([cookie.name isEqualToString:@"cf_clearance"] || [cookie.name isEqualToString:@"__cf_bm"])) {
                         [shared deleteCookie:cookie];
                     }
                 }
                 dispatch_group_notify(group, dispatch_get_main_queue(), ^{
                     sendReply(callback, request, @{@"deleted": deletedValues}, nil);
                 });
-            }];
-        } else if ([method isEqualToString:@"restoreCfClearance"]) {
-            NSString *val = [p[@"value"] isKindOfClass:NSString.class] ? p[@"value"] : @"";
-            if (!val.length) {
-                sendReply(callback, request, @{@"restored": @NO}, nil);
-                return;
-            }
-            NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:@{
-                NSHTTPCookieName: @"cf_clearance",
-                NSHTTPCookieValue: val,
-                NSHTTPCookieDomain: @".linux.do",
-                NSHTTPCookiePath: @"/",
-                NSHTTPCookieSecure: @"TRUE",
-                @"HttpOnly": @"TRUE",
-                NSHTTPCookieExpires: [NSDate dateWithTimeIntervalSinceNow:86400]
-            }];
-            if (!cookie) {
-                sendReply(callback, request, @{@"restored": @NO}, nil);
-                return;
-            }
-            [store setCookie:cookie completionHandler:^{
-                sendReply(callback, request, @{@"restored": @YES}, nil);
             }];
         } else if ([method isEqualToString:@"clearCookies"] || [method isEqualToString:@"deleteCookie"]) {
             [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {

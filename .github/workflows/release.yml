@@ -128,7 +128,16 @@ jobs:
 
       - name: Run Windows Rust unit tests (RSA + Release Asset Parser)
         working-directory: desktop-tauri/src-tauri
-        run: cargo test --lib
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm -y --no-progress
+            if (Test-Path "C:\Program Files\NASM") {
+              $env:PATH += ";C:\Program Files\NASM"
+              "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+          cargo test --lib
 
       - name: Build Windows NSIS (-setup.exe) & MSI installers
         working-directory: desktop-tauri

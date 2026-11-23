@@ -425,6 +425,11 @@ class LinDoCoreTest {
     @Test
     fun unreadDotOnlyClearsAfterServerConfirmsHighestFloor() = runTest {
         val prevHttp = UserApiKeyAuthManager.webViewHttpExecutor
+        LinuxDoRepository.clearChallengeCooldown()
+        LinuxDoRepository.clearTransientRateLimit()
+        do_.linux.lindo.core.network.NetworkPolicyEngine.resetForTesting()
+        do_.linux.lindo.core.network.NetworkRecoveryPolicy.androidEnabled = false
+        do_.linux.lindo.core.network.NetworkRecoveryPolicy.androidVerifying = false
         LinuxDoRepository.clearReadTopics()
         CookieSentinel.clearAll()
         CookieSentinel.ingestRawCookieString("_t=valid_test_session")

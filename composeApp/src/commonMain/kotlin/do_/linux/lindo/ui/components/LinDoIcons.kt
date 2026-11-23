@@ -310,43 +310,52 @@ object LinDoIcons {
 
     val LayoutCards: ImageVector by lazy {
         lucideIcon("LayoutCards") {
-            strokePath(1.9f) {
-                // 宽松列表视图：两组「左侧圆点 + 主标题长线 + 摘要短线」（与轻分割线宽松列表一一对应，严格处于 y=6.2..17.8 视觉框内）
-                moveTo(4f, 6.5f)
-                horizontalLineTo(5.2f)
-                moveTo(8.5f, 6.5f)
-                horizontalLineTo(20f)
-                moveTo(8.5f, 9.8f)
-                horizontalLineTo(15.5f)
+            strokePath(1.85f) {
+                // 宽松列表视图：上下两张带明显呼吸间距的独立圆角卡片（x=3..21, y=3..10 & 14..21）
+                moveTo(5f, 3f)
+                horizontalLineTo(19f)
+                curveTo(20.1f, 3f, 21f, 3.9f, 21f, 5f)
+                verticalLineTo(8f)
+                curveTo(21f, 9.1f, 20.1f, 10f, 19f, 10f)
+                horizontalLineTo(5f)
+                curveTo(3.9f, 10f, 3f, 9.1f, 3f, 8f)
+                verticalLineTo(5f)
+                curveTo(3f, 3.9f, 3.9f, 3f, 5f, 3f)
+                close()
 
-                moveTo(4f, 14.5f)
-                horizontalLineTo(5.2f)
-                moveTo(8.5f, 14.5f)
-                horizontalLineTo(20f)
-                moveTo(8.5f, 17.8f)
-                horizontalLineTo(15.5f)
+                moveTo(5f, 14f)
+                horizontalLineTo(19f)
+                curveTo(20.1f, 14f, 21f, 14.9f, 21f, 16f)
+                verticalLineTo(19f)
+                curveTo(21f, 20.1f, 20.1f, 21f, 19f, 21f)
+                horizontalLineTo(5f)
+                curveTo(3.9f, 21f, 3f, 20.1f, 3f, 19f)
+                verticalLineTo(16f)
+                curveTo(3f, 14.9f, 3.9f, 14f, 5f, 14f)
+                close()
             }
         }
     }
 
     val LayoutCompact: ImageVector by lazy {
         lucideIcon("LayoutCompact") {
-            strokePath(1.9f) {
-                // 紧凑列表视图：三行「左侧圆点 + 单行标题线」（与宽松图标同宽 x=4..20、同高 y=6.5..17.5）
-                moveTo(4f, 6.5f)
+            strokePath(1.85f) {
+                // 紧凑列表视图：同框密排三等分紧凑行（Lucide Rows3 风格，x=3..21, y=3/9/15/21）
+                moveTo(5.2f, 3f)
+                horizontalLineTo(18.8f)
+                curveTo(20f, 3f, 21f, 4f, 21f, 5.2f)
+                verticalLineTo(18.8f)
+                curveTo(21f, 20f, 20f, 21f, 18.8f, 21f)
                 horizontalLineTo(5.2f)
-                moveTo(8.5f, 6.5f)
-                horizontalLineTo(20f)
+                curveTo(4f, 21f, 3f, 20f, 3f, 18.8f)
+                verticalLineTo(5.2f)
+                curveTo(3f, 4f, 4f, 3f, 5.2f, 3f)
+                close()
 
-                moveTo(4f, 12f)
-                horizontalLineTo(5.2f)
-                moveTo(8.5f, 12f)
-                horizontalLineTo(20f)
-
-                moveTo(4f, 17.5f)
-                horizontalLineTo(5.2f)
-                moveTo(8.5f, 17.5f)
-                horizontalLineTo(20f)
+                moveTo(3f, 9f)
+                horizontalLineTo(21f)
+                moveTo(3f, 15f)
+                horizontalLineTo(21f)
             }
         }
     }
@@ -2221,6 +2230,19 @@ object LinDoIcons {
     }
     val FaGamepad: ImageVector by lazy {
         faSolidIcon("FaGamepad", 640f, 512f, "M192 64C86 64 0 150 0 256S86 448 192 448H448c106 0 192-86 192-192s-86-192-192-192H192zM496 168a40 40 0 1 1 0 80 40 40 0 1 1 0-80zM392 304a40 40 0 1 1 80 0 40 40 0 1 1 -80 0zM168 200c0-13.3 10.7-24 24-24s24 10.7 24 24v32h32c13.3 0 24 10.7 24 24s-10.7 24-24 24H216v32c0 13.3-10.7 24-24 24s-24-10.7-24-24V280H136c-13.3 0-24-10.7-24-24s10.7-24 24-24h32V200z")
+    }
+    val QrCode: ImageVector by lazy {
+        lucideIcon("QrCode") {
+            strokePath(1.8f) {
+                moveTo(3f, 3f); horizontalLineTo(9f); verticalLineTo(9f); horizontalLineTo(3f); close()
+                moveTo(15f, 3f); horizontalLineTo(21f); verticalLineTo(9f); horizontalLineTo(15f); close()
+                moveTo(3f, 15f); horizontalLineTo(9f); verticalLineTo(21f); horizontalLineTo(3f); close()
+                moveTo(14f, 14f); horizontalLineTo(17f)
+                moveTo(20f, 14f); verticalLineTo(17f)
+                moveTo(14f, 18f); verticalLineTo(21f)
+                moveTo(17f, 20f); horizontalLineTo(21f)
+            }
+        }
     }
     val FaGraduationCap: ImageVector by lazy {
         faSolidIcon("FaGraduationCap", 640f, 512f, "M320 32c-8.1 0-16.1 1.4-23.7 4.1L15.8 137.4C6.3 140.9 0 149.9 0 160s6.3 19.1 15.8 22.6l57.9 20.9C57.3 229.3 48 259.8 48 291.9v28.1c0 28.4-10.8 57.7-22.3 80.8c-6.5 13-13.9 25.8-22.5 37.6C0 442.7-.9 448.3 .9 453.4s6 8.9 11.2 10.2l64 16c4.2 1.1 8.7 .3 12.4-2s6.3-6.1 7.1-10.4c8.6-42.8 4.3-81.2-2.1-108.7C90.3 344.3 86 329.8 80 316.5V291.9c0-30.2 10.2-58.7 27.9-81.5c12.9-15.5 29.6-28 49.2-35.7l157-61.7c8.2-3.2 17.5 .8 20.7 9s-.8 17.5-9 20.7l-157 61.7c-12.4 4.9-23.3 12.4-32.2 21.6l159.6 57.6c7.6 2.7 15.6 4.1 23.7 4.1s16.1-1.4 23.7-4.1L624.2 182.6c9.5-3.4 15.8-12.5 15.8-22.6s-6.3-19.1-15.8-22.6L343.7 36.1C336.1 33.4 328.1 32 320 32zM128 408c0 35.3 86 72 192 72s192-36.7 192-72L496.7 262.6 354.5 314c-11.1 4-22.8 6-34.5 6s-23.5-2-34.5-6L143.3 262.6 128 408z")

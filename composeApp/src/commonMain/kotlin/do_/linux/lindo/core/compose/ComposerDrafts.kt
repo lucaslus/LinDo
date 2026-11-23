@@ -351,7 +351,7 @@ class ComposerDraftSession(
                         afterPublish.await()
                         val seq = cleanupSequence ?: runCatching { LinuxDoRepository.fetchDraftSequence(targetKey) }.getOrNull()
                         if (seq != null) {
-                            runCatching { LinuxDoRepository.deleteCloudDraft(targetKey, seq) }
+                            runCatching { LinuxDoRepository.deleteCloudDraft(targetKey, seq, background = true) }
                         }
                     }
                 } finally {
@@ -385,7 +385,7 @@ class ComposerDraftSession(
                     LinuxDoRepository.launchDetachedDraftOp {
                         val seq = knownSequence ?: runCatching { LinuxDoRepository.fetchDraftSequence(targetKey) }.getOrNull()
                         if (seq != null) {
-                            runCatching { LinuxDoRepository.deleteCloudDraft(targetKey, seq) }
+                            runCatching { LinuxDoRepository.deleteCloudDraft(targetKey, seq, background = true) }
                         }
                     }
                     true

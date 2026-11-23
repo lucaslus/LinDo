@@ -449,6 +449,9 @@ enum class DebugPreviewScene(val wireKey: String, val isRegressionSheetScene: Bo
 enum class CalloutBlockKind(val wireKey: String, val defaultTitle: LinDoReaderCopy) {
     LOTTERY("lottery", LinDoReaderCopy.CALLOUT_LOTTERY),
     WARNING("warning", LinDoReaderCopy.CALLOUT_WARNING),
+    IMPORTANT("important", LinDoReaderCopy.CALLOUT_IMPORTANT),
+    CAUTION("caution", LinDoReaderCopy.CALLOUT_CAUTION),
+    QUOTE("quote", LinDoReaderCopy.CALLOUT_QUOTE),
     TIP("tip", LinDoReaderCopy.CALLOUT_TIP),
     NOTE("note", LinDoReaderCopy.CALLOUT_NOTE);
 
@@ -507,11 +510,11 @@ enum class PrivateMessagesViewMode(val tabLabel: LinDoMessagesCopy? = null) {
 }
 
 enum class ReaderFontScalePreset(val scale: Float, val labelCopy: LinDoMessagesCopy) {
-    MINIMUM(0.80f, LinDoMessagesCopy.FONT_SCALE_MINIMUM),
-    SMALL(0.90f, LinDoMessagesCopy.FONT_SCALE_SMALL),
+    MINIMUM(0.88f, LinDoMessagesCopy.FONT_SCALE_MINIMUM),
+    SMALL(0.94f, LinDoMessagesCopy.FONT_SCALE_SMALL),
     STANDARD(1.0f, LinDoMessagesCopy.FONT_SCALE_STANDARD),
-    LARGE(1.10f, LinDoMessagesCopy.FONT_SCALE_LARGE),
-    MAXIMUM(1.20f, LinDoMessagesCopy.FONT_SCALE_MAXIMUM);
+    LARGE(1.12f, LinDoMessagesCopy.FONT_SCALE_LARGE),
+    MAXIMUM(1.28f, LinDoMessagesCopy.FONT_SCALE_MAXIMUM);
 
     fun nextCycle(): ReaderFontScalePreset = entries[(ordinal + 1) % entries.size]
 

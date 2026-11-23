@@ -43,6 +43,7 @@ internal enum class CloudflareChallengeMarker(val token: String) {
     TITLE_JUST_A_MOMENT("<title>just a moment"),
     TITLE_PLEASE_WAIT_ZH("<title>请稍候"),
     TITLE_ATTENTION_REQUIRED("<title>attention required"),
+    TITLE_SOMETHING_WENT_WRONG("<title>something went wrong"),
     ENABLE_JS_AND_COOKIES("enable javascript and cookies to continue")
 }
 

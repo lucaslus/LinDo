@@ -14,6 +14,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
+import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import do_.linux.lindo.core.site.AuthorFeedbackSpec
 import do_.linux.lindo.core.update.AppUpdateManager
 import do_.linux.lindo.ui.components.LinDoIcons
 import kotlinx.coroutines.delay
@@ -29,11 +31,13 @@ private const val LINDO_PROJECT_URL = "https://github.com/lucaslus/LinDo"
 internal fun LindoAboutPage(
     onDismiss: () -> Unit,
     onOpenLink: (String) -> Unit,
-    onOpenDebugDiagnostics: () -> Unit = {}
+    onOpenDebugDiagnostics: () -> Unit = {},
+    onOpenAuthorFeedback: (() -> Unit)? = null
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     var showLicenses by remember { mutableStateOf(false) }
+    var showAuthorFeedback by remember { mutableStateOf(false) }
     var checkHint by remember { mutableStateOf<String?>(null) }
     val updateInfo = AppUpdateManager.latestInfo
     val checkingUpdate = AppUpdateManager.checking
@@ -93,11 +97,33 @@ internal fun LindoAboutPage(
                     )
                 }
                 item { LinDoSettingRow(LinDoIcons.Globe, "项目主页", onClick = { onOpenLink(LINDO_PROJECT_URL) }) }
-                item { LinDoSettingRow(LinDoIcons.MessageCircle, "问题反馈", onClick = { onOpenLink("$LINDO_PROJECT_URL/issues") }) }
+                item {
+                    LinDoSettingRow(
+                        icon = LinDoIcons.MessageCircle,
+                        title = "私信作者反馈",
+                        value = "@${AuthorFeedbackSpec.AUTHOR_USERNAME}",
+                        onClick = {
+                            if (onOpenAuthorFeedback != null) {
+                                onOpenAuthorFeedback()
+                            } else if (UserApiKeyAuthManager.isAuthorized()) {
+                                showAuthorFeedback = true
+                            } else {
+                                onOpenLink("https://linux.do/u/${AuthorFeedbackSpec.AUTHOR_USERNAME}")
+                            }
+                        }
+                    )
+                }
+                item { LinDoSettingRow(LinDoIcons.MessageCircle, "GitHub Issues", onClick = { onOpenLink("$LINDO_PROJECT_URL/issues") }) }
                 item { LinDoSettingRow(LinDoIcons.Code, "开源许可", onClick = { showLicenses = true }) }
                 item { LinDoSettingRow(LinDoIcons.FileText, "诊断与崩溃日志", showDivider = false, onClick = onOpenDebugDiagnostics) }
             }
         }
+    }
+    if (showAuthorFeedback) {
+        AuthorFeedbackDialog(
+            onDismiss = { showAuthorFeedback = false },
+            onSentSuccess = { checkHint = "已通过站内私信发送给 @${AuthorFeedbackSpec.AUTHOR_USERNAME}" }
+        )
     }
     if (showLicenses) {
         LindoLicensesPage(onBack = { showLicenses = false }, onOpenLink = onOpenLink)

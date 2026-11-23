@@ -26,6 +26,45 @@ object MarkdownPreview {
         // Indented code must also remain literal when it contains Discourse-looking syntax.
         source = Regex("(?m)^(?:(?: {4}|\\t)[^\\n]*(?:\\n|$))+").replace(source) { protect(it.value) }
         fun attr(value: String) = Element("span").attr("data-value", value).outerHtml().substringAfter("data-value=\"").substringBefore('"')
+        // Ensure GFM tables immediately following a paragraph or list item without a blank line parse cleanly
+        source = Regex("(?m)(^[^\\n|]*[^\\s\\n|][^\\n]*\\n)(?=[ \\t]*\\|?[^\\n]*\\|[^\\n]*\\n[ \\t]*\\|?[ \\t]*:?-{3,}:?(?:[ \\t]*\\|[ \\t]*:?-{3,}:?)*[ \\t]*\\|?[ \\t]*(?:\\n|$))")
+            .replace(source) { "${it.groupValues[1]}\n" }
+        // BBCode [color=...] and [bgcolor=...] with strict CSS color sanitization
+        val colorRegex = Regex("\\[color=\"?([^\\]\"]+)\"?]((?:(?!\\[color=)[\\s\\S])*?)\\[/color]", RegexOption.IGNORE_CASE)
+        for (depth in 0 until 8) {
+            val next = colorRegex.replace(source) { match ->
+                val safe = DiscourseAstParser.sanitizeSafeCssColor(match.groupValues[1])
+                if (safe != null) {
+                    "<span class=\"bbcode-color\" data-color=\"${attr(safe)}\" style=\"color: ${attr(safe)}\">${match.groupValues[2]}</span>"
+                } else {
+                    match.groupValues[2]
+                }
+            }
+            if (next == source) break
+            source = next
+        }
+        val bgColorRegex = Regex("\\[bgcolor=\"?([^\\]\"]+)\"?]((?:(?!\\[bgcolor=)[\\s\\S])*?)\\[/bgcolor]", RegexOption.IGNORE_CASE)
+        for (depth in 0 until 8) {
+            val next = bgColorRegex.replace(source) { match ->
+                val safe = DiscourseAstParser.sanitizeSafeCssColor(match.groupValues[1])
+                if (safe != null) {
+                    "<span class=\"bbcode-bgcolor\" data-bgcolor=\"${attr(safe)}\" style=\"background-color: ${attr(safe)}\">${match.groupValues[2]}</span>"
+                } else {
+                    match.groupValues[2]
+                }
+            }
+            if (next == source) break
+            source = next
+        }
+        // Block math $$...$$ and inline math $...$ (outside code)
+        source = Regex("(?m)^\\$\\$\\s*\\n([\\s\\S]*?)\\n\\$\\$\\s*$").replace(source) { match ->
+            val expr = match.groupValues[1].trim()
+            "\n<div class=\"math\" data-math=\"${attr(expr)}\">${org.jsoup.nodes.Entities.escape(expr)}</div>\n"
+        }
+        source = Regex("(?<!\\\\)(?<!\\$)\\$(?!\\s)([^$\\n]+?)(?<!\\s)\\$(?!\\$)").replace(source) { match ->
+            val expr = match.groupValues[1].trim()
+            "<span class=\"math\" data-math=\"${attr(expr)}\">${org.jsoup.nodes.Entities.escape(expr)}</span>"
+        }
         val detailsRegex = Regex("\\[details(?:=\"?([^\\]\"]*)\"?)?]((?:(?!\\[details\\b)[\\s\\S])*?)\\[/details]", RegexOption.IGNORE_CASE)
         for (depth in 0 until 8) {
             val next = detailsRegex.replace(source) {
@@ -73,14 +112,48 @@ object MarkdownPreview {
         // Restore in reverse order in case an indented-code token contains an earlier token.
         protected.indices.reversed().forEach { source = source.replace("$tokenPrefix${it}END", protected[it]) }
         val body = Jsoup.parseBodyFragment(renderer.render(parser.parse(source))).body()
-        val alertMarker = Regex("^\\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)]\\s*", RegexOption.IGNORE_CASE)
+        val alertMarker = Regex(
+            "^\\[!(NOTE|INFO|TODO|TIP|HINT|IMPORTANT|SUCCESS|CHECK|DONE|WARNING|ATTENTION|CAUTION|DANGER|ERROR|FAILURE|FAIL|BUG|EXAMPLE|QUOTE|CITE|ABSTRACT|SUMMARY|TLDR|QUESTION|HELP|FAQ)\\]([+-])?(?:[ \\t]+([^\\r\\n]*))?",
+            RegexOption.IGNORE_CASE
+        )
         body.select("blockquote").forEach { quote ->
-            val firstText = quote.selectFirst("p")?.childNodes()?.firstOrNull() as? TextNode ?: return@forEach
-            val match = alertMarker.find(firstText.wholeText.trimStart()) ?: return@forEach
-            val kind = match.groupValues[1].lowercase()
-            quote.tagName("div").addClass("markdown-alert").addClass("markdown-alert-$kind")
-            val remaining = firstText.wholeText.trimStart().removePrefix(match.value)
-            if (remaining.isBlank()) firstText.remove() else firstText.text(remaining)
+            val firstP = quote.children().firstOrNull { it.normalName() == "p" } ?: return@forEach
+            val firstText = firstP.childNodes().firstOrNull() as? TextNode ?: return@forEach
+            val rawFirst = firstText.wholeText.trimStart()
+            val firstLine = rawFirst.substringBefore('\n')
+            val match = alertMarker.find(firstLine) ?: return@forEach
+            val rawKind = match.groupValues[1].lowercase()
+            val normalizedKind = when (rawKind) {
+                "tip", "hint", "success", "check", "done", "example" -> "tip"
+                "important", "abstract", "summary", "tldr", "question", "help", "faq" -> "important"
+                "warning", "attention" -> "warning"
+                "caution", "danger", "error", "failure", "fail", "bug" -> "caution"
+                "quote", "cite" -> "quote"
+                else -> "note"
+            }
+            val foldFlag = match.groupValues[2]
+            val customTitle = match.groupValues[3].trim()
+            quote.tagName("div").addClass("markdown-alert").addClass("markdown-alert-$normalizedKind")
+            if (customTitle.isNotEmpty()) {
+                quote.attr("data-callout-title", customTitle)
+            }
+            if (foldFlag == "+" || foldFlag == "-") {
+                quote.attr("data-callout-collapsible", "true")
+                quote.attr("data-callout-expanded", if (foldFlag == "-") "false" else "true")
+            }
+            val afterNewline = if (rawFirst.contains('\n')) rawFirst.substringAfter('\n') else ""
+            if (afterNewline.isNotBlank()) {
+                firstText.text(afterNewline)
+            } else {
+                firstText.remove()
+                val nextChild = firstP.childNodes().firstOrNull()
+                if (nextChild is Element && nextChild.normalName() == "br") {
+                    nextChild.remove()
+                }
+                if (firstP.childNodes().isEmpty() || (firstP.text().isBlank() && firstP.selectFirst("img, code, pre") == null)) {
+                    firstP.remove()
+                }
+            }
         }
         val textNodes = mutableListOf<TextNode>()
         fun collect(element: Element) {

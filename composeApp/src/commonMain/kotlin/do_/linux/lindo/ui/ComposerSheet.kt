@@ -316,6 +316,7 @@ internal fun ComposerSheet(
     var draft by remember(stateKey) {
         mutableStateOf(initialInstantPair?.first ?: ComposerDraft("", key, action))
     }
+    var editReason by remember(stateKey) { mutableStateOf("") }
     var session by remember(stateKey) {
         mutableStateOf<ComposerDraftSession?>(initialInstantPair?.second)
     }
@@ -755,6 +756,7 @@ internal fun ComposerSheet(
         )
     val needsVerification = submitError.isSiteVerificationError()
     val canClickSubmit = prepared && !busy && !needsVerification && !PlatformSessionRecovery.verifying &&
+        !(hasTopicMetaControls && tagsLoading) &&
         (action != ComposerAction.EDIT || hasChanges)
     val canSubmit = canClickSubmit && titleValidation == null && bodyValidation == null && tagValidationOk
 
@@ -824,7 +826,8 @@ internal fun ComposerSheet(
                             if (!editingOp || snapshot.raw != originalRaw) {
                                 val updatedPost = LinuxDoRepository.updatePost(
                                     snapshot.postId ?: throw ApiMutationException(LinDoComposerCopy.POST_META_INCOMPLETE.text),
-                                    snapshot.raw
+                                    snapshot.raw,
+                                    editReason = editReason.trim()
                                 ) ?: throw PostSubmissionUnconfirmed()
                                 PostSubmission.Published(
                                     ComposerPublished(
@@ -862,7 +865,7 @@ internal fun ComposerSheet(
                 if (errMsg.isSiteVerificationError()) {
                     focusManager.clearFocus(force = true)
                     keyboard?.hide()
-                    if (openWebUrl != null && !PlatformSessionRecovery.verifying) {
+                    if (!NetworkRecoveryPolicy.enabled && openWebUrl != null && !PlatformSessionRecovery.verifying) {
                         openWebUrl.invoke("https://linux.do/challenge#lindo-verify")
                     }
                 }
@@ -987,58 +990,91 @@ internal fun ComposerSheet(
                             ?: draft.replyToUsername?.takeIf { it.isNotBlank() }
                         val snippet = if (floor == null) topicTitle else replyToContentSnippet.orEmpty()
                         if (floor != null || snippet.isNotBlank()) {
-                            Row(
-                                Modifier.fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 4.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .then(
-                                        if (snippet.isNotBlank()) {
-                                            Modifier
-                                                .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
-                                                .clickable { replyContextExpanded = !replyContextExpanded }
-                                        } else {
-                                            Modifier
-                                        }
-                                    )
-                                    .padding(horizontal = 6.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.Top,
-                                horizontalArrangement = Arrangement.spacedBy(9.dp)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp)
                             ) {
-                                if (floor != null && name != null) {
-                                    GoogleAccountRingAvatar(
-                                        letter = name,
-                                        username = draft.replyToUsername ?: name,
-                                        avatarUrl = replyToAvatarUrl,
-                                        animatedAvatar = replyToAnimatedAvatar,
-                                        avatarSize = 25.dp,
-                                        strokeWidth = 0.dp
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(IntrinsicSize.Min)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(palette.subtleSurface)
+                                        .border(0.5.dp, palette.hairline.copy(alpha = 0.65f), RoundedCornerShape(10.dp))
+                                        .then(
+                                            if (snippet.isNotBlank()) {
+                                                Modifier
+                                                    .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
+                                                    .clickable { replyContextExpanded = !replyContextExpanded }
+                                            } else {
+                                                Modifier
+                                            }
+                                        ),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(2.5.dp)
+                                            .fillMaxHeight()
+                                            .background(palette.brandGold)
                                     )
-                                }
-                                Column(Modifier.weight(1f)) {
-                                    if (floor != null) {
-                                        Text(
-                                            when {
-                                                name != null -> LinDoReaderCopy.REPLY_TARGET_USER_FLOOR.format(name, floor)
-                                                floor == 1 -> LinDoComposerCopy.REPLY_OP.text
-                                                else -> LinDoComposerCopy.REPLY_FLOOR_NUMBER.format(floor)
-                                            },
-                                            color = palette.inkPrimary, fontWeight = FontWeight.Medium,
-                                            fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                                        )
+                                    Column(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(horizontal = 11.dp, vertical = 9.dp),
+                                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            if (floor != null && name != null) {
+                                                GoogleAccountRingAvatar(
+                                                    letter = name,
+                                                    username = draft.replyToUsername ?: name,
+                                                    avatarUrl = replyToAvatarUrl,
+                                                    animatedAvatar = replyToAnimatedAvatar,
+                                                    avatarSize = 19.dp,
+                                                    strokeWidth = 0.dp
+                                                )
+                                            }
+                                            Text(
+                                                text = when {
+                                                    floor != null && name != null -> LinDoReaderCopy.REPLY_TARGET_USER_FLOOR.format(name, floor)
+                                                    floor == 1 -> LinDoComposerCopy.REPLY_OP.text
+                                                    floor != null -> LinDoComposerCopy.REPLY_FLOOR_NUMBER.format(floor)
+                                                    else -> "回复话题"
+                                                },
+                                                color = palette.inkSecondary,
+                                                fontWeight = FontWeight.Medium,
+                                                fontSize = 12.5.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            if (snippet.isNotBlank()) {
+                                                Icon(
+                                                    imageVector = if (replyContextExpanded) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
+                                                    contentDescription = if (replyContextExpanded) LinDoComposerCopy.COLLAPSE_ORIGINAL_DESC.text else LinDoComposerCopy.EXPAND_ORIGINAL_DESC.text,
+                                                    tint = palette.inkTertiary,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                        }
+                                        if (snippet.isNotBlank()) {
+                                            Text(
+                                                text = snippet,
+                                                color = palette.inkPrimary.copy(alpha = 0.84f),
+                                                fontSize = 13.sp,
+                                                lineHeight = 19.sp,
+                                                maxLines = if (replyContextExpanded) 6 else 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.padding(start = if (floor != null && name != null) 25.dp else 0.dp)
+                                            )
+                                        }
                                     }
-                                    if (snippet.isNotBlank()) {
-                                        Text(
-                                            snippet, color = palette.inkSecondary, fontSize = 12.sp, lineHeight = 18.sp,
-                                            maxLines = if (replyContextExpanded) 5 else 1, overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                                if (snippet.isNotBlank()) {
-                                    Icon(
-                                        if (replyContextExpanded) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
-                                        if (replyContextExpanded) LinDoComposerCopy.COLLAPSE_ORIGINAL_DESC.text else LinDoComposerCopy.EXPAND_ORIGINAL_DESC.text,
-                                        tint = palette.inkSecondary, modifier = Modifier.size(15.dp)
-                                    )
                                 }
                             }
                             HorizontalDivider(color = palette.hairline, thickness = 0.5.dp)
@@ -1348,6 +1384,47 @@ internal fun ComposerSheet(
                         Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
                             LinDoFeedbackRow(submitError!!, LinDoMascotState.NetworkError)
                         }
+                    }
+
+                    if (action == ComposerAction.EDIT) {
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = editReason,
+                            onValueChange = { if (it.length <= 120) editReason = it },
+                            enabled = !submitting,
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                color = palette.inkPrimary,
+                                fontSize = 12.5.sp
+                            ),
+                            cursorBrush = androidx.compose.ui.graphics.SolidColor(palette.brandGold),
+                            decorationBox = { inner ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "编辑原因：",
+                                        color = palette.inkTertiary,
+                                        fontSize = 12.sp
+                                    )
+                                    Box(Modifier.weight(1f)) {
+                                        if (editReason.isEmpty()) {
+                                            Text(
+                                                text = "选填（例如：修正错别字 / 补充配置说明）",
+                                                color = palette.inkTertiary.copy(alpha = 0.7f),
+                                                fontSize = 12.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        inner()
+                                    }
+                                }
+                            }
+                        )
+                        HorizontalDivider(color = palette.hairline, thickness = 0.5.dp)
                     }
 
                     // ==================== 4. 顶部 Action Tools Bar + 弹性全高创作画布 ====================

@@ -390,6 +390,13 @@ internal fun DebugDiagnosticsSheet(
                                 else -> "通道就绪"
                             }
                         )
+                        val echSnap = do_.linux.lindo.core.network.EchRoutingPolicy.snapshot
+                        if (echSnap.supported) {
+                            DiagnosticDotPill(
+                                dotColor = if (echSnap.active) Color(0xFF10B981) else palette.inkTertiary,
+                                label = if (echSnap.active) "ECH 已开启" else "ECH 默认"
+                            )
+                        }
                     }
                 }
 

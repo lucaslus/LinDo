@@ -498,6 +498,20 @@ object ScreenTrackEngine {
         consecutiveFailures = 0
     }
 
+    /**
+     * Cloudflare 验证期间冻结并丢弃阻塞期未发出的旧 timings 批次（防止过盾瞬间齐射引发 429），
+     * 同时保留 `readPostsSet` 避免每秒 tick 误判未读触发风暴。
+     */
+    fun pauseAndDropForSiteVerification(nowMs: Long = System.currentTimeMillis()) = synchronized(lock) {
+        blockSendingUntilEpochMs = maxOf(blockSendingUntilEpochMs, nowMs + 90_000L)
+        if (consolidatedQueue.isNotEmpty()) {
+            consolidatedQueue.clear()
+            runUiSafeStateWrite {
+                pendingBatchesCount = 0
+            }
+        }
+    }
+
     fun onBatchSendResult(batch: ConsolidatedTimingBatch, statusCode: Int?, nowMs: Long = System.currentTimeMillis()) = synchronized(lock) {
         when (TimingBatchOutcome.classify(statusCode)) {
             TimingBatchOutcome.CONFIRMED -> {

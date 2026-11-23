@@ -51,8 +51,8 @@ data class DiagnosticLogEntry(
  * 3. 本地双文件滚动持久化（上限约 1.5 MB），支持跨重启保留上次崩溃现场，并支持一键导出 `.log` 或在清理缓存时一并清空。
  */
 object LinDoDiagnosticLogger {
-    const val APP_VERSION_NAME: String = "0.2.41"
-    const val APP_BUILD: Int = 75
+    const val APP_VERSION_NAME: String = "0.2.53"
+    const val APP_BUILD: Int = 87
     const val APP_VERSION_DISPLAY: String = "Lindo v$APP_VERSION_NAME · build $APP_BUILD"
 
     private const val MAX_MEMORY_ENTRIES = 320
@@ -83,7 +83,7 @@ object LinDoDiagnosticLogger {
         DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneId.systemDefault())
 
     private val sensitiveQueryParamRegex = Regex(
-        """(?i)([?&](?:payload|oneTimePassword|one_time_password|public_key|nonce|api_key|user_api_key|token|csrf|password|secret)=)([^&#\s"']+)"""
+        """(?i)([?&](?:payload|oneTimePassword|one_time_password|public_key|nonce|api_key|user_api_key|token|csrf|password|secret|k|o)=)([^&#\s"']+)"""
     )
     private val otpPathRegex = Regex("""(?i)(/session/otp/)([^/?#\s"']+)""")
     private val sensitiveCookiePairRegex = Regex(
@@ -577,6 +577,20 @@ object LinDoDiagnosticLogger {
                 "Guard State  : rateLimited=${LinuxDoRepository.isRateLimitedNow()}, " +
                     "cfCooldown=${LinuxDoRepository.isChallengeCooldownActive()}"
             )
+            val meta = runCatching { do_.linux.lindo.core.network.NetworkPolicyEngine.liveRuntimeMetaProvider?.invoke() }.getOrNull()
+            val healthSnap = runCatching {
+                do_.linux.lindo.core.network.NetworkPolicyEngine.buildHealthSnapshot(
+                    profileName = meta?.first ?: "default",
+                    webViewGeneration = meta?.second ?: 0,
+                    networkSignature = meta?.third ?: "unknown"
+                ).toDiagnosticLine()
+            }.getOrNull()
+            if (!healthSnap.isNullOrBlank()) {
+                appendLine("Health Snap  : $healthSnap")
+            }
+            if (do_.linux.lindo.core.network.EchRoutingPolicy.snapshot.supported) {
+                appendLine("ECH State    : ${do_.linux.lindo.core.network.EchRoutingPolicy.toDiagnosticLine()}")
+            }
             appendLine("Log Entries  : ${snap.size} (All tokens & cookies redacted)")
             appendLine("============================================================")
             appendLine()

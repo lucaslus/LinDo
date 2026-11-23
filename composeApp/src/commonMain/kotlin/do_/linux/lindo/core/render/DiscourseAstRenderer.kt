@@ -11,8 +11,19 @@ import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
 import java.net.URI
 
-data class InlineRun(val text: String, val bold: Boolean = false, val italic: Boolean = false,
-    val code: Boolean = false, val strike: Boolean = false, val underline: Boolean = false, val href: String? = null, val imageUrl: String? = null, val largeEmoji: Boolean = false)
+data class InlineRun(
+    val text: String,
+    val bold: Boolean = false,
+    val italic: Boolean = false,
+    val code: Boolean = false,
+    val strike: Boolean = false,
+    val underline: Boolean = false,
+    val href: String? = null,
+    val imageUrl: String? = null,
+    val largeEmoji: Boolean = false,
+    val colorHex: String? = null,
+    val bgColorHex: String? = null
+)
 data class RichText(val runs: List<InlineRun>) {
     val text: String get() = runs.joinToString("") { it.text }
     companion object { fun plain(text: String) = RichText(listOf(InlineRun(text))) }
@@ -22,8 +33,16 @@ sealed interface PostBlockNode {
     data class Heading(val level: Int, val text: String, val rich: RichText = RichText.plain(text)) : PostBlockNode
     data class Paragraph(val text: String, val inlineCodeSpans: List<String> = emptyList(), val rich: RichText = RichText.plain(text)) : PostBlockNode
     data class CodeBlock(val language: String, val code: String) : PostBlockNode
-    data class QuoteBlock(val username: String?, val postNumber: Int?, val topicId: Int?, val quotedText: String,
-        val children: List<PostBlockNode> = emptyList()) : PostBlockNode
+    data class QuoteBlock(
+        val username: String?,
+        val postNumber: Int?,
+        val topicId: Int?,
+        val quotedText: String,
+        val children: List<PostBlockNode> = emptyList(),
+        val title: String? = null,
+        val titleUrl: String? = null,
+        val isFull: Boolean = true
+    ) : PostBlockNode
     data class DetailsSpoilerBlock(val title: String, val innerText: String, val children: List<PostBlockNode> = emptyList()) : PostBlockNode
     data class Spoiler(val children: List<PostBlockNode>) : PostBlockNode
     data class PollOption(val id: String, val text: String)
@@ -50,7 +69,9 @@ sealed interface PostBlockNode {
     data class CalloutBlock(
         val kind: String,
         val title: String,
-        val children: List<PostBlockNode> = emptyList()
+        val children: List<PostBlockNode> = emptyList(),
+        val collapsible: Boolean = false,
+        val defaultExpanded: Boolean = true
     ) : PostBlockNode {
         val kindEnum: CalloutBlockKind get() = CalloutBlockKind.fromKey(kind)
     }
@@ -122,12 +143,146 @@ object DiscourseAstParser {
         return sb.toString()
     }
 
+    private val obsidianCalloutRegex = Regex(
+        """^\s*\[!(note|info|todo|tip|hint|important|success|check|done|warning|caution|attention|danger|error|failure|fail|bug|example|quote|cite|abstract|summary|tldr|question|help|faq)\]([+-])?(?:[ \t]+([^\r\n]*))?""",
+        RegexOption.IGNORE_CASE
+    )
+    private val hexColorRegex = Regex("""^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$""")
+    private val rgbColorRegex = Regex("""^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9.]+))?\s*\)$""", RegexOption.IGNORE_CASE)
+    private val namedCssColors = mapOf(
+        "red" to "#EF4444", "crimson" to "#DC2626", "darkred" to "#991B1B", "tomato" to "#F97316",
+        "orange" to "#F97316", "darkorange" to "#EA580C", "amber" to "#F59E0B", "gold" to "#EAB308",
+        "yellow" to "#EAB308", "green" to "#22C55E", "darkgreen" to "#15803D", "lime" to "#84CC16",
+        "emerald" to "#10B981", "teal" to "#14B8A6", "cyan" to "#06B6D4", "aqua" to "#06B6D4",
+        "skyblue" to "#38BDF8", "blue" to "#3B82F6", "royalblue" to "#2563EB", "navy" to "#1E40AF",
+        "indigo" to "#6366F1", "purple" to "#A855F7", "violet" to "#8B5CF6", "magenta" to "#D946EF",
+        "fuchsia" to "#D946EF", "pink" to "#EC4899", "hotpink" to "#EC4899", "brown" to "#A16207",
+        "gray" to "#9CA3AF", "grey" to "#9CA3AF", "silver" to "#CBD5E1", "white" to "#F8FAFC",
+        "black" to "#111827"
+    )
+
+    internal fun sanitizeSafeCssColor(raw: String?): String? {
+        val clean = raw?.trim()?.removeSuffix("!important")?.trim() ?: return null
+        if (clean.isEmpty() || clean.length > 48) return null
+        val lower = clean.lowercase()
+        if (lower.contains("url(") || lower.contains("expression(") || lower.contains("javascript:") || lower.contains(";")) {
+            return null
+        }
+        namedCssColors[lower]?.let { return it }
+        if (hexColorRegex.matches(clean)) return clean.uppercase()
+        rgbColorRegex.matchEntire(clean)?.let { m ->
+            val r = m.groupValues[1].toIntOrNull()?.coerceIn(0, 255) ?: return null
+            val g = m.groupValues[2].toIntOrNull()?.coerceIn(0, 255) ?: return null
+            val b = m.groupValues[3].toIntOrNull()?.coerceIn(0, 255) ?: return null
+            val aStr = m.groupValues.getOrNull(4).orEmpty()
+            return if (aStr.isNotBlank()) {
+                val a = ((aStr.toFloatOrNull() ?: 1f).coerceIn(0f, 1f) * 255f).toInt()
+                "#%02X%02X%02X%02X".format(r, g, b, a)
+            } else {
+                "#%02X%02X%02X".format(r, g, b)
+            }
+        }
+        return null
+    }
+
+    private fun extractElementInlineColors(node: Element): Pair<String?, String?> {
+        var fg = sanitizeSafeCssColor(node.attr("data-color").ifBlank { if (node.normalName() == "font") node.attr("color") else "" })
+        var bg = sanitizeSafeCssColor(node.attr("data-bgcolor"))
+        val styleAttr = node.attr("style")
+        if (styleAttr.isNotBlank()) {
+            styleAttr.split(';').forEach { decl ->
+                val idx = decl.indexOf(':')
+                if (idx > 0) {
+                    val prop = decl.substring(0, idx).trim().lowercase()
+                    val value = decl.substring(idx + 1).trim()
+                    when (prop) {
+                        "color" -> if (fg == null) fg = sanitizeSafeCssColor(value)
+                        "background-color", "background" -> if (bg == null) bg = sanitizeSafeCssColor(value)
+                    }
+                }
+            }
+        }
+        return fg to bg
+    }
+
+    private fun mapObsidianCalloutKind(rawType: String): CalloutBlockKind = when (rawType.lowercase()) {
+        "tip", "hint", "success", "check", "done", "example" -> CalloutBlockKind.TIP
+        "important", "abstract", "summary", "tldr", "question", "help", "faq" -> CalloutBlockKind.IMPORTANT
+        "warning", "attention" -> CalloutBlockKind.WARNING
+        "caution", "danger", "error", "failure", "fail", "bug" -> CalloutBlockKind.CAUTION
+        "quote", "cite" -> CalloutBlockKind.QUOTE
+        else -> CalloutBlockKind.NOTE
+    }
+
+    private fun tryParseObsidianCallout(blockquote: Element, nesting: Int): PostBlockNode.CalloutBlock? {
+        val firstP = blockquote.children().firstOrNull { it.normalName() == "p" } ?: return null
+        val firstNode = firstP.childNodes().firstOrNull() ?: return null
+        val firstRawText = when (firstNode) {
+            is TextNode -> firstNode.wholeText
+            is Element -> if (firstNode.normalName() in setOf("strong", "b", "em", "span")) firstNode.wholeText() else return null
+            else -> return null
+        }
+        val firstLine = firstRawText.substringBefore('\n')
+        val match = obsidianCalloutRegex.find(firstLine) ?: return null
+        val calloutKind = mapObsidianCalloutKind(match.groupValues[1])
+        val foldFlag = match.groupValues[2]
+        val customTitle = match.groupValues[3].trim()
+        val title = customTitle.ifBlank { calloutKind.defaultTitle.text }
+        val collapsible = foldFlag == "+" || foldFlag == "-"
+        val defaultExpanded = foldFlag != "-"
+
+        val clone = blockquote.clone()
+        val clonedFirstP = clone.children().firstOrNull { it.normalName() == "p" }
+        if (clonedFirstP != null) {
+            val clonedFirstChild = clonedFirstP.childNodes().firstOrNull()
+            val afterNewline = if (firstRawText.contains('\n')) firstRawText.substringAfter('\n') else ""
+            if (afterNewline.isNotBlank() && clonedFirstChild is TextNode) {
+                clonedFirstChild.text(afterNewline)
+            } else {
+                clonedFirstChild?.remove()
+                // Strip leading <br> left immediately after `[!Note]+ title<br>body`
+                val nextChild = clonedFirstP.childNodes().firstOrNull()
+                if (nextChild is Element && nextChild.normalName() == "br") {
+                    nextChild.remove()
+                }
+                if (clonedFirstP.childNodes().isEmpty() || clonedFirstP.text().isBlank() && clonedFirstP.selectFirst("img, code, pre") == null) {
+                    clonedFirstP.remove()
+                }
+            }
+        }
+        val bodyBlocks = blocks(clone.childNodes(), nesting + 1)
+        return PostBlockNode.CalloutBlock(
+            kind = calloutKind.wireKey,
+            title = title,
+            children = bodyBlocks,
+            collapsible = collapsible,
+            defaultExpanded = defaultExpanded
+        )
+    }
+
+    private fun friendlyMediaLabel(rawUrl: String?, mediaKind: MediaBlockKind, fallbackAttrTitle: String): String {
+        if (fallbackAttrTitle.isNotBlank()) return fallbackAttrTitle
+        if (mediaKind.isAudio) return LinDoReaderCopy.AST_AUDIO.text
+        val host = rawUrl?.let { runCatching { URI(it).host.orEmpty().lowercase() }.getOrNull() }.orEmpty()
+        return when {
+            host.contains("bilibili.com") || host.contains("b23.tv") -> "Bilibili 视频"
+            host.contains("youtube.com") || host.contains("youtu.be") -> "YouTube 视频"
+            host.contains("vimeo.com") -> "Vimeo 视频"
+            host.contains("codepen.io") -> "CodePen 演示"
+            host.contains("codesandbox.io") -> "CodeSandbox 演示"
+            host.contains("music.163.com") -> "网易云音乐"
+            host.isNotBlank() && mediaKind == MediaBlockKind.IFRAME -> "嵌入内容 · ${host.removePrefix("www.")}"
+            else -> LinDoReaderCopy.AST_VIDEO_OR_EMBED.text
+        }
+    }
+
     fun safeUrl(raw: String, allowMailto: Boolean = true): String? = runCatching {
         val value = raw.trim().let {
             if (it.startsWith("upload://") && it.removePrefix("upload://").matches(Regex("[A-Za-z0-9_.-]+")))
                 "https://linux.do/uploads/short-url/${it.removePrefix("upload://")}" else it
         }
         if (value.isEmpty()) return null
+        if (value.startsWith("#") && value.length > 1) return value
         val encoded = encodeLooseUriChars(value)
         val uri = URI("https://linux.do/").resolve(encoded)
         if (uri.scheme?.lowercase() !in if (allowMailto) setOf("https", "http", "mailto") else setOf("https", "http")) return null
@@ -250,17 +405,26 @@ object DiscourseAstParser {
                     val isLottery = node.attr("data-wrap").equals("lottery", ignoreCase = true) || node.hasClass("linuxdo-lottery")
                     val calloutKind = when {
                         isLottery -> CalloutBlockKind.LOTTERY
-                        node.classNames().any { it.contains("warning") || it.contains("caution") } -> CalloutBlockKind.WARNING
-                        node.classNames().any { it.contains("tip") || it.contains("important") } -> CalloutBlockKind.TIP
+                        node.classNames().any { it.contains("caution") || it.contains("danger") || it.contains("error") } -> CalloutBlockKind.CAUTION
+                        node.classNames().any { it.contains("warning") } -> CalloutBlockKind.WARNING
+                        node.classNames().any { it.contains("important") } -> CalloutBlockKind.IMPORTANT
+                        node.classNames().any { it.contains("tip") || it.contains("success") } -> CalloutBlockKind.TIP
+                        node.classNames().any { it.contains("quote") } -> CalloutBlockKind.QUOTE
                         else -> CalloutBlockKind.NOTE
                     }
                     val titleEl = node.selectFirst(".markdown-alert-title, .admonition-title, .lottery-title")
-                    val title = titleEl?.text()?.trim().orEmpty().ifBlank { calloutKind.defaultTitle.text }
+                    val title = node.attr("data-callout-title").trim()
+                        .ifBlank { titleEl?.text()?.trim().orEmpty() }
+                        .ifBlank { calloutKind.defaultTitle.text }
+                    val collapsible = node.attr("data-callout-collapsible").equals("true", ignoreCase = true)
+                    val defaultExpanded = !node.attr("data-callout-expanded").equals("false", ignoreCase = true)
                     val childrenNodes = blocks(node.childNodes().filter { it !== titleEl }, nesting + 1)
                     result += PostBlockNode.CalloutBlock(
                         kind = calloutKind.wireKey,
                         title = title,
-                        children = childrenNodes.ifEmpty { listOf(PostBlockNode.Paragraph(node.text().trim())) }
+                        children = childrenNodes.ifEmpty { listOf(PostBlockNode.Paragraph(node.text().trim())) },
+                        collapsible = collapsible,
+                        defaultExpanded = defaultExpanded
                     )
                 }
                 tag == "pre" -> {
@@ -268,10 +432,50 @@ object DiscourseAstParser {
                     val language = code.classNames().firstOrNull { it.startsWith("lang-") || it.startsWith("language-") }?.substringAfter('-').orEmpty()
                     result += PostBlockNode.CodeBlock(language, code.wholeText().trimEnd('\n'))
                 }
-                tag == "blockquote" || (tag == "aside" && node.hasClass("quote")) -> {
-                    flush(); val body = node.selectFirst("blockquote") ?: node
-                    result += PostBlockNode.QuoteBlock(node.attr("data-username").ifBlank { null }, node.attr("data-post").toIntOrNull(),
-                        node.attr("data-topic").toIntOrNull(), body.wholeText().trim(), blocks(body.childNodes(), nesting + 1))
+                tag == "blockquote" -> {
+                    flush()
+                    val obsidian = tryParseObsidianCallout(node, nesting)
+                    if (obsidian != null) {
+                        result += obsidian
+                    } else {
+                        result += PostBlockNode.QuoteBlock(
+                            username = node.attr("data-username").ifBlank { null },
+                            postNumber = node.attr("data-post").toIntOrNull(),
+                            topicId = node.attr("data-topic").toIntOrNull(),
+                            quotedText = node.wholeText().trim(),
+                            children = blocks(node.childNodes(), nesting + 1)
+                        )
+                    }
+                }
+                tag == "aside" && node.hasClass("quote") -> {
+                    flush()
+                    val body = node.selectFirst("blockquote") ?: node
+                    val titleDiv = node.selectFirst("> div.title, .title")
+                    val titleAnchor = titleDiv?.selectFirst("a[href]")
+                    val rawTitleHref = titleAnchor?.attr("href").orEmpty().trim()
+                    val resolvedTitleUrl = safeUrl(rawTitleHref, allowMailto = false)
+                    val titleText = titleAnchor?.text()?.trim()?.takeIf { it.isNotBlank() }
+                        ?: titleDiv?.text()?.trim()?.removeSuffix(":")?.trim()?.takeIf { it.isNotBlank() }
+                    val dataFull = node.attr("data-full").trim()
+                    val topicId = node.attr("data-topic").toIntOrNull()
+                    val postNumber = node.attr("data-post").toIntOrNull()
+                    val isFull = when {
+                        dataFull.equals("true", ignoreCase = true) -> true
+                        dataFull.equals("false", ignoreCase = true) -> false
+                        node.hasClass("quote-modified") -> false
+                        topicId != null && postNumber != null -> false
+                        else -> true
+                    }
+                    result += PostBlockNode.QuoteBlock(
+                        username = node.attr("data-username").ifBlank { null },
+                        postNumber = postNumber,
+                        topicId = topicId,
+                        quotedText = body.wholeText().trim(),
+                        children = blocks(body.childNodes(), nesting + 1),
+                        title = titleText,
+                        titleUrl = resolvedTitleUrl,
+                        isFull = isFull
+                    )
                 }
                 tag == "details" -> {
                     flush(); val summary = node.children().firstOrNull { it.normalName() == "summary" }
@@ -311,10 +515,10 @@ object DiscourseAstParser {
                     flush()
                     val mediaKind = MediaBlockKind.fromKey(tag)
                     val raw = node.attr("src").ifBlank { node.attr("data") }.ifBlank { node.selectFirst("source")?.attr("src").orEmpty() }
-                    val defaultLabel = if (mediaKind.isAudio) LinDoReaderCopy.AST_AUDIO.text else LinDoReaderCopy.AST_VIDEO_OR_EMBED.text
+                    val resolved = safeUrl(raw, allowMailto = false)
                     result += PostBlockNode.Media(
-                        node.attr("title").ifBlank { defaultLabel },
-                        safeUrl(raw, allowMailto = false),
+                        friendlyMediaLabel(resolved, mediaKind, node.attr("title").trim()),
+                        resolved,
                         mediaKind.wireKey
                     )
                 }
@@ -431,17 +635,27 @@ object DiscourseAstParser {
                 }
                 tag == "br" -> pending.add(style.copy(text = "\n"))
                 tag in setOf("p", "div", "section", "article", "figure", "figcaption", "dl", "dt", "dd", "li") -> {
-                    flush(); node.childNodes().forEach { visit(it, style, nesting + 1) }; flush()
+                    flush()
+                    val (fgColor, bgColor) = extractElementInlineColors(node)
+                    val blockStyle = if (fgColor != null || bgColor != null) {
+                        style.copy(colorHex = fgColor ?: style.colorHex, bgColorHex = bgColor ?: style.bgColorHex)
+                    } else style
+                    node.childNodes().forEach { visit(it, blockStyle, nesting + 1) }
+                    flush()
                 }
                 else -> {
+                    val (fgColor, bgColor) = extractElementInlineColors(node)
+                    val styledBase = if (fgColor != null || bgColor != null) {
+                        style.copy(colorHex = fgColor ?: style.colorHex, bgColorHex = bgColor ?: style.bgColorHex)
+                    } else style
                     val next = when (tag) {
-                        "b", "strong" -> style.copy(bold = true)
-                        "i", "em" -> style.copy(italic = true)
-                        "s", "del", "strike" -> style.copy(strike = true)
-                        "u" -> style.copy(underline = true)
-                        "code", "kbd" -> style.copy(code = true)
-                        "a" -> style.copy(href = safeUrl(node.attr("href")))
-                        else -> style
+                        "b", "strong" -> styledBase.copy(bold = true)
+                        "i", "em" -> styledBase.copy(italic = true)
+                        "s", "del", "strike" -> styledBase.copy(strike = true)
+                        "u" -> styledBase.copy(underline = true)
+                        "code", "kbd" -> styledBase.copy(code = true)
+                        "a" -> styledBase.copy(href = safeUrl(node.attr("href")))
+                        else -> styledBase
                     }
                     node.childNodes().forEach { visit(it, next, nesting + 1) }
                 }

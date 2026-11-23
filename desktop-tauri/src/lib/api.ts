@@ -6,9 +6,13 @@ import type {
   BootstrapPayload,
   CategoryMeta,
   CloudDraftItem,
+  CommunitySearchFilters,
+  CommunitySearchTagHit,
+  CommunitySearchUserHit,
   ConnectMetricItem,
   ConnectTrustLevelReport,
   DesktopUpdateInfo,
+  EchDesktopSnapshot,
   FlairInfo,
   FollowUserEntry,
   GrantedBadge,
@@ -16,19 +20,25 @@ import type {
   LocalHistoryItem,
   MentionUserCandidate,
   NotificationItem,
+  PollVoterItem,
   PostBoostItem,
   PostItemModel,
+  PostLinkCountItem,
   PostPollModel,
   PostReactionItem,
+  PostRevisionDetail,
+  ReactionUserGroup,
   SiteHttpResponse,
   TagChoiceOption,
   TagChoiceResult,
   TopicDetailModel,
+  TopicPoster,
   TopicSummary,
   UserAccountPreferencesSnapshot,
   UserPreferences,
   UserProfile,
 } from "./types";
+import { parseInternalTopicLink } from "./cooked";
 import { extractUsernameFromAvatarUrl } from "./palette";
 import { diagLog } from "./diagnostics";
 
@@ -450,6 +460,7 @@ export async function clearExpiredNoticeInRust(): Promise<void> {
 
 export async function switchSavedAccount(username: string): Promise<boolean> {
   clearTopicDetailCache();
+  resetNotificationReadState();
   diagLog("INFO", "AUTH", "AccountSwitch", `切换至已保存账号 @${username}`);
   const ok = await invoke<boolean>("switch_account", { username });
   if (!ok) {
@@ -460,6 +471,7 @@ export async function switchSavedAccount(username: string): Promise<boolean> {
 
 export async function logoutAccount(removeSaved = true): Promise<void> {
   clearTopicDetailCache();
+  resetNotificationReadState();
   diagLog("INFO", "AUTH", "Logout", removeSaved ? "退出登录并移除本地凭据" : "退出当前会话（保留已保存账号）");
   return invoke("logout_account", { removeSaved });
 }
@@ -470,11 +482,13 @@ export async function removeSavedAccountInRust(username: string): Promise<void> 
 
 export async function addAccountWebLoginInRust(isDark: boolean): Promise<boolean> {
   clearTopicDetailCache();
+  resetNotificationReadState();
   return invoke<boolean>("add_account_web_login", { isDark });
 }
 
 export async function importManualCredentialInRust(rawInput: string, isDark: boolean): Promise<boolean> {
   clearTopicDetailCache();
+  resetNotificationReadState();
   return invoke<boolean>("import_manual_credential", { rawInput, isDark });
 }
 
@@ -484,6 +498,10 @@ export async function openInAppForumPanel(url: string, isDark: boolean): Promise
 
 export async function savePreferencesToRust(preferences: UserPreferences): Promise<void> {
   return invoke("save_preferences", { preferences });
+}
+
+export async function getEchStatus(): Promise<EchDesktopSnapshot> {
+  return invoke<EchDesktopSnapshot>("get_ech_status");
 }
 
 export async function recordReadFloorInRust(topicId: number, floor: number): Promise<void> {
@@ -650,7 +668,13 @@ async function getJsonOrThrow(
   }
   const data = safeJson(res.body);
   if (res.status < 200 || res.status >= 300 || !data) {
-    throw new SiteError(extractDiscourseError(data) || `加载失败 (${res.status})`, { status: res.status });
+    const rawErr = extractDiscourseError(data);
+    const localizedErr =
+      res.status === 404 &&
+      (!rawErr || /could not be found|not_found/i.test(rawErr) || data?.error_type === "not_found")
+        ? "内容不存在，或当前账号暂未获得访问权限"
+        : rawErr;
+    throw new SiteError(localizedErr || `加载失败 (${res.status})`, { status: res.status });
   }
   return data;
 }
@@ -1075,7 +1099,12 @@ export async function refreshCurrentUserSession(): Promise<{ profile: UserProfil
   if (profile.avatarTemplate) {
     userAvatarMemoryCache.set(profile.username.toLowerCase(), profile.avatarTemplate);
   }
-  const unread = Number(cu.all_unread_notifications_count ?? cu.unread_notifications ?? 0);
+  ensureNotificationOwner(profile.username);
+  const rawUnread = Number(cu.all_unread_notifications_count ?? cu.unread_notifications ?? 0);
+  const unread =
+    shortNotifCache && Date.now() - shortNotifCache.ts <= SHORT_LIST_CACHE_TTL_MS
+      ? resolveAuthoritativeUnreadCount(shortNotifCache.items, rawUnread, 60)
+      : rawUnread;
   await updateCurrentUserInRust(profile);
   await setUnreadBadgeInRust(unread);
   return { profile, unread };
@@ -1490,6 +1519,7 @@ function parsePollsOnPost(p: any): PostPollModel[] {
         min: pl.min != null ? Number(pl.min) : undefined,
         max: pl.max != null ? Number(pl.max) : undefined,
         title: pl.title ? String(pl.title) : undefined,
+        isPublic: pl.public === true || String(pl.public || "").toLowerCase() === "true",
         myVotes,
       };
     })
@@ -1523,6 +1553,36 @@ function parsePostModel(
         cooked: String(b.cooked || b.raw || ""),
         canDelete: Boolean(b.can_delete),
       }))
+    : [];
+
+  const linkCounts: PostLinkCountItem[] = Array.isArray(p.link_counts)
+    ? (() => {
+        const seen = new Set<string>();
+        const out: PostLinkCountItem[] = [];
+        for (const rawLink of p.link_counts) {
+          const url = String(rawLink?.url || "").trim();
+          const title = stripHtmlTags(String(rawLink?.title || "")).trim();
+          if (!url || !title) continue;
+          const internal = Boolean(rawLink?.internal);
+          const reflection = Boolean(rawLink?.reflection);
+          const parsedTopic = parseInternalTopicLink(url);
+          const dedupeKey = parsedTopic
+            ? `t:${parsedTopic.topicId}:${reflection ? 1 : 0}`
+            : `u:${url}:${reflection ? 1 : 0}`;
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
+          out.push({
+            url,
+            title,
+            clicks: Number(rawLink?.clicks || 0),
+            internal: internal || Boolean(parsedTopic),
+            reflection,
+            topicId: parsedTopic?.topicId,
+            postNumber: parsedTopic?.postNumber,
+          });
+        }
+        return out;
+      })()
     : [];
 
   const userId = Number(p.user_id || 0);
@@ -1616,10 +1676,20 @@ function parsePostModel(
     currentUserReaction: currentReaction,
     reactions,
     boosts,
+    linkCounts,
     canBoost: p.can_boost !== undefined ? Boolean(p.can_boost) : !Boolean(p.yours),
     polls: parsePollsOnPost(p),
     bookmarked: Boolean(p.bookmarked),
     bookmarkId: p.bookmark_id ? Number(p.bookmark_id) : null,
+    bookmarkName: p.bookmark_name ? String(p.bookmark_name) : null,
+    bookmarkReminderAt: p.bookmark_reminder_at ? String(p.bookmark_reminder_at) : null,
+    version: Number(p.version || 1),
+    updatedAt: p.updated_at ? String(p.updated_at) : null,
+    canViewEditHistory:
+      p.can_view_edit_history !== undefined
+        ? Boolean(p.can_view_edit_history)
+        : Number(p.version || 1) > 1,
+    editReason: p.edit_reason ? String(p.edit_reason) : null,
     canEdit: Boolean(p.can_edit ?? p.yours),
     canDelete: Boolean(p.can_delete),
     isSmallAction,
@@ -1638,6 +1708,163 @@ let lastTopicTrackVisitAtMs = 0;
 const SHORT_LIST_CACHE_TTL_MS = 12000;
 const shortFeedCache = new Map<string, { ts: number; data: { topics: TopicSummary[]; hasMore: boolean } }>();
 let shortNotifCache: { ts: number; items: NotificationItem[] } | null = null;
+
+const MAX_TRACKED_NOTIF_IDS = 1000;
+const MAX_PENDING_MARK_READ_IDS = 500;
+const POST_FLOOR_READABLE_NOTIF_TYPES = new Set([1, 2, 3, 6, 9, 15, 17, 36, 37, 38, 801, 802]);
+let notificationOwner = "";
+
+function isNotifAutoReadableByTopicFloor(item: NotificationItem): boolean {
+  return (
+    Boolean(item.topicId && item.topicId > 0) &&
+    Boolean(item.postNumber && item.postNumber > 0) &&
+    !item.isConsolidatedReplies &&
+    (item.count ?? 0) <= 1 &&
+    POST_FLOOR_READABLE_NOTIF_TYPES.has(item.notificationType)
+  );
+}
+const locallyReadNotifIds = new Set<number>();
+const pendingMarkReadNotifIds = new Set<number>();
+const confirmedTopicReadFloors = new Map<number, number>();
+let inFlightMarkReadDrain: Promise<void> | null = null;
+
+function addBoundedSetId(set: Set<number>, id: number, maxEntries: number): boolean {
+  if (id <= 0) return false;
+  if (set.has(id)) return false;
+  set.add(id);
+  while (set.size > maxEntries) {
+    const oldest = set.values().next().value;
+    if (oldest === undefined) break;
+    set.delete(oldest);
+  }
+  return true;
+}
+
+function ensureNotificationOwner(username?: string | null): void {
+  const clean = String(username || "").trim().toLowerCase();
+  if (!clean) return;
+  if (notificationOwner && notificationOwner !== clean) {
+    locallyReadNotifIds.clear();
+    pendingMarkReadNotifIds.clear();
+    confirmedTopicReadFloors.clear();
+    shortNotifCache = null;
+  }
+  notificationOwner = clean;
+}
+
+export function resetNotificationReadState(): void {
+  notificationOwner = "";
+  locallyReadNotifIds.clear();
+  pendingMarkReadNotifIds.clear();
+  confirmedTopicReadFloors.clear();
+  shortNotifCache = null;
+}
+
+export function invalidateNotificationShortCache(): void {
+  shortNotifCache = null;
+}
+
+export function resolveAuthoritativeUnreadCount(
+  pageZeroItems: NotificationItem[],
+  previousCount: number,
+  pageSizeLimit = 60
+): number {
+  const pageUnread = pageZeroItems.filter((item) => !item.read).length;
+  if (pageZeroItems.length < pageSizeLimit || pageUnread < pageZeroItems.length) {
+    return pageUnread;
+  }
+  return Math.max(Math.max(0, previousCount), pageUnread);
+}
+
+function overlayNotificationsWithLocalState(items: NotificationItem[]): NotificationItem[] {
+  if (items.length === 0) return items;
+  return items.map((item) => {
+    if (item.read) {
+      pendingMarkReadNotifIds.delete(item.id);
+      return item;
+    }
+    const readLocally = locallyReadNotifIds.has(item.id);
+    const confirmedFloor = item.topicId && item.topicId > 0
+      ? confirmedTopicReadFloors.get(item.topicId) ?? 0
+      : 0;
+    const readByTopicFloor =
+      isNotifAutoReadableByTopicFloor(item) &&
+      confirmedFloor >= (item.postNumber ?? 0);
+    if (readLocally || readByTopicFloor) {
+      addBoundedSetId(locallyReadNotifIds, item.id, MAX_TRACKED_NOTIF_IDS);
+      if (readByTopicFloor) {
+        addBoundedSetId(pendingMarkReadNotifIds, item.id, MAX_PENDING_MARK_READ_IDS);
+      }
+      return { ...item, read: true };
+    }
+    return item;
+  });
+}
+
+function applySingleNotifReadLocally(notificationId: number): boolean {
+  if (notificationId <= 0) return false;
+  const addedToLedger = addBoundedSetId(locallyReadNotifIds, notificationId, MAX_TRACKED_NOTIF_IDS);
+  addBoundedSetId(pendingMarkReadNotifIds, notificationId, MAX_PENDING_MARK_READ_IDS);
+  let transitioned = false;
+  if (shortNotifCache) {
+    shortNotifCache = {
+      ...shortNotifCache,
+      items: shortNotifCache.items.map((item) => {
+        if (item.id === notificationId && !item.read) {
+          transitioned = true;
+          return { ...item, read: true };
+        }
+        return item;
+      }),
+    };
+  }
+  return transitioned || addedToLedger;
+}
+
+export function recordConfirmedTopicFloorForNotifications(topicId: number, floor: number): number {
+  if (topicId <= 0 || floor <= 0) return 0;
+  const prev = confirmedTopicReadFloors.get(topicId) ?? 0;
+  const updatedFloor = Math.max(prev, floor);
+  if (updatedFloor > prev) {
+    confirmedTopicReadFloors.delete(topicId);
+    confirmedTopicReadFloors.set(topicId, updatedFloor);
+    while (confirmedTopicReadFloors.size > 1500) {
+      const oldest = confirmedTopicReadFloors.keys().next().value;
+      if (oldest === undefined) break;
+      confirmedTopicReadFloors.delete(oldest);
+    }
+  }
+  if (!shortNotifCache || shortNotifCache.items.length === 0) {
+    return 0;
+  }
+  let newlyMarked = 0;
+  shortNotifCache = {
+    ...shortNotifCache,
+    items: shortNotifCache.items.map((item) => {
+      if (
+        !item.read &&
+        isNotifAutoReadableByTopicFloor(item) &&
+        item.topicId === topicId &&
+        updatedFloor >= (item.postNumber ?? 0)
+      ) {
+        newlyMarked += 1;
+        addBoundedSetId(locallyReadNotifIds, item.id, MAX_TRACKED_NOTIF_IDS);
+        addBoundedSetId(pendingMarkReadNotifIds, item.id, MAX_PENDING_MARK_READ_IDS);
+        return { ...item, read: true };
+      }
+      return item;
+    }),
+  };
+  if (newlyMarked > 0) {
+    void drainPendingMarkReads();
+  }
+  return newlyMarked;
+}
+
+export function getShortCachedUnreadCount(): number | null {
+  if (!shortNotifCache) return null;
+  return shortNotifCache.items.filter((x) => !x.read).length;
+}
 
 export function clearTopicDetailCache(): void {
   topicDetailMemoryCache.clear();
@@ -1673,6 +1900,7 @@ export async function fetchTopicDetail(
   opts: {
     targetPostNumber?: number | null;
     onlyOpUsername?: string | null;
+    filterSummary?: boolean;
     trackVisit?: boolean;
     forceRefresh?: boolean;
   } = {}
@@ -1680,6 +1908,7 @@ export async function fetchTopicDetail(
   const canUseCache =
     !opts.forceRefresh &&
     !opts.onlyOpUsername &&
+    !opts.filterSummary &&
     (!opts.targetPostNumber || opts.targetPostNumber <= 1);
   if (canUseCache) {
     const cached = getCachedTopicDetail(topicId);
@@ -1697,11 +1926,12 @@ export async function fetchTopicDetail(
   const params = new URLSearchParams();
   if (shouldTrack) params.set("track_visit", "true");
   if (opts.onlyOpUsername) params.set("username_filters", opts.onlyOpUsername);
+  if (opts.filterSummary) params.set("filter", "summary");
 
   const qs = params.toString();
   const suffix = qs ? `?${qs}` : "";
   const path =
-    opts.targetPostNumber && opts.targetPostNumber > 1 && !opts.onlyOpUsername
+    opts.targetPostNumber && opts.targetPostNumber > 1 && !opts.onlyOpUsername && !opts.filterSummary
       ? `https://linux.do/t/${topicId}/${opts.targetPostNumber}.json${suffix}`
       : `https://linux.do/t/${topicId}.json${suffix}`;
 
@@ -1732,6 +1962,64 @@ export async function fetchTopicDetail(
     ? Number(data.accepted_answer.post_number)
     : posts.find((p) => p.acceptedAnswer)?.postNumber ?? null;
 
+  const rawSuggested: any[] = Array.isArray(data?.suggested_topics) && data.suggested_topics.length > 0
+    ? data.suggested_topics
+    : Array.isArray(data?.related_topics)
+      ? data.related_topics
+      : [];
+  const suggestedTopics: TopicSummary[] = rawSuggested
+    .filter((st: any) => Number(st?.id || 0) > 0 && Number(st?.id) !== Number(data.id || topicId))
+    .slice(0, 6)
+    .map((st: any) => {
+      const sCatId = st.category_id ? Number(st.category_id) : undefined;
+      const sCatMeta = findCategoryMeta(sCatId);
+      const sTags: string[] = Array.isArray(st.tags)
+        ? st.tags.map((tg: any) => (typeof tg === "string" ? tg : String(tg?.name || ""))).filter(Boolean)
+        : [];
+      const firstPoster = Array.isArray(st.posters) ? st.posters[0] : null;
+      return {
+        id: Number(st.id),
+        title: stripHtmlTags(String(st.title || st.fancy_title || `话题 #${st.id}`)),
+        slug: String(st.slug || "topic"),
+        categoryId: sCatId,
+        categoryName: sCatMeta?.displayName || (sCatId ? CANONICAL_NAME_BY_ID.get(sCatId) : undefined),
+        categoryColorHex: sCatMeta?.colorHex,
+        tags: sTags,
+        postsCount: Number(st.posts_count || 1),
+        replyCount: Math.max(0, Number(st.reply_count ?? (Number(st.posts_count || 1) - 1))),
+        views: Number(st.views || 0),
+        likeCount: Number(st.like_count || 0),
+        highestPostNumber: Number(st.highest_post_number || st.posts_count || 1),
+        unreadPosts: Number(st.unread_posts || 0),
+        unseen: Boolean(st.unseen),
+        pinned: Boolean(st.pinned),
+        closed: Boolean(st.closed),
+        archived: Boolean(st.archived),
+        bookmarked: Boolean(st.bookmarked),
+        createdAt: String(st.created_at || ""),
+        lastPostedAt: String(st.last_posted_at || st.bumped_at || st.created_at || ""),
+        originalPoster: {
+          userId: Number(firstPoster?.user_id || 0),
+          username: String(st.last_poster_username || "linuxdo"),
+          avatarTemplate: "",
+        },
+      };
+    });
+
+  const rawAllowedUsers: any[] = Array.isArray(data?.details?.allowed_users)
+    ? data.details.allowed_users
+    : [];
+  const allowedUsers: TopicPoster[] = rawAllowedUsers
+    .filter((u: any) => Boolean(u?.username))
+    .map((u: any) => ({
+      userId: Number(u.id || 0),
+      username: String(u.username || ""),
+      name: u.name ? String(u.name) : undefined,
+      avatarTemplate: String(u.avatar_template || ""),
+      animatedAvatar: u.animated_avatar ? String(u.animated_avatar) : null,
+      primaryGroupName: u.primary_group_name ? String(u.primary_group_name) : null,
+    }));
+
   const detail: TopicDetailModel = {
     id: Number(data.id || topicId),
     title: String(data.title || ""),
@@ -1752,13 +2040,46 @@ export async function fetchTopicDetail(
     opUsername,
     streamIds,
     posts,
+    suggestedTopics,
+    allowedUsers,
+    canInviteTo: Boolean(data?.details?.can_invite_to),
+    canRemoveAllowedUsers: Boolean(data?.details?.can_remove_allowed_users),
     hasSummary: Boolean(data.has_summary),
     summarizable: Boolean(data.summarizable),
   };
-  if (!opts.onlyOpUsername && (!opts.targetPostNumber || opts.targetPostNumber <= 1)) {
+  if (lastReadPostNum != null && lastReadPostNum > 0) {
+    recordConfirmedTopicFloorForNotifications(detail.id, lastReadPostNum);
+  }
+  if (
+    !opts.onlyOpUsername &&
+    !opts.filterSummary &&
+    (!opts.targetPostNumber || opts.targetPostNumber <= 1)
+  ) {
     putCachedTopicDetail(detail);
   }
   return detail;
+}
+
+/** Resolve Discourse `/p/{postId}` short permalink to `{ topicId, postNumber }` so it opens natively in Lindo PC */
+export async function fetchPostLocationById(
+  postId: number
+): Promise<{ topicId: number; postNumber: number; title?: string } | null> {
+  if (!postId || postId <= 0) return null;
+  try {
+    const data = await getJsonOrThrow(`https://linux.do/posts/${postId}.json`);
+    const tid = Number(data?.topic_id || 0);
+    const pnum = Number(data?.post_number || 1);
+    if (tid > 0) {
+      return {
+        topicId: tid,
+        postNumber: pnum > 0 ? pnum : 1,
+        title: data?.topic_slug ? undefined : undefined,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchPostsByIds(
@@ -1776,6 +2097,89 @@ export async function fetchPostsByIds(
   const effectiveBadges = parsedMap.size > 0 ? parsedMap : fallbackAuthorBadges;
   const rawPosts: any[] = data?.post_stream?.posts ?? [];
   return rawPosts.map((p) => parsePostModel(p, topicId, effectiveBadges, lastReadPostNumber));
+}
+
+/**
+ * 轻量尾部增量刷新：仅探测当前最后楼层之后的新增 `post_ids` 并拉取未加载楼层，绝不重载整页。
+ */
+export async function fetchTopicTailNewPosts(
+  topicId: number,
+  afterPostNumber: number,
+  loadedPosts: readonly PostItemModel[],
+  fallbackAuthorBadges?: Map<number, GrantedBadge[]>,
+  lastReadPostNumber?: number | null
+): Promise<{ incomingStreamIds: number[]; fetchedPosts: PostItemModel[] }> {
+  const safeFloor = Math.max(1, Math.floor(afterPostNumber));
+  let candidateIds: number[] = [];
+  let inlinePosts: PostItemModel[] = [];
+
+  try {
+    const idsResp = await getJsonOrThrow(
+      `https://linux.do/t/${topicId}/post_ids.json?post_number=${safeFloor}&limit=100`
+    );
+    if (Array.isArray(idsResp?.post_ids)) {
+      candidateIds = idsResp.post_ids
+        .map((x: any) => Number(x))
+        .filter((n: number) => Number.isFinite(n) && n > 0);
+    }
+  } catch (err) {
+    if (err instanceof SiteError && (err.isVerification || err.status === 429)) {
+      throw err;
+    }
+    // 部分节点或私信不支持 `/post_ids.json` 时，回退轻量锚点尾页拉取
+    const tailData = await getJsonOrThrow(
+      `https://linux.do/t/${topicId}/${safeFloor}.json?track_visit=false`
+    );
+    const parsedMap = readTopicAuthorBadgesMap(tailData);
+    const effectiveBadges = parsedMap.size > 0 ? parsedMap : fallbackAuthorBadges;
+    if (Array.isArray(tailData?.post_stream?.stream)) {
+      candidateIds = tailData.post_stream.stream
+        .map((x: any) => Number(x))
+        .filter((n: number) => Number.isFinite(n) && n > 0);
+    }
+    if (Array.isArray(tailData?.post_stream?.posts)) {
+      inlinePosts = tailData.post_stream.posts.map((p: any) =>
+        parsePostModel(p, topicId, effectiveBadges, lastReadPostNumber)
+      );
+    }
+  }
+
+  const loadedIds = new Set(loadedPosts.map((p) => p.id));
+  const inlineMap = new Map<number, PostItemModel>();
+  for (const p of inlinePosts) {
+    if (!loadedIds.has(p.id)) {
+      inlineMap.set(p.id, p);
+    }
+  }
+
+  const missingIds: number[] = [];
+  const seenMissing = new Set<number>();
+  for (const id of candidateIds) {
+    if (loadedIds.has(id) || inlineMap.has(id) || seenMissing.has(id)) continue;
+    seenMissing.add(id);
+    missingIds.push(id);
+    if (missingIds.length >= 20) break;
+  }
+
+  let fetchedFromApi: PostItemModel[] = [];
+  if (missingIds.length > 0) {
+    fetchedFromApi = await fetchPostsByIds(
+      topicId,
+      missingIds,
+      fallbackAuthorBadges,
+      lastReadPostNumber,
+      false
+    );
+  }
+
+  const combinedMap = new Map<number, PostItemModel>();
+  for (const p of inlineMap.values()) combinedMap.set(p.id, p);
+  for (const p of fetchedFromApi) combinedMap.set(p.id, p);
+
+  return {
+    incomingStreamIds: candidateIds,
+    fetchedPosts: Array.from(combinedMap.values()).sort((a, b) => a.postNumber - b.postNumber),
+  };
 }
 
 export async function fetchPostByNumber(
@@ -1989,13 +2393,168 @@ export async function deleteBookmarkById(bookmarkId: number): Promise<void> {
   await mutateJsonOrThrow(`https://linux.do/bookmarks/${bookmarkId}.json`, "DELETE");
 }
 
+export async function saveBookmarkWithDetails(params: {
+  postId: number;
+  existingBookmarkId?: number | null;
+  name?: string;
+  reminderAt?: string | null;
+  autoDeletePreference?: number;
+}): Promise<{ id: number; name?: string | null; reminderAt?: string | null }> {
+  const form: Record<string, string> = {
+    bookmarkable_id: String(params.postId),
+    bookmarkable_type: "Post",
+    name: (params.name || "").trim(),
+    auto_delete_preference: String(params.autoDeletePreference ?? 3),
+  };
+  if (params.reminderAt) {
+    form.reminder_at = params.reminderAt;
+  }
+  if (params.existingBookmarkId) {
+    const res = await mutateJsonOrThrow(
+      `https://linux.do/bookmarks/${params.existingBookmarkId}.json`,
+      "PUT",
+      form
+    );
+    return {
+      id: Number(res?.id || params.existingBookmarkId),
+      name: (params.name || "").trim() || null,
+      reminderAt: params.reminderAt || null,
+    };
+  }
+  const data = await mutateJsonOrThrow("https://linux.do/bookmarks.json", "POST", form);
+  return {
+    id: Number(data?.id || 1),
+    name: (params.name || "").trim() || null,
+    reminderAt: params.reminderAt || null,
+  };
+}
+
+export async function fetchPostRevision(
+  postId: number,
+  revision?: number
+): Promise<PostRevisionDetail> {
+  const path = revision
+    ? `https://linux.do/posts/${postId}/revisions/${revision}.json`
+    : `https://linux.do/posts/${postId}/revisions/latest.json`;
+  const data = await getJsonOrThrow(path);
+  return {
+    postId,
+    currentRevision: Number(data?.current_revision ?? revision ?? 2),
+    previousRevision:
+      data?.previous_revision != null ? Number(data.previous_revision) : null,
+    nextRevision: data?.next_revision != null ? Number(data.next_revision) : null,
+    versionCount: Number(data?.version_count ?? data?.current_revision ?? 2),
+    username: String(data?.username || ""),
+    displayName: data?.display_username ? String(data.display_username) : undefined,
+    avatarTemplate: String(data?.avatar_template || ""),
+    createdAt: String(data?.created_at || ""),
+    editReason: data?.edit_reason ? String(data.edit_reason) : null,
+    bodyChangesHtml: data?.body_changes?.inline
+      ? String(data.body_changes.inline)
+      : data?.body_changes?.side_by_side
+        ? String(data.body_changes.side_by_side)
+        : null,
+    titleChangesHtml: data?.title_changes?.inline
+      ? String(data.title_changes.inline)
+      : null,
+  };
+}
+
+export async function fetchPostReactionUsers(postId: number): Promise<ReactionUserGroup[]> {
+  const data = await getJsonOrThrow(
+    `https://linux.do/discourse-reactions/posts/${postId}/reactions-users.json`
+  );
+  const rawGroups: any[] = Array.isArray(data?.reaction_users)
+    ? data.reaction_users
+    : Array.isArray(data)
+      ? data
+      : [];
+  return rawGroups
+    .map((g: any) => ({
+      id: String(g?.id || "heart"),
+      count: Number(g?.count || g?.users?.length || 0),
+      users: Array.isArray(g?.users)
+        ? g.users
+            .filter((u: any) => Boolean(u?.username))
+            .map((u: any) => ({
+              username: String(u.username),
+              name: u.name ? String(u.name) : undefined,
+              avatarTemplate: String(u.avatar_template || ""),
+            }))
+        : [],
+    }))
+    .filter((g) => g.users.length > 0 || g.count > 0);
+}
+
+export async function fetchPollVoters(
+  postId: number,
+  pollName: string,
+  optionId: string,
+  page = 1
+): Promise<PollVoterItem[]> {
+  const qs = new URLSearchParams({
+    post_id: String(postId),
+    poll_name: pollName,
+    option_id: optionId,
+    page: String(page),
+  });
+  const data = await getJsonOrThrow(`https://linux.do/polls/voters.json?${qs.toString()}`);
+  const votersMap = data?.voters && typeof data.voters === "object" ? data.voters : {};
+  const list: any[] = Array.isArray(votersMap[optionId])
+    ? votersMap[optionId]
+    : Array.isArray(data?.voters)
+      ? data.voters
+      : [];
+  return list
+    .filter((u: any) => Boolean(u?.username))
+    .map((u: any) => ({
+      username: String(u.username),
+      name: u.name ? String(u.name) : undefined,
+      avatarTemplate: String(u.avatar_template || ""),
+    }));
+}
+
+export async function inviteUserToPm(topicId: number, username: string): Promise<void> {
+  const clean = username.trim().replace(/^@/, "");
+  if (!clean) throw new Error("请输入用户名");
+  await mutateJsonOrThrow(`https://linux.do/t/${topicId}/invite.json`, "POST", {
+    user: clean,
+  });
+}
+
+export async function removeUserFromPm(topicId: number, username: string): Promise<void> {
+  const clean = username.trim().replace(/^@/, "");
+  if (!clean) return;
+  await mutateJsonOrThrow(`https://linux.do/t/${topicId}/remove-allowed-user.json`, "PUT", {
+    username: clean,
+  });
+}
+
 // Single-flight coalesced `topics/timings` reporter so rapid 144Hz scroll never piles up concurrent POSTs!
 const pendingTimingsByTopic = new Map<number, Set<number>>();
 let timingsFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let timingsInFlight = false;
+let timingsPausedForVerify = false;
+
+/**
+ * Cloudflare 验证期间冻结并丢弃阻塞期未发出的阅读时长批次（借鉴 FluxDO 经验），
+ * 避免过盾恢复瞬间积压的 `/topics/timings` 齐射把刚恢复的通道直接打成 429。
+ */
+export function pauseAndDropPendingTimings(): void {
+  timingsPausedForVerify = true;
+  pendingTimingsByTopic.clear();
+  if (timingsFlushTimer) {
+    clearTimeout(timingsFlushTimer);
+    timingsFlushTimer = null;
+  }
+}
+
+export function resumeTimingsAfterVerify(): void {
+  timingsPausedForVerify = false;
+}
 
 async function drainPendingTimings(): Promise<void> {
-  if (timingsInFlight || pendingTimingsByTopic.size === 0) return;
+  if (timingsPausedForVerify || timingsInFlight || pendingTimingsByTopic.size === 0) return;
   timingsInFlight = true;
   try {
     while (pendingTimingsByTopic.size > 0) {
@@ -2013,13 +2572,19 @@ async function drainPendingTimings(): Promise<void> {
         form[`timings[${num}]`] = "1500";
       }
       try {
-        await siteRequest(
+        const res = await siteRequest(
           "https://linux.do/topics/timings",
           "POST",
           form,
           { "Discourse-Background": "true" },
           { silentDiag: true }
         );
+        if (res.status >= 200 && res.status < 300 && !res.isChallenge && !res.isUnauthenticated) {
+          const maxNum = nums.reduce((acc, n) => (n > acc ? n : acc), 0);
+          if (maxNum > 0) {
+            recordConfirmedTopicFloorForNotifications(topicId, maxNum);
+          }
+        }
       } catch {
         // non-fatal background telemetry
         break;
@@ -2030,8 +2595,16 @@ async function drainPendingTimings(): Promise<void> {
   }
 }
 
+export async function flushTopicTimingsNow(): Promise<void> {
+  if (timingsFlushTimer) {
+    clearTimeout(timingsFlushTimer);
+    timingsFlushTimer = null;
+  }
+  await drainPendingTimings();
+}
+
 export async function reportTopicTimings(topicId: number, postNumbers: number[]): Promise<void> {
-  if (postNumbers.length === 0) return;
+  if (timingsPausedForVerify || postNumbers.length === 0) return;
   let bucket = pendingTimingsByTopic.get(topicId);
   if (!bucket) {
     bucket = new Set<number>();
@@ -2061,7 +2634,7 @@ export async function fetchNotifications(offset = 0, forceRefresh = false): Prom
     shortNotifCache &&
     Date.now() - shortNotifCache.ts <= SHORT_LIST_CACHE_TTL_MS
   ) {
-    return shortNotifCache.items;
+    return overlayNotificationsWithLocalState(shortNotifCache.items);
   }
   // CRITICAL: Never combine `recent=true` with `offset` in Discourse (returns 400 InvalidParameters!).
   // Use `offset=${cleanOffset}&limit=60&silent=true` exactly like composeApp LinDoNetworkStack.kt line 4243!
@@ -2202,25 +2775,91 @@ export async function fetchNotifications(offset = 0, forceRefresh = false): Prom
     };
   });
 
+  const overlayed = overlayNotificationsWithLocalState(parsed);
+
   if (cleanOffset === 0) {
-    shortNotifCache = { ts: Date.now(), items: parsed };
-    const pageUnread = parsed.filter((x) => !x.read).length;
-    if (parsed.length < 60 || pageUnread === 0) {
-      setUnreadBadgeInRust(pageUnread).catch(() => {});
+    shortNotifCache = { ts: Date.now(), items: overlayed };
+    const pageUnread = overlayed.filter((x) => !x.read).length;
+    if (overlayed.length < 60 || pageUnread < overlayed.length) {
+      const resolved = resolveAuthoritativeUnreadCount(overlayed, pageUnread, 60);
+      setUnreadBadgeInRust(resolved).catch(() => {});
+    }
+    if (pendingMarkReadNotifIds.size > 0) {
+      void drainPendingMarkReads();
     }
   }
 
-  return parsed;
+  return overlayed;
+}
+
+export async function drainPendingMarkReads(): Promise<void> {
+  if (inFlightMarkReadDrain) {
+    await inFlightMarkReadDrain;
+  }
+  if (inFlightMarkReadDrain || pendingMarkReadNotifIds.size === 0) return;
+
+  const task = (async () => {
+    const snapshot = Array.from(pendingMarkReadNotifIds);
+    for (const id of snapshot) {
+      if (!pendingMarkReadNotifIds.has(id)) continue;
+      try {
+        const res = await siteRequest(
+          "https://linux.do/notifications/mark-read.json",
+          "PUT",
+          { id: String(id) },
+          { "Discourse-Background": "true" },
+          { silentDiag: true }
+        );
+        if (res.status >= 200 && res.status < 300 && !res.isChallenge && !res.isUnauthenticated) {
+          pendingMarkReadNotifIds.delete(id);
+        } else {
+          break;
+        }
+      } catch {
+        break;
+      }
+    }
+  })().finally(() => {
+    if (inFlightMarkReadDrain === task) {
+      inFlightMarkReadDrain = null;
+    }
+  });
+  inFlightMarkReadDrain = task;
+  await task;
 }
 
 export async function markAllNotificationsRead(): Promise<void> {
   await mutateJsonOrThrow("https://linux.do/notifications/mark-read.json", "PUT");
+  if (shortNotifCache) {
+    for (const item of shortNotifCache.items) {
+      addBoundedSetId(locallyReadNotifIds, item.id, MAX_TRACKED_NOTIF_IDS);
+    }
+    shortNotifCache = {
+      ts: Date.now(),
+      items: shortNotifCache.items.map((x) => ({ ...x, read: true })),
+    };
+  }
+  pendingMarkReadNotifIds.clear();
+  setUnreadBadgeInRust(0).catch(() => {});
 }
 
 export async function markSingleNotificationRead(id: number): Promise<void> {
-  await mutateJsonOrThrow("https://linux.do/notifications/mark-read.json", "PUT", {
-    id: String(id),
-  });
+  if (id <= 0) return;
+  applySingleNotifReadLocally(id);
+  try {
+    const res = await siteRequest(
+      "https://linux.do/notifications/mark-read.json",
+      "PUT",
+      { id: String(id) },
+      { "Discourse-Background": "true" },
+      { silentDiag: true }
+    );
+    if (res.status >= 200 && res.status < 300 && !res.isChallenge && !res.isUnauthenticated) {
+      pendingMarkReadNotifIds.delete(id);
+    }
+  } catch {
+    // keep id in pendingMarkReadNotifIds so drainPendingMarkReads retries after recovery
+  }
 }
 
 /* ==================== 6. 全站搜索、快速引用搜索与 @提及联想 ==================== */
@@ -2241,7 +2880,12 @@ export interface CommunitySearchHit {
   postsCount: number;
 }
 
-function parseSearchRoot(data: any): { posts: CommunitySearchHit[]; hasMore: boolean } {
+function parseSearchRoot(data: any): {
+  posts: CommunitySearchHit[];
+  users: CommunitySearchUserHit[];
+  tags: CommunitySearchTagHit[];
+  hasMore: boolean;
+} {
   const topicsMap = new Map<number, any>();
   for (const t of data?.topics ?? []) {
     topicsMap.set(Number(t.id), t);
@@ -2297,18 +2941,79 @@ function parseSearchRoot(data: any): { posts: CommunitySearchHit[]; hasMore: boo
     });
   }
 
+  const users: CommunitySearchUserHit[] = Array.isArray(data?.users)
+    ? data.users
+        .filter((u: any) => Boolean(u?.username))
+        .slice(0, 6)
+        .map((u: any) => ({
+          username: String(u.username),
+          name: u.name ? String(u.name) : undefined,
+          avatarTemplate: String(u.avatar_template || ""),
+          trustLevel: u.trust_level != null ? Number(u.trust_level) : undefined,
+        }))
+    : [];
+
+  const tags: CommunitySearchTagHit[] = Array.isArray(data?.tags)
+    ? data.tags
+        .filter((tg: any) => Boolean(tg?.name || tg?.id))
+        .slice(0, 8)
+        .map((tg: any) => ({
+          name: String(tg.name || tg.id),
+          topicCount: Number(tg.topic_count || tg.count || 0),
+        }))
+    : [];
+
   const hasMore = Boolean(data?.grouped_search_result?.more_full_page_results);
-  return { posts: hits, hasMore };
+  return { posts: hits, users, tags, hasMore };
+}
+
+export function buildDiscourseSearchQuery(
+  rawQuery: string,
+  order?: string | null,
+  filters?: CommunitySearchFilters
+): string {
+  const parts: string[] = [];
+  const cleanQ = rawQuery.trim();
+  if (cleanQ) parts.push(cleanQ);
+  if (filters?.categorySlug) {
+    parts.push(`#${filters.categorySlug.replace(/^#/, "").trim()}`);
+  }
+  if (filters?.tag) {
+    parts.push(`tags:${filters.tag.replace(/^#/, "").trim()}`);
+  }
+  if (filters?.author) {
+    parts.push(`@${filters.author.replace(/^@/, "").trim()}`);
+  }
+  if (filters?.inTitle) {
+    parts.push("in:title");
+  }
+  if (filters?.solved) {
+    parts.push("status:solved");
+  }
+  if (filters?.afterDays && filters.afterDays > 0) {
+    const d = new Date(Date.now() - filters.afterDays * 86_400_000);
+    const iso = d.toISOString().slice(0, 10);
+    parts.push(`after:${iso}`);
+  }
+  if (order) {
+    parts.push(`order:${order}`);
+  }
+  return parts.join(" ").trim();
 }
 
 export async function searchCommunity(
   query: string,
   page = 1,
-  order?: string | null
-): Promise<{ posts: CommunitySearchHit[]; hasMore: boolean }> {
-  const cleanQ = query.trim();
-  if (!cleanQ) return { posts: [], hasMore: false };
-  const fullQ = order ? `${cleanQ} order:${order}` : cleanQ;
+  order?: string | null,
+  filters?: CommunitySearchFilters
+): Promise<{
+  posts: CommunitySearchHit[];
+  users: CommunitySearchUserHit[];
+  tags: CommunitySearchTagHit[];
+  hasMore: boolean;
+}> {
+  const fullQ = buildDiscourseSearchQuery(query, order, filters);
+  if (!fullQ) return { posts: [], users: [], tags: [], hasMore: false };
   const data = await getJsonOrThrow(
     `https://linux.do/search.json?q=${encodeURIComponent(fullQ)}&page=${Math.max(1, page)}`
   );
@@ -2495,6 +3200,7 @@ export async function updateExistingPost(params: {
   title?: string;
   categoryId?: number;
   tags?: string[];
+  editReason?: string;
 }): Promise<PostItemModel | null> {
   const topicReferer = { "X-LinDo-Referer": `https://linux.do/t/topic/${params.topicId}` };
   if (params.title && params.topicId) {
@@ -2512,10 +3218,14 @@ export async function updateExistingPost(params: {
       topicReferer
     );
   }
+  const postForm: Record<string, string> = { "post[raw]": params.raw };
+  if (params.editReason && params.editReason.trim()) {
+    postForm["post[edit_reason]"] = params.editReason.trim();
+  }
   const res = await mutateJsonOrThrow(
     `https://linux.do/posts/${params.postId}.json`,
     "PUT",
-    { "post[raw]": params.raw },
+    postForm,
     topicReferer
   );
   const postObj = res?.post || res;
@@ -2637,6 +3347,25 @@ export async function fetchCloudDrafts(): Promise<CloudDraftItem[]> {
       };
     })
     .filter((x): x is CloudDraftItem => Boolean(x));
+}
+
+export async function saveCloudDraft(params: {
+  draftKey: string;
+  sequence: number;
+  data: Record<string, any>;
+}): Promise<number> {
+  const res = await mutateJsonOrThrow(
+    "https://linux.do/drafts.json",
+    "POST",
+    {
+      draft_key: params.draftKey,
+      sequence: String(Math.max(0, params.sequence)),
+      data: JSON.stringify(params.data),
+    },
+    { "Discourse-Background": "true" }
+  );
+  const nextSeq = Number(res?.draft_sequence ?? params.sequence);
+  return Number.isFinite(nextSeq) ? nextSeq : params.sequence;
 }
 
 export async function deleteCloudDraft(draftKey: string, sequence = 0): Promise<void> {

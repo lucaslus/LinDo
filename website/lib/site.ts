@@ -8,8 +8,8 @@ export const SITE = {
   issues: "https://github.com/lucaslus/LinDo/issues",
   forum: "https://linux.do",
   versions: {
-    android: "0.2.41",
-    desktop: "1.0.57",
+    android: "0.2.43",
+    desktop: "1.0.58",
   },
   sizes: {
     androidMb: "12",

@@ -798,7 +798,8 @@ class Round4StabilityAndBadgesRegressionTest {
 
             val status = LinuxDoRepository.sendTopicTimings(firstBatch)
             assertEquals(ScreenTrackEngine.STATUS_SITE_VERIFICATION_REQUIRED, status)
-            assertTrue(LinuxDoRepository.isChallengeCooldownActive())
+            // 后台 timings 撞盾只挂起 ScreenTrack 自身，绝不拉全局熔断短路用户的前台请求
+            assertFalse(LinuxDoRepository.isChallengeCooldownActive())
             assertEquals("https://linux.do/t/8801", lastTimingsHeaders["Referer"])
             assertEquals("true", lastTimingsHeaders["X-SILENCE-LOGGER"])
 

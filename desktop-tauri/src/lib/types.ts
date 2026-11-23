@@ -20,6 +20,11 @@ export interface SavedAccountEntry {
   readFloors: Record<string, number>;
 }
 
+export type EchRoutingModePref =
+  | "smart_auto"
+  | "ech_priority"
+  | "system_default";
+
 export interface UserPreferences {
   appearance: "system" | "light" | "dark";
   themeOption: string;
@@ -28,6 +33,7 @@ export interface UserPreferences {
   compactFeed: boolean;
   defaultSearchExpanded: boolean;
   enableAnimations: boolean;
+  echRoutingMode?: EchRoutingModePref | "smart_bypass" | "direct_only";
 }
 
 export interface LocalDraftRecord {
@@ -97,6 +103,23 @@ export interface SiteHttpDiag {
   bodyBytes?: number;
 }
 
+export interface EchDesktopSnapshot {
+  supported: boolean;
+  active: boolean;
+  mode: string;
+  listenPort: number;
+  stickyIp: string;
+  proxyOrVpnActive: boolean;
+  tunActive: boolean;
+  httpProxy: string;
+  routeIface: string;
+  vpnYielded: boolean;
+  echHandshakeCount: number;
+  lastEchAccepted: boolean;
+  statusSubtitle: string;
+  diagLine: string;
+}
+
 export interface DiagRuntimeSnapshot {
   os: string;
   arch: string;
@@ -123,6 +146,7 @@ export interface DiagRuntimeSnapshot {
   sessionGeneration?: number;
   mediaCacheEntries: number;
   mediaCacheBytes: number;
+  echState?: EchDesktopSnapshot;
 }
 
 export interface SiteHttpResponse {
@@ -235,6 +259,16 @@ export interface PostBoostItem {
   canDelete?: boolean;
 }
 
+export interface PostLinkCountItem {
+  url: string;
+  title: string;
+  clicks: number;
+  internal: boolean;
+  reflection: boolean;
+  topicId?: number;
+  postNumber?: number;
+}
+
 export interface PostPollOption {
   id: string;
   html: string;
@@ -251,7 +285,62 @@ export interface PostPollModel {
   min?: number;
   max?: number;
   title?: string;
+  isPublic?: boolean;
   myVotes?: string[];
+}
+
+export interface PostRevisionDetail {
+  postId: number;
+  currentRevision: number;
+  previousRevision?: number | null;
+  nextRevision?: number | null;
+  versionCount: number;
+  username: string;
+  displayName?: string;
+  avatarTemplate: string;
+  createdAt: string;
+  editReason?: string | null;
+  bodyChangesHtml?: string | null;
+  titleChangesHtml?: string | null;
+}
+
+export interface ReactionUserEntry {
+  username: string;
+  name?: string;
+  avatarTemplate: string;
+}
+
+export interface ReactionUserGroup {
+  id: string;
+  count: number;
+  users: ReactionUserEntry[];
+}
+
+export interface PollVoterItem {
+  username: string;
+  name?: string;
+  avatarTemplate: string;
+}
+
+export interface CommunitySearchUserHit {
+  username: string;
+  name?: string;
+  avatarTemplate: string;
+  trustLevel?: number;
+}
+
+export interface CommunitySearchTagHit {
+  name: string;
+  topicCount: number;
+}
+
+export interface CommunitySearchFilters {
+  categorySlug?: string;
+  tag?: string;
+  author?: string;
+  inTitle?: boolean;
+  solved?: boolean;
+  afterDays?: number;
 }
 
 export interface PostItemModel {
@@ -291,10 +380,17 @@ export interface PostItemModel {
   currentUserReaction?: string | null;
   reactions: PostReactionItem[];
   boosts: PostBoostItem[];
+  linkCounts?: PostLinkCountItem[];
   canBoost?: boolean;
   polls: PostPollModel[];
   bookmarked: boolean;
   bookmarkId?: number | null;
+  bookmarkName?: string | null;
+  bookmarkReminderAt?: string | null;
+  version?: number;
+  updatedAt?: string | null;
+  canViewEditHistory?: boolean;
+  editReason?: string | null;
   canEdit: boolean;
   canDelete: boolean;
   isSmallAction?: boolean;
@@ -324,6 +420,10 @@ export interface TopicDetailModel {
   opUsername: string;
   streamIds: number[];
   posts: PostItemModel[];
+  suggestedTopics?: TopicSummary[];
+  allowedUsers?: TopicPoster[];
+  canInviteTo?: boolean;
+  canRemoveAllowedUsers?: boolean;
   hasSummary: boolean;
   summarizable?: boolean;
 }
@@ -423,6 +523,9 @@ export interface ComposerLaunchRequest {
   postNumber?: number;
   replyToPostNumber?: number;
   replyToUsername?: string;
+  replyToDisplayName?: string;
+  replyToAvatarTemplate?: string;
+  replyToAnimatedAvatar?: string | null;
   replyToSnippet?: string;
   initialCategoryId?: number;
   initialTitle?: string;

@@ -16,6 +16,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 
+internal fun computeVerificationCardHeightDp(maxHeightDp: Float, expanded: Boolean): Float {
+    val safeCeiling = (maxHeightDp - 32f).coerceAtLeast(240f)
+    // 原生 Cloudflare /challenge 页包含站点 Logo、Turnstile 复选框及隐私条款尾栏，
+    // 380dp（扣除 44dp 顶栏后正文 336dp，对齐桌面端 480×380 卡片）可零裁剪完整呈现且无需篡改页面 DOM。
+    val compactHeight = 380f.coerceAtMost(safeCeiling)
+    return if (expanded) {
+        (maxHeightDp * 0.78f).coerceAtLeast(compactHeight).coerceAtMost((maxHeightDp - 24f).coerceAtLeast(compactHeight))
+    } else {
+        compactHeight
+    }
+}
+
 /** Shared presentation; verification uses a compact centered card matching desktop, while general web pages stay full-screen. */
 @Composable
 internal fun VerificationPageSurface(
@@ -60,17 +72,12 @@ internal fun VerificationPageSurface(
                     onClick = onDismiss
                 )
         )
-        val compactHeight = 224.dp.coerceAtMost(maxHeight - 32.dp)
-        val cardHeight = if (expanded) {
-            (maxHeight * 0.76f).coerceAtLeast(compactHeight).coerceAtMost(maxHeight - 24.dp)
-        } else {
-            compactHeight
-        }
+        val cardHeight = computeVerificationCardHeightDp(maxHeight.value, expanded).dp
         Box(
             Modifier
                 .align(Alignment.Center)
-                .padding(horizontal = 20.dp)
-                .widthIn(max = 368.dp)
+                .padding(horizontal = 16.dp)
+                .widthIn(max = 388.dp)
                 .fillMaxWidth()
                 .height(cardHeight)
                 .shadow(

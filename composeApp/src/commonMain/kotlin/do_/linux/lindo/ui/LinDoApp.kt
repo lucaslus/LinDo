@@ -17,6 +17,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.saveable.rememberSaveable
 import coil3.disk.directory
 import androidx.compose.foundation.BorderStroke
@@ -215,6 +216,7 @@ import do_.linux.lindo.core.network.LinuxDoCategoryMeta
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.MentionCandidate
 import do_.linux.lindo.core.network.NetworkRecoveryPolicy
+import do_.linux.lindo.core.network.NotificationReadCoordinator
 import do_.linux.lindo.core.network.PlatformMediaPicker
 import do_.linux.lindo.core.network.UploadedMediaResult
 import do_.linux.lindo.core.network.UserAccountPreferencesSnapshot
@@ -230,6 +232,14 @@ import do_.linux.lindo.core.render.DiscourseAstParser
 import do_.linux.lindo.core.render.PostBlockNode
 import do_.linux.lindo.core.site.LinuxDoEmojiCatalog
 import do_.linux.lindo.core.site.LinuxDoSiteRules
+import do_.linux.lindo.core.site.AuthorFeedbackSpec
+import do_.linux.lindo.core.site.AdvancedSearchFilter
+import do_.linux.lindo.core.site.buildAdvancedSearchQuery
+import do_.linux.lindo.core.site.parseShortPostPermalink
+import do_.linux.lindo.core.model.TopicFilterTransition
+import do_.linux.lindo.core.model.TopicRepliesFilterMode
+import do_.linux.lindo.core.model.CommunitySearchUserHit
+import do_.linux.lindo.core.model.CommunitySearchTagHit
 import do_.linux.lindo.ui.components.LinDoIcons
 import do_.linux.lindo.ui.components.LocalIsWebModalActive
 import do_.linux.lindo.ui.components.LocalLinDoListScrolling
@@ -358,6 +368,7 @@ data class LinDoThemePalette(
     val tonalPill: Color,
     val onTonalPill: Color,
     val inkPrimary: Color,
+    val inkBody: Color,
     val inkSecondary: Color,
     val inkTertiary: Color,
     val hairline: Color,
@@ -390,8 +401,9 @@ internal fun buildLinDoPalette(
             subtleSurface = Color(0xFFF3F4F6),
             navBarSurface = Color(0xFFFFFFFF),
             tonalPill = Color(0xFFEEF1F5),
-            onTonalPill = Color(0xFF111827),
-            inkPrimary = Color(0xFF111827),
+            onTonalPill = Color(0xFF161920),
+            inkPrimary = Color(0xFF161920),
+            inkBody = Color(0xFF262B35),
             inkSecondary = Color(0xFF525866),
             inkTertiary = Color(0xFF6B7280),
             hairline = Color(0xFFEBEEF2),
@@ -416,10 +428,11 @@ internal fun buildLinDoPalette(
             subtleSurface = Color(0xFF181B22),
             navBarSurface = Color(0xFF11141B),
             tonalPill = Color(0xFF212631),
-            onTonalPill = Color(0xFFF3F4F6),
-            inkPrimary = Color(0xFFF3F4F6),
-            inkSecondary = Color(0xFFA1A8B5),
-            inkTertiary = Color(0xFF7D8594),
+            onTonalPill = Color(0xFFDADBDF),
+            inkPrimary = Color(0xFFDADBDF),
+            inkBody = Color(0xFFC9CBCF),
+            inkSecondary = Color(0xFF969CA8),
+            inkTertiary = Color(0xFF767E8D),
             hairline = Color(0xFF1E222B),
             accent = option.darkChipText,
             brandGold = option.darkChipText,
@@ -613,7 +626,7 @@ internal enum class TopPeriodFilter(val label: String, val apiPeriod: String) {
 }
 
 private val smartUrlTopicRegex = Regex(
-    """^https?://(?:www\.)?linux\.do/t/(?:[^/?#]+/)?(\d+)(?:/(\d+|last))?/?(?:[?#].*)?$""",
+    """^(?:https?:)?//(?:www\.)?linux\.do/t/(?:(?:(?!\d+(?:/|$))[^/?#]+)/)?(\d+)(?:/(\d+|last))?/?(?:[?#].*)?$""",
     RegexOption.IGNORE_CASE
 )
 private val workbenchHeadingPrefixRegex = Regex("^#{1,6} $")
@@ -832,6 +845,9 @@ private fun LinearPulseLoadingFooter(
     errorText: String = LinDoCommonCopy.NETWORK_ERROR.text,
     doneText: String = LinDoCommonCopy.NO_MORE.text,
     useIconArtwork: Boolean = false,
+    onRefreshAtEnd: (() -> Unit)? = null,
+    isRefreshingAtEnd: Boolean = false,
+    endStatusText: String? = null,
     onLoadMore: () -> Unit
 ) {
     val palette = LocalPalette.current
@@ -844,9 +860,20 @@ private fun LinearPulseLoadingFooter(
             currentOnLoadMore()
         }
     }
+    val atEnd = !hasMore && !isLoadingMore && !isError
+    val spinTransition = rememberInfiniteTransition(label = "tailRefreshSpin")
+    val spinAngle by spinTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 850, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "tailRefreshAngle"
+    )
     val state = when {
         isError -> LinDoMascotState.NetworkError
-        isLoadingMore -> LinDoMascotState.Loading
+        isLoadingMore || isRefreshingAtEnd -> LinDoMascotState.Loading
         !hasMore -> LinDoMascotState.End
         else -> LinDoMascotState.Refreshing
     }
@@ -869,7 +896,7 @@ private fun LinearPulseLoadingFooter(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (!hasMore && !isLoadingMore && !isError) {
+        if (atEnd) {
             Box(
                 modifier = Modifier
                     .width(24.dp)
@@ -878,13 +905,20 @@ private fun LinearPulseLoadingFooter(
             )
             Spacer(Modifier.width(10.dp))
         }
-        LinDoMascot(state = state, compact = true, size = 22.dp, animate = isLoadingMore, useIconArtwork = useIconArtwork)
+        LinDoMascot(
+            state = state,
+            compact = true,
+            size = 22.dp,
+            animate = isLoadingMore || isRefreshingAtEnd,
+            useIconArtwork = useIconArtwork
+        )
         Spacer(Modifier.width(6.dp))
         Text(
             text = when {
                 isError -> errorText
-                isLoadingMore -> LinDoCommonCopy.LOADING.text
-                !hasMore -> LinDoCommonCopy.NO_MORE.text
+                isLoadingMore -> loadingText
+                isRefreshingAtEnd -> "正在检查新回复…"
+                !hasMore -> endStatusText?.takeIf { it.isNotBlank() } ?: doneText
                 else -> moreText
             },
             color = palette.inkSecondary,
@@ -892,6 +926,33 @@ private fun LinearPulseLoadingFooter(
             fontWeight = FontWeight.Normal,
             lineHeight = 18.sp
         )
+        if (atEnd && onRefreshAtEnd != null) {
+            Spacer(Modifier.width(6.dp))
+            Box(
+                modifier = Modifier
+                    .size(26.dp)
+                    .clip(CircleShape)
+                    .background(palette.subtleSurface)
+                    .border(0.5.dp, palette.hairline, CircleShape)
+                    .clickable(
+                        enabled = !isRefreshingAtEnd,
+                        onClickLabel = "刷新后续评论",
+                        onClick = onRefreshAtEnd
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = LinDoIcons.Refresh,
+                    contentDescription = "刷新后续评论",
+                    tint = palette.inkSecondary,
+                    modifier = Modifier
+                        .size(13.dp)
+                        .graphicsLayer {
+                            rotationZ = if (isRefreshingAtEnd) spinAngle else 0f
+                        }
+                )
+            }
+        }
         if (isLoadingMore) {
             Spacer(Modifier.width(4.dp))
             LinDoWaveDots(color = palette.inkSecondary, dotSize = 3.5.dp)
@@ -925,7 +986,7 @@ private fun LinearPulseLoadingFooter(
                 }
             }
         }
-        if (!hasMore && !isLoadingMore && !isError) {
+        if (atEnd) {
             Spacer(Modifier.width(10.dp))
             Box(
                 modifier = Modifier
@@ -1031,9 +1092,10 @@ internal fun LinDoFullScreenPage(
  */
 object LinDoTokens {
     val Display = 22.sp
-    val Title = 17.sp
-    val Headline = 16.sp
-    val Body = 15.sp
+    val Title = 18.sp
+    val Headline = 17.sp
+    val CompactHeadline = 15.5.sp
+    val Body = 16.sp
     val Sub = 14.sp
     val Meta get() = 12.5.sp
     val Caption get() = 12.sp
@@ -1831,6 +1893,8 @@ internal fun LinDoApp(
     val openAppIconPage: (() -> Unit)? = onApplyAppIcon?.let { { showAppIconPage = true } }
     val hasEmbeddedWebLogin = PlatformWebLoginHost.webLoginRenderer != null
     var showAuthSheet by remember { mutableStateOf(false) }
+    var showQrScanSheet by remember { mutableStateOf(false) }
+    var showQrGenerateSheet by remember { mutableStateOf(false) }
     var authStatusHint by remember { mutableStateOf<String?>(null) }
     var authCompleting by remember { mutableStateOf(UserApiKeyAuthManager.pendingOtpToken != null) }
     var showSiteVerifySheet by remember { mutableStateOf(false) }
@@ -1877,8 +1941,9 @@ internal fun LinDoApp(
         )
     }
 
-    val isAuthorized = remember(authVersion) { UserApiKeyAuthManager.isAuthorized() }
-    val currentUser = remember(authVersion, fullUserProfile) { UserApiKeyAuthManager.currentUser }
+    val globalAuthTick by UserApiKeyAuthManager.authStateTick.collectAsState()
+    val isAuthorized = remember(authVersion, globalAuthTick) { UserApiKeyAuthManager.isAuthorized() }
+    val currentUser = remember(authVersion, globalAuthTick, fullUserProfile) { UserApiKeyAuthManager.currentUser }
 
     val feedListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -1897,6 +1962,7 @@ internal fun LinDoApp(
     var lastTopicsSyncedAtMs by remember { mutableStateOf(System.currentTimeMillis()) }
     var isFeedPaneCollapsed by remember { mutableStateOf(false) }
     var pendingVerifyTargetUrl by remember { mutableStateOf("https://linux.do/challenge#lindo-verify") }
+    var pendingVerifyModalCallback by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
     LaunchedEffect(authVersion) {
         topicDetailUiCache.clear()
     }
@@ -2027,6 +2093,8 @@ internal fun LinDoApp(
         showConnectSheet = false
         showBadgesCenterSheet = false
         showPrivateMessagesSheet = false
+        showQrScanSheet = false
+        showQrGenerateSheet = false
         pmInitialRecipient = null
         pmInitialDraft = null
         inspectedUsername = null
@@ -2166,7 +2234,7 @@ internal fun LinDoApp(
         profileSyncJob?.cancel()
         profileSyncJob = scope.launch {
             if (background) {
-                delay(650L)
+                delay(2_500L)
             }
             val profile = LinuxDoRepository.fetchCurrentUserProfile(background = background)
             if (profile != null) {
@@ -2533,6 +2601,37 @@ internal fun LinDoApp(
         }
     }
 
+    // 平台静默过盾 / verifySession ⇄ UI 桥：确需人工时原位展开验证面板并可 await 结果；静默通过后自动重试视图
+    DisposableEffect(hasEmbeddedWebLogin) {
+        PlatformSessionRecovery.openEmbeddedVerifyModal = { onResult ->
+            val prev = pendingVerifyModalCallback
+            pendingVerifyModalCallback = if (prev != null) {
+                { passed -> prev(passed); onResult(passed) }
+            } else {
+                onResult
+            }
+            pendingVerifyTargetUrl = "https://linux.do/challenge#lindo-verify"
+            if (hasEmbeddedWebLogin) {
+                activeWebLoginUrl = pendingVerifyTargetUrl
+            } else {
+                showSiteVerifySheet = true
+            }
+        }
+        PlatformSessionRecovery.onSilentVerifyPassed = {
+            val hasVerifyError = feedError.isSiteVerificationError() ||
+                activeTopicDetail?.loadError.isSiteVerificationError() ||
+                (loadMoreError && loadMoreErrorMessage.isSiteVerificationError())
+            if (hasVerifyError) siteVerificationRestoreVersion++
+        }
+        onDispose {
+            val cb = pendingVerifyModalCallback
+            pendingVerifyModalCallback = null
+            cb?.invoke(false)
+            PlatformSessionRecovery.openEmbeddedVerifyModal = null
+            PlatformSessionRecovery.onSilentVerifyPassed = null
+        }
+    }
+
     LaunchedEffect(networkRestoreVersion) {
         if (networkRestoreVersion == 0) return@LaunchedEffect
         if (LinuxDoRepository.isRateLimitedNow() ||
@@ -2705,18 +2804,30 @@ internal fun LinDoApp(
     // hydration). A LaunchedEffect(authVersion) cancels its own exchange at that
     // point. Collect serially in a stable effect instead of restarting the job.
     LaunchedEffect(Unit) {
-        androidx.compose.runtime.snapshotFlow { authVersion }.collect {
+        androidx.compose.runtime.snapshotFlow { authVersion to UserApiKeyAuthManager.authStateTick.value }.collect {
             val otp = UserApiKeyAuthManager.consumePendingOtpToken() ?: return@collect
             authCompleting = true
             try {
                 var sessionAccepted = false
-                var redeemed = LinuxDoRepository.redeemOtpSilently(otp) { sessionAccepted = true }
+                var otpRejected = false
+                var redeemed = LinuxDoRepository.redeemOtpSilently(
+                    otp = otp,
+                    onSessionAccepted = { sessionAccepted = true },
+                    onOtpRejected = { otpRejected = true }
+                )
                 val verifyHandler = PlatformSessionRecovery.verifySession
-                if (!redeemed && !sessionAccepted && verifyHandler != null) {
+                var verifyAttemptedAndFailed = false
+                if (!redeemed && !sessionAccepted && !otpRejected && verifyHandler != null) {
                     // External browser OTP was blocked by a site challenge before Discourse saw it.
                     // Complete site verification in WebKit first, then redeem the unconsumed OTP without asking for a password.
                     if (verifyHandler()) {
-                        redeemed = LinuxDoRepository.redeemOtpSilently(otp) { sessionAccepted = true }
+                        redeemed = LinuxDoRepository.redeemOtpSilently(
+                            otp = otp,
+                            onSessionAccepted = { sessionAccepted = true },
+                            onOtpRejected = { otpRejected = true }
+                        )
+                    } else {
+                        verifyAttemptedAndFailed = true
                     }
                 }
                 if (redeemed) {
@@ -2732,10 +2843,25 @@ internal fun LinDoApp(
                     siteVerificationRestoreVersion++
                     networkRestoreVersion++
                 } else if (sessionAccepted && UserApiKeyAuthManager.isAuthorized()) {
-                    // The OTP was redeemed; continue site verification without replaying it
-                    // or sending an already authenticated user through login again.
-                    showSiteVerifySheet = true
-                } else if (hasEmbeddedWebLogin) {
+                    // OTP 已兑换且会话 Cookie 已就位（仅资料拉取暂未成功，如首装撞 Cloudflare）：
+                    // 直接进入 App，绝不停留在登录页；确有站点验证时再原位展开验证。
+                    authStatusHint = null
+                    showAuthSheet = false
+                    guestLoginPrompt = null
+                    activeWebLoginUrl = null
+                    isGuestMode = false
+                    authVersion++
+                    networkRestoreVersion++
+                } else if (otpRejected) {
+                    if (SavedAccounts.adding) runCatching { SavedAccounts.cancelAdd() }
+                    authStatusHint = "授权令牌无效或已过期，请重新点击浏览器授权。"
+                    showAuthSheet = true
+                } else if (sessionAccepted) {
+                    // OTP 已被服务端接受，但会话同步未完成：绝不回放一次性 /session/otp
+                    if (SavedAccounts.adding) runCatching { SavedAccounts.cancelAdd() }
+                    authStatusHint = "授权已完成，但登录状态同步未完成，请再点一次登录。"
+                    showAuthSheet = true
+                } else if (hasEmbeddedWebLogin && !verifyAttemptedAndFailed && verifyHandler == null && !LinuxDoRepository.isRateLimitedNow()) {
                     openWebPage("https://linux.do/session/otp/$otp")
                 } else {
                     if (SavedAccounts.adding) runCatching { SavedAccounts.cancelAdd() }
@@ -2763,7 +2889,7 @@ internal fun LinDoApp(
         }
     }
 
-    LaunchedEffect(authVersion, SavedAccounts.busy, authCompleting, showSiteVerifySheet) {
+    LaunchedEffect(authVersion, globalAuthTick, SavedAccounts.busy, authCompleting, showSiteVerifySheet) {
         if (SavedAccounts.busy || authCompleting || showSiteVerifySheet) return@LaunchedEffect
         var preFetchedProfile: UserFullProfileSummary? = null
         if (UserApiKeyAuthManager.isAuthorized() &&
@@ -2896,6 +3022,23 @@ internal fun LinDoApp(
             closedUrl.startsWith("https://linux.do") || closedUrl.contains(".linux.do")
         )
         activeWebLoginUrl = null
+        // Closing/cancelling a verification page is not proof that the challenge succeeded.
+        // Only the verified callback (or confirmed healthy clearance on dismiss) clears the cooldown and resumes blocked operations.
+        if (closedUrl != null && do_.linux.lindo.core.network.webPagePurpose(closedUrl) == do_.linux.lindo.core.network.WebPagePurpose.VERIFICATION) {
+            val passed = do_.linux.lindo.core.network.CfClearanceAuthority.hasHealthyIncumbent() &&
+                !LinuxDoRepository.isChallengeCooldownActive()
+            val cb = pendingVerifyModalCallback
+            pendingVerifyModalCallback = null
+            cb?.invoke(passed)
+            if (passed) {
+                siteVerificationRestoreVersion++
+                networkRestoreVersion++
+            }
+            return
+        }
+        val danglingCb = pendingVerifyModalCallback
+        pendingVerifyModalCallback = null
+        danglingCb?.invoke(false)
         if (SavedAccounts.adding) {
             scope.launch {
                 runCatching { SavedAccounts.cancelAdd() }.onFailure {
@@ -2905,9 +3048,6 @@ internal fun LinDoApp(
             }
             return
         }
-        // Closing/cancelling a verification page is not proof that the challenge succeeded.
-        // Only the verified callback may clear the cooldown and resume blocked operations.
-        if (closedUrl != null && do_.linux.lindo.core.network.webPagePurpose(closedUrl) == do_.linux.lindo.core.network.WebPagePurpose.VERIFICATION) return
         if (wasEditingProfile) syncUserProfile()
         if (wasLinuxDoPage) {
             scope.launch {
@@ -3072,6 +3212,18 @@ internal fun LinDoApp(
         if (topicTarget != null) {
             val (tid, pnum) = topicTarget
             openTopicById(tid, LinDoCommonCopy.TOPIC_NUMBER_FALLBACK.format(tid), pnum)
+            return
+        }
+        val shortPostId = parseShortPostPermalink(trimmed)
+        if (shortPostId != null) {
+            scope.launch {
+                val loc = LinuxDoRepository.fetchPostLocationById(shortPostId)
+                if (loc != null) {
+                    openTopicById(loc.first, LinDoCommonCopy.TOPIC_NUMBER_FALLBACK.format(loc.first), loc.second)
+                } else {
+                    openWebPage(trimmed)
+                }
+            }
             return
         }
         val tagMatch = Regex(
@@ -3597,6 +3749,10 @@ internal fun LinDoApp(
                                 onPrimaryWebLogin = ::triggerPrimaryLogin,
                                 onBrowserOneClickAuth = {
                                     triggerBrowserOneClickLogin()
+                                },
+                                onScanQrLogin = {
+                                    authStatusHint = null
+                                    showQrScanSheet = true
                                 },
                                 secondaryActionLabel = LinDoAuthCopy.SYSTEM_BROWSER_AUTH.text,
                                 secondaryActionIcon = LinDoIcons.Globe,
@@ -4689,6 +4845,11 @@ internal fun LinDoApp(
                         onBrowserOneClickAuth = {
                             triggerBrowserOneClickLogin()
                         },
+                        onScanQrLogin = {
+                            guestLoginPrompt = null
+                            authStatusHint = null
+                            showQrScanSheet = true
+                        },
                         onDismiss = { guestLoginPrompt = null }
                     )
                 }
@@ -4704,6 +4865,20 @@ internal fun LinDoApp(
                         onBrowserOneClickAuth = { addAccount(browser = true) },
                         onAddAccount = { addAccount() },
                         onSelectAccount = ::selectSavedAccount,
+                        onScanQrLogin = {
+                            scope.launch {
+                                if (isAuthorized && !SavedAccounts.adding) {
+                                    runCatching { SavedAccounts.beginAdd() }
+                                }
+                                showAuthSheet = false
+                                authStatusHint = null
+                                showQrScanSheet = true
+                            }
+                        },
+                        onGenerateQrLogin = {
+                            showAuthSheet = false
+                            showQrGenerateSheet = true
+                        },
                         onLogout = {
                             showLogoutConfirm = true
                             showAuthSheet = false
@@ -4760,6 +4935,72 @@ internal fun LinDoApp(
                             verificationFeedbackNotice = PlatformSessionRecovery.verificationMessage?.takeIf { it.isNotBlank() }
                         }
                     )
+                }
+
+                var delayedVerifyPill by remember { mutableStateOf(false) }
+                LaunchedEffect(PlatformSessionRecovery.verifying, showSiteVerifySheet, activeWebLoginUrl) {
+                    if (PlatformSessionRecovery.verifying && !showSiteVerifySheet && activeWebLoginUrl == null) {
+                        kotlinx.coroutines.delay(do_.linux.lindo.core.network.VerifyCoordinator.PILL_DELAY_MS)
+                        delayedVerifyPill = true
+                    } else {
+                        delayedVerifyPill = false
+                    }
+                }
+                if ((delayedVerifyPill || PlatformSessionRecovery.verifyPillVisible) && !showSiteVerifySheet && activeWebLoginUrl == null && !authCompleting) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(if (isWideLayout && !isAndroidRuntime) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
+                            .imePadding()
+                            .padding(bottom = if (isWideLayout && !isAndroidRuntime) 24.dp else FloatingNavClearance, end = 16.dp),
+                        contentAlignment = Alignment.BottomEnd
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .shadow(
+                                    elevation = 8.dp,
+                                    shape = CircleShape,
+                                    clip = false,
+                                    ambientColor = Color.Black.copy(alpha = 0.28f),
+                                    spotColor = Color.Black.copy(alpha = 0.38f)
+                                )
+                                .clip(CircleShape)
+                                .background(palette.cardSurface.copy(alpha = 0.94f), CircleShape)
+                                .border(0.5.dp, palette.hairline, CircleShape)
+                                .clickable {
+                                    PlatformSessionRecovery.verifyPillVisible = false
+                                    delayedVerifyPill = false
+                                    val customExpand = PlatformSessionRecovery.onExpandVerifyPill
+                                    if (customExpand != null) {
+                                        customExpand()
+                                    } else {
+                                        showSiteVerifySheet = true
+                                    }
+                                }
+                                .padding(horizontal = 13.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(palette.brandGold)
+                            )
+                            Text(
+                                text = "安全校验中…",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.inkPrimary
+                            )
+                            Icon(
+                                imageVector = LinDoIcons.ChevronRight,
+                                contentDescription = "展开安全校验",
+                                modifier = Modifier.size(13.dp),
+                                tint = palette.inkTertiary
+                            )
+                        }
+                    }
                 }
 
                 verificationFeedbackNotice?.let { noticeText ->
@@ -4937,6 +5178,31 @@ internal fun LinDoApp(
                         currentTab = MainTab.HOME
                     })
 
+                if (showQrScanSheet) {
+                    QrCodeScanSheet(
+                        onDismiss = {
+                            showQrScanSheet = false
+                            if (SavedAccounts.adding) {
+                                scope.launch { runCatching { SavedAccounts.cancelAdd() } }
+                            }
+                        },
+                        onAccepted = {
+                            showQrScanSheet = false
+                            showAuthSheet = false
+                            showSiteVerifySheet = false
+                            guestLoginPrompt = null
+                            authStatusHint = null
+                        }
+                    )
+                }
+
+                if (showQrGenerateSheet) {
+                    QrCodeGenerateSheet(
+                        username = fullUserProfile?.username ?: currentUser?.username.orEmpty(),
+                        onDismiss = { showQrGenerateSheet = false }
+                    )
+                }
+
                 // 内置全屏安全 WebView 弹层置于所有全屏 Sheet 最顶层，并注册 LIFO 返回键拦截 (C6)
                 activeWebLoginUrl?.let { loginUrl ->
                     DisposableEffect(loginUrl) {
@@ -4952,6 +5218,9 @@ internal fun LinDoApp(
                                 val wasAlreadyAuth = wasAuthorized
                                 val completingLogin = do_.linux.lindo.core.network.webPagePurpose(loginUrl) == do_.linux.lindo.core.network.WebPagePurpose.LOGIN
                                 activeWebLoginUrl = null
+                                val cb = pendingVerifyModalCallback
+                                pendingVerifyModalCallback = null
+                                cb?.invoke(true)
                                 if (completingLogin && UserApiKeyAuthManager.isAuthorized()) {
                                     currentTab = MainTab.HOME
                                     mobileShowingDetail = false
@@ -4983,7 +5252,7 @@ internal fun LinDoApp(
                         )
                     }
                 }
-                if (authCompleting || SavedAccounts.busy) {
+                if ((authCompleting || SavedAccounts.busy) && activeWebLoginUrl == null) {
                     Box(Modifier.fillMaxSize().background(palette.canvas)
                         .testTag("auth_completion_loading")
                         .pointerInput(Unit) {
@@ -5200,10 +5469,12 @@ private fun DesktopSideRail(
             @Composable
             fun RailTabItem(tab: MainTab) {
                 val selected = currentTab == tab
+                val isHomeMascot = tab == MainTab.HOME
+                val tabItemHeight = if (isHomeMascot && !isCompactHeight) 56.dp else itemHeight
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(itemHeight)
+                        .height(tabItemHeight)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
@@ -5225,15 +5496,18 @@ private fun DesktopSideRail(
                         verticalArrangement = Arrangement.Center
                     ) {
                         Box(
-                            modifier = Modifier.size(width = 28.dp, height = 24.dp),
+                            modifier = Modifier.size(
+                                width = if (isHomeMascot) 32.dp else 28.dp,
+                                height = if (isHomeMascot) (if (isCompactHeight) 26.dp else 30.dp) else 24.dp
+                            ),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (tab == MainTab.HOME) {
+                            if (isHomeMascot) {
                                 Image(
                                     painter = painterResource(Res.drawable.lindo_brand_mark),
                                     contentDescription = tab.title,
-                                    modifier = Modifier.size(21.dp),
-                                    alpha = if (selected) 1f else 0.78f,
+                                    modifier = Modifier.size(if (isCompactHeight) 25.dp else 29.dp),
+                                    alpha = if (selected) 1f else 0.85f,
                                     contentScale = ContentScale.Fit
                                 )
                             } else {
@@ -5712,20 +5986,20 @@ internal fun GoogleM3NavigationBar(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null
                             ) { onSelectTab(tab) }
-                            .padding(vertical = 6.dp),
+                            .padding(vertical = 4.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
                         Box(
-                            modifier = Modifier.size(width = 34.dp, height = 22.dp),
+                            modifier = Modifier.size(width = 34.dp, height = 26.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             if (tab == MainTab.HOME) {
                                 Image(
                                     painter = painterResource(Res.drawable.lindo_brand_mark),
                                     contentDescription = tab.title,
-                                    modifier = Modifier.size(22.dp),
-                                    alpha = if (selected) 1f else 0.72f,
+                                    modifier = Modifier.size(26.dp),
+                                    alpha = if (selected) 1f else 0.84f,
                                     contentScale = ContentScale.Fit
                                 )
                             } else {
@@ -5758,12 +6032,12 @@ internal fun GoogleM3NavigationBar(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
                         ) { onPublishClick() }
-                        .padding(vertical = 6.dp),
+                        .padding(vertical = 4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     Box(
-                        modifier = Modifier.size(width = 34.dp, height = 22.dp),
+                        modifier = Modifier.size(width = 34.dp, height = 26.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -5794,12 +6068,12 @@ internal fun GoogleM3NavigationBar(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null
                             ) { onSelectTab(tab) }
-                            .padding(vertical = 6.dp),
+                            .padding(vertical = 4.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
                         Box(
-                            modifier = Modifier.size(width = 34.dp, height = 22.dp),
+                            modifier = Modifier.size(width = 34.dp, height = 26.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -7572,7 +7846,7 @@ private fun CommunityTopicItem(
                 animatedAvatar = op.animatedAvatar,
                 primaryGroupName = op.primaryGroupName,
                 flair = null,
-                size = 32.dp,
+                size = 38.dp,
                 enableAnimations = false
             )
 
@@ -7585,9 +7859,10 @@ private fun CommunityTopicItem(
                     Text(
                         text = titleAnnotated,
                         inlineContent = titleInlineContent,
-                        fontSize = 14.sp,
-                        lineHeight = 19.sp,
-                        fontWeight = FontWeight.Normal,
+                        fontSize = LinDoTokens.CompactHeadline,
+                        lineHeight = 21.sp,
+                        letterSpacing = if (palette.isDark) 0.14.sp else 0.08.sp,
+                        fontWeight = FontWeight.Medium,
                         color = palette.inkPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -7596,9 +7871,10 @@ private fun CommunityTopicItem(
                 } else {
                     Text(
                         text = topic.title,
-                        fontSize = 14.sp,
-                        lineHeight = 19.sp,
-                        fontWeight = FontWeight.Normal,
+                        fontSize = LinDoTokens.CompactHeadline,
+                        lineHeight = 21.sp,
+                        letterSpacing = if (palette.isDark) 0.14.sp else 0.08.sp,
+                        fontWeight = FontWeight.Medium,
                         color = palette.inkPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -7707,7 +7983,8 @@ private fun CommunityTopicItem(
                         inlineContent = titleInlineContent,
                         fontSize = LinDoTokens.Headline,
                         fontWeight = FontWeight.SemiBold,
-                        lineHeight = 22.sp,
+                        lineHeight = 24.sp,
+                        letterSpacing = if (palette.isDark) 0.14.sp else 0.08.sp,
                         color = palette.inkPrimary,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -7718,7 +7995,8 @@ private fun CommunityTopicItem(
                         text = topic.title,
                         fontSize = LinDoTokens.Headline,
                         fontWeight = FontWeight.SemiBold,
-                        lineHeight = 22.sp,
+                        lineHeight = 24.sp,
+                        letterSpacing = if (palette.isDark) 0.14.sp else 0.08.sp,
                         color = palette.inkPrimary,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -7967,8 +8245,22 @@ internal fun CommunityTopicReaderPane(
             finally { bookmarkBusy = false }
         }
     }
-    var onlyOpFilter by remember(summary.id) { mutableStateOf(false) }
+    var filterMode by remember(summary.id) { mutableStateOf(TopicRepliesFilterMode.ALL) }
+    val onlyOpFilter = filterMode == TopicRepliesFilterMode.ONLY_OP
+    val summaryFilter = filterMode == TopicRepliesFilterMode.SUMMARY
+    var cachedAllDetail by remember(summary.id) { mutableStateOf<TopicDetailModel?>(null) }
     var changingReaderFilter by remember(summary.id) { mutableStateOf(false) }
+    var showTopicToc by remember(summary.id) { mutableStateOf(false) }
+    var showInTopicFind by remember(summary.id) { mutableStateOf(false) }
+    var inTopicFindQuery by remember(summary.id) { mutableStateOf("") }
+    var revisionPostId by remember(summary.id) { mutableStateOf<Int?>(null) }
+    var reactionUsersPostId by remember(summary.id) { mutableStateOf<Int?>(null) }
+    var bookmarkReminderPost by remember(summary.id) { mutableStateOf<PostItemModel?>(null) }
+    LaunchedEffect(detail, filterMode) {
+        if (filterMode == TopicRepliesFilterMode.ALL && detail != null && detail.id == summary.id && detail.posts.isNotEmpty()) {
+            cachedAllDetail = detail
+        }
+    }
     var notificationLevel by remember(summary.id) {
         mutableStateOf(TopicNotificationLevel.fromCode(detail?.notificationLevel ?: 1))
     }
@@ -7982,6 +8274,14 @@ internal fun CommunityTopicReaderPane(
     var isLoadingMorePosts by remember(summary.id) { mutableStateOf(false) }
     var loadingEarlierPosts by remember(summary.id) { mutableStateOf(false) }
     var isLoadingGapPosts by remember(summary.id) { mutableStateOf(false) }
+    var isRefreshingTail by remember(summary.id) { mutableStateOf(false) }
+    var tailRefreshFeedback by remember(summary.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(tailRefreshFeedback) {
+        if (tailRefreshFeedback != null) {
+            delay(2_600L)
+            tailRefreshFeedback = null
+        }
+    }
     var loadMorePostsError by remember(summary.id) { mutableStateOf(false) }
     var floorLoadError by remember(summary.id) { mutableStateOf<String?>(null) }
     var copiedShareLink by remember(summary.id) { mutableStateOf(false) }
@@ -8225,6 +8525,62 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
+    fun refreshTailIncremental() {
+        val currentDetail = latestDetail ?: return
+        if (isRefreshingTail || isLoadingMorePosts || isLoadingGapPosts || changingReaderFilter) return
+        isRefreshingTail = true
+        tailRefreshFeedback = null
+        scope.launch {
+            try {
+                if (summaryFilter) {
+                    val refreshed = LinuxDoRepository.fetchTopicDetail(
+                        topicId = summary.id,
+                        summaryFallback = summary,
+                        trackVisit = false,
+                        filterSummary = true
+                    )
+                    if (refreshed.loadError == null) {
+                        val added = (refreshed.posts.size - currentDetail.posts.size).coerceAtLeast(0)
+                        onDetailUpdated(refreshed)
+                        tailRefreshFeedback = if (added > 0) "已加载 $added 条新回复" else "已是最新回复"
+                    } else {
+                        tailRefreshFeedback = "检查新回复失败，可稍后重试"
+                    }
+                    return@launch
+                }
+                val lastFloor = currentDetail.posts.maxOfOrNull { it.postNumber } ?: 1
+                val knownAuthorBadges = currentDetail.posts.associate { it.userId to it.authorBadges }
+                val (newIds, incomingPosts) = LinuxDoRepository.fetchTopicTailNewPosts(
+                    topicId = summary.id,
+                    afterPostNumber = lastFloor,
+                    loadedPosts = currentDetail.posts,
+                    knownAuthorBadges = knownAuthorBadges
+                )
+                val latest = latestDetail ?: currentDetail
+                val mergedResult = do_.linux.lindo.core.model.TopicTailRefresh.merge(
+                    prevDetail = latest,
+                    incomingStreamTailIds = newIds,
+                    fetchedPosts = incomingPosts,
+                    onlyOpFilter = onlyOpFilter
+                )
+                if (mergedResult.addedCount > 0 || newIds.isNotEmpty()) {
+                    onDetailUpdated(mergedResult.detail)
+                }
+                tailRefreshFeedback = if (mergedResult.addedCount > 0) {
+                    "已加载 ${mergedResult.addedCount} 条新回复"
+                } else {
+                    "已是最新回复"
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                tailRefreshFeedback = "检查新回复失败，可稍后重试"
+            } finally {
+                isRefreshingTail = false
+            }
+        }
+    }
+
     LaunchedEffect(netRestoreVer, siteVerifyVer) {
         val activeVerify = siteVerifyVer > 0 && siteVerifyVer != lastHandledSiteVerifyVer
         val activeNet = netRestoreVer > 0 && netRestoreVer != lastHandledNetRestoreVer
@@ -8416,20 +8772,43 @@ internal fun CommunityTopicReaderPane(
         }
     }
 
-    fun toggleOnlyOpMode() {
+    fun switchReaderFilterMode(targetMode: TopicRepliesFilterMode) {
         if (changingReaderFilter || fetchingJumpWindow || isLoadingMorePosts) return
+        if (targetMode == filterMode && filterError == null) return
         val retryingAfterFilterError = filterError != null
-        val nextState = !onlyOpFilter
-        changingReaderFilter = true
+        val prevMode = filterMode
+        filterMode = targetMode
         filterError = null
+
+        // Instant 0ms restore when switching back to 全部 if cached snapshot exists
+        val cached = cachedAllDetail
+        if (targetMode == TopicRepliesFilterMode.ALL && !retryingAfterFilterError && cached != null && cached.id == summary.id) {
+            navigationError = null
+            pendingJumpFloor = null
+            pendingReturnFloor = null
+            replyReturnFloor = null
+            jumpFetchedWindow = false
+            loadMorePostsError = false
+            floorLoadError = null
+            onDetailUpdated(TopicFilterTransition.applyFilterResult(latestDetail, cached))
+            if (currentReaderListState.firstVisibleItemIndex > 1) {
+                scope.launch { runCatching { currentReaderListState.animateScrollToItem(1) } }
+            }
+            return
+        }
+
+        changingReaderFilter = true
         scope.launch {
             try {
                 if (retryingAfterFilterError) {
                     LinuxDoRepository.prepareForManualRecovery()
                 }
                 val filtered = LinuxDoRepository.fetchTopicDetail(
-                    topicId = summary.id, summaryFallback = summary, trackVisit = false,
-                    filterUsername = if (nextState) effectiveOpUsername else null
+                    topicId = summary.id,
+                    summaryFallback = summary,
+                    trackVisit = false,
+                    filterUsername = if (targetMode == TopicRepliesFilterMode.ONLY_OP) effectiveOpUsername else null,
+                    filterSummary = targetMode == TopicRepliesFilterMode.SUMMARY
                 )
                 val error = filtered.loadError
                 if (error == null) {
@@ -8440,19 +8819,32 @@ internal fun CommunityTopicReaderPane(
                     jumpFetchedWindow = false
                     loadMorePostsError = false
                     floorLoadError = null
-                    onlyOpFilter = nextState
-                    onDetailUpdated(filtered)
+                    val seamless = TopicFilterTransition.applyFilterResult(latestDetail, filtered)
+                    onDetailUpdated(seamless)
+                    // Only glide smoothly to the replies divider if user was scrolled deep down into replies;
+                    // NEVER jump back to scrollTop = 0 when user is reading right at the divider!
+                    if (currentReaderListState.firstVisibleItemIndex > 1) {
+                        runCatching { currentReaderListState.animateScrollToItem(1) }
+                    }
                 } else {
+                    filterMode = prevMode
                     filterError = error
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (err: Throwable) {
+                filterMode = prevMode
                 filterError = err.message?.takeIf { it.isNotBlank() } ?: LinDoCommonCopy.LOAD_FAILED.text
             } finally {
                 changingReaderFilter = false
             }
         }
+    }
+
+    fun toggleOnlyOpMode() {
+        switchReaderFilterMode(
+            if (filterMode == TopicRepliesFilterMode.ONLY_OP) TopicRepliesFilterMode.ALL else TopicRepliesFilterMode.ONLY_OP
+        )
     }
 
     LaunchedEffect(netRestoreVer, siteVerifyVer) {
@@ -8528,7 +8920,8 @@ internal fun CommunityTopicReaderPane(
                     summaryFallback = summary,
                     trackVisit = false,
                     filterUsername = effectiveOpUsername.takeIf { onlyOpFilter },
-                    targetPostNumber = fetchTarget
+                    targetPostNumber = fetchTarget,
+                    filterSummary = summaryFilter
                 )
                 if (fresh.unavailable) {
                     onUnavailable()
@@ -8679,7 +9072,11 @@ internal fun CommunityTopicReaderPane(
                 }
             } else {
                 Text(
-                    if (onlyOpFilter) LinDoReaderCopy.OP_ONLY_MODE.text else LinDoReaderCopy.TOPIC_HEADER_TITLE.text,
+                    when (filterMode) {
+                        TopicRepliesFilterMode.ONLY_OP -> LinDoReaderCopy.OP_ONLY_MODE.text
+                        TopicRepliesFilterMode.SUMMARY -> LinDoReaderCopy.HOT_REPLIES_MODE.text
+                        TopicRepliesFilterMode.ALL -> LinDoReaderCopy.TOPIC_HEADER_TITLE.text
+                    },
                     fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary,
                     modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
@@ -8868,6 +9265,109 @@ internal fun CommunityTopicReaderPane(
                         color = palette.inkPrimary
                     )
                 }
+
+                Row(
+                    modifier = moreActionChipMod.clickable {
+                        showTopMoreMenu = false
+                        showTopicToc = true
+                    }.padding(horizontal = 5.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.FileText,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = palette.inkSecondary
+                    )
+                    Text(
+                        text = "目录",
+                        fontSize = 12.2.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.inkPrimary
+                    )
+                }
+
+                Row(
+                    modifier = moreActionChipMod.clickable {
+                        showTopMoreMenu = false
+                        showInTopicFind = !showInTopicFind
+                        if (!showInTopicFind) inTopicFindQuery = ""
+                    }.padding(horizontal = 5.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = LinDoIcons.Search,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = if (showInTopicFind) palette.brandGold else palette.inkSecondary
+                    )
+                    Text(
+                        text = "帖内搜索",
+                        fontSize = 12.2.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (showInTopicFind) palette.brandGold else palette.inkPrimary
+                    )
+                }
+            }
+        }
+
+        AnimatedVisibility(visible = showInTopicFind) {
+            val matchedFloors = remember(inTopicFindQuery, posts) {
+                val q = inTopicFindQuery.trim()
+                if (q.isEmpty()) emptyList()
+                else posts.filter { p ->
+                    p.cookedHtml.contains(q, ignoreCase = true) || p.username.contains(q, ignoreCase = true)
+                }.map { it.postNumber }
+            }
+            var matchCursor by remember(inTopicFindQuery, matchedFloors.size) { mutableIntStateOf(0) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.subtleSurface)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(LinDoIcons.Search, null, Modifier.size(14.dp), tint = palette.inkTertiary)
+                BasicTextField(
+                    value = inTopicFindQuery,
+                    onValueChange = { inTopicFindQuery = it },
+                    singleLine = true,
+                    textStyle = TextStyle(color = palette.inkPrimary, fontSize = 13.sp),
+                    cursorBrush = SolidColor(palette.brandGold),
+                    modifier = Modifier.weight(1f),
+                    decorationBox = { inner ->
+                        if (inTopicFindQuery.isEmpty()) {
+                            Text("在当前已加载楼层中搜索关键词…", color = palette.inkTertiary, fontSize = 12.5.sp)
+                        }
+                        inner()
+                    }
+                )
+                if (inTopicFindQuery.isNotBlank()) {
+                    Text(
+                        text = if (matchedFloors.isEmpty()) "0" else "${matchCursor + 1}/${matchedFloors.size}",
+                        fontSize = 11.5.sp,
+                        color = palette.inkTertiary
+                    )
+                    if (matchedFloors.isNotEmpty()) {
+                        TextButton(
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                            onClick = {
+                                val nextIdx = (matchCursor + 1) % matchedFloors.size
+                                matchCursor = nextIdx
+                                jumpToFloor(matchedFloors[nextIdx])
+                            }
+                        ) { Text("下一处", fontSize = 12.sp, color = palette.activeChipText) }
+                    }
+                }
+                IconButton(
+                    modifier = Modifier.size(28.dp),
+                    onClick = { showInTopicFind = false; inTopicFindQuery = "" }
+                ) {
+                    Icon(LinDoIcons.Close, "关闭帖内搜索", Modifier.size(15.dp), tint = palette.inkSecondary)
+                }
             }
         }
 
@@ -8920,7 +9420,7 @@ internal fun CommunityTopicReaderPane(
                         fontSize = 19.6f.sp,
                         fontWeight = FontWeight.Bold,
                         lineHeight = 27.0f.sp,
-                        letterSpacing = (-0.25).sp,
+                        letterSpacing = if (palette.isDark) 0.08.sp else 0.sp,
                         color = palette.inkPrimary
                     )
 
@@ -8964,29 +9464,33 @@ internal fun CommunityTopicReaderPane(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            TextButton(
-                                contentPadding = PaddingValues(horizontal = 8.dp),
-                                onClick = {
-                                    showAiSummaryPanel = !showAiSummaryPanel
-                                    if (showAiSummaryPanel && remoteAiSummary == null && !isLoadingAiSummary) {
-                                        isLoadingAiSummary = true
-                                        scope.launch {
-                                            try {
-                                                remoteAiSummary = LinuxDoRepository.fetchTopicAiSummary(summary.id)
-                                            } finally {
-                                                isLoadingAiSummary = false
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .pointerHoverIcon(PointerIcon.Hand)
+                                    .clickable(
+                                        onClickLabel = if (showAiSummaryPanel) LinDoReaderCopy.COLLAPSE_SUMMARY.text else LinDoReaderCopy.SUMMARY_SHORT.text
+                                    ) {
+                                        showAiSummaryPanel = !showAiSummaryPanel
+                                        if (showAiSummaryPanel && remoteAiSummary == null && !isLoadingAiSummary) {
+                                            isLoadingAiSummary = true
+                                            scope.launch {
+                                                try {
+                                                    remoteAiSummary = LinuxDoRepository.fetchTopicAiSummary(summary.id)
+                                                } finally {
+                                                    isLoadingAiSummary = false
+                                                }
                                             }
                                         }
-                                    }
-                                }
+                                    },
+                                contentAlignment = Alignment.Center
                             ) {
-                                val tint = if (showAiSummaryPanel) palette.activeChipText else palette.inkSecondary
-                                Icon(LinDoIcons.Sparkles, null, Modifier.size(15.dp), tint = tint)
-                                Spacer(Modifier.width(5.dp))
-                                Text(
-                                    if (showAiSummaryPanel) LinDoReaderCopy.COLLAPSE_SUMMARY.text else LinDoReaderCopy.SUMMARY_SHORT.text,
-                                    fontSize = 12.sp,
-                                    color = tint
+                                Icon(
+                                    imageVector = LinDoIcons.Sparkles,
+                                    contentDescription = if (showAiSummaryPanel) LinDoReaderCopy.COLLAPSE_SUMMARY.text else LinDoReaderCopy.SUMMARY_SHORT.text,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = if (showAiSummaryPanel) palette.brandGold else palette.brandGold.copy(alpha = 0.85f)
                                 )
                             }
                         }
@@ -9155,6 +9659,12 @@ internal fun CommunityTopicReaderPane(
                 val repliedPost = postsByNumber[post.replyToPostNumber]
                 val childReplies = repliesByParent[post.postNumber].orEmpty()
                 val isFloorUnread = rememberFloorUnread(summary.id, post, isAuthorized)
+                val isReplyFloorDimmed = changingReaderFilter && post.postNumber > 1
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer { alpha = if (isReplyFloorDimmed) 0.48f else 1f }
+                ) {
                 CommunityPostFloor(
                     post = post,
                     repliedPost = repliedPost,
@@ -9172,6 +9682,18 @@ internal fun CommunityTopicReaderPane(
                     onJumpToFloorNumber = { floor -> jumpToFloor(floor, returnTo = post.postNumber) },
                     onEditPost = { editingPost = it },
                     onDeletePost = { targetPost -> pendingDeletePost = targetPost; deletePostError = null },
+                    onInspectRevisions = { pid -> revisionPostId = pid },
+                    onInspectReactionUsers = { pid -> reactionUsersPostId = pid },
+                    onOpenBookmarkReminder = { p ->
+                        if (!UserApiKeyAuthManager.isAuthorized()) {
+                            requestGuestLogin?.invoke(
+                                GuestGateScenario.BOOKMARK_TOPIC.titleCopy.text,
+                                GuestGateScenario.BOOKMARK_TOPIC.subtitleCopy.text
+                            ) ?: onRequestLogin()
+                        } else {
+                            bookmarkReminderPost = p
+                        }
+                    },
                     onReplyFloor = { targetPost ->
                         if (!UserApiKeyAuthManager.isAuthorized()) {
                             requestGuestLogin?.invoke(
@@ -9205,33 +9727,106 @@ internal fun CommunityTopicReaderPane(
                     },
                     onRequestLogin = onRequestLogin
                 )
+                }
 
-                if (post.postNumber == 1 && (postCount > 1 || onlyOpFilter)) {
+                // 私信参与者展示条（仅 private_message 主楼下方展示）
+                if (post.postNumber == 1 && detail?.archetype == "private_message" && detail.allowedUsers.isNotEmpty()) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("参与者：", fontSize = 11.5.sp, color = palette.inkTertiary)
+                        detail.allowedUsers.forEach { member ->
+                            Row(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(palette.subtleSurface)
+                                    .clickable { onInspectUser(member.username) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                SmartAvatar(username = member.username, avatarTemplate = member.avatarTemplate, animatedAvatar = member.animatedAvatar, size = 16.dp, enableAnimations = false)
+                                Text(member.name?.takeIf { it.isNotBlank() } ?: member.username, fontSize = 11.5.sp, color = palette.inkSecondary)
+                            }
+                        }
+                    }
+                }
+
+                if (post.postNumber == 1 && (postCount > 1 || onlyOpFilter || summaryFilter)) {
+                    val filterBarInfo = remember(detail, filterMode, postCount) {
+                        TopicFilterTransition.describeFilterBar(detail, filterMode, postCount)
+                    }
+                    val showSummaryBtn = detail?.hasSummary == true || summaryFilter
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            if (onlyOpFilter) LinDoReaderCopy.OP_REPLIES_HEADER.text else LinDoReaderCopy.REPLIES_HEADER.text,
+                        Row(
                             modifier = Modifier.weight(1f),
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.inkPrimary
-                        )
-                        TextButton(
-                            enabled = !changingReaderFilter && !fetchingJumpWindow && !isLoadingMorePosts,
-                            onClick = ::toggleOnlyOpMode
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
-                                if (changingReaderFilter) {
-                                    LinDoCommonCopy.SWITCHING.text
-                                } else if (onlyOpFilter) {
-                                    LinDoReaderCopy.VIEW_ALL_SHORT.text
-                                } else {
-                                    LinDoReaderCopy.OP_ONLY_MODE.text
-                                },
-                                fontSize = 12.sp,
-                                color = if (onlyOpFilter) palette.activeChipText else palette.inkSecondary
+                                text = filterBarInfo.label,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.inkPrimary
+                            )
+                            if (changingReaderFilter) {
+                                Text(
+                                    text = LinDoCommonCopy.SWITCHING.text,
+                                    fontSize = 11.5.sp,
+                                    color = palette.inkTertiary
+                                )
+                            }
+                        }
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(palette.subtleSurface)
+                                .padding(2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            @Composable
+                            fun FilterTabChip(label: String, selected: Boolean, onClick: () -> Unit) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (selected) palette.canvas else Color.Transparent)
+                                        .pointerHoverIcon(PointerIcon.Hand)
+                                        .clickable(enabled = !changingReaderFilter && !fetchingJumpWindow && !isLoadingMorePosts, onClick = onClick)
+                                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.8.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (selected) palette.activeChipText else palette.inkTertiary
+                                    )
+                                }
+                            }
+                            FilterTabChip(
+                                label = LinDoReaderCopy.ALL_REPLIES_TAB.text,
+                                selected = filterMode == TopicRepliesFilterMode.ALL,
+                                onClick = { switchReaderFilterMode(TopicRepliesFilterMode.ALL) }
+                            )
+                            if (showSummaryBtn) {
+                                FilterTabChip(
+                                    label = LinDoReaderCopy.HOT_REPLIES_MODE.text,
+                                    selected = filterMode == TopicRepliesFilterMode.SUMMARY,
+                                    onClick = { switchReaderFilterMode(TopicRepliesFilterMode.SUMMARY) }
+                                )
+                            }
+                            FilterTabChip(
+                                label = LinDoReaderCopy.OP_ONLY_MODE.text,
+                                selected = filterMode == TopicRepliesFilterMode.ONLY_OP,
+                                onClick = { switchReaderFilterMode(TopicRepliesFilterMode.ONLY_OP) }
                             )
                         }
                     }
@@ -9249,7 +9844,7 @@ internal fun CommunityTopicReaderPane(
                 posts.size == 1 &&
                 posts.first().postNumber == 1 &&
                 afterTailPostIds.isEmpty() &&
-                (totalFloorCount <= 1 || onlyOpFilter)
+                (totalFloorCount <= 1 || onlyOpFilter || summaryFilter)
             if (hasZeroReplies) {
                 item(key = "empty_replies", contentType = "footer") {
                     val topicClosed = detail?.closed == true || detail?.archived == true
@@ -9283,8 +9878,26 @@ internal fun CommunityTopicReaderPane(
                                 Text(
                                     text = "查看全部",
                                     fontSize = 12.5.sp,
-                                    color = palette.inkSecondary,
-                                    modifier = Modifier.clickable { toggleOnlyOpMode() }
+                                    color = palette.activeChipText,
+                                    modifier = Modifier.clickable { switchReaderFilterMode(TopicRepliesFilterMode.ALL) }
+                                )
+                            }
+                            summaryFilter -> {
+                                Text(
+                                    text = "暂无精选热门回复",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary
+                                )
+                                Text(
+                                    text = " · ",
+                                    fontSize = 12.5.sp,
+                                    color = palette.inkTertiary.copy(alpha = 0.5f)
+                                )
+                                Text(
+                                    text = "查看全部",
+                                    fontSize = 12.5.sp,
+                                    color = palette.activeChipText,
+                                    modifier = Modifier.clickable { switchReaderFilterMode(TopicRepliesFilterMode.ALL) }
                                 )
                             }
                             topicClosed -> {
@@ -9339,9 +9952,62 @@ internal fun CommunityTopicReaderPane(
                         loadingText = LinDoReaderCopy.SYNCING_FOLLOWING_FLOORS.format(posts.size, totalFloorCount),
                         moreText = LinDoReaderCopy.LOAD_FOLLOWING_FLOORS.text,
                         errorText = floorLoadError ?: LinDoReaderCopy.FLOOR_LOAD_FAILED.text,
-                        doneText = LinDoReaderCopy.TOPIC_END_REACHED.text,
+                        doneText = LinDoCommonCopy.NO_MORE.text,
+                        onRefreshAtEnd = ::refreshTailIncremental,
+                        isRefreshingAtEnd = isRefreshingTail,
+                        endStatusText = tailRefreshFeedback,
                         onLoadMore = { loadMoreFloorBatch(20, isManualRetry = true) }
                     )
+                }
+            }
+
+            // 相关推荐话题（原生直达站内阅读，不跳转 Web）
+            val suggested = detail?.suggestedTopics.orEmpty()
+            if (suggested.isNotEmpty() && afterTailPostIds.isEmpty() && !isLoading) {
+                item(key = "suggested_topics_${summary.id}", contentType = "footer") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                        Text(
+                            text = "相关推荐话题",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.inkSecondary,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                        suggested.forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(palette.subtleSurface.copy(alpha = 0.55f))
+                                    .clickable { onOpenWebUrl("https://linux.do/t/-/${item.id}") }
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        text = item.title,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.inkPrimary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${item.categoryName} · ${item.replyCount} 回复",
+                                        fontSize = 11.5.sp,
+                                        color = palette.inkTertiary
+                                    )
+                                }
+                                Icon(LinDoIcons.ChevronRight, null, Modifier.size(14.dp), tint = palette.inkTertiary)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -9552,6 +10218,45 @@ internal fun CommunityTopicReaderPane(
             onJump = { number, exact ->
                 showFloorNavigator = false
                 jumpToFloor(number, exact = exact)
+            }
+        )
+    }
+
+    if (showTopicToc) {
+        val firstHtml = posts.firstOrNull { it.postNumber == 1 }?.cookedHtml.orEmpty()
+        TopicTocDialog(
+            firstPostHtml = firstHtml,
+            onJumpTop = { scope.launch { runCatching { readerListState.animateScrollToItem(0) } } },
+            onDismiss = { showTopicToc = false }
+        )
+    }
+    revisionPostId?.let { pid ->
+        PostRevisionsDialog(postId = pid, onDismiss = { revisionPostId = null })
+    }
+    reactionUsersPostId?.let { pid ->
+        ReactionUsersDialog(
+            postId = pid,
+            onInspectUser = onInspectUser,
+            onDismiss = { reactionUsersPostId = null }
+        )
+    }
+    bookmarkReminderPost?.let { targetPost ->
+        BookmarkReminderDialog(
+            post = targetPost,
+            onDismiss = { bookmarkReminderPost = null },
+            onSaved = { bmId, bmName, bmReminder ->
+                latestDetail?.let { cur ->
+                    onDetailUpdated(cur.copy(posts = cur.posts.map { p ->
+                        if (p.id == targetPost.id) {
+                            p.copy(
+                                bookmarkedByMe = bmId != null,
+                                bookmarkId = bmId,
+                                bookmarkName = bmName,
+                                bookmarkReminderAt = bmReminder
+                            )
+                        } else p
+                    }))
+                }
             }
         )
     }
@@ -9799,6 +10504,9 @@ internal fun CommunityPostFloor(
     onJumpToFloorNumber: (Int) -> Unit = {},
     onEditPost: (PostItemModel) -> Unit = {},
     onDeletePost: (PostItemModel) -> Unit = {},
+    onInspectRevisions: ((Int) -> Unit)? = null,
+    onInspectReactionUsers: ((Int) -> Unit)? = null,
+    onOpenBookmarkReminder: ((PostItemModel) -> Unit)? = null,
     onReplyFloor: (PostItemModel) -> Unit,
     onQuoteFloor: (PostItemModel, String?) -> Unit,
     onRequestLogin: () -> Unit,
@@ -9959,7 +10667,7 @@ internal fun CommunityPostFloor(
                     localReactions = prevReactionsSnapshot
                     val errMsg = res.errorMessage ?: LinDoReaderCopy.LIKE_OR_REACTION_FAILED.text
                     floorActionError = errMsg
-                    if (errMsg.isSiteVerificationError() && !PlatformSessionRecovery.verifying) {
+                    if (errMsg.isSiteVerificationError() && !NetworkRecoveryPolicy.enabled && !PlatformSessionRecovery.verifying) {
                         floorFocusManager.clearFocus(force = true)
                         floorKeyboardController?.hide()
                         onOpenWebUrl("https://linux.do/challenge#lindo-verify")
@@ -10023,7 +10731,7 @@ internal fun CommunityPostFloor(
                         floorKeyboardController?.hide()
                         if (!autoAfterVerify) {
                             pendingBoostAfterVerify = trimmed
-                            if (!PlatformSessionRecovery.verifying) {
+                            if (!NetworkRecoveryPolicy.enabled && !PlatformSessionRecovery.verifying) {
                                 onOpenWebUrl("https://linux.do/challenge#lindo-verify")
                             }
                         }
@@ -10069,7 +10777,7 @@ internal fun CommunityPostFloor(
                 } else {
                     val errMsg = res.errorMessage ?: LinDoReaderCopy.BOOST_DELETE_FAILED_SHORT.text
                     floorActionError = errMsg
-                    if (errMsg.isSiteVerificationError() && !PlatformSessionRecovery.verifying) {
+                    if (errMsg.isSiteVerificationError() && !NetworkRecoveryPolicy.enabled && !PlatformSessionRecovery.verifying) {
                         floorFocusManager.clearFocus(force = true)
                         floorKeyboardController?.hide()
                         onOpenWebUrl("https://linux.do/challenge#lindo-verify")
@@ -10759,12 +11467,21 @@ internal fun CommunityPostFloor(
                     }
 
                     val boostInputStyle = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, color = palette.inkPrimary)
+                    var boostFieldValue by remember(post.id) {
+                        mutableStateOf(TextFieldValue(boostInputText, TextRange(boostInputText.length)))
+                    }
+                    val syncedBoostFieldValue = if (boostFieldValue.text == boostInputText) {
+                        boostFieldValue
+                    } else {
+                        TextFieldValue(boostInputText, TextRange(boostInputText.length))
+                    }
                     BasicTextField(
-                        value = boostInputText,
+                        value = syncedBoostFieldValue,
                         onValueChange = { next ->
-                            val normalized = next.replace("\n", " ")
-                            boostInputText = normalized
-                            if (pendingBoostAfterVerify != null && normalized.trim() != pendingBoostAfterVerify) {
+                            val normalizedValue = ImeInputGuard.normalizeSingleLine(next)
+                            boostFieldValue = normalizedValue
+                            boostInputText = normalizedValue.text
+                            if (pendingBoostAfterVerify != null && normalizedValue.text.trim() != pendingBoostAfterVerify) {
                                 pendingBoostAfterVerify = null
                             }
                         },
@@ -10773,7 +11490,9 @@ internal fun CommunityPostFloor(
                         cursorBrush = SolidColor(palette.brandGold),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(onSend = {
-                            if (canSendNow) submitBoost(boostInputText)
+                            if (canSendNow && ImeInputGuard.canSubmitAction(syncedBoostFieldValue)) {
+                                submitBoost(boostInputText)
+                            }
                         }),
                         modifier = Modifier
                             .weight(1f)
@@ -10977,20 +11696,16 @@ internal fun CommunityPostFloor(
                         horizontalArrangement = Arrangement.spacedBy(3.5.dp)
                     ) {
                         Text(
-                            text = if (showInlineReplies) {
-                                LinDoReaderCopy.COLLAPSE_REPLIES.text
-                            } else {
-                                LinDoReaderCopy.CHILD_REPLIES_COUNT.format(childReplies.size)
-                            },
+                            text = LinDoReaderCopy.CHILD_REPLIES_COUNT.format(childReplies.size),
                             fontSize = 12.8.sp,
                             fontWeight = FontWeight.Medium,
-                            color = palette.inkSecondary
+                            color = if (showInlineReplies) palette.brandGold else palette.inkSecondary
                         )
                         Icon(
                             imageVector = if (showInlineReplies) LinDoIcons.ChevronUp else LinDoIcons.ChevronDown,
-                            contentDescription = null,
+                            contentDescription = if (showInlineReplies) LinDoReaderCopy.COLLAPSE_REPLIES.text else null,
                             modifier = Modifier.size(13.5.dp),
-                            tint = palette.inkTertiary
+                            tint = if (showInlineReplies) palette.brandGold else palette.inkTertiary
                         )
                     }
                 }
@@ -11160,6 +11875,78 @@ internal fun CommunityPostFloor(
                                 onQuoteFloor(post, selection)
                             }
                         )
+
+                        if (onOpenBookmarkReminder != null) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = if (post.bookmarkedByMe) "编辑书签提醒" else "收藏并设提醒",
+                                        fontSize = 13.5.sp,
+                                        color = palette.inkPrimary
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = if (post.bookmarkedByMe) LinDoIcons.BookmarkFilled else LinDoIcons.Bookmark,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = if (post.bookmarkedByMe) palette.brandGold else palette.inkSecondary
+                                    )
+                                },
+                                onClick = {
+                                    showFloorMoreMenu = false
+                                    onOpenBookmarkReminder(post)
+                                }
+                            )
+                        }
+
+                        if (onInspectReactionUsers != null && (post.reactions.isNotEmpty() || post.likeCount > 0)) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = "查看表态成员",
+                                        fontSize = 13.5.sp,
+                                        color = palette.inkPrimary
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = LinDoIcons.Users,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = palette.inkSecondary
+                                    )
+                                },
+                                onClick = {
+                                    showFloorMoreMenu = false
+                                    onInspectReactionUsers(post.id)
+                                }
+                            )
+                        }
+
+                        if (onInspectRevisions != null && (post.version > 1 || post.canViewEditHistory)) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = "编辑历史 (v${post.version})",
+                                        fontSize = 13.5.sp,
+                                        color = palette.inkPrimary
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = LinDoIcons.FileText,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = palette.inkSecondary
+                                    )
+                                },
+                                onClick = {
+                                    showFloorMoreMenu = false
+                                    onInspectRevisions(post.id)
+                                }
+                            )
+                        }
 
                         if (!originalUrl.isNullOrBlank()) {
                             DropdownMenuItem(
@@ -12235,6 +13022,24 @@ private fun CommunityMessagesScreen(
     var isLoadingMoreNotifications by remember { mutableStateOf(false) }
     var loadMoreNotifJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
+    val notifStateVer = LinuxDoRepository.notificationsStateVersion
+    LaunchedEffect(notifStateVer, isAuthorized) {
+        if (!isAuthorized) return@LaunchedEffect
+        val cached = LinuxDoRepository.getCachedRecentNotifications(
+            username.takeIf { it.isNotBlank() } ?: UserApiKeyAuthManager.currentUser?.username
+        )
+        if (cached.isNotEmpty() || notifications.isNotEmpty()) {
+            val readIds = cached.filter { it.read }.mapTo(HashSet()) { it.id }
+            notifications = notifications.map { item ->
+                if (!item.read && (item.id in readIds || NotificationReadCoordinator.isLocallyRead(item.id))) {
+                    item.copy(read = true)
+                } else {
+                    item
+                }
+            }
+        }
+    }
+
     var privateMessages by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
     var pmPage by remember { mutableIntStateOf(0) }
     var hasMorePm by remember { mutableStateOf(true) }
@@ -12267,7 +13072,7 @@ private fun CommunityMessagesScreen(
                 val addedCount = merged.size - notifications.size
                 notifications = merged
                 notifOffset += nextBatch.size
-                hasMoreNotifications = nextBatch.size >= 30 && addedCount > 0
+                hasMoreNotifications = nextBatch.size >= 55 && addedCount > 0
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -12368,13 +13173,14 @@ private fun CommunityMessagesScreen(
                 val loaded = LinuxDoRepository.fetchUserNotifications(offset = 0)
                 notifications = loaded
                 notifOffset = loaded.size
-                hasMoreNotifications = loaded.size >= 30
-                val pageUnread = loaded.count { !it.read }
-                if (!hasMoreNotifications || pageUnread == 0) {
-                    onUnreadCountSynced(pageUnread)
-                } else {
-                    onUnreadCountSynced(maxOf(globalUnreadCount, pageUnread))
-                }
+                hasMoreNotifications = loaded.size >= 55
+                onUnreadCountSynced(
+                    NotificationReadCoordinator.resolveAuthoritativeUnreadCount(
+                        pageZeroItems = loaded,
+                        previousCachedCount = globalUnreadCount,
+                        pageSizeLimit = 60
+                    )
+                )
                 if ((!hadNotificationsBeforeFetch || shouldPrepareRecovery) &&
                     (notifListState.firstVisibleItemIndex != 0 || notifListState.firstVisibleItemScrollOffset != 0)
                 ) {
@@ -12726,17 +13532,10 @@ private fun CommunityMessagesScreen(
                                             if (it.id == item.id) it.copy(read = true) else it
                                         }
                                         notifications = updated
-                                        if (!hasMoreNotifications) {
-                                            onUnreadCountSynced(updated.count { !it.read })
-                                        } else {
-                                            val curGlobal = maxOf(globalUnreadCount, UserApiKeyAuthManager.fullProfileCache?.unreadNotifications ?: 0)
-                                            if (curGlobal > 0) {
-                                                onUnreadCountSynced((curGlobal - 1).coerceAtLeast(0))
-                                            }
-                                        }
-                                        scope.launch {
-                                            runCatching { LinuxDoRepository.markSingleNotificationRead(item.id) }
-                                        }
+                                        LinuxDoRepository.acknowledgeNotificationRead(item.id)
+                                        onUnreadCountSynced(
+                                            UserApiKeyAuthManager.cachedUnreadNotificationCount.coerceAtLeast(0)
+                                        )
                                     }
                                     val kind = DiscourseNotificationKind.fromCode(item.notificationType)
                                     when {
@@ -13325,6 +14124,31 @@ internal fun CommunityProfileScreen(
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     LinDoGroupHeader(text = "通用")
 
+                    if (do_.linux.lindo.core.network.EchRoutingPolicy.snapshot.supported) {
+                        val currentEchMode = do_.linux.lindo.core.network.EchRoutingPolicy.mode
+                        ExpandableSetting(
+                            icon = LinDoIcons.Globe,
+                            title = "网络加速 (ECH)",
+                            value = currentEchMode.labelZh
+                        ) {
+                            SettingsChoices(
+                                options = do_.linux.lindo.core.network.EchRoutingMode.entries,
+                                selected = currentEchMode,
+                                label = { it.labelZh },
+                                onSelect = { selectedMode ->
+                                    do_.linux.lindo.core.network.EchRoutingPolicy.selectMode(selectedMode)
+                                }
+                            )
+                            Text(
+                                text = "${currentEchMode.descZh}\n当前状态：${do_.linux.lindo.core.network.EchRoutingPolicy.statusSubtitle()}",
+                                fontSize = 11.5.sp,
+                                lineHeight = 16.5.sp,
+                                color = palette.inkTertiary,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
                     SettingsToggleRow(LinDoIcons.Sparkles, LinDoMessagesCopy.ROW_ANIMATIONS.text, enableAnimations) {
                         if (it != enableAnimations) onToggleAnimations()
                     }
@@ -13422,6 +14246,35 @@ internal fun CommunityProfileScreen(
                             Icon(LinDoIcons.ChevronRight, null, Modifier.size(14.dp), tint = palette.inkTertiary)
                         }
                     )
+
+                    var showAuthorFeedbackDialog by remember { mutableStateOf(false) }
+                    var authorFeedbackNotice by remember { mutableStateOf<String?>(null) }
+                    LaunchedEffect(authorFeedbackNotice) {
+                        if (authorFeedbackNotice != null) {
+                            delay(2800L)
+                            authorFeedbackNotice = null
+                        }
+                    }
+                    LinDoSettingRow(
+                        icon = LinDoIcons.MessageCircle,
+                        title = "私信作者反馈",
+                        value = authorFeedbackNotice ?: "@${AuthorFeedbackSpec.AUTHOR_USERNAME}",
+                        onClick = {
+                            if (isAuthorized) {
+                                showAuthorFeedbackDialog = true
+                            } else {
+                                onOpenAuthSheet()
+                            }
+                        }
+                    )
+                    if (showAuthorFeedbackDialog) {
+                        AuthorFeedbackDialog(
+                            onDismiss = { showAuthorFeedbackDialog = false },
+                            onSentSuccess = {
+                                authorFeedbackNotice = "已私信反馈给 @${AuthorFeedbackSpec.AUTHOR_USERNAME}"
+                            }
+                        )
+                    }
 
                     // Version and diagnostics live in the local About Lindo page.
                     LinDoSettingRow(
@@ -14323,7 +15176,9 @@ private fun UserApiKeyAuthSheet(
     onAddAccount: () -> Unit,
     onSelectAccount: (String) -> Unit,
     onLogout: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onScanQrLogin: (() -> Unit)? = null,
+    onGenerateQrLogin: (() -> Unit)? = null
 ) {
     var managing by remember { mutableStateOf(false) }
     var adding by remember { mutableStateOf(false) }
@@ -14343,7 +15198,8 @@ private fun UserApiKeyAuthSheet(
         if (adding || (accounts.isEmpty() && !isAuthorized)) {
             LinDoWelcomeScreen(isDark = LocalPalette.current.isDark,
                 onPrimaryWebLogin = if (adding) onAddAccount else onPrimaryWebLogin,
-                onBrowserOneClickAuth = onBrowserOneClickAuth, onToggleDark = {}, showHeader = false, statusMessage = authStatusHint)
+                onBrowserOneClickAuth = onBrowserOneClickAuth, onScanQrLogin = onScanQrLogin,
+                onToggleDark = {}, showHeader = false, statusMessage = authStatusHint)
         } else {
             AccountSessionContent(if (isAuthorized) currentUser else null, authStatusHint,
                 onPrimaryWebLogin, onBrowserOneClickAuth, onLogout,
@@ -14355,7 +15211,9 @@ private fun UserApiKeyAuthSheet(
                     } else {
                         onSelectAccount(name)
                     }
-                }, onRemoveAccount = SavedAccounts::forget)
+                }, onRemoveAccount = SavedAccounts::forget,
+                onScanQrLogin = onScanQrLogin,
+                onGenerateQrLogin = onGenerateQrLogin)
         }
     }
 }
@@ -14396,7 +15254,8 @@ private fun GuestLoginGuideSheet(
     prompt: GuestLoginPrompt,
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onScanQrLogin: (() -> Unit)? = null
 ) {
     val palette = LocalPalette.current
     if (LocalIsWebModalActive.current) return
@@ -14425,7 +15284,7 @@ private fun GuestLoginGuideSheet(
                     text = prompt.title,
                     fontSize = 18.5.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = (-0.25).sp,
+                    letterSpacing = if (palette.isDark) 0.08.sp else 0.sp,
                     color = palette.inkPrimary,
                     textAlign = TextAlign.Center
                 )
@@ -14476,6 +15335,36 @@ private fun GuestLoginGuideSheet(
                     )
                 }
 
+                if (onScanQrLogin != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(palette.subtleSurface)
+                            .clickable(onClick = onScanQrLogin)
+                            .padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = LinDoIcons.QrCode,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                            tint = palette.inkPrimary
+                        )
+                        Spacer(modifier = Modifier.width(7.dp))
+                        Text(
+                            text = "扫码登录",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkPrimary,
+                            maxLines = 1
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Text(
@@ -14498,6 +15387,7 @@ private fun GoogleWelcomeLoginScreen(
     onOpenSavedAccounts: (() -> Unit)? = null,
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
+    onScanQrLogin: (() -> Unit)? = null,
     secondaryActionLabel: String = LinDoAuthCopy.SYSTEM_BROWSER_AUTH.text,
     secondaryActionIcon: ImageVector = LinDoIcons.Globe,
     onToggleDark: () -> Unit = {},
@@ -14509,6 +15399,7 @@ private fun GoogleWelcomeLoginScreen(
         onOpenSavedAccounts = onOpenSavedAccounts,
         onPrimaryWebLogin = onPrimaryWebLogin,
         onBrowserOneClickAuth = onBrowserOneClickAuth,
+        onScanQrLogin = onScanQrLogin,
         onToggleDark = onToggleDark,
         onOpenAppIcon = onOpenAppIcon,
         onGuestBrowse = onGuestBrowse,
@@ -16649,12 +17540,24 @@ private fun WorkbenchCompactInputBox(
             )
             Spacer(modifier = Modifier.width(6.dp))
         }
+        var fieldValue by remember { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+        val syncedFieldValue = if (fieldValue.text == value) {
+            fieldValue
+        } else {
+            TextFieldValue(value, TextRange(value.length))
+        }
         BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
+            value = syncedFieldValue,
+            onValueChange = { next ->
+                val normalized = ImeInputGuard.normalizeSingleLine(next)
+                fieldValue = normalized
+                onValueChange(normalized.text)
+            },
             singleLine = true,
             keyboardOptions = if (onSearch == null) KeyboardOptions.Default else KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = if (onSearch == null) KeyboardActions.Default else KeyboardActions(onSearch = { onSearch() }),
+            keyboardActions = if (onSearch == null) KeyboardActions.Default else KeyboardActions(onSearch = {
+                if (ImeInputGuard.canSubmitAction(syncedFieldValue)) onSearch()
+            }),
             textStyle = inputStyle,
             cursorBrush = SolidColor(if (isError) errorColor else palette.brandGold),
             modifier = Modifier
@@ -16746,8 +17649,14 @@ internal fun GlobalSearchModalSheet(
     var lastHandledSiteVerifyVer by remember { mutableIntStateOf(siteVerifyVer) }
 
     var query by remember { mutableStateOf(initialQuery) }
+    var committedQuery by remember { mutableStateOf(initialQuery) }
     var sortOrder by remember { mutableStateOf(SearchSortOrder.RELEVANCE) }
+    var advInTitle by remember { mutableStateOf(false) }
+    var advSolved by remember { mutableStateOf(false) }
+    var advRecentDays by remember { mutableIntStateOf(0) } // 0=不限, 7=近7天, 30=近30天
     var results by remember { mutableStateOf(initialResults) }
+    var userHits by remember { mutableStateOf<List<CommunitySearchUserHit>>(emptyList()) }
+    var tagHits by remember { mutableStateOf<List<CommunitySearchTagHit>>(emptyList()) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
     var manualRecoveryRequested by remember { mutableStateOf(false) }
@@ -16761,10 +17670,25 @@ internal fun GlobalSearchModalSheet(
     val listState = rememberLazyListState()
 
     var submittedQuery by remember { mutableStateOf(initialQuery.trim()) }
+    fun effectiveSubmittedSearchQuery(rawBase: String = submittedQuery): String {
+        val afterDate = if (advRecentDays > 0) {
+            java.time.LocalDate.now().minusDays(advRecentDays.toLong()).toString()
+        } else ""
+        return buildAdvancedSearchQuery(
+            keyword = rawBase,
+            filter = AdvancedSearchFilter(
+                inTitle = advInTitle,
+                solved = advSolved,
+                afterDateIso = afterDate
+            )
+        )
+    }
+
     fun performSearch(targetQuery: String = query, isManualRetry: Boolean = false) {
         keyboardController?.hide()
         loadMoreJob?.cancel()
         isLoadingMore = false
+        committedQuery = targetQuery
         submittedQuery = targetQuery.trim()
         loadMoreError = false
         if (isManualRetry || loadError != null) {
@@ -16785,7 +17709,7 @@ internal fun GlobalSearchModalSheet(
                 if (retryingAfterError) {
                     LinuxDoRepository.prepareForManualRecovery()
                 }
-                val pageResult = LinuxDoRepository.searchCommunityPage(q, sortOrder.wireOrder, page = nextPage)
+                val pageResult = LinuxDoRepository.searchCommunityPage(effectiveSubmittedSearchQuery(q), sortOrder.wireOrder, page = nextPage)
                 val nextItems = pageResult.items
                 if (nextItems.isEmpty()) {
                     hasMoreResults = false
@@ -16810,9 +17734,9 @@ internal fun GlobalSearchModalSheet(
         }
     }
 
-    // 输入防抖自动搜索：用户输入停止 420ms 后自动触发全站检索
-    LaunchedEffect(query) {
-        val trimmed = query.trim()
+    // 输入防抖自动搜索：仅在拼音选词上屏后（committedQuery 变化）停止 420ms 自动触发，绝不发半截拼音
+    LaunchedEffect(committedQuery) {
+        val trimmed = committedQuery.trim()
         if (trimmed.isBlank()) {
             loadMoreJob?.cancel()
             submittedQuery = ""
@@ -16830,15 +17754,18 @@ internal fun GlobalSearchModalSheet(
         }
     }
 
-    LaunchedEffect(submittedQuery, sortOrder, reloadToken) {
+    LaunchedEffect(submittedQuery, sortOrder, reloadToken, advInTitle, advSolved, advRecentDays) {
         loadMoreJob?.cancel()
         isLoadingMore = false
         loadMoreError = false
-        if (submittedQuery.isBlank()) {
+        val effectiveQuery = effectiveSubmittedSearchQuery(submittedQuery)
+        if (effectiveQuery.isBlank()) {
             manualRecoveryRequested = false
+            userHits = emptyList()
+            tagHits = emptyList()
             return@LaunchedEffect
         }
-        if (initialResults.isNotEmpty() && reloadToken == 0 && sortOrder == SearchSortOrder.RELEVANCE && submittedQuery == initialQuery.trim()) {
+        if (initialResults.isNotEmpty() && reloadToken == 0 && sortOrder == SearchSortOrder.RELEVANCE && !advInTitle && !advSolved && advRecentDays == 0 && submittedQuery == initialQuery.trim()) {
             manualRecoveryRequested = false
             return@LaunchedEffect
         }
@@ -16849,12 +17776,16 @@ internal fun GlobalSearchModalSheet(
         hasMoreResults = false
         loadError = null
         results = emptyList()
+        userHits = emptyList()
+        tagHits = emptyList()
         try {
             if (shouldPrepareRecovery) {
                 LinuxDoRepository.prepareForManualRecovery()
             }
-            val firstPage = LinuxDoRepository.searchCommunityPage(submittedQuery, sortOrder.wireOrder, page = 1)
+            val firstPage = LinuxDoRepository.searchCommunityPage(effectiveQuery, sortOrder.wireOrder, page = 1)
             results = firstPage.items
+            userHits = firstPage.users
+            tagHits = firstPage.tags
             hasMoreResults = firstPage.hasMore
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -16947,14 +17878,32 @@ internal fun GlobalSearchModalSheet(
                             tint = palette.inkTertiary
                         )
                         Spacer(modifier = Modifier.width(8.dp))
+                        var searchFieldValue by remember {
+                            mutableStateOf(TextFieldValue(query, TextRange(query.length)))
+                        }
+                        val syncedSearchFieldValue = if (searchFieldValue.text == query) {
+                            searchFieldValue
+                        } else {
+                            TextFieldValue(query, TextRange(query.length))
+                        }
                         BasicTextField(
-                            value = query,
-                            onValueChange = { query = it },
+                            value = syncedSearchFieldValue,
+                            onValueChange = { next ->
+                                val normalized = ImeInputGuard.normalizeSingleLine(next)
+                                searchFieldValue = normalized
+                                query = normalized.text
+                                committedQuery = ImeInputGuard.resolveCommittedQuery(committedQuery, normalized)
+                            },
                             singleLine = true,
                             textStyle = searchInputStyle,
                             cursorBrush = SolidColor(palette.brandGold),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            keyboardActions = KeyboardActions(onSearch = { performSearch() }),
+                            keyboardActions = KeyboardActions(onSearch = {
+                                if (ImeInputGuard.canSubmitAction(syncedSearchFieldValue)) {
+                                    committedQuery = syncedSearchFieldValue.text
+                                    performSearch(syncedSearchFieldValue.text)
+                                }
+                            }),
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(vertical = 9.dp)
@@ -16970,6 +17919,8 @@ internal fun GlobalSearchModalSheet(
                         if (query.isNotEmpty()) {
                             IconButton(onClick = {
                                 query = ""
+                                committedQuery = ""
+                                searchFieldValue = TextFieldValue("")
                                 submittedQuery = ""
                                 results = emptyList()
                                 loadError = null
@@ -17004,6 +17955,38 @@ internal fun GlobalSearchModalSheet(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
+                // 高级筛选快捷胶囊（仅标题 / 已解决 / 时间范围）
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(top = 6.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    @Composable
+                    fun AdvChip(label: String, active: Boolean, onClick: () -> Unit) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (active) palette.activeChipBg else palette.subtleSurface)
+                                .clickable(onClick = onClick)
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                fontSize = 11.8.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (active) palette.activeChipText else palette.inkSecondary
+                            )
+                        }
+                    }
+                    AdvChip("仅搜标题", advInTitle) { advInTitle = !advInTitle }
+                    AdvChip("已解决", advSolved) { advSolved = !advSolved }
+                    AdvChip("近 7 天", advRecentDays == 7) { advRecentDays = if (advRecentDays == 7) 0 else 7 }
+                    AdvChip("近 30 天", advRecentDays == 30) { advRecentDays = if (advRecentDays == 30) 0 else 30 }
+                }
+
                 // 排序切换栏（统一使用 LinDoSectionTabs D2）
                 val sortOrders = SearchSortOrder.entries
                 LinDoSectionTabs(
@@ -17029,6 +18012,62 @@ internal fun GlobalSearchModalSheet(
                 .background(palette.cardSurface),
             contentPadding = PaddingValues(top = 4.dp, bottom = 28.dp)
         ) {
+            if (userHits.isNotEmpty() || tagHits.isNotEmpty()) {
+                item(key = "search_entities") {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (userHits.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                userHits.take(6).forEach { u ->
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(palette.subtleSurface)
+                                            .clickable {
+                                                query = "@${u.username}"
+                                                performSearch("@${u.username}")
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        SmartAvatar(username = u.username, avatarTemplate = u.avatarTemplate, animatedAvatar = null, size = 18.dp, enableAnimations = false)
+                                        Text("@${u.username}", fontSize = 12.sp, color = palette.inkPrimary)
+                                    }
+                                }
+                            }
+                        }
+                        if (tagHits.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                tagHits.take(8).forEach { t ->
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(palette.subtleSurface)
+                                            .clickable {
+                                                val tagQ = "tags:${t.name}"
+                                                query = tagQ
+                                                performSearch(tagQ)
+                                            }
+                                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                                    ) {
+                                        Text("#${t.name}", fontSize = 11.8.sp, color = palette.activeChipText)
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+                    }
+                }
+            }
             if (query.isBlank() && results.isEmpty() && !isSearching) {
                 item {
                     val hotKeywordRows = remember {
@@ -17315,6 +18354,21 @@ private fun UserNotificationsSheet(
     var filterTab by remember { mutableStateOf(NotificationSheetFilterTab.ALL) }
     var filterAutoFetches by remember(filterTab, reloadToken) { mutableIntStateOf(0) }
 
+    val notifStateVer = LinuxDoRepository.notificationsStateVersion
+    LaunchedEffect(notifStateVer) {
+        val cached = LinuxDoRepository.getCachedRecentNotifications()
+        if (cached.isNotEmpty() || notifications.isNotEmpty()) {
+            val readIds = cached.filter { it.read }.mapTo(HashSet()) { it.id }
+            notifications = notifications.map { item ->
+                if (!item.read && (item.id in readIds || NotificationReadCoordinator.isLocallyRead(item.id))) {
+                    item.copy(read = true)
+                } else {
+                    item
+                }
+            }
+        }
+    }
+
     fun loadMore() {
         if (isLoading || isLoadingMore || !hasMore) return
         val retryingAfterError = loadMoreError
@@ -17330,7 +18384,7 @@ private fun UserNotificationsSheet(
                 val added = merged.size - notifications.size
                 notifications = merged
                 notifOffset += nextBatch.size
-                hasMore = nextBatch.size >= 30 && added > 0
+                hasMore = nextBatch.size >= 55 && added > 0
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -17356,13 +18410,14 @@ private fun UserNotificationsSheet(
             val loaded = LinuxDoRepository.fetchUserNotifications(offset = 0)
             notifications = loaded
             notifOffset = loaded.size
-            hasMore = loaded.size >= 30
-            val pageUnread = loaded.count { !it.read }
-            if (!hasMore || pageUnread == 0) {
-                onUnreadCountSynced(pageUnread)
-            } else {
-                onUnreadCountSynced(maxOf(globalUnreadCount, pageUnread))
-            }
+            hasMore = loaded.size >= 55
+            onUnreadCountSynced(
+                NotificationReadCoordinator.resolveAuthoritativeUnreadCount(
+                    pageZeroItems = loaded,
+                    previousCachedCount = globalUnreadCount,
+                    pageSizeLimit = 60
+                )
+            )
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -17526,21 +18581,10 @@ private fun UserNotificationsSheet(
                                             if (it.id == item.id) it.copy(read = true) else it
                                         }
                                         notifications = updated
-                                        if (!hasMore) {
-                                            onUnreadCountSynced(updated.count { !it.read })
-                                        } else {
-                                            val curGlobal = maxOf(
-                                                globalUnreadCount,
-                                                UserApiKeyAuthManager.fullProfileCache?.unreadNotifications
-                                                    ?: UserApiKeyAuthManager.cachedUnreadNotificationCount
-                                            )
-                                            if (curGlobal > 0) {
-                                                onUnreadCountSynced((curGlobal - 1).coerceAtLeast(0))
-                                            }
-                                        }
-                                        scope.launch {
-                                            runCatching { LinuxDoRepository.markSingleNotificationRead(item.id) }
-                                        }
+                                        LinuxDoRepository.acknowledgeNotificationRead(item.id)
+                                        onUnreadCountSynced(
+                                            UserApiKeyAuthManager.cachedUnreadNotificationCount.coerceAtLeast(0)
+                                        )
                                     }
                                     when {
                                         item.topicId > 0 -> onSelectNotification(item.topicId, item.title, item.postNumber)
@@ -19363,6 +20407,61 @@ private fun UserReadHistorySheet(
     var reloadToken by remember { mutableIntStateOf(0) }
     var manualRecoveryRequested by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
+    var searchFieldValue by remember { mutableStateOf(TextFieldValue("")) }
+    var committedSearchQuery by remember { mutableStateOf("") }
+    var cloudSearchResults by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
+    var isSearchingCloud by remember { mutableStateOf(false) }
+
+    val trimmedQuery = committedSearchQuery.trim()
+    val filteredEntries = remember(items, cloudSearchResults, trimmedQuery) {
+        do_.linux.lindo.core.site.ReadingHistorySearch.filterAndMerge(
+            localAndLoaded = items,
+            cloudSeenHits = cloudSearchResults,
+            rawQuery = trimmedQuery
+        )
+    }
+
+    LaunchedEffect(trimmedQuery) {
+        val seenQuery = do_.linux.lindo.core.site.ReadingHistorySearch.buildSeenQuery(trimmedQuery)
+        if (seenQuery == null) {
+            cloudSearchResults = emptyList()
+            isSearchingCloud = false
+            return@LaunchedEffect
+        }
+        isSearchingCloud = true
+        delay(340L)
+        try {
+            val page = LinuxDoRepository.searchCommunityPage(seenQuery, page = 1)
+            cloudSearchResults = page.items.distinctBy { it.topicId }.map { hit ->
+                TopicSummary(
+                    id = hit.topicId,
+                    title = hit.title,
+                    slug = "",
+                    postsCount = hit.postsCount.coerceAtLeast(1),
+                    replyCount = (hit.postsCount - 1).coerceAtLeast(0),
+                    views = 0,
+                    likeCount = hit.likeCount,
+                    categoryId = 0,
+                    categoryName = hit.categoryName,
+                    categoryColorHex = hit.categoryColorHex,
+                    excerpt = hit.blurb.takeIf { it.isNotBlank() },
+                    lastPostedAt = hit.createdAtText,
+                    originalPoster = TopicUser(
+                        id = 0,
+                        username = hit.username.ifBlank { "user" },
+                        name = hit.username.ifBlank { null },
+                        avatarTemplate = hit.avatarTemplate
+                    )
+                )
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            cloudSearchResults = emptyList()
+        } finally {
+            isSearchingCloud = false
+        }
+    }
 
     fun loadMoreHistory() {
         if (isLoading || isLoadingMore || !hasMore) return
@@ -19445,6 +20544,71 @@ private fun UserReadHistorySheet(
             }
         )
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(palette.subtleSurface)
+                .border(0.5.dp, palette.hairline, RoundedCornerShape(10.dp))
+                .padding(horizontal = 11.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = LinDoIcons.Search,
+                contentDescription = "搜索历史记录",
+                tint = palette.inkTertiary,
+                modifier = Modifier.size(15.dp)
+            )
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                if (searchFieldValue.text.isEmpty()) {
+                    Text(
+                        text = "搜索历史记录（标题、作者、分类、#ID）",
+                        fontSize = 13.sp,
+                        color = palette.inkTertiary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                BasicTextField(
+                    value = searchFieldValue,
+                    onValueChange = { next ->
+                        val normalized = ImeInputGuard.normalizeSingleLine(next)
+                        searchFieldValue = normalized
+                        committedSearchQuery = ImeInputGuard.resolveCommittedQuery(committedSearchQuery, normalized)
+                    },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        color = palette.inkPrimary,
+                        fontSize = 13.5.sp
+                    ),
+                    cursorBrush = SolidColor(palette.brandGold),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            if (isSearchingCloud) {
+                Text(
+                    text = "检索中…",
+                    fontSize = 11.sp,
+                    color = palette.inkTertiary
+                )
+            }
+            if (searchFieldValue.text.isNotEmpty()) {
+                Icon(
+                    imageVector = LinDoIcons.Close,
+                    contentDescription = "清除搜索",
+                    tint = palette.inkTertiary,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable {
+                            searchFieldValue = TextFieldValue("")
+                            committedSearchQuery = ""
+                        }
+                )
+            }
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
         if (isLoading) {
             Box(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -19457,7 +20621,7 @@ private fun UserReadHistorySheet(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(vertical = 4.dp)
             ) {
-                if (loadError != null) {
+                if (loadError != null && trimmedQuery.isEmpty()) {
                     item(key = "error") {
                         Box(Modifier.padding(horizontal = 16.dp)) {
                             LinDoLoadFailure(loadError!!, onRetry = {
@@ -19467,7 +20631,16 @@ private fun UserReadHistorySheet(
                         }
                     }
                 }
-                if (items.isEmpty() && loadError == null) {
+                if (trimmedQuery.isNotEmpty() && filteredEntries.isEmpty() && !isSearchingCloud) {
+                    item(key = "empty_search") {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LinDoEmptyState(message = "未找到包含「$trimmedQuery」的阅读记录")
+                        }
+                    }
+                } else if (trimmedQuery.isEmpty() && items.isEmpty() && loadError == null) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
@@ -19477,24 +20650,45 @@ private fun UserReadHistorySheet(
                         }
                     }
                 } else {
-                    itemsIndexed(items, key = { _, item -> item.id }, contentType = { _, _ -> "topic" }) { _, topic ->
+                    itemsIndexed(
+                        filteredEntries,
+                        key = { _, entry -> entry.topic.id },
+                        contentType = { _, _ -> "topic" }
+                    ) { _, entry ->
                         CommunityTopicItem(
-                            topic = topic,
+                            topic = entry.topic,
                             isSelected = false,
                             isCompact = true,
                             enableAnimations = false,
-                            onClick = { onSelectTopic(topic) }
+                            trailingAction = if (entry.fromCloudSearch) {
+                                {
+                                    Text(
+                                        text = "更早记录",
+                                        fontSize = 10.5.sp,
+                                        color = palette.inkTertiary,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(palette.subtleSurface)
+                                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            onClick = { onSelectTopic(entry.topic) }
                         )
                         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                     }
-                    item(key = "history_footer") {
-                        LinearPulseLoadingFooter(
-                            isLoadingMore = isLoadingMore,
-                            hasMore = hasMore,
-                            loadedCount = items.size,
-                            isError = loadMoreError,
-                            onLoadMore = ::loadMoreHistory
-                        )
+                    if (trimmedQuery.isEmpty()) {
+                        item(key = "history_footer") {
+                            LinearPulseLoadingFooter(
+                                isLoadingMore = isLoadingMore,
+                                hasMore = hasMore,
+                                loadedCount = items.size,
+                                isError = loadMoreError,
+                                onLoadMore = ::loadMoreHistory
+                            )
+                        }
                     }
                 }
             }

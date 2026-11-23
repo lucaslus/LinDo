@@ -39,5 +39,11 @@ object PlatformSessionRecovery {
     var verifySession: (suspend () -> Boolean)? = null
     var verificationMessage by mutableStateOf<String?>(null)
     var verifying by mutableStateOf(false)
+    var verifyPillVisible by mutableStateOf(false)
+    var onExpandVerifyPill: (() -> Unit)? = null
+    /** 打开应用内验证面板（置于任何加载遮罩之上），并在用户通过或关闭后以 true/false 回调。 */
+    var openEmbeddedVerifyModal: (((Boolean) -> Unit) -> Unit)? = null
+    /** 平台静默过盾成功：UI 自动重试当前因站点验证失败的视图。 */
+    var onSilentVerifyPassed: (() -> Unit)? = null
     var cancelVerification: (() -> Unit)? = null
 }

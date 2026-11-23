@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { isImeComposingEvent } from "../lib/imeGuard";
 import {
   LinDoIcons,
   resolveOfficialCategoryVisual,
@@ -21,6 +22,7 @@ import {
   fetchPostRawMarkdown,
   publishReply,
   publishTopic,
+  saveCloudDraft,
   saveLocalDraftInRust,
   searchTopicsForLinkPicker,
   searchUsersForMention,
@@ -38,7 +40,9 @@ import {
   type PreparedUploadFile,
 } from "../lib/composerMedia";
 import { optimizePanguSpacing, prepareCookedHtml } from "../lib/cooked";
+import { renderDiscourseMarkdownPreview } from "../lib/markdownPreview";
 import { observeCookedForumImages } from "../lib/forumMedia";
+import { observeCookedRichContent } from "../lib/richDecorators";
 import { formatCompactCount, resolveCategoryVisual } from "../lib/palette";
 import { AvatarWithFlair, ConfirmDialog } from "./SecondaryScreens";
 
@@ -148,6 +152,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const [lastAppliedTemplate, setLastAppliedTemplate] = useState<string>("");
   const [tags, setTags] = useState<string[]>(savedDraft?.tags ?? request.initialTags ?? []);
   const [viewMode, setViewMode] = useState<"SOURCE" | "SPLIT" | "PREVIEW">("SOURCE");
+  const [replyQuoteExpanded, setReplyQuoteExpanded] = useState(false);
   const [drawerHeight, setDrawerHeight] = useState<number>(() => {
     try {
       const saved = Number(localStorage.getItem("lindo_composer_drawer_h") || 0);
@@ -203,7 +208,17 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     width: number;
     height: number;
     snippet: string;
+    scale: "100%" | "75%" | "50%";
   } | null>(null);
+  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
+  const [cloudSyncedAt, setCloudSyncedAt] = useState<number | null>(null);
+  const cloudDraftSeqRef = useRef<number>(savedDraft?.sequence ?? 0);
+  const [editReason, setEditReason] = useState<string>("");
+  const [inlineSuggest, setInlineSuggest] = useState<
+    | { kind: "MENTION"; query: string; startIdx: number; endIdx: number; items: MentionUserCandidate[]; active: number }
+    | { kind: "EMOJI"; query: string; startIdx: number; endIdx: number; items: Array<{ code: string; label: string }>; active: number }
+    | null
+  >(null);
   const [loadingRawEdit, setLoadingRawEdit] = useState(
     request.action === "EDIT" && !request.initialRaw
   );
@@ -269,8 +284,6 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     let latestH = startH;
     let rafId = 0;
 
-    document.body.style.cursor = "row-resize";
-
     const onMove = (ev: MouseEvent) => {
       const delta = startY - ev.clientY;
       latestH = Math.round(Math.max(220, Math.min(maxH, startH + delta)));
@@ -288,7 +301,6 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       if (rafId !== 0) cancelAnimationFrame(rafId);
-      document.body.style.cursor = "";
       setDrawerHeight(latestH);
       try {
         localStorage.setItem("lindo_composer_drawer_h", String(latestH));
@@ -433,10 +445,83 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         tags,
         sequence: 0,
         updatedAt: Date.now(),
-      }).catch(() => {});
+      })
+        .then(() => setDraftSavedAt(Date.now()))
+        .catch(() => {});
     }, 450);
     return () => clearTimeout(timer);
   }, [draftKey, request, categoryId, title, raw, tags]);
+
+  // Best-effort bidirectional Discourse cloud draft sync (debounced 2.8s, strictly non-blocking)
+  useEffect(() => {
+    if (request.action === "EDIT") return;
+    if (!title.trim() && !raw.trim()) return;
+    const cloudKey =
+      request.action === "NEW_TOPIC"
+        ? "new_topic"
+        : request.topicId
+          ? `topic_${request.topicId}`
+          : null;
+    if (!cloudKey) return;
+    const timer = setTimeout(() => {
+      const payload =
+        request.action === "NEW_TOPIC"
+          ? {
+              reply: raw,
+              action: "createTopic",
+              title,
+              categoryId,
+              tags,
+              archetypeId: "regular",
+              metaData: null,
+              composerTime: Date.now() - composerOpenedAtRef.current,
+              typingTime: firstTypedAtRef.current ? Date.now() - firstTypedAtRef.current : 0,
+            }
+          : {
+              reply: raw,
+              action: "reply",
+              replyToPostNumber: request.replyToPostNumber ?? null,
+              composerTime: Date.now() - composerOpenedAtRef.current,
+              typingTime: firstTypedAtRef.current ? Date.now() - firstTypedAtRef.current : 0,
+            };
+      saveCloudDraft({
+        draftKey: cloudKey,
+        sequence: cloudDraftSeqRef.current,
+        data: payload,
+      })
+        .then((nextSeq) => {
+          cloudDraftSeqRef.current = nextSeq;
+          setCloudSyncedAt(Date.now());
+        })
+        .catch(() => {
+          // silent fallback: local Rust draft is always authoritative
+        });
+    }, 2800);
+    return () => clearTimeout(timer);
+  }, [request, categoryId, title, raw, tags]);
+
+  // Live inline `@` mention fetch when user types `@term` directly in the editor
+  useEffect(() => {
+    if (!inlineSuggest || inlineSuggest.kind !== "MENTION") return;
+    const q = inlineSuggest.query;
+    let alive = true;
+    const timer = setTimeout(() => {
+      searchUsersForMention(q)
+        .then((list) => {
+          if (!alive) return;
+          setInlineSuggest((prev) =>
+            prev && prev.kind === "MENTION" && prev.query === q
+              ? { ...prev, items: list.slice(0, 6), active: 0 }
+              : prev
+          );
+        })
+        .catch(() => {});
+    }, 180);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [inlineSuggest?.kind, inlineSuggest?.query]);
 
   const activeCategory = useMemo(
     () => categories.find((c) => c.id === categoryId) ?? postableTopCategories[0],
@@ -541,6 +626,23 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   );
 
   useEffect(() => {
+    if (isDrawer || showLotteryConfirm || showExitConfirm) return;
+    const onWinKeyDown = (e: KeyboardEvent) => {
+      if (isImeComposingEvent(e)) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (inlineSuggest) {
+          setInlineSuggest(null);
+          return;
+        }
+        requestClose();
+      }
+    };
+    window.addEventListener("keydown", onWinKeyDown);
+    return () => window.removeEventListener("keydown", onWinKeyDown);
+  }, [isDrawer, showLotteryConfirm, showExitConfirm, inlineSuggest, requestClose]);
+
+  useEffect(() => {
     if (!exitGuardRef) return;
     const handler = (proceed: () => void) => requestClose(proceed);
     exitGuardRef.current = handler;
@@ -555,23 +657,123 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   const showTagError = submitAttempted && Boolean(tagErrorMsg);
   const showBodyError = submitAttempted && Boolean(bodyErrorMsg);
 
-  const insertAroundSelection = useCallback((before: string, after = "") => {
+  // Auto-dismiss recent-upload scale bar immediately when the image markdown is deleted from the editor
+  const activeUploadedImg = useMemo(() => {
+    if (!uploadedImg) return null;
+    if (raw.includes(uploadedImg.shortUrl) || raw.includes(uploadedImg.snippet)) {
+      return uploadedImg;
+    }
+    return null;
+  }, [uploadedImg, raw]);
+
+  useEffect(() => {
+    if (uploadedImg && !activeUploadedImg) {
+      setUploadedImg(null);
+    }
+  }, [uploadedImg, activeUploadedImg]);
+
+  const insertAroundSelection = useCallback((before: string, after = "", placeholder = "") => {
     const el = bodyTextareaRef.current;
     const cur = rawRef.current;
     if (!el) {
-      setRaw((prev) => `${prev}${before}${after}`);
+      const inner = placeholder || "";
+      const next = `${cur}${before}${inner}${after}`;
+      rawRef.current = next;
+      setRaw(next);
       return;
     }
     const start = el.selectionStart ?? cur.length;
     const end = el.selectionEnd ?? cur.length;
     const selected = cur.slice(start, end);
-    const next = `${cur.slice(0, start)}${before}${selected}${after}${cur.slice(end)}`;
+    const bodyText = selected || placeholder;
+    const next = `${cur.slice(0, start)}${before}${bodyText}${after}${cur.slice(end)}`;
     rawRef.current = next;
     setRaw(next);
     requestAnimationFrame(() => {
       el.focus();
-      const cursor = start + before.length + selected.length;
-      el.setSelectionRange(cursor, cursor);
+      if (!selected && placeholder) {
+        el.setSelectionRange(start + before.length, start + before.length + placeholder.length);
+      } else {
+        const cursor = start + before.length + bodyText.length;
+        el.setSelectionRange(cursor, cursor);
+      }
+    });
+  }, []);
+
+  const insertBlockSnippet = useCallback((block: string, selectToken?: string) => {
+    const el = bodyTextareaRef.current;
+    const cur = rawRef.current;
+    const start = el ? (el.selectionStart ?? cur.length) : cur.length;
+    const end = el ? (el.selectionEnd ?? cur.length) : cur.length;
+    const before = cur.slice(0, start);
+    const after = cur.slice(end);
+    const lead =
+      before.length === 0
+        ? ""
+        : before.endsWith("\n\n")
+          ? ""
+          : before.endsWith("\n")
+            ? "\n"
+            : "\n\n";
+    const trail = after.length === 0 || after.startsWith("\n") ? "\n" : "\n\n";
+    const inserted = `${lead}${block}${trail}`;
+    const next = `${before}${inserted}${after}`;
+    rawRef.current = next;
+    setRaw(next);
+    if (el) {
+      requestAnimationFrame(() => {
+        el.focus();
+        if (selectToken) {
+          const idx = inserted.indexOf(selectToken);
+          if (idx >= 0) {
+            el.setSelectionRange(start + idx, start + idx + selectToken.length);
+            return;
+          }
+        }
+        const cursor = start + inserted.length;
+        el.setSelectionRange(cursor, cursor);
+      });
+    }
+  }, []);
+
+  const prefixSelectedLines = useCallback((prefix: string, placeholder: string) => {
+    const el = bodyTextareaRef.current;
+    const cur = rawRef.current;
+    if (!el) {
+      const lead = cur.length > 0 && !cur.endsWith("\n") ? "\n" : "";
+      const next = `${cur}${lead}${prefix}${placeholder}`;
+      rawRef.current = next;
+      setRaw(next);
+      return;
+    }
+    const start = el.selectionStart ?? cur.length;
+    const end = el.selectionEnd ?? cur.length;
+    if (end > start) {
+      const lineStart = cur.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+      const selectedBlock = cur.slice(lineStart, end);
+      const prefixed = selectedBlock
+        .split("\n")
+        .map((line) => `${prefix}${line}`)
+        .join("\n");
+      const next = `${cur.slice(0, lineStart)}${prefixed}${cur.slice(end)}`;
+      rawRef.current = next;
+      setRaw(next);
+      requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(lineStart + prefixed.length, lineStart + prefixed.length);
+      });
+      return;
+    }
+    const before = cur.slice(0, start);
+    const needNewline = before.length > 0 && !before.endsWith("\n");
+    const inserted = `${needNewline ? "\n" : ""}${prefix}${placeholder}`;
+    const next = `${before}${inserted}${cur.slice(end)}`;
+    rawRef.current = next;
+    setRaw(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const phStart = start + inserted.length - placeholder.length;
+      el.setSelectionRange(phStart, phStart + placeholder.length);
     });
   }, []);
 
@@ -696,6 +898,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               width: uploaded.width,
               height: uploaded.height,
               snippet,
+              scale: "100%",
             });
           }
         } catch (err: any) {
@@ -798,12 +1001,17 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
 
   const previewHtml = useMemo(() => {
     if (viewMode === "SOURCE" || !raw.trim()) return "";
-    return prepareCookedHtml(simpleMarkdownToHtml(raw, uploadedPreviewMap));
+    return prepareCookedHtml(renderDiscourseMarkdownPreview(raw, uploadedPreviewMap));
   }, [viewMode, raw, uploadedPreviewMap]);
 
   useEffect(() => {
     if (viewMode === "SOURCE" || !previewHtml) return;
-    return observeCookedForumImages(previewContainerRef.current);
+    const cleanupImgs = observeCookedForumImages(previewContainerRef.current);
+    const cleanupRich = observeCookedRichContent(previewContainerRef.current);
+    return () => {
+      cleanupImgs();
+      cleanupRich();
+    };
   }, [viewMode, previewHtml]);
 
   const executePublish = async () => {
@@ -848,6 +1056,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           title: isEditingOp ? title : undefined,
           categoryId: isEditingOp ? categoryId : undefined,
           tags: isEditingOp ? tags : undefined,
+          editReason: editReason.trim() || undefined,
         });
         onPublished({ topicId: request.topicId, post: updated });
       }
@@ -952,7 +1161,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         : request.action === "EDIT"
           ? `编辑回复 · #${request.postNumber || 1} 楼`
           : request.replyToPostNumber
-            ? `回复 @${request.replyToUsername || ""} · #${request.replyToPostNumber} 楼`
+            ? isDrawer
+              ? `回复 ${request.replyToDisplayName || `@${request.replyToUsername || ""}`} · #${request.replyToPostNumber} 楼`
+              : "回复"
             : "回复话题";
 
   const actionLabel =
@@ -976,7 +1187,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             }
           }}
           title="上下拖拽调节回复区高度（双击恢复默认）"
-          className="group absolute inset-x-0 -top-[3px] z-30 flex h-[7px] cursor-row-resize items-center justify-center"
+          className="group absolute inset-x-0 -top-[3px] z-30 flex h-[7px] items-center justify-center"
         >
           <div
             className="h-[1px] w-full opacity-0 transition-opacity group-hover:opacity-100"
@@ -1099,25 +1310,113 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         </div>
       </header>
 
-      {/* 回复上下文条（仅在居中弹窗模式下显示，抽屉模式上方直接可见原帖全文！） */}
-      {!isDrawer && request.action === "REPLY" && request.topicTitle && (
-        <div
-          className="lindo-hairline-b shrink-0 px-5 py-2 text-[12px]"
-          style={{
-            backgroundColor: "var(--subtle-surface)",
-            color: "var(--ink-secondary)",
-          }}
-        >
-          <div className="font-medium truncate" style={{ color: "var(--ink-primary)" }}>
-            {request.topicTitle}
-          </div>
-          {request.replyToSnippet && (
-            <div className="mt-0.5 truncate" style={{ color: "var(--ink-tertiary)" }}>
-              {request.replyToSnippet}
+      {/* 回复 / 编辑回复上下文条（居中弹窗下清晰展示所属话题与引用摘要） */}
+      {!isDrawer &&
+        (request.action === "REPLY" || (request.action === "EDIT" && !isEditingOp)) &&
+        (request.replyToPostNumber || request.topicTitle) && (() => {
+          const isFloorReply = request.action === "REPLY" && Boolean(request.replyToPostNumber);
+          const replyDisplay =
+            request.replyToDisplayName?.trim() ||
+            (request.replyToUsername ? `@${request.replyToUsername}` : "");
+          const quoteText = isFloorReply
+            ? (request.replyToSnippet || "").trim() || (request.topicTitle || "")
+            : (request.topicTitle || "");
+          const canExpandQuote = isFloorReply && quoteText.length > 68;
+          return (
+            <div className="lindo-hairline-b shrink-0 px-5 pb-3 pt-0.5">
+              <div
+                role={canExpandQuote ? "button" : undefined}
+                tabIndex={canExpandQuote ? 0 : undefined}
+                onClick={() => {
+                  if (canExpandQuote) setReplyQuoteExpanded((v) => !v);
+                }}
+                onKeyDown={(e) => {
+                  if (canExpandQuote && (e.key === "Enter" || e.key === " ")) {
+                    e.preventDefault();
+                    setReplyQuoteExpanded((v) => !v);
+                  }
+                }}
+                className={`rounded-lg border-l-[2.5px] px-3 py-2.5 transition-colors ${
+                  canExpandQuote ? "cursor-pointer" : ""
+                }`}
+                style={{
+                  backgroundColor: "var(--subtle-surface)",
+                  borderLeftColor: "var(--brand-gold)",
+                }}
+              >
+                <div className="flex items-center justify-between gap-2 text-[12px]">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    {isFloorReply && request.replyToUsername ? (
+                      <>
+                        <AvatarWithFlair
+                          username={request.replyToUsername}
+                          avatarTemplate={request.replyToAvatarTemplate || ""}
+                          animatedAvatar={request.replyToAnimatedAvatar}
+                          sizePx={19}
+                          className="shrink-0"
+                        />
+                        <span className="shrink-0" style={{ color: "var(--ink-tertiary)" }}>
+                          回复
+                        </span>
+                        <span
+                          className="truncate font-semibold"
+                          style={{ color: "var(--ink-primary)" }}
+                        >
+                          {replyDisplay}
+                        </span>
+                        <span
+                          className="shrink-0 tabular-nums"
+                          style={{ color: "var(--ink-tertiary)" }}
+                        >
+                          · #{request.replyToPostNumber} 楼
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span
+                          className="shrink-0 font-medium"
+                          style={{ color: "var(--ink-tertiary)" }}
+                        >
+                          {request.action === "EDIT" ? "所属话题" : "回复话题"}
+                        </span>
+                        {request.topicTitle && (
+                          <span
+                            className="truncate font-semibold"
+                            style={{ color: "var(--ink-primary)" }}
+                          >
+                            {request.topicTitle}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  {canExpandQuote && (
+                    <span
+                      className="inline-flex shrink-0 items-center gap-0.5 text-[11px]"
+                      style={{ color: "var(--ink-tertiary)" }}
+                    >
+                      {replyQuoteExpanded ? (
+                        <LinDoIcons.ChevronUp size={13} />
+                      ) : (
+                        <LinDoIcons.ChevronDown size={13} />
+                      )}
+                    </span>
+                  )}
+                </div>
+                {isFloorReply && quoteText && (
+                  <p
+                    className={`mt-1.5 pl-[25px] text-[12.5px] leading-[1.52] ${
+                      replyQuoteExpanded ? "line-clamp-6" : "line-clamp-2"
+                    }`}
+                    style={{ color: "var(--ink-secondary)" }}
+                  >
+                    {quoteText}
+                  </p>
+                )}
+              </div>
             </div>
-          )}
-        </div>
-      )}
+          );
+        })()}
 
       {/* 2. 新建/编辑话题元数据单行栏 */}
       {hasMetaControls && (
@@ -1654,6 +1953,17 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (isImeComposingEvent(e)) return;
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  handleAttemptSubmit();
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  if (viewMode === "PREVIEW") setViewMode("SOURCE");
+                  bodyTextareaRef.current?.focus();
+                }
+              }}
               placeholder="话题标题"
               autoFocus={isNewTopic}
               className="flex-1 bg-transparent text-[18px] font-bold outline-none"
@@ -1730,7 +2040,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             <button
               type="button"
               title={isWindows ? "粗体 (Ctrl+B)" : "粗体 (⌘+B)"}
-              onClick={() => insertAroundSelection("**", "**")}
+              onClick={() => insertAroundSelection("**", "**", "粗体文字")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
@@ -1739,7 +2049,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             <button
               type="button"
               title={isWindows ? "斜体 (Ctrl+I)" : "斜体 (⌘+I)"}
-              onClick={() => insertAroundSelection("*", "*")}
+              onClick={() => insertAroundSelection("*", "*", "斜体文字")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
@@ -1747,8 +2057,39 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
+              title="删除线"
+              onClick={() => insertAroundSelection("~~", "~~", "删除文字")}
+              className="lindo-interactive flex h-9 shrink-0 items-center justify-center rounded-lg px-2 text-[12.5px] font-medium line-through"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              S
+            </button>
+            <button
+              type="button"
+              title="二级标题"
+              onClick={() => prefixSelectedLines("## ", "小节标题")}
+              className="lindo-interactive flex h-9 shrink-0 items-center justify-center rounded-lg px-2 text-[12px] font-semibold"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              H2
+            </button>
+            <button
+              type="button"
               title={isWindows ? "代码 / 代码块 (Ctrl+E)" : "代码 / 代码块 (⌘+E)"}
-              onClick={() => insertAroundSelection("\n```\n", "\n```\n")}
+              onClick={() => {
+                const el = bodyTextareaRef.current;
+                const sel =
+                  el && el.selectionEnd > el.selectionStart
+                    ? rawRef.current.slice(el.selectionStart, el.selectionEnd)
+                    : "";
+                if (sel && !sel.includes("\n")) {
+                  insertAroundSelection("`", "`");
+                } else if (sel) {
+                  insertBlockSnippet(`\`\`\`\n${sel}\n\`\`\``);
+                } else {
+                  insertBlockSnippet("```\n代码内容\n```", "代码内容");
+                }
+              }}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
@@ -1757,7 +2098,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             <button
               type="button"
               title="引用块"
-              onClick={() => insertAroundSelection("\n> ")}
+              onClick={() => prefixSelectedLines("> ", "引用内容")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
@@ -1766,7 +2107,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             <button
               type="button"
               title="无序列表"
-              onClick={() => insertAroundSelection("\n- ")}
+              onClick={() => prefixSelectedLines("- ", "列表项")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
@@ -1774,10 +2115,40 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
+              title="有序列表"
+              onClick={() => prefixSelectedLines("1. ", "步骤内容")}
+              className="lindo-interactive flex h-9 shrink-0 items-center justify-center rounded-lg px-2 text-[12px] font-medium tabular-nums"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              1.
+            </button>
+            <button
+              type="button"
+              title="任务清单"
+              onClick={() => prefixSelectedLines("- [ ] ", "待办事项")}
+              className="lindo-interactive flex h-9 shrink-0 items-center justify-center rounded-lg px-2 text-[12px] font-medium"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              ☑
+            </button>
+            <button
+              type="button"
+              title="插入提示卡片 (Obsidian Callout)"
+              onClick={() =>
+                insertBlockSnippet("> [!Note]+ 提示标题\n> 在此输入提示内容", "提示标题")
+              }
+              className="lindo-interactive flex h-9 shrink-0 items-center justify-center rounded-lg px-2 text-[12px] font-medium"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              提示框
+            </button>
+            <button
+              type="button"
               title="插入表格"
               onClick={() =>
-                insertAroundSelection(
-                  "\n| 列一 | 列二 |\n| --- | --- |\n| 内容 | 内容 |\n"
+                insertBlockSnippet(
+                  "| 列一 | 列二 |\n| --- | --- |\n| 内容 | 内容 |",
+                  "列一"
                 )
               }
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
@@ -1789,8 +2160,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               type="button"
               title="插入投票"
               onClick={() =>
-                insertAroundSelection(
-                  "\n[poll type=regular results=always public=true chartType=bar]\n* 选项一\n* 选项二\n[/poll]\n"
+                insertBlockSnippet(
+                  "[poll type=regular results=always public=true chartType=bar]\n* 选项一\n* 选项二\n[/poll]",
+                  "选项一"
                 )
               }
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
@@ -1802,7 +2174,10 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               type="button"
               title="折叠详情"
               onClick={() =>
-                insertAroundSelection('\n[details="摘要"]\n', "\n[/details]\n")
+                insertBlockSnippet(
+                  '[details="摘要"]\n详细内容\n[/details]',
+                  "摘要"
+                )
               }
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
@@ -1812,7 +2187,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             <button
               type="button"
               title="剧透模糊"
-              onClick={() => insertAroundSelection("[spoiler]", "[/spoiler]")}
+              onClick={() => insertAroundSelection("[spoiler]", "[/spoiler]", "剧透内容")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
             >
@@ -2113,39 +2488,56 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         </div>
       )}
 
-      {/* 最近上传图片缩放快捷条 (100% / 75% / 50%) */}
-      {uploadedImg && (
+      {/* 最近上传图片缩放快捷条 (100% / 75% / 50%) — 图片 markdown 被删除后自动立即隐藏 */}
+      {activeUploadedImg && (
         <div
           className="lindo-hairline-b flex shrink-0 items-center justify-between px-5 py-1.5 text-[12px]"
           style={{ backgroundColor: "var(--subtle-surface)" }}
         >
-          <span className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
-            <LinDoIcons.Check size={13.5} style={{ color: "var(--brand-gold)" }} />
-            <span>已插入图片 {uploadedImg.filename}</span>
+          <span className="flex min-w-0 items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
+            <LinDoIcons.Check size={13.5} className="shrink-0" style={{ color: "var(--brand-gold)" }} />
+            <span className="truncate">已插入图片 {activeUploadedImg.filename}</span>
           </span>
-          <div className="flex items-center gap-1.5">
-            {["100%", "75%", "50%"].map((pct) => (
-              <button
-                key={pct}
-                type="button"
-                onClick={() => {
-                  const nextTag = `![${uploadedImg.filename}|${uploadedImg.width}x${uploadedImg.height}, ${pct}](${uploadedImg.shortUrl})`;
-                  setRaw((prev) => {
-                    const next = prev.replace(uploadedImg.snippet, nextTag);
-                    rawRef.current = next;
-                    return next;
-                  });
-                  setUploadedImg({ ...uploadedImg, snippet: nextTag });
-                }}
-                className="lindo-interactive rounded px-2 py-0.5 font-medium"
-                style={{
-                  backgroundColor: "var(--tonal-pill)",
-                  color: "var(--ink-primary)",
-                }}
-              >
-                {pct}
-              </button>
-            ))}
+          <div className="flex shrink-0 items-center gap-1.5">
+            {(["100%", "75%", "50%"] as const).map((pct) => {
+              const isSelectedScale = activeUploadedImg.scale === pct;
+              return (
+                <button
+                  key={pct}
+                  type="button"
+                  onClick={() => {
+                    const nextTag =
+                      pct === "100%"
+                        ? `![${activeUploadedImg.filename}|${activeUploadedImg.width}x${activeUploadedImg.height}](${activeUploadedImg.shortUrl})`
+                        : `![${activeUploadedImg.filename}|${activeUploadedImg.width}x${activeUploadedImg.height}, ${pct}](${activeUploadedImg.shortUrl})`;
+                    const escapedUrl = activeUploadedImg.shortUrl.replace(
+                      /[.*+?^${}()|[\]\\]/g,
+                      "\\$&"
+                    );
+                    const imgTagRe = new RegExp(`!\\[[^\\]]*\\]\\(${escapedUrl}\\)`);
+                    setRaw((prev) => {
+                      const next = prev.includes(activeUploadedImg.snippet)
+                        ? prev.replace(activeUploadedImg.snippet, nextTag)
+                        : prev.replace(imgTagRe, nextTag);
+                      rawRef.current = next;
+                      return next;
+                    });
+                    setUploadedImg({ ...activeUploadedImg, snippet: nextTag, scale: pct });
+                  }}
+                  className="lindo-interactive rounded px-2 py-0.5 font-medium cursor-pointer"
+                  style={{
+                    backgroundColor: isSelectedScale
+                      ? "var(--active-chip-bg)"
+                      : "var(--tonal-pill)",
+                    color: isSelectedScale
+                      ? "var(--active-chip-text)"
+                      : "var(--ink-secondary)",
+                  }}
+                >
+                  {pct}
+                </button>
+              );
+            })}
             <button
               type="button"
               onClick={() => setUploadedImg(null)}
@@ -2209,7 +2601,54 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                   if (firstTypedAtRef.current === null) {
                     firstTypedAtRef.current = Date.now();
                   }
-                  setRaw(e.target.value);
+                  const val = e.target.value;
+                  setRaw(val);
+                  const caret = e.target.selectionStart ?? val.length;
+                  const beforeCaret = val.slice(0, caret);
+                  const mentionMatch = beforeCaret.match(/(?:^|[\s(（【,，])@([A-Za-z0-9_.-]{1,24})$/);
+                  if (mentionMatch) {
+                    const q = mentionMatch[1];
+                    const startIdx = caret - q.length - 1;
+                    setInlineSuggest((prev) => ({
+                      kind: "MENTION",
+                      query: q,
+                      startIdx,
+                      endIdx: caret,
+                      items: prev?.kind === "MENTION" ? prev.items : [],
+                      active: 0,
+                    }));
+                    return;
+                  }
+                  const emojiMatch = beforeCaret.match(/(?:^|[\s(（【]):([a-z0-9_+-]{2,20})$/i);
+                  if (emojiMatch) {
+                    const q = emojiMatch[1].toLowerCase();
+                    const matches = SITE_SHORTCODE_EMOJIS.filter(
+                      (sc) => sc.code.toLowerCase().includes(q) || sc.label.includes(q)
+                    ).slice(0, 6);
+                    if (matches.length > 0) {
+                      setInlineSuggest({
+                        kind: "EMOJI",
+                        query: q,
+                        startIdx: caret - emojiMatch[1].length - 1,
+                        endIdx: caret,
+                        items: matches,
+                        active: 0,
+                      });
+                      return;
+                    }
+                  }
+                  setInlineSuggest(null);
+                }}
+                onScroll={(e) => {
+                  if (viewMode !== "SPLIT") return;
+                  const ta = e.currentTarget;
+                  const pv = previewContainerRef.current;
+                  if (!pv) return;
+                  const taMax = ta.scrollHeight - ta.clientHeight;
+                  const pvMax = pv.scrollHeight - pv.clientHeight;
+                  if (taMax > 0 && pvMax > 0) {
+                    pv.scrollTop = (ta.scrollTop / taMax) * pvMax;
+                  }
                 }}
                 onPaste={(e) =>
                   handleComposerTextareaPaste(e, {
@@ -2224,14 +2663,59 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                 }
                 placeholder={
                   request.action === "NEW_TOPIC"
-                    ? `写下正文（支持粘贴或拖拽图片、Markdown 与 Discourse 语法，${submitShortcutLabel} 快速提交）`
+                    ? `写下正文（支持粘贴或拖拽图片、键入 @提及 / :表情、Markdown 与 Discourse 语法，${submitShortcutLabel} 快速提交）`
                     : request.action === "EDIT"
                       ? `修改正文（支持粘贴或拖拽图片，${submitShortcutLabel} 快速保存）`
-                      : `写下回复（支持粘贴或拖拽图片，${submitShortcutLabel} 快速发送）`
+                      : `写下回复（支持粘贴或拖拽图片、键入 @提及 / :表情，${submitShortcutLabel} 快速发送）`
                 }
                 autoFocus={!isNewTopic}
                 onKeyDown={(e) => {
-                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                  if (isImeComposingEvent(e)) return;
+                  if (inlineSuggest && inlineSuggest.items.length > 0) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setInlineSuggest((prev) =>
+                        prev ? { ...prev, active: (prev.active + 1) % prev.items.length } : null
+                      );
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setInlineSuggest((prev) =>
+                        prev
+                          ? { ...prev, active: (prev.active - 1 + prev.items.length) % prev.items.length }
+                          : null
+                      );
+                      return;
+                    }
+                    if (e.key === "Enter" || e.key === "Tab") {
+                      e.preventDefault();
+                      const chosen = inlineSuggest.items[inlineSuggest.active];
+                      if (chosen) {
+                        const replacement =
+                          inlineSuggest.kind === "MENTION"
+                            ? `@${(chosen as MentionUserCandidate).username} `
+                            : `${(chosen as { code: string }).code} `;
+                        const cur = rawRef.current;
+                        const next = `${cur.slice(0, inlineSuggest.startIdx)}${replacement}${cur.slice(inlineSuggest.endIdx)}`;
+                        const nextCaret = inlineSuggest.startIdx + replacement.length;
+                        rawRef.current = next;
+                        setRaw(next);
+                        setInlineSuggest(null);
+                        requestAnimationFrame(() => {
+                          bodyTextareaRef.current?.focus();
+                          bodyTextareaRef.current?.setSelectionRange(nextCaret, nextCaret);
+                        });
+                      }
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setInlineSuggest(null);
+                      return;
+                    }
+                  }
                   const mod = e.metaKey || e.ctrlKey;
                   if (mod && e.key === "Enter") {
                     e.preventDefault();
@@ -2347,21 +2831,28 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                       }
                     }
                   }
-                  if (e.key === "Escape" && !raw.trim() && !title.trim()) {
-                    e.preventDefault();
-                    onClose();
-                  }
                 }}
                 className={`lindo-scroll h-full resize-none bg-transparent text-[15px] leading-[1.72] outline-none select-text ${
                   viewMode === "SPLIT" ? "w-1/2 lindo-hairline-r" : "w-full"
                 } ${isDrawer ? "px-4 py-3" : "px-5 py-4"}`}
-                style={{ color: "var(--ink-primary)" }}
+                style={{ color: "var(--ink-body)" }}
               />
             )}
 
             {viewMode !== "SOURCE" && (
               <div
                 ref={previewContainerRef}
+                onClick={(e) => {
+                  const target = e.target as HTMLElement;
+                  const spoiled = target.closest<HTMLElement>(".spoiled");
+                  if (spoiled) {
+                    spoiled.classList.toggle("revealed");
+                    return;
+                  }
+                  if (target.closest("a")) {
+                    e.preventDefault();
+                  }
+                }}
                 className={`lindo-scroll h-full ${
                   viewMode === "SPLIT" ? "w-1/2" : "w-full"
                 } ${isDrawer ? "px-4 py-3" : "px-5 py-4"}`}
@@ -2373,14 +2864,16 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               >
                 {previewHtml ? (
                   <div
-                    className="lindo-cooked whitespace-pre-wrap"
+                    className="lindo-cooked"
                     dangerouslySetInnerHTML={{
                       __html: previewHtml,
                     }}
                   />
                 ) : (
                   <p className="text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
-                    右侧将实时渲染 Markdown 预览...
+                    {viewMode === "SPLIT"
+                      ? "右侧将实时渲染 Markdown 预览..."
+                      : "暂无内容可预览"}
                   </p>
                 )}
               </div>
@@ -2388,6 +2881,134 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
           </>
         )}
       </div>
+
+      {/* 键入 @ / : 自动补全候选条（支持 ↑/↓/Enter/Tab 快捷上屏） */}
+      {inlineSuggest && inlineSuggest.items.length > 0 && (
+        <div
+          className="flex shrink-0 items-center gap-1.5 overflow-x-auto px-5 py-1.5 no-scrollbar"
+          style={{
+            borderTop: "0.5px solid var(--hairline-soft)",
+            backgroundColor: "var(--subtle-surface)",
+          }}
+        >
+          <span className="shrink-0 text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+            {inlineSuggest.kind === "MENTION" ? "提及成员" : "社区表情"}
+          </span>
+          {inlineSuggest.items.map((item, idx) => {
+            const active = idx === inlineSuggest.active;
+            const applyChoice = () => {
+              const replacement =
+                inlineSuggest.kind === "MENTION"
+                  ? `@${(item as MentionUserCandidate).username} `
+                  : `${(item as { code: string }).code} `;
+              const cur = rawRef.current;
+              const next = `${cur.slice(0, inlineSuggest.startIdx)}${replacement}${cur.slice(inlineSuggest.endIdx)}`;
+              const nextCaret = inlineSuggest.startIdx + replacement.length;
+              rawRef.current = next;
+              setRaw(next);
+              setInlineSuggest(null);
+              requestAnimationFrame(() => {
+                bodyTextareaRef.current?.focus();
+                bodyTextareaRef.current?.setSelectionRange(nextCaret, nextCaret);
+              });
+            };
+            if (inlineSuggest.kind === "MENTION") {
+              const u = item as MentionUserCandidate;
+              return (
+                <button
+                  key={u.username}
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    applyChoice();
+                  }}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11.8px] cursor-pointer"
+                  style={{
+                    backgroundColor: active ? "var(--active-chip-bg)" : "var(--card-surface)",
+                    color: active ? "var(--active-chip-text)" : "var(--ink-primary)",
+                    border: "0.5px solid var(--hairline)",
+                  }}
+                >
+                  <AvatarWithFlair
+                    username={u.username}
+                    avatarTemplate={u.avatarTemplate}
+                    sizePx={15}
+                  />
+                  <span className="font-medium">@{u.username}</span>
+                </button>
+              );
+            }
+            const sc = item as { code: string; label: string };
+            return (
+              <button
+                key={sc.code}
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  applyChoice();
+                }}
+                className="inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-0.5 text-[11.8px] cursor-pointer"
+                style={{
+                  backgroundColor: active ? "var(--active-chip-bg)" : "var(--card-surface)",
+                  color: active ? "var(--active-chip-text)" : "var(--ink-primary)",
+                  border: "0.5px solid var(--hairline)",
+                }}
+              >
+                <span>{sc.label}</span>
+                <span style={{ color: "var(--ink-tertiary)" }}>{sc.code}</span>
+              </button>
+            );
+          })}
+          <span className="ml-auto shrink-0 text-[10.5px]" style={{ color: "var(--ink-tertiary)" }}>
+            ↑↓ 选择 · Tab/Enter 补全
+          </span>
+        </div>
+      )}
+
+      {/* 编辑模式可选修改说明栏 */}
+      {request.action === "EDIT" && (
+        <div
+          className="flex shrink-0 items-center gap-2 px-5 py-1.5"
+          style={{
+            borderTop: "0.5px solid var(--hairline-soft)",
+            backgroundColor: "color-mix(in srgb, var(--subtle-surface) 45%, transparent)",
+          }}
+        >
+          <span className="shrink-0 text-[11.5px]" style={{ color: "var(--ink-tertiary)" }}>
+            修改说明
+          </span>
+          <input
+            type="text"
+            value={editReason}
+            onChange={(e) => setEditReason(e.target.value)}
+            placeholder="选填：简要记录本次修改原因（将展示在编辑历史中）"
+            className="flex-1 bg-transparent text-[12px] outline-none"
+            style={{ color: "var(--ink-primary)" }}
+          />
+        </div>
+      )}
+
+      {/* 底部极简状态栏（草稿状态 / 字数 / 快捷提交提示） */}
+      <footer
+        className="flex h-[32px] shrink-0 items-center justify-between px-5 text-[11.5px] select-none"
+        style={{
+          borderTop: "0.5px solid var(--hairline-soft)",
+          color: "var(--ink-tertiary)",
+        }}
+      >
+        <span className="truncate">
+          {uploading
+            ? uploadProgressLabel || "正在上传图片..."
+            : cloudSyncedAt && request.action !== "EDIT"
+              ? "草稿已同步至云端与本地 · 支持粘贴或拖拽图片"
+              : draftSavedAt && request.action !== "EDIT"
+                ? "草稿已自动保存 · 支持粘贴或拖拽图片"
+                : "支持 Markdown、Callout、代码高亮、公式与粘贴/拖拽图片"}
+        </span>
+        <span className="shrink-0 tabular-nums">
+          {Array.from(raw.trim()).length} 字 · {submitShortcutLabel} {actionLabel}
+        </span>
+      </footer>
 
       {/* 抽奖话题扣除 20 积分官方规则二次确认 */}
       {showLotteryConfirm && (
@@ -2404,48 +3025,67 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       )}
 
       {/* 未发送内容退出 / 切帖防误触确认 */}
-      {showExitConfirm && (
-        <ConfirmDialog
-          title="保存草稿？"
-          detail="当前编辑内容尚未发送，是否保存至草稿以便稍后继续？"
-          confirmLabel="保存"
-          alternateLabel="不保存"
-          onCancel={() => {
-            pendingProceedRef.current = null;
-            setShowExitConfirm(false);
-          }}
-          onAlternate={() => {
-            const after = pendingProceedRef.current;
-            pendingProceedRef.current = null;
-            setShowExitConfirm(false);
-            deleteLocalDraftInRust(draftKey).catch(() => {});
-            onClose();
-            after?.();
-          }}
-          onConfirm={() => {
-            const after = pendingProceedRef.current;
-            pendingProceedRef.current = null;
-            setShowExitConfirm(false);
-            if (request.action !== "EDIT" && (title.trim() || raw.trim() || tags.length > 0)) {
-              saveLocalDraftInRust({
-                key: draftKey,
-                action: request.action,
-                topicId: request.topicId ?? null,
-                postId: request.postId ?? null,
-                replyToPostNumber: request.replyToPostNumber ?? null,
-                categoryId,
-                title,
-                raw,
-                tags,
-                sequence: 0,
-                updatedAt: Date.now(),
-              }).catch(() => {});
-            }
-            onClose();
-            after?.();
-          }}
-        />
-      )}
+      {showExitConfirm &&
+        (request.action === "EDIT" ? (
+          <ConfirmDialog
+            title="放弃未保存的修改？"
+            detail="当前编辑的内容尚未提交保存，关闭后修改将会丢失。"
+            confirmLabel="放弃修改"
+            destructive
+            onCancel={() => {
+              pendingProceedRef.current = null;
+              setShowExitConfirm(false);
+            }}
+            onConfirm={() => {
+              const after = pendingProceedRef.current;
+              pendingProceedRef.current = null;
+              setShowExitConfirm(false);
+              onClose();
+              after?.();
+            }}
+          />
+        ) : (
+          <ConfirmDialog
+            title="保存草稿？"
+            detail="当前编辑内容尚未发送，是否保存至草稿以便稍后继续？"
+            confirmLabel="保存"
+            alternateLabel="不保存"
+            onCancel={() => {
+              pendingProceedRef.current = null;
+              setShowExitConfirm(false);
+            }}
+            onAlternate={() => {
+              const after = pendingProceedRef.current;
+              pendingProceedRef.current = null;
+              setShowExitConfirm(false);
+              deleteLocalDraftInRust(draftKey).catch(() => {});
+              onClose();
+              after?.();
+            }}
+            onConfirm={() => {
+              const after = pendingProceedRef.current;
+              pendingProceedRef.current = null;
+              setShowExitConfirm(false);
+              if (title.trim() || raw.trim() || tags.length > 0) {
+                saveLocalDraftInRust({
+                  key: draftKey,
+                  action: request.action,
+                  topicId: request.topicId ?? null,
+                  postId: request.postId ?? null,
+                  replyToPostNumber: request.replyToPostNumber ?? null,
+                  categoryId,
+                  title,
+                  raw,
+                  tags,
+                  sequence: 0,
+                  updatedAt: Date.now(),
+                }).catch(() => {});
+              }
+              onClose();
+              after?.();
+            }}
+          />
+        ))}
     </>
   );
 
@@ -2474,7 +3114,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
       }}
     >
       <div
-        className="flex h-[min(660px,86vh)] w-[min(860px,92vw)] flex-col overflow-hidden rounded-2xl shadow-2xl"
+        className={`flex flex-col overflow-hidden rounded-2xl shadow-2xl transition-[width,height] duration-150 ${
+          viewMode === "SPLIT"
+            ? "h-[min(690px,88vh)] w-[min(1040px,94vw)]"
+            : "h-[min(650px,86vh)] w-[min(840px,92vw)]"
+        }`}
         style={{
           backgroundColor: "var(--card-surface)",
           border: "0.5px solid var(--hairline)",
@@ -2486,87 +3130,3 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
     </div>
   );
 };
-
-function resolvePreviewImageUrl(
-  rawUrl: string,
-  previewMap: Record<string, string>
-): string {
-  const trimmed = rawUrl.trim();
-  if (previewMap[trimmed]) return previewMap[trimmed];
-  if (trimmed.startsWith("upload://")) {
-    return `https://linux.do/uploads/short-url/${trimmed.slice("upload://".length)}`;
-  }
-  return trimmed;
-}
-
-function simpleMarkdownToHtml(
-  md: string,
-  previewMap: Record<string, string> = {}
-): string {
-  // Preserve fenced code blocks before inline formatting so code contents stay literal
-  const codeBlocks: string[] = [];
-  const esc = md
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, (_m, lang: string, body: string) => {
-      const idx = codeBlocks.length;
-      const cls = lang ? ` class="lang-${lang}"` : "";
-      codeBlocks.push(`<pre><code${cls}>${body.replace(/\n$/, "")}</code></pre>`);
-      return `@@LINDO_CODE_${idx}@@`;
-    });
-
-  let html = esc
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-    // Uploading inline placeholders
-    .replace(
-      /!?\[([^\]]+)\]\((uploading-\d+)\)/g,
-      '<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;background:var(--subtle-surface);color:var(--brand-gold);font-size:12px;">$1</span>'
-    )
-    // Discourse images with optional `|WxH, 50%` scale metadata + `upload://` resolution
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, rawAlt: string, rawSrc: string) => {
-      const resolvedSrc = resolvePreviewImageUrl(rawSrc, previewMap);
-      const parts = rawAlt.split("|");
-      const altText = parts[0] || "";
-      const meta = parts.slice(1).join("|");
-      const pctMatch = meta.match(/(\d{2,3})%/);
-      const dimMatch = meta.match(/(\d+)x(\d+)/);
-      let style = "max-width:100%;height:auto;border-radius:8px;margin:6px 0;";
-      if (pctMatch) {
-        const pct = Math.max(15, Math.min(100, Number(pctMatch[1])));
-        if (dimMatch) {
-          const scaledW = Math.round((Number(dimMatch[1]) * pct) / 100);
-          style = `width:${scaledW}px;max-width:${pct}%;height:auto;border-radius:8px;margin:6px 0;`;
-        } else {
-          style = `max-width:${pct}%;height:auto;border-radius:8px;margin:6px 0;`;
-        }
-      }
-      return `<img alt="${altText}" src="${resolvedSrc}" style="${style}" />`;
-    })
-    .replace(/\[([^\]]+)\]\(<?([^)>]+)>?\)/g, '<a href="$2">$1</a>')
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
-    .replace(/(^|[^\w*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
-    .replace(/^---+\s*$/gm, "<hr />")
-    .replace(/^### (.+)$/gm, "<h3>$1</h3>")
-    .replace(/^## (.+)$/gm, "<h2>$1</h2>")
-    .replace(/^# (.+)$/gm, "<h1>$1</h1>")
-    .replace(/^&gt; (.+)$/gm, "<blockquote>$1</blockquote>")
-    .replace(
-      /\[details=&quot;([^&]*?)&quot;\]([\s\S]*?)\[\/details\]/g,
-      "<details><summary>$1</summary><div>$2</div></details>"
-    )
-    .replace(
-      /\[details="([^"]*?)"\]([\s\S]*?)\[\/details\]/g,
-      "<details><summary>$1</summary><div>$2</div></details>"
-    )
-    .replace(
-      /\[quote(?:=[^\]]+)?\]([\s\S]*?)\[\/quote\]/g,
-      "<blockquote>$1</blockquote>"
-    )
-    .replace(/\[spoiler\]([\s\S]*?)\[\/spoiler\]/g, '<span class="spoiled">$1</span>')
-    .replace(/\n\n/g, "</p><p>");
-
-  html = html.replace(/@@LINDO_CODE_(\d+)@@/g, (_m, i: string) => codeBlocks[Number(i)] || "");
-  return html;
-}

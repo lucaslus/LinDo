@@ -2,10 +2,12 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LinDoIcons } from "./components/LinDoIcons";
+import { ensureGlobalImeTracking, isImeComposingEvent } from "./lib/imeGuard";
 import type {
   CategoryMeta,
   ComposerLaunchRequest,
   DesktopUpdateInfo,
+  EchDesktopSnapshot,
   FeedSort,
   GrantedBadge,
   LocalDraftRecord,
@@ -25,20 +27,27 @@ import {
   checkAppUpdateInRust,
   clearExpiredNoticeInRust,
   downloadAndInstallUpdateInRust,
+  drainPendingMarkReads,
   fetchSiteCategories,
   fetchTopicDetail,
   fetchTopicFeed,
+  flushTopicTimingsNow,
   getCachedCategories,
   getCachedTopicDetail,
+  getEchStatus,
   importManualCredentialInRust,
+  invalidateNotificationShortCache,
   logoutAccount,
   markManualRetryIntent,
   openInAppForumPanel,
+  pauseAndDropPendingTimings,
   putCachedTopicDetail,
+  recordConfirmedTopicFloorForNotifications,
   recordLocalTopicVisit,
   recordReadFloorInRust,
   refreshCurrentUserSession,
   removeSavedAccountInRust,
+  resumeTimingsAfterVerify,
   savePreferencesToRust,
   setApiDarkTheme,
   setUnreadBadgeInRust,
@@ -48,8 +57,11 @@ import {
   triggerInteractiveVerifyOnce,
 } from "./lib/api";
 import { applyPaletteToDocument, performSmoothThemeSwitch } from "./lib/palette";
+import { parseInternalTopicLink } from "./lib/cooked";
+import { applyTopicFilterResult } from "./lib/topicTransition";
 import { DESKTOP_APP_VERSION, diagLog, installGlobalDiagHooks } from "./lib/diagnostics";
 import { installSmoothWheelAndScrollOptimizer } from "./lib/smoothWheel";
+import { discourseMessageBus } from "./lib/messageBus";
 import { SideRail } from "./components/SideRail";
 import { HomeFeedPane } from "./components/HomeFeedPane";
 import { TopicReaderPane } from "./components/TopicReaderPane";
@@ -67,6 +79,7 @@ import {
   MessagesView,
   ProfileSettingsView,
   PublicUserCardModal,
+  SiteBadgesModal,
   WelcomeLoginScreen,
 } from "./components/SecondaryScreens";
 
@@ -78,6 +91,7 @@ const DEFAULT_PREFS: UserPreferences = {
   compactFeed: false,
   defaultSearchExpanded: true,
   enableAnimations: true,
+  echRoutingMode: "smart_auto",
 };
 
 function mergePostPreservingBadges(
@@ -136,6 +150,7 @@ export const App: React.FC = () => {
   const [readFloors, setReadFloors] = useState<Record<string, number>>({});
   const [drafts, setDrafts] = useState<Record<string, LocalDraftRecord>>({});
   const [unreadCount, setUnreadCount] = useState(0);
+  const [echStatus, setEchStatus] = useState<EchDesktopSnapshot | null>(null);
   const [systemPrefersDark, setSystemPrefersDark] = useState(
     () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true
   );
@@ -166,11 +181,17 @@ export const App: React.FC = () => {
   const activeDetailRef = useRef<TopicDetailModel | null>(null);
   activeDetailRef.current = activeDetail;
   const [readerLoading, setReaderLoading] = useState(false);
+  const [readerFilterLoading, setReaderFilterLoading] = useState(false);
   const [readerError, setReaderError] = useState<string | null>(null);
   const [targetFloor, setTargetFloor] = useState<number | null>(null);
   const [targetFloorHighlight, setTargetFloorHighlight] = useState(false);
   const [targetJumpNonce, setTargetJumpNonce] = useState(0);
+  const [filterSettledNonce, setFilterSettledNonce] = useState(0);
   const [onlyOpFilter, setOnlyOpFilter] = useState(false);
+  const [summaryFilter, setSummaryFilter] = useState(false);
+  const [homeReaderHistory, setHomeReaderHistory] = useState<
+    Array<{ summary: TopicSummary; floor: number }>
+  >([]);
 
   // Messages split-pane reader state (independent from Home reader!)
   const [msgSummary, setMsgSummary] = useState<TopicSummary | null>(null);
@@ -178,11 +199,17 @@ export const App: React.FC = () => {
   const msgDetailRef = useRef<TopicDetailModel | null>(null);
   msgDetailRef.current = msgDetail;
   const [msgReaderLoading, setMsgReaderLoading] = useState(false);
+  const [msgFilterLoading, setMsgFilterLoading] = useState(false);
   const [msgReaderError, setMsgReaderError] = useState<string | null>(null);
   const [msgTargetFloor, setMsgTargetFloor] = useState<number | null>(null);
   const [msgTargetFloorHighlight, setMsgTargetFloorHighlight] = useState(false);
   const [msgJumpNonce, setMsgJumpNonce] = useState(0);
+  const [msgFilterSettledNonce, setMsgFilterSettledNonce] = useState(0);
   const [msgOnlyOp, setMsgOnlyOp] = useState(false);
+  const [msgSummaryFilter, setMsgSummaryFilter] = useState(false);
+  const [msgReaderHistory, setMsgReaderHistory] = useState<
+    Array<{ summary: TopicSummary; floor: number }>
+  >([]);
   const [pendingPmRecipient, setPendingPmRecipient] = useState<string | null>(null);
 
   // Overlays & modals
@@ -196,7 +223,6 @@ export const App: React.FC = () => {
   const [guestPrompt, setGuestPrompt] = useState<{ title: string; subtitle: string } | null>(null);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [composerReq, setComposerReq] = useState<ComposerLaunchRequest | null>(null);
-  const [composerForceModal, setComposerForceModal] = useState(false);
   const [composerAppendQuote, setComposerAppendQuote] = useState<{
     text: string;
     nonce: number;
@@ -222,13 +248,23 @@ export const App: React.FC = () => {
   const [inspectedUsername, setInspectedUsername] = useState<string | null>(null);
   const [inspectedBadge, setInspectedBadge] = useState<GrantedBadge | null>(null);
   const [showConnectModal, setShowConnectModal] = useState(false);
+  const [showSiteBadgesModal, setShowSiteBadgesModal] = useState(false);
   const [pmRefreshNonce, setPmRefreshNonce] = useState(0);
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxState, setLightboxState] = useState<{
+    src: string;
+    images?: string[];
+    index?: number;
+  } | null>(null);
   const [globalNotice, setGlobalNotice] = useState<string | null>(null);
   const [feedCollapsed, setFeedCollapsed] = useState(false);
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
   const [cfAttentionNeeded, setCfAttentionNeeded] = useState(false);
   const [cfAttentionDismissed, setCfAttentionDismissed] = useState(false);
+  const [verifyPill, setVerifyPill] = useState<{
+    visible: boolean;
+    round: number;
+    stage: string;
+  } | null>(null);
   const lastFeedSyncedAtRef = useRef<number>(Date.now());
   const backgroundPollInFlightRef = useRef(false);
 
@@ -365,7 +401,6 @@ export const App: React.FC = () => {
           replyToSnippet: req.replyToSnippet ?? prev.replyToSnippet,
         };
       }
-      setComposerForceModal(false);
       setComposerAppendQuote(null);
       return req;
     });
@@ -378,8 +413,10 @@ export const App: React.FC = () => {
         floor?: number | null;
         highlightFloor?: boolean;
         onlyOp?: boolean;
+        summary?: boolean;
         forceRefresh?: boolean;
         inPlace?: boolean;
+        filterSwitch?: boolean;
         trackVisit?: boolean;
         bypassGuard?: boolean;
       }
@@ -387,8 +424,10 @@ export const App: React.FC = () => {
       if (
         !opts?.forceRefresh &&
         !opts?.inPlace &&
+        !opts?.filterSwitch &&
         opts?.floor == null &&
         opts?.onlyOp == null &&
+        opts?.summary == null &&
         isWideLayout &&
         currentTab === "HOME" &&
         activeSummary?.id === topic.id &&
@@ -418,6 +457,7 @@ export const App: React.FC = () => {
       );
       const seq = ++topicReqSeqRef.current;
       const nextOnlyOp = opts?.onlyOp ?? false;
+      const nextSummary = !nextOnlyOp && Boolean(opts?.summary);
       const desiredFloor = opts?.floor ?? null;
       const curDetail = activeDetailRef.current;
       const isInPlace = Boolean(
@@ -426,22 +466,45 @@ export const App: React.FC = () => {
         curDetail.id === topic.id &&
         curDetail.posts.length > 0
       );
+      const isFilterSwitch = Boolean(
+        opts?.filterSwitch &&
+        !isInPlace &&
+        curDetail &&
+        curDetail.id === topic.id &&
+        curDetail.posts.length > 0
+      );
+      const prevOnlyOp = onlyOpFilter;
+      const prevSummary = summaryFilter;
       const prevPostsCount = curDetail?.postsCount ?? topic.postsCount ?? 0;
-      const shouldTrack = isInPlace ? false : opts?.trackVisit !== false;
+      const shouldTrack = isInPlace || isFilterSwitch ? false : opts?.trackVisit !== false;
       const canHitCache =
-        !opts?.forceRefresh &&
+        (!opts?.forceRefresh || isFilterSwitch) &&
         !isInPlace &&
         !nextOnlyOp &&
+        !nextSummary &&
         (!desiredFloor || desiredFloor <= 1);
       const instantCached = canHitCache ? getCachedTopicDetail(topic.id) : null;
 
-      if (!isInPlace) {
+      if (isFilterSwitch) {
+        setOnlyOpFilter(nextOnlyOp);
+        setSummaryFilter(nextSummary);
+        setReaderError(null);
+        if (instantCached) {
+          setReaderFilterLoading(false);
+          setActiveDetail((prev) => applyTopicFilterResult(prev, instantCached));
+          setFilterSettledNonce((n) => n + 1);
+          return;
+        }
+        setReaderFilterLoading(true);
+      } else if (!isInPlace) {
         setActiveSummary(topic);
         setOnlyOpFilter(nextOnlyOp);
+        setSummaryFilter(nextSummary);
         setTargetFloor(desiredFloor);
         setTargetFloorHighlight(Boolean(opts?.highlightFloor && desiredFloor && desiredFloor > 1));
         setNarrowShowingReader(true);
         setReaderError(null);
+        setReaderFilterLoading(false);
         if (shouldTrack) {
           recordLocalTopicVisit({
             topicId: topic.id,
@@ -458,38 +521,47 @@ export const App: React.FC = () => {
         }
       }
 
-      if (instantCached) {
+      if (!isFilterSwitch && instantCached) {
         setReaderLoading(false);
         setActiveDetail(instantCached);
         setTargetJumpNonce((n) => n + 1);
         return;
       }
 
-      if (!isInPlace && (opts?.forceRefresh || activeDetail?.id !== topic.id)) {
+      if (!isInPlace && !isFilterSwitch && (opts?.forceRefresh || activeDetail?.id !== topic.id)) {
         setActiveDetail(null);
       }
-      setReaderLoading(true);
+      if (!isFilterSwitch) {
+        setReaderLoading(true);
+      }
 
       const nowClickMs = Date.now();
       const prevClickMs = lastTopicClickMsRef.current;
       lastTopicClickMsRef.current = nowClickMs;
 
       try {
-        if (!opts?.forceRefresh && !isInPlace && prevClickMs > 0 && nowClickMs - prevClickMs < 750) {
+        if (!opts?.forceRefresh && !isInPlace && !isFilterSwitch && prevClickMs > 0 && nowClickMs - prevClickMs < 750) {
           // Rapid topic skimming protection: wait 165ms; if user clicked another topic, abort BEFORE firing any network call!
           await new Promise((r) => setTimeout(r, 165));
           if (seq !== topicReqSeqRef.current) return;
         }
-        const fetchTargetFloor = isInPlace
-          ? desiredFloor && desiredFloor > 12 && !nextOnlyOp
-            ? desiredFloor
-            : null
-          : desiredFloor;
+        const fetchTargetFloor = isFilterSwitch
+          ? null
+          : isInPlace
+            ? desiredFloor && desiredFloor > 12 && !nextOnlyOp && !nextSummary
+              ? desiredFloor
+              : null
+            : desiredFloor;
+        const effectiveOpUsername =
+          curDetail?.id === topic.id && curDetail.opUsername
+            ? curDetail.opUsername
+            : topic.originalPoster.username;
         const detail = await fetchTopicDetail(topic.id, {
           targetPostNumber: fetchTargetFloor,
-          onlyOpUsername: nextOnlyOp ? topic.originalPoster.username : null,
+          onlyOpUsername: nextOnlyOp ? effectiveOpUsername : null,
+          filterSummary: nextSummary,
           trackVisit: shouldTrack,
-          forceRefresh: opts?.forceRefresh || isInPlace,
+          forceRefresh: opts?.forceRefresh || isInPlace || isFilterSwitch,
         });
         if (seq !== topicReqSeqRef.current) return;
         const opPost = detail.posts.find((p) => p.postNumber === 1) ?? detail.posts[0];
@@ -506,6 +578,12 @@ export const App: React.FC = () => {
             replyCount: Math.max(0, detail.postsCount - 1),
             views: detail.views,
           });
+        }
+        if (isFilterSwitch) {
+          setReaderError(null);
+          setActiveDetail((prev) => applyTopicFilterResult(prev, detail));
+          setFilterSettledNonce((n) => n + 1);
+          return;
         }
         if (isInPlace) {
           setReaderError(null);
@@ -529,7 +607,13 @@ export const App: React.FC = () => {
         setTargetJumpNonce((n) => n + 1);
       } catch (err: any) {
         if (seq !== topicReqSeqRef.current) return;
-        const msg = err?.message || (isInPlace ? "刷新失败，请稍后重试" : "帖子加载失败，请重试");
+        const msg = err?.message || (isInPlace || isFilterSwitch ? "切换筛选失败，请稍后重试" : "帖子加载失败，请重试");
+        if (isFilterSwitch) {
+          setOnlyOpFilter(prevOnlyOp);
+          setSummaryFilter(prevSummary);
+          setGlobalNotice(msg);
+          return { error: msg };
+        }
         if (isInPlace) {
           return { error: msg };
         }
@@ -537,10 +621,11 @@ export const App: React.FC = () => {
       } finally {
         if (seq === topicReqSeqRef.current) {
           setReaderLoading(false);
+          setReaderFilterLoading(false);
         }
       }
     },
-    [activeDetail?.id, activeSummary?.id, currentTab, isWideLayout, readerError]
+    [activeDetail?.id, activeSummary?.id, currentTab, isWideLayout, readerError, onlyOpFilter, summaryFilter]
   );
 
   const openMessageTopic = useCallback(
@@ -550,16 +635,20 @@ export const App: React.FC = () => {
         floor?: number | null;
         highlightFloor?: boolean;
         onlyOp?: boolean;
+        summary?: boolean;
         forceRefresh?: boolean;
         inPlace?: boolean;
+        filterSwitch?: boolean;
         bypassGuard?: boolean;
       }
     ): Promise<{ addedReplies?: number; error?: string } | void> => {
       if (
         !opts?.forceRefresh &&
         !opts?.inPlace &&
+        !opts?.filterSwitch &&
         opts?.floor == null &&
         opts?.onlyOp == null &&
+        opts?.summary == null &&
         isWideLayout &&
         currentTab === "MESSAGES" &&
         msgSummary?.id === topic.id &&
@@ -589,6 +678,7 @@ export const App: React.FC = () => {
       );
       const seq = ++msgReqSeqRef.current;
       const nextOnlyOp = opts?.onlyOp ?? false;
+      const nextSummary = !nextOnlyOp && Boolean(opts?.summary);
       const desiredFloor = opts?.floor ?? null;
       const curMsgDetail = msgDetailRef.current;
       const isInPlace = Boolean(
@@ -597,15 +687,39 @@ export const App: React.FC = () => {
         curMsgDetail.id === topic.id &&
         curMsgDetail.posts.length > 0
       );
+      const isFilterSwitch = Boolean(
+        opts?.filterSwitch &&
+        !isInPlace &&
+        curMsgDetail &&
+        curMsgDetail.id === topic.id &&
+        curMsgDetail.posts.length > 0
+      );
+      const prevMsgOnlyOp = msgOnlyOp;
+      const prevMsgSummary = msgSummaryFilter;
       const prevPostsCount = curMsgDetail?.postsCount ?? topic.postsCount ?? 0;
 
-      if (!isInPlace) {
+      if (isFilterSwitch) {
+        setMsgOnlyOp(nextOnlyOp);
+        setMsgSummaryFilter(nextSummary);
+        setMsgReaderError(null);
+        const instantCached =
+          !nextOnlyOp && !nextSummary ? getCachedTopicDetail(topic.id) : null;
+        if (instantCached) {
+          setMsgFilterLoading(false);
+          setMsgDetail((prev) => applyTopicFilterResult(prev, instantCached));
+          setMsgFilterSettledNonce((n) => n + 1);
+          return;
+        }
+        setMsgFilterLoading(true);
+      } else if (!isInPlace) {
         setMsgSummary(topic);
         setMsgOnlyOp(nextOnlyOp);
+        setMsgSummaryFilter(nextSummary);
         setMsgTargetFloor(desiredFloor);
         setMsgTargetFloorHighlight(Boolean(opts?.highlightFloor && desiredFloor && desiredFloor > 1));
         setNarrowShowingReader(true);
         setMsgReaderError(null);
+        setMsgFilterLoading(false);
         recordLocalTopicVisit({
           topicId: topic.id,
           title: topic.title,
@@ -620,26 +734,35 @@ export const App: React.FC = () => {
         });
       }
 
-      if (!isInPlace && (opts?.forceRefresh || msgDetail?.id !== topic.id)) {
+      if (!isInPlace && !isFilterSwitch && (opts?.forceRefresh || msgDetail?.id !== topic.id)) {
         setMsgDetail(null);
       }
-      setMsgReaderLoading(true);
+      if (!isFilterSwitch) {
+        setMsgReaderLoading(true);
+      }
 
       try {
-        const fetchTargetFloor = isInPlace
-          ? desiredFloor && desiredFloor > 12 && !nextOnlyOp
-            ? desiredFloor
-            : null
-          : desiredFloor;
+        const fetchTargetFloor = isFilterSwitch
+          ? null
+          : isInPlace
+            ? desiredFloor && desiredFloor > 12 && !nextOnlyOp && !nextSummary
+              ? desiredFloor
+              : null
+            : desiredFloor;
+        const effectiveOpUsername =
+          curMsgDetail?.id === topic.id && curMsgDetail.opUsername
+            ? curMsgDetail.opUsername
+            : topic.originalPoster.username;
         const detail = await fetchTopicDetail(topic.id, {
           targetPostNumber: fetchTargetFloor,
-          onlyOpUsername: nextOnlyOp ? topic.originalPoster.username : null,
-          trackVisit: !isInPlace,
-          forceRefresh: opts?.forceRefresh || isInPlace,
+          onlyOpUsername: nextOnlyOp ? effectiveOpUsername : null,
+          filterSummary: nextSummary,
+          trackVisit: !isInPlace && !isFilterSwitch,
+          forceRefresh: opts?.forceRefresh || isInPlace || isFilterSwitch,
         });
         if (seq !== msgReqSeqRef.current) return;
         const opPost = detail.posts.find((p) => p.postNumber === 1) ?? detail.posts[0];
-        if (!isInPlace) {
+        if (!isInPlace && !isFilterSwitch) {
           recordLocalTopicVisit({
             topicId: detail.id,
             title: detail.title,
@@ -653,6 +776,12 @@ export const App: React.FC = () => {
             views: detail.views,
           });
         }
+        if (isFilterSwitch) {
+          setMsgReaderError(null);
+          setMsgDetail((prev) => applyTopicFilterResult(prev, detail));
+          setMsgFilterSettledNonce((n) => n + 1);
+          return;
+        }
         if (isInPlace) {
           setMsgReaderError(null);
           setMsgDetail((prev) => mergeTopicDetailInPlace(prev, detail, nextOnlyOp));
@@ -662,7 +791,13 @@ export const App: React.FC = () => {
         setMsgJumpNonce((n) => n + 1);
       } catch (err: any) {
         if (seq !== msgReqSeqRef.current) return;
-        const msg = err?.message || (isInPlace ? "刷新失败，请稍后重试" : "消息内容加载失败，请重试");
+        const msg = err?.message || (isInPlace || isFilterSwitch ? "切换筛选失败，请稍后重试" : "消息内容加载失败，请重试");
+        if (isFilterSwitch) {
+          setMsgOnlyOp(prevMsgOnlyOp);
+          setMsgSummaryFilter(prevMsgSummary);
+          setGlobalNotice(msg);
+          return { error: msg };
+        }
         if (isInPlace) {
           return { error: msg };
         }
@@ -670,10 +805,11 @@ export const App: React.FC = () => {
       } finally {
         if (seq === msgReqSeqRef.current) {
           setMsgReaderLoading(false);
+          setMsgFilterLoading(false);
         }
       }
     },
-    [msgDetail?.id, msgSummary?.id, currentTab, isWideLayout, msgReaderError]
+    [msgDetail?.id, msgSummary?.id, currentTab, isWideLayout, msgReaderError, msgOnlyOp, msgSummaryFilter]
   );
 
   const openTopicRef = useRef(openTopic);
@@ -744,12 +880,127 @@ export const App: React.FC = () => {
     [makeSummaryById, isWideLayout, openTopic, openMessageTopic]
   );
 
+  const navigateTopicLinkInReader = useCallback(
+    (tid: number, floor?: number, title?: string, fromFloor?: number) => {
+      const label = title?.trim() || `话题 #${tid}`;
+      if (isWideLayout && currentTab === "MESSAGES") {
+        const cur = msgSummaryRef.current;
+        if (cur && cur.id !== tid) {
+          const curTitle = msgDetailRef.current?.title || cur.title;
+          setMsgReaderHistory((prev) => [
+            ...prev.slice(-19),
+            { summary: { ...cur, title: curTitle }, floor: fromFloor ?? msgTargetFloorRef.current ?? 1 },
+          ]);
+        }
+        openMessageTopicById(tid, label, floor, false);
+      } else {
+        const cur = activeSummaryRef.current;
+        if (cur && cur.id !== tid) {
+          const curTitle = activeDetailRef.current?.title || cur.title;
+          setHomeReaderHistory((prev) => [
+            ...prev.slice(-19),
+            { summary: { ...cur, title: curTitle }, floor: fromFloor ?? targetFloorRef.current ?? 1 },
+          ]);
+        }
+        openTopicById(tid, label, floor, false);
+      }
+    },
+    [isWideLayout, currentTab, openMessageTopicById, openTopicById]
+  );
+
+  const goBackInReaderHistory = useCallback(() => {
+    if (isWideLayout && currentTab === "MESSAGES") {
+      setMsgReaderHistory((prev) => {
+        if (prev.length === 0) return prev;
+        const last = prev[prev.length - 1];
+        void openMessageTopic(last.summary, {
+          floor: last.floor > 1 ? last.floor : null,
+          highlightFloor: false,
+        });
+        return prev.slice(0, -1);
+      });
+    } else {
+      setHomeReaderHistory((prev) => {
+        if (prev.length === 0) return prev;
+        const last = prev[prev.length - 1];
+        void openTopic(last.summary, {
+          floor: last.floor > 1 ? last.floor : null,
+          highlightFloor: false,
+        });
+        return prev.slice(0, -1);
+      });
+    }
+  }, [isWideLayout, currentTab, openMessageTopic, openTopic]);
+
+  const handleSelectCategoryFromReader = useCallback(
+    (categoryId?: number, slug?: string) => {
+      let targetCat =
+        categoryId != null ? categories.find((c) => c.id === categoryId) : undefined;
+      if (!targetCat && slug) {
+        const cleanSlug = slug.trim().toLowerCase();
+        targetCat = categories.find(
+          (c) => c.slug?.toLowerCase() === cleanSlug || c.name.toLowerCase() === cleanSlug
+        );
+      }
+      const resolvedId = targetCat?.id ?? categoryId;
+      if (!resolvedId) return;
+      if (targetCat?.readRestricted && !isAuthorized) {
+        setGuestPrompt({
+          title: `登录后查看「${targetCat.name}」`,
+          subtitle: "该版块仅对登录会员开放，登录后即可浏览对应等级内容",
+        });
+        return;
+      }
+      setSelectedCategoryId(resolvedId);
+      setSelectedTag(null);
+      setCurrentTab("HOME");
+      setNarrowShowingReader(false);
+      if (feedCollapsed) setFeedCollapsed(false);
+    },
+    [categories, isAuthorized, feedCollapsed]
+  );
+
+  const handleSelectTagFromReader = useCallback(
+    (tag: string) => {
+      const clean = tag.trim();
+      if (!clean) return;
+      setSelectedTag(clean);
+      setCurrentTab("HOME");
+      setNarrowShowingReader(false);
+      if (feedCollapsed) setFeedCollapsed(false);
+    },
+    [feedCollapsed]
+  );
+
+  const handleOpenInAppUrl = useCallback(
+    (url: string) => {
+      const trimmed = url.trim();
+      const internalTopic = parseInternalTopicLink(trimmed);
+      if (internalTopic) {
+        navigateTopicLinkInReader(internalTopic.topicId, internalTopic.postNumber);
+        return;
+      }
+      if (/^https?:\/\/connect\.linux\.do\/?$/i.test(trimmed) && currentUser) {
+        setShowConnectModal(true);
+      } else {
+        openInAppForumPanel(trimmed, isDark).catch(() => openUrl(trimmed));
+      }
+    },
+    [navigateTopicLinkInReader, currentUser, isDark]
+  );
+
   const handleDecrementUnread = useCallback(() => {
     setUnreadCount((prev) => {
       const next = Math.max(0, prev - 1);
       setUnreadBadgeInRust(next).catch(() => {});
       return next;
     });
+  }, []);
+
+  const handleSyncUnreadCount = useCallback((next: number) => {
+    const clamped = Math.max(0, next);
+    setUnreadCount(clamped);
+    setUnreadBadgeInRust(clamped).catch(() => {});
   }, []);
 
   // Keep latest callbacks in refs so the mount-only Tauri event listener subscription NEVER tears down on filter/tab re-renders!
@@ -778,7 +1029,17 @@ export const App: React.FC = () => {
     const unsubs: Array<() => void> = [];
 
     (async () => {
+      getEchStatus()
+        .then((snap) => {
+          if (!cancelled) setEchStatus(snap);
+        })
+        .catch(() => {});
       const registered = await Promise.all([
+        listen<EchDesktopSnapshot>("lindo://ech-updated", (ev) => {
+          if (!cancelled && ev.payload) {
+            setEchStatus(ev.payload);
+          }
+        }),
         listen("lindo://state-updated", () => {
           syncFromRustStateRef.current().then((b) => {
             if (b.isAuthorized) {
@@ -804,6 +1065,9 @@ export const App: React.FC = () => {
         listen("lindo://verified", () => {
           setCfAttentionNeeded(false);
           setCfAttentionDismissed(false);
+          resumeTimingsAfterVerify();
+          void drainPendingMarkReads();
+          void flushTopicTimingsNow();
           const hadReaderErr = Boolean(readerErrorRef.current);
           const curSummary = activeSummaryRef.current;
           const curFloor = targetFloorRef.current;
@@ -862,6 +1126,23 @@ export const App: React.FC = () => {
           setCfAttentionNeeded(needed);
           if (needed) {
             setCfAttentionDismissed(false);
+            pauseAndDropPendingTimings();
+          } else {
+            resumeTimingsAfterVerify();
+          }
+        }),
+        listen<{ visible?: boolean; round?: number; stage?: string }>("lindo://verify-pill", (ev) => {
+          const p = ev.payload;
+          if (p?.visible) {
+            pauseAndDropPendingTimings();
+            setVerifyPill({
+              visible: true,
+              round: Number(p.round || 0),
+              stage: String(p.stage || "checking"),
+            });
+          } else {
+            resumeTimingsAfterVerify();
+            setVerifyPill(null);
           }
         }),
         listen<string>("lindo://auth-notice", (ev) => {
@@ -1027,6 +1308,43 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  // Disciplined Discourse MessageBus live subscription for near-real-time notifications & active topic updates
+  useEffect(() => {
+    if (!inMainApp || !isAuthorized || !currentUser?.userId) return;
+    const unsubNotif = discourseMessageBus.subscribe(
+      `/notification/${currentUser.userId}`,
+      (data) => {
+        invalidateNotificationShortCache();
+        const nextUnread = Number(data?.unread_notifications ?? data?.all_unread_notifications_count ?? -1);
+        if (Number.isFinite(nextUnread) && nextUnread >= 0) {
+          setUnreadCount(nextUnread);
+          setUnreadBadgeInRust(nextUnread).catch(() => {});
+        }
+      }
+    );
+    return () => {
+      unsubNotif();
+    };
+  }, [inMainApp, isAuthorized, currentUser?.userId]);
+
+  useEffect(() => {
+    if (!inMainApp || !activeSummary?.id || currentTab !== "HOME") return;
+    const tid = activeSummary.id;
+    const unsubTopic = discourseMessageBus.subscribe(`/topic/${tid}`, (data) => {
+      if (data?.type === "created" && activeSummaryRef.current?.id === tid) {
+        void openTopic(activeSummaryRef.current, {
+          inPlace: true,
+          forceRefresh: true,
+          onlyOp: onlyOpFilter,
+          summary: summaryFilter,
+        });
+      }
+    });
+    return () => {
+      unsubTopic();
+    };
+  }, [inMainApp, activeSummary?.id, currentTab, openTopic, onlyOpFilter, summaryFilter]);
+
   // Stable 75s background poll for `N 条新动态` capsule & unread notifications (never reset by pagination or topic clicks!)
   useEffect(() => {
     if (!inMainApp) return;
@@ -1097,11 +1415,22 @@ export const App: React.FC = () => {
 
   // Global keyboard shortcuts
   useEffect(() => {
+    ensureGlobalImeTracking();
     const onKeyDown = (e: KeyboardEvent) => {
+      if (isImeComposingEvent(e)) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key === "\\" && inMainApp && isWideLayout && (currentTab === "HOME" || currentTab === "MESSAGES")) {
         e.preventDefault();
         toggleFeedCollapse();
+      } else if (mod && e.key === "[" && inMainApp && (currentTab === "HOME" || currentTab === "MESSAGES")) {
+        const hasHistory =
+          isWideLayout && currentTab === "MESSAGES"
+            ? msgReaderHistory.length > 0
+            : homeReaderHistory.length > 0;
+        if (hasHistory) {
+          e.preventDefault();
+          goBackInReaderHistory();
+        }
       } else if (mod && e.key.toLowerCase() === "k" && inMainApp) {
         e.preventDefault();
         setShowGlobalSearch((v) => !v);
@@ -1126,8 +1455,9 @@ export const App: React.FC = () => {
           openMessageTopic(msgSummary, { floor: msgTargetFloor, forceRefresh: true });
         }
       } else if (e.key === "Escape") {
-        if (lightboxSrc) setLightboxSrc(null);
+        if (lightboxState) setLightboxState(null);
         else if (inspectedBadge) setInspectedBadge(null);
+        else if (showSiteBadgesModal) setShowSiteBadgesModal(false);
         else if (inspectedUsername) setInspectedUsername(null);
         else if (showUpdateModal && !installingUpdate) setShowUpdateModal(false);
         else if (showGlobalSearch) setShowGlobalSearch(false);
@@ -1150,7 +1480,11 @@ export const App: React.FC = () => {
     msgSummary,
     openMessageTopic,
     msgTargetFloor,
-    lightboxSrc,
+    homeReaderHistory.length,
+    msgReaderHistory.length,
+    goBackInReaderHistory,
+    lightboxState,
+    showSiteBadgesModal,
     inspectedBadge,
     inspectedUsername,
     showUpdateModal,
@@ -1377,6 +1711,14 @@ export const App: React.FC = () => {
   }, [preferences, isDark, updatePreferences]);
 
   const handleFloorSeen = useCallback((tid: number, floor: number) => {
+    const cleared = recordConfirmedTopicFloorForNotifications(tid, floor);
+    if (cleared > 0) {
+      setUnreadCount((prev) => {
+        const next = Math.max(0, prev - cleared);
+        setUnreadBadgeInRust(next).catch(() => {});
+        return next;
+      });
+    }
     setReadFloors((prev) => {
       const old = prev[String(tid)] ?? 0;
       if (floor <= old) return prev;
@@ -1440,12 +1782,23 @@ export const App: React.FC = () => {
   // 120fps DOM-direct resizable split divider drag (ZERO React re-renders during mousemove!)
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const leftPaneRef = useRef<HTMLDivElement | null>(null);
+  const splitHandlePillRef = useRef<HTMLDivElement | null>(null);
+  const updateSplitHandleY = (clientY: number) => {
+    const container = splitContainerRef.current;
+    const pill = splitHandlePillRef.current;
+    if (!container || !pill) return;
+    const rect = container.getBoundingClientRect();
+    if (rect.height <= 0) return;
+    const clampedY = Math.max(72, Math.min(rect.height - 72, clientY - rect.top));
+    pill.style.top = `${Math.round(clampedY)}px`;
+  };
   const startSplitDrag = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
     const container = splitContainerRef.current;
     const leftEl = leftPaneRef.current;
     if (!container || !leftEl) return;
+    updateSplitHandleY(e.clientY);
     const startX = e.clientX;
     const rect = container.getBoundingClientRect();
     let latestFraction = preferences.splitFraction;
@@ -1457,11 +1810,11 @@ export const App: React.FC = () => {
         onUp();
         return;
       }
+      updateSplitHandleY(ev.clientY);
       if (!engaged) {
         if (Math.abs(ev.clientX - startX) < 3) return;
         engaged = true;
         setIsDraggingSplit(true);
-        document.body.style.cursor = "col-resize";
       }
       const raw = (ev.clientX - rect.left) / Math.max(1, rect.width);
       latestFraction = Math.max(0.28, Math.min(0.62, raw));
@@ -1479,7 +1832,6 @@ export const App: React.FC = () => {
       window.removeEventListener("mouseup", onUp);
       if (rafId !== 0) cancelAnimationFrame(rafId);
       if (engaged) {
-        document.body.style.cursor = "";
         setIsDraggingSplit(false);
         updatePreferences({ ...preferences, splitFraction: latestFraction });
       }
@@ -1522,6 +1874,16 @@ export const App: React.FC = () => {
     else setActiveDetail(updater);
   };
 
+  const updateActiveReaderDetail = (
+    updater: (prev: TopicDetailModel) => TopicDetailModel
+  ) => {
+    if (currentTab === "MESSAGES") {
+      setMsgDetail((prev) => (prev ? updater(prev) : prev));
+    } else {
+      setActiveDetail((prev) => (prev ? updater(prev) : prev));
+    }
+  };
+
   const removePostFromActiveReader = (postId: number) => {
     const updater = (prev: TopicDetailModel | null) => {
       if (!prev) return prev;
@@ -1535,31 +1897,14 @@ export const App: React.FC = () => {
     else setActiveDetail(updater);
   };
 
-  const canDockInRightColumn = Boolean(
-    composerReq &&
-      isWideLayout &&
-      (currentTab === "HOME" || currentTab === "MESSAGES") &&
-      activeRightSummary &&
-      composerReq.topicId === activeRightSummary.id &&
-      (composerReq.action === "REPLY" ||
-        (composerReq.action === "EDIT" && (composerReq.postNumber ?? 2) > 1))
-  );
-  const isDrawerComposer = canDockInRightColumn && !composerForceModal;
-
-  const renderComposerInstance = (
-    mode: "drawer" | "modal",
-    allowToggle: boolean
-  ): React.ReactNode => {
+  const renderComposerInstance = (): React.ReactNode => {
     if (!composerReq) return null;
     return (
       <ComposerModal
         key={`${composerReq.action}_${composerReq.topicId || 0}_${composerReq.postId || 0}`}
         request={composerReq}
         categories={categories}
-        presentation={mode}
-        onTogglePresentation={
-          allowToggle ? () => setComposerForceModal((v) => !v) : undefined
-        }
+        presentation="modal"
         appendQuote={composerAppendQuote}
         exitGuardRef={composerExitGuardRef}
         savedDraft={
@@ -1573,14 +1918,12 @@ export const App: React.FC = () => {
         }
         onClose={() => {
           setComposerReq(null);
-          setComposerForceModal(false);
           setComposerAppendQuote(null);
           syncFromRustState();
         }}
         onPublished={({ topicId, post, pendingReview }) => {
           const act = composerReq.action;
           setComposerReq(null);
-          setComposerForceModal(false);
           setComposerAppendQuote(null);
           syncFromRustState();
           if (pendingReview) {
@@ -1679,13 +2022,6 @@ export const App: React.FC = () => {
                 if (feedCollapsed) setFeedCollapsed(false);
                 return;
               }
-              if (isDrawerComposer && composerExitGuardRef.current) {
-                composerExitGuardRef.current(() => {
-                  setCurrentTab(tab);
-                  setNarrowShowingReader(false);
-                });
-                return;
-              }
               setCurrentTab(tab);
               setNarrowShowingReader(false);
             }}
@@ -1735,6 +2071,8 @@ export const App: React.FC = () => {
                 onOpenPortalUrl={(url, requiresAuth, gTitle, gSub) => {
                   if (requiresAuth && !isAuthorized) {
                     setGuestPrompt({ title: gTitle, subtitle: gSub });
+                  } else if (/^https?:\/\/linux\.do\/badges\/?$/i.test(url.trim())) {
+                    setShowSiteBadgesModal(true);
                   } else if (/^https?:\/\/connect\.linux\.do\/?$/i.test(url.trim()) && currentUser) {
                     setShowConnectModal(true);
                   } else if (url.includes("linux.do")) {
@@ -1787,6 +2125,10 @@ export const App: React.FC = () => {
                   setShowUpdateModal(true);
                 }}
                 onOpenMessages={() => setCurrentTab("MESSAGES")}
+                echStatus={echStatus}
+                onRefreshEchStatus={() => {
+                  getEchStatus().then(setEchStatus).catch(() => {});
+                }}
               />
             ) : isWideLayout ? (
               <>
@@ -1838,6 +2180,7 @@ export const App: React.FC = () => {
                       initialComposeRecipient={pendingPmRecipient}
                       onConsumeInitialRecipient={() => setPendingPmRecipient(null)}
                       onOpenNotificationTopic={(tid, title, postNum) => {
+                        setMsgReaderHistory([]);
                         openMessageTopicById(tid, title, postNum, true);
                       }}
                       onUnreadCleared={() => {
@@ -1845,6 +2188,7 @@ export const App: React.FC = () => {
                         setUnreadBadgeInRust(0).catch(() => {});
                       }}
                       onDecrementUnread={handleDecrementUnread}
+                      onSyncUnreadCount={handleSyncUnreadCount}
                       onInspectUser={(uname) => setInspectedUsername(uname)}
                       onInspectBadge={(b) => setInspectedBadge(b)}
                       onOpenAuth={() => {
@@ -1910,7 +2254,10 @@ export const App: React.FC = () => {
                         setSelectedCategoryId(catId);
                       }}
                       onSelectTag={setSelectedTag}
-                      onSelectTopic={(t, resumeFloor) => openTopic(t, { floor: resumeFloor ?? null })}
+                      onSelectTopic={(t, resumeFloor) => {
+                        setHomeReaderHistory([]);
+                        openTopic(t, { floor: resumeFloor ?? null });
+                      }}
                       onRefresh={() => {
                         markManualRetryIntent();
                         loadFeed();
@@ -1936,24 +2283,72 @@ export const App: React.FC = () => {
                       onTriggerVerify={handleTriggerVerify}
                     />
                   )}
+                  </div>
+                </div>
 
-                  {/* 分栏可拖拽分隔手柄（双击恢复默认比例） */}
-                  {!feedCollapsed && (
+                {/* 分栏可拖拽分隔线与悬浮拖动按钮（跨缝 12px 热区、鼠标悬停显示并跟随 Y 轴、双击恢复默认比例） */}
+                {!feedCollapsed && (
+                  <div className="relative z-30 h-full w-0 shrink-0 select-none">
                     <div
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="左右拖动调整栏宽，双击恢复默认比例"
+                      title="左右拖动调整栏宽 · 双击恢复默认"
+                      onMouseEnter={(e) => updateSplitHandleY(e.clientY)}
+                      onMouseMove={(e) => updateSplitHandleY(e.clientY)}
                       onMouseDown={startSplitDrag}
                       onDoubleClick={() =>
                         updatePreferences({ ...preferences, splitFraction: 0.42 })
                       }
-                      className="group absolute top-0 right-0 z-30 h-full w-[5px] cursor-col-resize"
+                      className="group absolute inset-y-0 -left-[6px] w-[12px] cursor-pointer"
                     >
                       <div
-                        className="ml-auto h-full w-[1px] opacity-0 transition-opacity group-hover:opacity-100"
+                        className={`pointer-events-none mx-auto h-full transition-all duration-150 ${
+                          isDraggingSplit
+                            ? "w-[2px] opacity-100"
+                            : "w-[1.5px] opacity-0 group-hover:opacity-90"
+                        }`}
                         style={{ backgroundColor: "var(--brand-gold)" }}
                       />
+                      <div
+                        ref={splitHandlePillRef}
+                        className={`absolute left-1/2 -translate-x-1/2 -translate-y-1/2 flex h-[38px] w-[18px] items-center justify-center rounded-full shadow-md transition-[opacity,transform,border-color,background-color] duration-150 ${
+                          isDraggingSplit
+                            ? "pointer-events-auto scale-100 opacity-100"
+                            : "pointer-events-none scale-90 opacity-0 group-hover:pointer-events-auto group-hover:scale-100 group-hover:opacity-100"
+                        }`}
+                        style={{
+                          top: "50%",
+                          backgroundColor: "var(--card-surface)",
+                          border: isDraggingSplit
+                            ? "1px solid var(--brand-gold)"
+                            : "1px solid color-mix(in srgb, var(--brand-gold) 45%, var(--hairline))",
+                          color: isDraggingSplit ? "var(--brand-gold)" : "var(--ink-secondary)",
+                          boxShadow: isDraggingSplit
+                            ? "0 0 0 2px color-mix(in srgb, var(--brand-gold) 22%, transparent), 0 4px 12px rgba(0, 0, 0, 0.28)"
+                            : "0 2px 8px rgba(0, 0, 0, 0.22)",
+                        }}
+                      >
+                        <svg width="12" height="16" viewBox="0 0 12 16" fill="none" aria-hidden="true">
+                          <path
+                            d="M4.2 5.2L1.6 8L4.2 10.8M7.8 5.2L10.4 8L7.8 10.8"
+                            stroke="currentColor"
+                            strokeWidth="1.45"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                          <path
+                            d="M6 4.2V11.8"
+                            stroke="currentColor"
+                            strokeWidth="1.35"
+                            strokeLinecap="round"
+                            opacity="0.65"
+                          />
+                        </svg>
+                      </div>
                     </div>
-                  )}
                   </div>
-                </div>
+                )}
 
                 {/* 宽屏右栏：上方可滚动阅读器 + 下方可拖拽半屏回复抽屉（上下同步联动、零遮挡） */}
                 <div className="relative flex flex-1 min-w-0 h-full flex-col">
@@ -1962,11 +2357,20 @@ export const App: React.FC = () => {
                       summary={activeRightSummary}
                       detail={activeRightDetail}
                       isLoading={activeRightLoading}
+                      isFilterSwitching={
+                        currentTab === "MESSAGES" ? msgFilterLoading : readerFilterLoading
+                      }
+                      filterSettledNonce={
+                        currentTab === "MESSAGES" ? msgFilterSettledNonce : filterSettledNonce
+                      }
                       errorMessage={activeRightError}
                       targetFloor={activeRightFloor}
                       highlightTargetFloor={activeRightFloorHighlight}
                       targetJumpNonce={activeRightNonce}
                       onlyOpFilter={activeRightOnlyOp}
+                      summaryFilter={
+                        currentTab === "MESSAGES" ? msgSummaryFilter : summaryFilter
+                      }
                       isAuthorized={isAuthorized}
                       currentUser={currentUser}
                       confirmedReadFloor={Math.max(
@@ -1974,7 +2378,17 @@ export const App: React.FC = () => {
                         activeRightSummary ? readFloors[String(activeRightSummary.id)] ?? 0 : 0
                       )}
                       showBackButton={false}
-                      hideQuickReplyBar={isDrawerComposer}
+                      canGoBackHistory={
+                        currentTab === "MESSAGES"
+                          ? msgReaderHistory.length > 0
+                          : homeReaderHistory.length > 0
+                      }
+                      previousTopicTitle={
+                        currentTab === "MESSAGES"
+                          ? msgReaderHistory[msgReaderHistory.length - 1]?.summary.title ?? null
+                          : homeReaderHistory[homeReaderHistory.length - 1]?.summary.title ?? null
+                      }
+                      onGoBackHistory={goBackInReaderHistory}
                       emptyPlaceholderText={
                         currentTab === "MESSAGES"
                           ? "选择左侧消息开始阅读"
@@ -1988,6 +2402,7 @@ export const App: React.FC = () => {
                           return openMessageTopic(msgSummary, {
                             floor: opts?.currentFloor ?? msgTargetFloor,
                             onlyOp: msgOnlyOp,
+                            summary: msgSummaryFilter,
                             forceRefresh: true,
                             inPlace: useInPlace,
                           });
@@ -1995,6 +2410,7 @@ export const App: React.FC = () => {
                           return openTopic(activeSummary, {
                             floor: opts?.currentFloor ?? targetFloor,
                             onlyOp: onlyOpFilter,
+                            summary: summaryFilter,
                             forceRefresh: true,
                             inPlace: useInPlace,
                           });
@@ -2004,33 +2420,49 @@ export const App: React.FC = () => {
                         if (currentTab === "MESSAGES" && msgSummary) {
                           openMessageTopic(msgSummary, {
                             onlyOp: !msgOnlyOp,
-                            forceRefresh: true,
+                            summary: false,
+                            filterSwitch: true,
                           });
                         } else if (activeSummary) {
                           openTopic(activeSummary, {
                             onlyOp: !onlyOpFilter,
-                            forceRefresh: true,
+                            summary: false,
+                            filterSwitch: true,
+                          });
+                        }
+                      }}
+                      onToggleSummaryFilter={() => {
+                        if (currentTab === "MESSAGES" && msgSummary) {
+                          openMessageTopic(msgSummary, {
+                            onlyOp: false,
+                            summary: !msgSummaryFilter,
+                            filterSwitch: true,
+                          });
+                        } else if (activeSummary) {
+                          openTopic(activeSummary, {
+                            onlyOp: false,
+                            summary: !summaryFilter,
+                            filterSwitch: true,
                           });
                         }
                       }}
                       onAppendPosts={appendPostsToActiveReader}
+                      onUpdateDetail={updateActiveReaderDetail}
                       onRemovePost={removePostFromActiveReader}
                       onOpenComposer={(req) => launchOrAppendComposer(req)}
                       onInspectUser={(uname) => setInspectedUsername(uname)}
                       onInspectBadge={(b) => setInspectedBadge(b)}
-                      onOpenImageLightbox={(src) => setLightboxSrc(src)}
-                      onNavigateTopicLink={(tid, floor) =>
-                        currentTab === "MESSAGES"
-                          ? openMessageTopicById(tid, `话题 #${tid}`, floor, false)
-                          : openTopicById(tid, `话题 #${tid}`, floor, false)
+                      onOpenImageLightbox={(src, gallery) =>
+                        setLightboxState({
+                          src,
+                          images: gallery?.images,
+                          index: gallery?.index,
+                        })
                       }
-                      onOpenInAppUrl={(url) => {
-                        if (/^https?:\/\/connect\.linux\.do\/?$/i.test(url.trim()) && currentUser) {
-                          setShowConnectModal(true);
-                        } else {
-                          openInAppForumPanel(url, isDark).catch(() => openUrl(url));
-                        }
-                      }}
+                      onNavigateTopicLink={navigateTopicLinkInReader}
+                      onSelectCategory={handleSelectCategoryFromReader}
+                      onSelectTag={handleSelectTagFromReader}
+                      onOpenInAppUrl={handleOpenInAppUrl}
                       onPmArchiveChanged={() => setPmRefreshNonce((n) => n + 1)}
                       onRequestGuestLogin={(title, subtitle) => setGuestPrompt({ title, subtitle })}
                       onTriggerVerify={handleTriggerVerify}
@@ -2039,8 +2471,6 @@ export const App: React.FC = () => {
                       onFloorSeen={handleFloorSeen}
                     />
                   </div>
-                  {canDockInRightColumn &&
-                    renderComposerInstance(isDrawerComposer ? "drawer" : "modal", true)}
                 </div>
               </>
             ) : currentTab === "MESSAGES" ? (
@@ -2060,6 +2490,7 @@ export const App: React.FC = () => {
                   setUnreadBadgeInRust(0).catch(() => {});
                 }}
                 onDecrementUnread={handleDecrementUnread}
+                onSyncUnreadCount={handleSyncUnreadCount}
                 onInspectUser={(uname) => setInspectedUsername(uname)}
                 onInspectBadge={(b) => setInspectedBadge(b)}
                 onOpenAuth={() => setShowAuthModal(true)}
@@ -2075,11 +2506,14 @@ export const App: React.FC = () => {
                 summary={activeSummary}
                 detail={activeDetail}
                 isLoading={readerLoading}
+                isFilterSwitching={readerFilterLoading}
+                filterSettledNonce={filterSettledNonce}
                 errorMessage={readerError}
                 targetFloor={targetFloor}
                 highlightTargetFloor={targetFloorHighlight}
                 targetJumpNonce={targetJumpNonce}
                 onlyOpFilter={onlyOpFilter}
+                summaryFilter={summaryFilter}
                 isAuthorized={isAuthorized}
                 currentUser={currentUser}
                 confirmedReadFloor={Math.max(
@@ -2087,12 +2521,18 @@ export const App: React.FC = () => {
                   activeSummary ? readFloors[String(activeSummary.id)] ?? 0 : 0
                 )}
                 showBackButton={true}
+                canGoBackHistory={homeReaderHistory.length > 0}
+                previousTopicTitle={
+                  homeReaderHistory[homeReaderHistory.length - 1]?.summary.title ?? null
+                }
+                onGoBackHistory={goBackInReaderHistory}
                 onBack={() => setNarrowShowingReader(false)}
                 onRefresh={(opts) => {
                   markManualRetryIntent();
                   return openTopic(activeSummary, {
                     floor: opts?.currentFloor ?? targetFloor,
                     onlyOp: onlyOpFilter,
+                    summary: summaryFilter,
                     forceRefresh: true,
                     inPlace: opts?.inPlace ?? true,
                   });
@@ -2100,7 +2540,15 @@ export const App: React.FC = () => {
                 onToggleOnlyOp={() =>
                   openTopic(activeSummary, {
                     onlyOp: !onlyOpFilter,
-                    forceRefresh: true,
+                    summary: false,
+                    filterSwitch: true,
+                  })
+                }
+                onToggleSummaryFilter={() =>
+                  openTopic(activeSummary, {
+                    onlyOp: false,
+                    summary: !summaryFilter,
+                    filterSwitch: true,
                   })
                 }
                 onAppendPosts={(incoming, position) => {
@@ -2119,6 +2567,9 @@ export const App: React.FC = () => {
                     };
                   });
                 }}
+                onUpdateDetail={(updater) => {
+                  setActiveDetail((prev) => (prev ? updater(prev) : prev));
+                }}
                 onRemovePost={(postId) => {
                   setActiveDetail((prev) =>
                     prev
@@ -2133,17 +2584,17 @@ export const App: React.FC = () => {
                 onOpenComposer={(req) => launchOrAppendComposer(req)}
                 onInspectUser={(uname) => setInspectedUsername(uname)}
                 onInspectBadge={(b) => setInspectedBadge(b)}
-                onOpenImageLightbox={(src) => setLightboxSrc(src)}
-                onNavigateTopicLink={(tid, floor) =>
-                  openTopicById(tid, `话题 #${tid}`, floor, false)
+                onOpenImageLightbox={(src, gallery) =>
+                  setLightboxState({
+                    src,
+                    images: gallery?.images,
+                    index: gallery?.index,
+                  })
                 }
-                onOpenInAppUrl={(url) => {
-                  if (/^https?:\/\/connect\.linux\.do\/?$/i.test(url.trim()) && currentUser) {
-                    setShowConnectModal(true);
-                  } else {
-                    openInAppForumPanel(url, isDark).catch(() => openUrl(url));
-                  }
-                }}
+                onNavigateTopicLink={navigateTopicLinkInReader}
+                onSelectCategory={handleSelectCategoryFromReader}
+                onSelectTag={handleSelectTagFromReader}
+                onOpenInAppUrl={handleOpenInAppUrl}
                 onPmArchiveChanged={() => setPmRefreshNonce((n) => n + 1)}
                 onRequestGuestLogin={(title, subtitle) => setGuestPrompt({ title, subtitle })}
                 onTriggerVerify={handleTriggerVerify}
@@ -2218,7 +2669,7 @@ export const App: React.FC = () => {
           className="fixed bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2.5 rounded-full pl-4 pr-2 py-1.5 shadow-2xl"
           style={{
             backgroundColor: isDark ? "#1B202A" : "var(--card-surface)",
-            border: "0.5px solid color-mix(in srgb, var(--brand-gold) 38%, transparent)",
+            border: "0.5px solid var(--hairline)",
           }}
         >
           <span className="text-[12.8px] font-medium" style={{ color: "var(--ink-primary)" }}>
@@ -2325,15 +2776,21 @@ export const App: React.FC = () => {
       {/* 全局搜索弹窗 */}
       {showGlobalSearch && (
         <GlobalSearchModal
+          categories={categories}
           onSelectHit={(tid, title, floor) => {
             openTopicById(tid, title, floor, false);
+          }}
+          onInspectUser={(uname) => setInspectedUsername(uname)}
+          onSelectTag={(tg) => {
+            setSelectedTag(tg);
+            setCurrentTab("HOME");
           }}
           onClose={() => setShowGlobalSearch(false)}
         />
       )}
 
-      {/* 创作工作台（新话题 / 编辑首楼 / 窄屏居中圆角弹窗） */}
-      {composerReq && !canDockInRightColumn && renderComposerInstance("modal", false)}
+      {/* 创作工作台（发帖 / 回复 / 编辑统一居中圆角弹窗） */}
+      {composerReq && renderComposerInstance()}
 
       {/* 公开用户名片 */}
       {inspectedUsername && (
@@ -2348,6 +2805,14 @@ export const App: React.FC = () => {
           onOpenTopic={(tid, title, floor) => openTopicById(tid, title, floor, false)}
           onInspectBadge={(b) => setInspectedBadge(b)}
           onClose={() => setInspectedUsername(null)}
+        />
+      )}
+
+      {/* 原生全站徽章墙（发现页直开，不再跳 WebView） */}
+      {showSiteBadgesModal && (
+        <SiteBadgesModal
+          onInspectBadge={(b) => setInspectedBadge(b)}
+          onClose={() => setShowSiteBadgesModal(false)}
         />
       )}
 
@@ -2383,9 +2848,14 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* 大图灯箱 */}
-      {lightboxSrc && (
-        <ImageLightboxModal src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      {/* 增强型多图大图灯箱 */}
+      {lightboxState && (
+        <ImageLightboxModal
+          src={lightboxState.src}
+          images={lightboxState.images}
+          initialIndex={lightboxState.index ?? 0}
+          onClose={() => setLightboxState(null)}
+        />
       )}
 
       {/* 授权兑换或切换账号遮罩 */}
@@ -2399,6 +2869,39 @@ export const App: React.FC = () => {
             {switchingBusy ? "切换中" : "登录中"}
           </span>
         </div>
+      )}
+
+      {/* 4 档渐进式安全校验轻胶囊（后台校验超过 2 秒未完时静默浮现，点击可随时展开，通过自动淡出） */}
+      {verifyPill?.visible && !authCompleting && !switchingBusy && (
+        <button
+          type="button"
+          onClick={() => {
+            setVerifyPill(null);
+            handleTriggerVerify();
+          }}
+          title="点击展开安全确认面板"
+          className="lindo-interactive group fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-full px-3.5 py-1.5 shadow-lg transition-all duration-200 cursor-pointer"
+          style={{
+            backgroundColor: "color-mix(in srgb, var(--card-surface) 92%, transparent)",
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+            border: "0.5px solid var(--hairline)",
+            color: "var(--ink-primary)",
+          }}
+        >
+          <span
+            className="h-2 w-2 rounded-full animate-pulse shrink-0"
+            style={{ backgroundColor: "var(--brand-gold)" }}
+          />
+          <span className="text-[12px] font-medium" style={{ color: "var(--ink-primary)" }}>
+            安全校验中…
+          </span>
+          <LinDoIcons.ChevronRight
+            size={12.5}
+            className="opacity-65 group-hover:opacity-100 transition-opacity"
+            style={{ color: "var(--ink-tertiary)" }}
+          />
+        </button>
       )}
 
       {/* 全局通知 Toast */}

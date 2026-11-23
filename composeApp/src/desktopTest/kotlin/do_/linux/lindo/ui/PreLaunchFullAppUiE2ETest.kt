@@ -471,8 +471,8 @@ class PreLaunchFullAppUiE2ETest {
         // Scroll Topic Reader LazyColumn back to header item 0 so AI Summary ("总结") is mounted
         onAllNodes(hasScrollToIndexAction()).onLast().edtScrollToIndex(0)
         // AI Summary
-        waitForText("总结")
-        onNodeWithText("总结").edtScrollClick()
+        waitForContentDescription("总结")
+        onNodeWithContentDescription("总结").edtScrollClick()
         waitUntil(timeoutMillis = 5_000L) { backend.aiSummaryRequestCount.get() >= 1 }
         waitForText("这是预发版全功能巡检生成的 AI 智能总结", substring = true)
 
@@ -530,8 +530,15 @@ class PreLaunchFullAppUiE2ETest {
 
         // Messages -> Notifications -> Mark all read -> Private Messages tab
         onNodeWithText("消息").edtClick()
-        waitForText("欢迎体验 Lindo v0.2.31 桌面预发版", substring = true)
+        waitForText("neo")
+        waitForText("Lindo 预发版全功能自动化巡检主贴")
         waitForText("全部标为已读")
+        waitUntil(timeoutMillis = 5_000L) {
+            runCatching {
+                onEdt { onNodeWithText("全部标为已读").assertIsEnabled() }
+                true
+            }.getOrDefault(false)
+        }
         onNodeWithText("全部标为已读").edtClick()
         waitForText("要将通知全部标为已读吗？")
         onNodeWithText("标为已读").edtClick()
@@ -660,13 +667,13 @@ class PreLaunchFullAppUiE2ETest {
 
         savePreviewSnapshotIfConfigured("e2e_4_profile_v0_2_31.png")
 
-        // Scroll back to Account & Session Management ("切换账号") -> Logout
+        // Scroll back to Account & Session Management ("账号管理") -> Logout
         onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(1)
         waitForText("账号管理")
-        onNodeWithText("切换账号").edtScrollClick()
+        onNodeWithText("账号管理").edtScrollClick()
 
-        waitForText("Linux.do 账号会话")
-        onAllNodesWithText("退出当前账号").onLast().edtClick()
+        waitForText("重新登录")
+        onAllNodesWithText("退出登录").onLast().edtScrollClick()
         waitForText("要退出当前账号吗？")
         onNodeWithText("退出").edtClick()
 
@@ -770,7 +777,7 @@ class PreLaunchFullAppUiE2ETest {
 
         // Ensure top inline failure banner is scrolled into view on LazyColumn
         onAllNodes(hasScrollToIndexAction()).onFirst().edtScrollToIndex(0)
-        waitForText("站点验证", substring = true)
+        waitForText("安全确认", substring = true)
         waitForText("去验证")
 
         val verificationCalls = AtomicInteger(0)
@@ -901,7 +908,7 @@ class PreLaunchFullAppUiE2ETest {
         savePreviewSnapshotIfConfigured(snapshot.replace(".png", "_about.png"))
         onNodeWithText("项目主页").edtClick()
         waitUntil { openedExternalUrls.contains("https://github.com/lucaslus/LinDo") }
-        onNodeWithText("问题反馈").edtClick()
+        onNodeWithText("GitHub Issues").edtClick()
         waitUntil { openedExternalUrls.contains("https://github.com/lucaslus/LinDo/issues") }
         onNodeWithText("开源许可").edtClick()
         waitForText("Compose Multiplatform")
@@ -947,7 +954,11 @@ class PreLaunchFullAppUiE2ETest {
         val siteVerificationBlocked = AtomicBoolean(false)
 
         private val notificationsMarkedRead = AtomicBoolean(false)
+        private val singleMarkedReadNotifIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
         private val bookmarkedTopicIds = Collections.synchronizedSet(mutableSetOf<Int>())
+
+        private fun currentUnreadNotificationCount(): Int =
+            if (notificationsMarkedRead.get()) 0 else listOf(5001, 5002).count { it !in singleMarkedReadNotifIds }
         private val likedPostIds = Collections.synchronizedSet(mutableSetOf<Int>())
         private val nextPostId = AtomicInteger(3000)
         private val nextTopicId = AtomicInteger(201)
@@ -1029,7 +1040,7 @@ class PreLaunchFullAppUiE2ETest {
                                 put("avatar_template", "/letter_avatar_proxy/v4/letter/l/f05b48/{size}.png")
                                 put("trust_level", 3)
                                 put("title", "高级佬友")
-                                put("unread_notifications", if (notificationsMarkedRead.get()) 0 else 1)
+                                put("unread_notifications", currentUnreadNotificationCount())
                             }
                         }.toString()
                     } else {
@@ -1135,7 +1146,7 @@ class PreLaunchFullAppUiE2ETest {
                                     put("id", 5001)
                                     put("user_id", 888)
                                     put("notification_type", 2)
-                                    put("read", isRead)
+                                    put("read", isRead || 5001 in singleMarkedReadNotifIds)
                                     put("created_at", "2026-11-12T06:30:00.000Z")
                                     put("post_number", 2)
                                     put("topic_id", 101)
@@ -1150,14 +1161,38 @@ class PreLaunchFullAppUiE2ETest {
                                     }
                                 }
                             )
+                            add(
+                                buildJsonObject {
+                                    put("id", 5002)
+                                    put("user_id", 888)
+                                    put("notification_type", 5)
+                                    put("read", isRead || 5002 in singleMarkedReadNotifIds)
+                                    put("created_at", "2026-11-12T06:35:00.000Z")
+                                    put("post_number", 1)
+                                    put("topic_id", 101)
+                                    put("slug", "lindo-prelaunch-e2e")
+                                    putJsonObject("data") {
+                                        put("topic_title", "Lindo 预发版全功能自动化巡检主贴")
+                                        put("original_post_id", 1011)
+                                        put("original_post_type", 1)
+                                        put("original_username", "alice")
+                                        put("display_username", "alice")
+                                    }
+                                }
+                            )
                         }
-                        put("total_rows_notifications", 1)
+                        put("total_rows_notifications", 2)
                     }.toString()
                 }
 
                 upperMethod == "PUT" && path == "/notifications/mark-read.json" -> {
-                    markAllNotificationsReadCount.incrementAndGet()
-                    notificationsMarkedRead.set(true)
+                    val targetId = formParams?.get("id")?.toIntOrNull()
+                    if (targetId != null && targetId > 0) {
+                        singleMarkedReadNotifIds.add(targetId)
+                    } else {
+                        markAllNotificationsReadCount.incrementAndGet()
+                        notificationsMarkedRead.set(true)
+                    }
                     200 to """{"success":"OK"}"""
                 }
 
@@ -1730,7 +1765,7 @@ class PreLaunchFullAppUiE2ETest {
                     put("bio_raw", "Kotlin Multiplatform & Compose Desktop")
                     put("bio_excerpt", "Kotlin Multiplatform & Compose Desktop")
                     put("badge_count", 2)
-                    put("unread_notifications", if (notificationsMarkedRead.get()) 0 else 1)
+                    put("unread_notifications", currentUnreadNotificationCount())
                     put("created_at", "2024-05-01T00:00:00.000Z")
                     putJsonObject("user_option") {
                         put("hide_profile_and_presence", false)

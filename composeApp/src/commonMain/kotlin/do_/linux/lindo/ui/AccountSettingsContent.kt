@@ -176,7 +176,9 @@ internal fun AccountSessionContent(
     managing: Boolean = false,
     onAddAccount: () -> Unit = onLogin,
     onSelectAccount: (String) -> Unit = {},
-    onRemoveAccount: (String) -> Unit = {}
+    onRemoveAccount: (String) -> Unit = {},
+    onScanQrLogin: (() -> Unit)? = null,
+    onGenerateQrLogin: (() -> Unit)? = null
 ) {
     var removing by remember { mutableStateOf<String?>(null) }
     removing?.let { username ->
@@ -217,6 +219,11 @@ internal fun AccountSessionContent(
         } else {
             AccountDetailRow(if (user != null) "重新登录" else "使用 LINUX DO 登录", onClick = onLogin)
             AccountDetailRow("浏览器授权", onClick = onBrowserAuth)
+        }
+        if (user != null && onGenerateQrLogin != null) {
+            AccountDetailRow("扫码登录其他设备", onClick = onGenerateQrLogin)
+        } else if (user == null && onScanQrLogin != null) {
+            AccountDetailRow("扫码登录", onClick = onScanQrLogin)
         }
         if (user != null) {
             Spacer(Modifier.height(24.dp))

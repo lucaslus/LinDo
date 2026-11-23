@@ -136,16 +136,16 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
             animatedAvatar={topic.originalPoster.animatedAvatar}
             primaryGroupName={topic.originalPoster.primaryGroupName}
             flair={topic.originalPoster.flair}
-            sizePx={isCompact ? 26 : 38}
+            sizePx={isCompact ? 36 : 38}
             className={isCompact ? "shrink-0" : "mt-0.5 shrink-0"}
           />
 
           {isCompact ? (
-            /* 紧凑模式：1:1 对齐移动端，首行标题+行内未读圆点，次行官方版块矢量图标+带图标标签胶囊 + 右侧评论数与时间 */
+            /* 紧凑模式：大厂信息流主标题 15px SemiBold（消除标题小于正文的倒挂）+ 清晰 12px 元信息 */
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
                 <div
-                  className="flex min-w-0 flex-1 items-center gap-1 text-[13.5px] font-normal leading-[1.38]"
+                  className="lindo-feed-title flex min-w-0 flex-1 items-center gap-1 text-[15px] font-semibold leading-[1.4]"
                   style={{
                     color:
                       isReadDimmed && !selected
@@ -155,7 +155,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
                 >
                   {topic.closed && (
                     <LinDoIcons.Lock
-                      size={12}
+                      size={12.5}
                       className="shrink-0"
                       style={{ color: "var(--ink-tertiary)" }}
                     />
@@ -163,12 +163,12 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
                   <span className="truncate">{topic.title}</span>
                   {topic.hasAcceptedAnswer && (
                     <span title="已采纳最佳解答" className="shrink-0">
-                      <LinDoIcons.CheckCircleFilled size={13} style={{ color: "#10B981" }} />
+                      <LinDoIcons.CheckCircleFilled size={13.5} style={{ color: "#10B981" }} />
                     </span>
                   )}
                   {isUnread && (
                     <span
-                      className="ml-0.5 h-[5px] w-[5px] shrink-0 rounded-full opacity-75"
+                      className="ml-0.5 h-[5.5px] w-[5.5px] shrink-0 rounded-full opacity-75"
                       style={{ backgroundColor: "var(--brand-gold)" }}
                     />
                   )}
@@ -176,7 +176,7 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
               </div>
 
               <div
-                className="mt-1.5 flex items-center justify-between gap-2 text-[11.5px] tabular-nums leading-none"
+                className="mt-1.5 flex items-center justify-between gap-2 text-[12px] tabular-nums leading-none"
                 style={{ color: "var(--ink-tertiary)" }}
               >
                 <span className="flex min-w-0 items-center gap-1.5 overflow-hidden">
@@ -184,15 +184,15 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
                     <LinDoCategoryBadge
                       name={topic.categoryName}
                       fallbackColor={catVis.dotColor}
-                      iconSize={11.5}
-                      className="text-[11.5px]"
+                      iconSize={12}
+                      className="text-[12px]"
                     />
                   )}
                   {topic.tags.slice(0, 2).map((tg) => (
                     <LinDoTopicTagChip key={tg} tag={tg} compact />
                   ))}
                   {topic.tags.length > 2 && (
-                    <span className="shrink-0 text-[10.8px] font-medium">
+                    <span className="shrink-0 text-[11.5px] font-medium">
                       +{topic.tags.length - 2}
                     </span>
                   )}
@@ -210,10 +210,10 @@ const FeedTopicRow: React.FC<FeedTopicRowProps> = React.memo(
               </div>
             </div>
           ) : (
-            /* 宽松模式：1:1 对齐移动端四层视觉韵律（标题 -> 官方版块矢量图标 + 带图标标签胶囊 -> 关注摘要 -> 作者·时间 | 点赞·回复·浏览） */
+            /* 宽松模式：大厂信息流主标题 16px SemiBold 高于正文一层，视觉扫读层级清晰 */
             <div className="min-w-0 flex-1">
               <div
-                className="line-clamp-2 text-[15px] font-semibold leading-[1.46]"
+                className="lindo-feed-title line-clamp-2 text-[16px] font-semibold leading-[1.45]"
                 style={{
                   color:
                     isReadDimmed && !selected
@@ -518,7 +518,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
             <img
               src="/brand/lindo-mark.svg"
               alt="Lindo"
-              className="h-[26px] w-[26px] shrink-0 object-contain pointer-events-none"
+              className="h-[30px] w-[30px] shrink-0 object-contain pointer-events-none"
             />
             <div className="flex min-w-0 items-baseline gap-2">
               <span className="text-[18.5px] font-extrabold tracking-tight leading-none">
@@ -855,36 +855,34 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
         )}
       </div>
 
-      {/* 4. 主话题滚动容器（原生 120Hz WebKit 合成器滚动 + 0.5px 内缩细分隔线） */}
-      <div className="relative flex-1 min-h-0">
-        {/* 顶部液态毛玻璃「N 条新动态」悬浮胶囊 */}
-        {pendingNewCount > 0 && !isLoading && (
-          <div
-            className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center pt-2 pb-3"
+      {/* 4. 克制平铺「N 条新动态」细条（不悬浮、不加阴影、不遮挡下方置顶条与首条话题） */}
+      {pendingNewCount > 0 && !isLoading && (
+        <button
+          type="button"
+          onClick={() => {
+            scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+            onApplyPendingNew();
+          }}
+          className="lindo-interactive flex h-[28px] w-full shrink-0 items-center justify-center gap-1.5 text-[11.5px] font-medium cursor-pointer"
+          style={{
+            backgroundColor: "color-mix(in srgb, var(--subtle-surface) 58%, var(--feed-surface))",
+            borderBottom: "0.5px solid var(--hairline-soft)",
+            color: "var(--ink-secondary)",
+          }}
+        >
+          <span
+            className="h-[5px] w-[5px] shrink-0 rounded-full"
             style={{
-              background:
-                "linear-gradient(to bottom, var(--feed-surface) 0%, color-mix(in srgb, var(--feed-surface) 82%, transparent) 55%, transparent 100%)",
+              backgroundColor: "color-mix(in srgb, var(--brand-gold) 72%, var(--ink-secondary))",
             }}
-          >
-            <button
-              type="button"
-              onClick={() => {
-                scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-                onApplyPendingNew();
-              }}
-              className="pointer-events-auto flex h-[30px] items-center gap-1.5 rounded-full px-3.5 text-[12px] font-medium shadow-lg transition-transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
-              style={{
-                backgroundColor: "var(--subtle-surface)",
-                border: "0.75px solid color-mix(in srgb, var(--brand-gold) 38%, transparent)",
-                color: "var(--brand-gold)",
-              }}
-            >
-              <SmoothRefreshIcon spinning={false} size={13} />
-              <span>{pendingNewCount >= 25 ? "20+" : pendingNewCount} 条新动态</span>
-            </button>
-          </div>
-        )}
+          />
+          <span>{pendingNewCount >= 25 ? "20+" : pendingNewCount} 条新动态</span>
+          <SmoothRefreshIcon spinning={false} size={11} className="opacity-65" />
+        </button>
+      )}
 
+      {/* 5. 主话题滚动容器（原生 120Hz/144Hz WebKit 合成器滚动 + 0.5px 内缩细分隔线） */}
+      <div className="relative flex-1 min-h-0">
         <div ref={scrollRef} className="lindo-scroll h-full w-full">
           {isLoading && topics.length === 0 ? (
             /* 无缝 GPU 流光骨架屏（适配宽松双行 / 紧凑单行双模式，循环首尾 100% 无跳帧） */
@@ -894,7 +892,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                   <div className={`flex ${isCompact ? "gap-2.5 px-4 py-2.5" : "gap-3 px-4 py-3.5"}`}>
                     <div
                       className={`lindo-shimmer mt-0.5 shrink-0 rounded-full ${
-                        isCompact ? "h-[26px] w-[26px]" : "h-[38px] w-[38px]"
+                        isCompact ? "h-[36px] w-[36px]" : "h-[38px] w-[38px]"
                       }`}
                     />
                     <div className={`min-w-0 flex-1 ${isCompact ? "space-y-1.5" : "space-y-2"}`}>
@@ -993,11 +991,12 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                         <button
                           type="button"
                           onClick={() => setPinnedExpanded(true)}
-                          className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[11px] transition-opacity hover:opacity-85 cursor-pointer"
+                          title="展开全部置顶"
+                          aria-label="展开全部置顶"
+                          className="lindo-interactive flex h-6 w-6 shrink-0 items-center justify-center rounded-full cursor-pointer"
                           style={{ color: "var(--ink-tertiary)" }}
                         >
-                          <span>展开</span>
-                          <LinDoIcons.ChevronDown size={11} />
+                          <LinDoIcons.ChevronDown size={13} />
                         </button>
                       )}
                     </div>
@@ -1035,7 +1034,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                                 <span>置顶</span>
                               </span>
                               <span
-                                className="flex-1 truncate text-[12.8px]"
+                                className="flex-1 truncate text-[13.5px]"
                                 style={{
                                   color: "var(--ink-primary)",
                                   fontWeight: selected ? 600 : 500,
@@ -1044,7 +1043,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                                 {pinned.title}
                               </span>
                               <span
-                                className="shrink-0 text-[11px] tabular-nums"
+                                className="shrink-0 text-[11.5px] tabular-nums"
                                 style={{ color: "var(--ink-tertiary)" }}
                               >
                                 {formatCompactCount(pinned.replyCount)} 回复
@@ -1056,11 +1055,12 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       <button
                         type="button"
                         onClick={() => setPinnedExpanded(false)}
-                        className="lindo-interactive flex w-full items-center justify-center gap-1 py-1.5 text-[11.2px] cursor-pointer"
+                        title="收起置顶"
+                        aria-label="收起置顶"
+                        className="lindo-interactive flex w-full items-center justify-center py-1.5 cursor-pointer"
                         style={{ color: "var(--ink-tertiary)" }}
                       >
-                        <span>收起置顶</span>
-                        <LinDoIcons.ChevronUp size={11.5} />
+                        <LinDoIcons.ChevronUp size={13.5} />
                       </button>
                     </div>
                   )}

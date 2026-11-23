@@ -10,6 +10,8 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=Cocoa");
         println!("cargo:rustc-link-lib=framework=WebKit");
         println!("cargo:rustc-link-lib=framework=Security");
+        println!("cargo:rustc-link-lib=framework=Network");
+        println!("cargo:rustc-link-lib=framework=CFNetwork");
     }
     tauri_build::build()
 }

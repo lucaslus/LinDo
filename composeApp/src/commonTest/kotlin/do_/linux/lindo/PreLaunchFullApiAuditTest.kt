@@ -255,6 +255,10 @@ class PreLaunchFullApiAuditTest {
             assertEquals("desktop_dev", UserApiKeyAuthManager.currentUser?.username)
             assertEquals(1024, UserApiKeyAuthManager.currentUser?.userId)
             assertEquals(3, UserApiKeyAuthManager.currentUser?.trustLevel)
+            // OTP 登录瞬间仅请求 /session/current.json，避免并发拉取 /u/summary 撞 Cloudflare 突发盾
+            assertEquals(0, UserApiKeyAuthManager.fullProfileCache?.daysVisited)
+            val fullProfile = LinuxDoRepository.fetchCurrentUserProfile()
+            assertEquals(64, fullProfile?.daysVisited)
             assertEquals(64, UserApiKeyAuthManager.fullProfileCache?.daysVisited)
         }
 
@@ -415,7 +419,10 @@ class PreLaunchFullApiAuditTest {
         ) {
             runCatching { LinuxDoRepository.fetchTopics(path = "rate_hit.json", background = true) }
             assertTrue(LinuxDoRepository.isRateLimitedNow())
+            // 后台请求撞盾不再拉全局熔断；前台撞盾才会
             runCatching { LinuxDoRepository.fetchTopics(path = "cf_hit.json", background = true) }
+            assertFalse(LinuxDoRepository.isChallengeCooldownActive())
+            runCatching { LinuxDoRepository.fetchTopics(path = "cf_hit.json", background = false) }
             assertTrue(LinuxDoRepository.isChallengeCooldownActive())
         }
 

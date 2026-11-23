@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { DiagRuntimeSnapshot } from "./types";
 
-export const DESKTOP_APP_VERSION = "1.0.57";
+export const DESKTOP_APP_VERSION = "1.0.61";
 
 export type DiagCategory = "NETWORK" | "AUTH" | "ERROR" | "SYSTEM";
 export type DiagLevel = "INFO" | "WARN" | "ERROR";
@@ -192,6 +192,7 @@ export function buildDiagReport(
     headerLines.push(
       `BridgeUA     : ${snapshot.bridgeUa ? redactDiagText(snapshot.bridgeUa) : "unknown"}`,
       `BridgeState  : originReady=${snapshot.originReady}, verifying=${snapshot.verifying}, bootChallenged=${snapshot.bootstrapChallenged}, cfAttention=${snapshot.cfAttentionNotified}`,
+      ...(snapshot.echState?.supported ? [`ECH State    : ${snapshot.echState.diagLine}`] : []),
       `CookieFlags  : _t=${snapshot.hasCookieT}, _forum_session=${snapshot.hasForumSession}, cf_clearance=${snapshot.hasCfClearance}${snapshot.cfClearanceAgeSecs != null ? ` (age=${snapshot.cfClearanceAgeSecs}s)` : ""}`,
       `VerifyPolicy : round=${snapshot.verifyRound ?? 0}, fails=${snapshot.verifyConsecutiveFailures ?? 0}, cooldownRemainMs=${snapshot.verifyCooldownRemainMs ?? 0}, ineffectiveBreaker=${Boolean(snapshot.verifyIneffectiveBreaker)}`,
       `GuardState   : rateLimitRemainMs=${snapshot.rateLimitRemainMs}, fgChallengeRemainMs=${snapshot.fgChallengeRemainMs}, bgChallengeRemainMs=${snapshot.bgChallengeRemainMs}, mediaCooldownRemainMs=${snapshot.mediaCooldownRemainMs}, pacer=${snapshot.pacerRatePerSec ?? 0}/s, gen=${snapshot.sessionGeneration ?? 1}`,

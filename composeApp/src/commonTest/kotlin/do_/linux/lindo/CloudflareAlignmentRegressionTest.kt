@@ -30,7 +30,8 @@ class CloudflareAlignmentRegressionTest {
 
     @Test
     fun cfAuthorityProtectsStickyIncumbentAndPromotesFreshClearanceAfterChallenge() {
-        CfClearanceAuthority.confirmHealthy("live_cf_v1", nowMs = 1_700_000_000_000L)
+        val nowMs = System.currentTimeMillis()
+        CfClearanceAuthority.confirmHealthy("live_cf_v1", nowMs = nowMs)
 
         // Even when CookieManager returns a stray host-only cookie after the live incumbent, sticky incumbent wins
         CookieSentinel.syncFromAuthoritativeBrowserCookieString(
@@ -58,12 +59,12 @@ class CloudflareAlignmentRegressionTest {
         assertNull(CfClearanceAuthority.challenged)
         assertEquals("fresh_cf_v2", CfClearanceAuthority.incumbent)
 
-        // Even after verified clears active challenged, historical challenged tokens remain blocked in bounded history
-        assertTrue(CfClearanceAuthority.isChallenged("live_cf_v1"))
+        // v2 Pure Incumbent Stickiness (FluxDO 2026-08 lesson): verified rotation clears `challenged`
+        // and NEVER permanently blacklists prior values, while active `noteChallenged("fresh_cf_v2")` still opens rotation!
+        assertFalse(CfClearanceAuthority.isChallenged("live_cf_v1"))
         CfClearanceAuthority.noteChallenged("fresh_cf_v2")
-        assertTrue(CfClearanceAuthority.isChallenged("live_cf_v1"))
         assertTrue(CfClearanceAuthority.isChallenged("fresh_cf_v2"))
-        assertNull(CfClearanceAuthority.selectWinner(listOf("live_cf_v1", "fresh_cf_v2")))
+        assertNull(CfClearanceAuthority.selectWinner(listOf("fresh_cf_v2")))
 
         // HTTP 429 with challenge prefix/body must classify as RateLimited, NEVER Verification
         val rateLimitErr = kotlin.test.assertFailsWith<do_.linux.lindo.core.network.ApiReadException> {

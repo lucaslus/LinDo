@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { isImeComposingEvent } from "../lib/imeGuard";
 import {
   LinDoCategoryBadge,
   LinDoIcons,
@@ -19,10 +20,15 @@ import {
   archivePrivateMessage,
   deletePostBoost,
   deletePostFloor,
+  fetchPollVoters,
+  fetchPostByNumber,
+  fetchPostLocationById,
   fetchPostReplies,
   fetchPostsByIds,
   fetchTopicAiSummary,
+  fetchTopicTailNewPosts,
   flagPost,
+  flushTopicTimingsNow,
   handleTitlebarMouseDown,
   markManualRetryIntent,
   removePollVote,
@@ -39,11 +45,28 @@ import {
   classifyExternalUrl,
   type ExternalUrlAssessment,
   extractPostReplyPreview,
-  parseInternalTopicLink,
+  parseInternalForumLink,
   prepareCookedHtml,
+  prepareCookedHtmlCached,
   rememberTrustedExternalHost,
 } from "../lib/cooked";
 import { observeCookedForumImages, useForumImageSrc } from "../lib/forumMedia";
+import { observeCookedRichContent } from "../lib/richDecorators";
+import {
+  computeFilterScrollTarget,
+  describeRepliesFilterBar,
+} from "../lib/topicTransition";
+import { mergeIncrementalTailPosts } from "../lib/topicTailRefresh";
+import {
+  BookmarkReminderModal,
+  extractPostHeadings,
+  InTopicFindBar,
+  PmParticipantsBar,
+  PostRevisionsModal,
+  ReactionUsersModal,
+  type TopicHeadingItem,
+  TopicTocPopover,
+} from "./ReaderEnhancements";
 import {
   computeBoostStats,
   formatCompactCount,
@@ -66,15 +89,21 @@ interface TopicReaderPaneProps {
   summary: TopicSummary | null;
   detail: TopicDetailModel | null;
   isLoading: boolean;
+  isFilterSwitching?: boolean;
+  filterSettledNonce?: number;
   errorMessage: string | null;
   targetFloor: number | null;
   highlightTargetFloor?: boolean;
   targetJumpNonce: number;
   onlyOpFilter: boolean;
+  summaryFilter?: boolean;
   isAuthorized: boolean;
   currentUser: UserProfile | null;
   confirmedReadFloor?: number;
   showBackButton: boolean;
+  canGoBackHistory?: boolean;
+  previousTopicTitle?: string | null;
+  onGoBackHistory?: () => void;
   feedCollapsed?: boolean;
   onToggleFeedCollapse?: () => void;
   hideQuickReplyBar?: boolean;
@@ -85,13 +114,17 @@ interface TopicReaderPaneProps {
     inPlace?: boolean;
   }) => Promise<{ addedReplies?: number; error?: string } | void> | void;
   onToggleOnlyOp: () => void;
+  onToggleSummaryFilter?: () => void;
   onAppendPosts: (posts: PostItemModel[], position: "before" | "after" | "replace") => void;
+  onUpdateDetail?: (updater: (prev: TopicDetailModel) => TopicDetailModel) => void;
   onRemovePost?: (postId: number) => void;
   onOpenComposer: (req: ComposerLaunchRequest) => void;
   onInspectUser: (username: string) => void;
   onInspectBadge?: (badge: GrantedBadge) => void;
-  onOpenImageLightbox: (src: string) => void;
-  onNavigateTopicLink: (topicId: number, postNumber?: number) => void;
+  onOpenImageLightbox: (src: string, gallery?: { images: string[]; index: number }) => void;
+  onNavigateTopicLink: (topicId: number, postNumber?: number, title?: string, fromFloor?: number) => void;
+  onSelectCategory?: (categoryId?: number, slug?: string) => void;
+  onSelectTag?: (tag: string) => void;
   onOpenInAppUrl?: (url: string) => void;
   onPmArchiveChanged?: () => void;
   onRequestGuestLogin: (title: string, subtitle: string) => void;
@@ -204,7 +237,7 @@ const ReplyThumbPreview = React.memo<{
           onOpenLightbox(url);
         }
       }}
-      className="ml-2 h-9 w-9 shrink-0 overflow-hidden rounded-lg transition-transform hover:scale-[1.04] cursor-zoom-in"
+      className="ml-2 h-9 w-9 shrink-0 overflow-hidden rounded-lg transition-transform hover:scale-[1.04] cursor-pointer"
       style={{
         backgroundColor: "var(--subtle-surface)",
         border: "0.5px solid var(--hairline)",
@@ -228,17 +261,23 @@ const ReplyThumbPreview = React.memo<{
 const MemoizedCookedBody = React.memo<{
   rawHtml: string;
   stripPolls: boolean;
+  currentTopicId?: number;
   onCookedClick: (e: React.MouseEvent<HTMLDivElement>) => void;
   className?: string;
 }>(
-  ({ rawHtml, stripPolls, onCookedClick, className = "lindo-cooked mt-3" }) => {
+  ({ rawHtml, stripPolls, currentTopicId, onCookedClick, className = "lindo-cooked mt-3" }) => {
     const bodyRef = useRef<HTMLDivElement | null>(null);
     const sanitized = useMemo(
-      () => prepareCookedHtml(rawHtml, { stripPolls }),
-      [rawHtml, stripPolls]
+      () => prepareCookedHtml(rawHtml, { stripPolls, currentTopicId }),
+      [rawHtml, stripPolls, currentTopicId]
     );
     useEffect(() => {
-      return observeCookedForumImages(bodyRef.current);
+      const cleanupImgs = observeCookedForumImages(bodyRef.current);
+      const cleanupRich = observeCookedRichContent(bodyRef.current);
+      return () => {
+        cleanupImgs();
+        cleanupRich();
+      };
     }, [sanitized]);
     return (
       <div
@@ -252,6 +291,8 @@ const MemoizedCookedBody = React.memo<{
   (prev, next) =>
     prev.rawHtml === next.rawHtml &&
     prev.stripPolls === next.stripPolls &&
+    prev.currentTopicId === next.currentTopicId &&
+    prev.onCookedClick === next.onCookedClick &&
     prev.className === next.className
 );
 
@@ -259,15 +300,21 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   summary,
   detail,
   isLoading,
+  isFilterSwitching = false,
+  filterSettledNonce = 0,
   errorMessage,
   targetFloor,
   highlightTargetFloor = false,
   targetJumpNonce,
   onlyOpFilter,
+  summaryFilter = false,
   isAuthorized,
   currentUser,
   confirmedReadFloor = 0,
   showBackButton,
+  canGoBackHistory = false,
+  previousTopicTitle = null,
+  onGoBackHistory,
   feedCollapsed = false,
   onToggleFeedCollapse,
   hideQuickReplyBar = false,
@@ -275,13 +322,17 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   onBack,
   onRefresh,
   onToggleOnlyOp,
+  onToggleSummaryFilter,
   onAppendPosts,
+  onUpdateDetail,
   onRemovePost,
   onOpenComposer,
   onInspectUser,
   onInspectBadge,
   onOpenImageLightbox,
   onNavigateTopicLink,
+  onSelectCategory,
+  onSelectTag,
   onOpenInAppUrl,
   onPmArchiveChanged,
   onRequestGuestLogin,
@@ -325,12 +376,16 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   const [floorNavOpen, setFloorNavOpen] = useState(false);
   const [floorInputVal, setFloorInputVal] = useState("1");
   const [loadingMoreBottom, setLoadingMoreBottom] = useState(false);
+  const [refreshingTail, setRefreshingTail] = useState(false);
+  const [tailFeedback, setTailFeedback] = useState<string | null>(null);
+  const tailFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [activeReactionPickerPostId, setActiveReactionPickerPostId] = useState<number | null>(null);
   const [activeFloorMorePostId, setActiveFloorMorePostId] = useState<number | null>(null);
   const pendingReactionPostsRef = useRef<Set<number>>(new Set());
   const [pendingReactionPostIds, setPendingReactionPostIds] = useState<Set<number>>(() => new Set());
   const [activeBoostComposerPostId, setActiveBoostComposerPostId] = useState<number | null>(null);
+  const [expandedLinkPostIds, setExpandedLinkPostIds] = useState<Set<number>>(() => new Set());
   const [boostEmojiOpen, setBoostEmojiOpen] = useState(false);
   const [boostDraftText, setBoostDraftText] = useState("");
   const [boostSubmitting, setBoostSubmitting] = useState(false);
@@ -500,6 +555,38 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     x: number;
     y: number;
   } | null>(null);
+  const [revisionModal, setRevisionModal] = useState<{ postId: number; postNumber: number } | null>(null);
+  const [reactionUsersModal, setReactionUsersModal] = useState<{
+    postId: number;
+    initialReactionId?: string | null;
+  } | null>(null);
+  const [bookmarkModalPost, setBookmarkModalPost] = useState<PostItemModel | null>(null);
+  const [tocOpen, setTocOpen] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
+  const [footnotePopover, setFootnotePopover] = useState<{
+    html: string;
+    targetId: string;
+  } | null>(null);
+
+  const post1Headings = useMemo<TopicHeadingItem[]>(() => {
+    const p1 = detail?.posts.find((p) => p.postNumber === 1);
+    return p1 ? extractPostHeadings(p1.cookedHtml) : [];
+  }, [detail?.posts]);
+
+  useEffect(() => {
+    const onFindKey = (e: KeyboardEvent) => {
+      if (!summary?.id) return;
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
+        // Don't hijack Find inside an open ComposerModal / input overlay
+        const activeTag = (document.activeElement?.tagName || "").toUpperCase();
+        if (activeTag === "TEXTAREA") return;
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onFindKey);
+    return () => window.removeEventListener("keydown", onFindKey);
+  }, [summary?.id]);
 
   const visibleFloorRef = useRef(1);
   const floorBadgeTextRef = useRef<HTMLSpanElement | null>(null);
@@ -512,19 +599,257 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   const knownAuthorBadgesRef = useRef(knownAuthorBadges);
   knownAuthorBadgesRef.current = knownAuthorBadges;
 
+  useEffect(() => {
+    setRefreshingTail(false);
+    setTailFeedback(null);
+    if (tailFeedbackTimerRef.current) {
+      clearTimeout(tailFeedbackTimerRef.current);
+      tailFeedbackTimerRef.current = null;
+    }
+  }, [detail?.id, onlyOpFilter, summaryFilter]);
+
+  useEffect(() => {
+    return () => {
+      if (tailFeedbackTimerRef.current) clearTimeout(tailFeedbackTimerRef.current);
+    };
+  }, []);
+
+  const showTransientTailFeedback = useCallback((msg: string) => {
+    if (tailFeedbackTimerRef.current) clearTimeout(tailFeedbackTimerRef.current);
+    setTailFeedback(msg);
+    tailFeedbackTimerRef.current = setTimeout(() => {
+      tailFeedbackTimerRef.current = null;
+      setTailFeedback(null);
+    }, 2400);
+  }, []);
+
+  const handleTailIncrementalRefresh = useCallback(async () => {
+    if (!detail || refreshingTail || loadingMoreBottom || isLoading) return;
+    setRefreshingTail(true);
+    setTailFeedback(null);
+    markManualRetryIntent();
+    try {
+      if (summaryFilter) {
+        const res = await onRefresh({
+          currentFloor: visibleFloorRef.current,
+          inPlace: true,
+        });
+        if (res && typeof res === "object" && typeof res.addedReplies === "number" && res.addedReplies > 0) {
+          showTransientTailFeedback(`已加载 ${res.addedReplies} 条新回复`);
+        } else if (res && typeof res === "object" && res.error) {
+          showTransientTailFeedback(res.error);
+        } else {
+          showTransientTailFeedback("已是最新精选回复");
+        }
+        return;
+      }
+
+      const lastPost = detail.posts[detail.posts.length - 1];
+      const anchorFloor = lastPost?.postNumber || 1;
+      const { incomingStreamIds, fetchedPosts } = await fetchTopicTailNewPosts(
+        detail.id,
+        anchorFloor,
+        detail.posts,
+        knownAuthorBadgesRef.current,
+        detail.lastReadPostNumber
+      );
+
+      let addedCount = 0;
+      if (onUpdateDetail) {
+        onUpdateDetail((prev) => {
+          const merged = mergeIncrementalTailPosts(prev, incomingStreamIds, fetchedPosts, {
+            onlyOpFilter,
+          });
+          addedCount = merged.addedCount;
+          return merged.detail;
+        });
+      } else {
+        const merged = mergeIncrementalTailPosts(detail, incomingStreamIds, fetchedPosts, {
+          onlyOpFilter,
+        });
+        addedCount = merged.addedCount;
+        if (merged.addedCount > 0) {
+          const newOnly = merged.detail.posts.filter(
+            (p) => !detail.posts.some((existing) => existing.id === p.id)
+          );
+          if (newOnly.length > 0) onAppendPosts(newOnly, "after");
+        }
+      }
+
+      if (addedCount > 0) {
+        showTransientTailFeedback(`已加载 ${addedCount} 条新回复`);
+      } else {
+        showTransientTailFeedback("已是最新回复");
+      }
+    } catch (err) {
+      if (err instanceof SiteError && err.isVerification) {
+        onTriggerVerify();
+        showTransientTailFeedback("需完成站点安全验证");
+      } else {
+        showTransientTailFeedback(err instanceof Error ? err.message : "刷新失败，请重试");
+      }
+    } finally {
+      setRefreshingTail(false);
+    }
+  }, [
+    detail,
+    isLoading,
+    loadingMoreBottom,
+    onAppendPosts,
+    onRefresh,
+    onTriggerVerify,
+    onUpdateDetail,
+    onlyOpFilter,
+    refreshingTail,
+    showTransientTailFeedback,
+    summaryFilter,
+  ]);
+
   const handleCookedClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target as HTMLElement;
+      const currentArticle = target.closest<HTMLElement>("[data-floor]");
+      const fromFloor = Number(currentArticle?.getAttribute("data-floor") || 0) || visibleFloorRef.current || undefined;
+
+      const navigateInternalTarget = (
+        href: string,
+        anchorEl?: HTMLAnchorElement | null,
+        hintTitle?: string
+      ): boolean => {
+        const parsed = parseInternalForumLink(href, anchorEl);
+        if (!parsed) return false;
+        const cleanTitle = (hintTitle || anchorEl?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 120);
+        if (parsed.kind === "topic") {
+          if (parsed.topicId === summary?.id && parsed.postNumber && parsed.postNumber > 0) {
+            jumpToFloorRef.current(parsed.postNumber, fromFloor);
+          } else {
+            onNavigateTopicLink(
+              parsed.topicId,
+              parsed.postNumber,
+              cleanTitle && !/^https?:\/\//i.test(cleanTitle) ? cleanTitle : undefined,
+              fromFloor
+            );
+          }
+          return true;
+        }
+        if (parsed.kind === "post") {
+          void fetchPostLocationById(parsed.postId).then((loc) => {
+            if (loc) {
+              if (loc.topicId === summary?.id && loc.postNumber > 0) {
+                jumpToFloorRef.current(loc.postNumber, fromFloor);
+              } else {
+                onNavigateTopicLink(
+                  loc.topicId,
+                  loc.postNumber,
+                  cleanTitle && !/^https?:\/\//i.test(cleanTitle) ? cleanTitle : loc.title,
+                  fromFloor
+                );
+              }
+            } else if (onOpenInAppUrl) {
+              onOpenInAppUrl(href);
+            } else {
+              openUrl(href);
+            }
+          });
+          return true;
+        }
+        if (parsed.kind === "user") {
+          onInspectUser(parsed.username);
+          return true;
+        }
+        if (parsed.kind === "category" && onSelectCategory) {
+          onSelectCategory(parsed.categoryId, parsed.slug);
+          return true;
+        }
+        if (parsed.kind === "tag" && onSelectTag) {
+          onSelectTag(parsed.tag);
+          return true;
+        }
+        return false;
+      };
+
+      const quoteExpandBtn = target.closest<HTMLButtonElement>("[data-quote-expand]");
+      if (quoteExpandBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const aside = quoteExpandBtn.closest<HTMLElement>("aside.quote");
+        const bq = aside?.querySelector<HTMLElement>("blockquote");
+        if (!aside || !bq) return;
+
+        const isExpanded = quoteExpandBtn.getAttribute("aria-expanded") === "true";
+        if (isExpanded) {
+          const orig = bq.dataset.lindoQuoteExcerptHtml;
+          if (orig !== undefined) {
+            bq.innerHTML = orig;
+            observeCookedForumImages(bq);
+            observeCookedRichContent(bq);
+          }
+          quoteExpandBtn.setAttribute("aria-expanded", "false");
+          quoteExpandBtn.setAttribute("title", "展开完整引用");
+          return;
+        }
+
+        const cachedFull = bq.dataset.lindoQuoteFullHtml;
+        if (cachedFull !== undefined) {
+          if (bq.dataset.lindoQuoteExcerptHtml === undefined) {
+            bq.dataset.lindoQuoteExcerptHtml = bq.innerHTML;
+          }
+          bq.innerHTML = cachedFull;
+          observeCookedForumImages(bq);
+          observeCookedRichContent(bq);
+          quoteExpandBtn.setAttribute("aria-expanded", "true");
+          quoteExpandBtn.setAttribute("title", "收起完整引用");
+          return;
+        }
+
+        const qTopicId = Number(quoteExpandBtn.getAttribute("data-quote-topic") || 0);
+        const qPostNum = Number(quoteExpandBtn.getAttribute("data-quote-post") || 0);
+        if (qTopicId <= 0 || qPostNum <= 0 || quoteExpandBtn.dataset.loading === "1") return;
+
+        quoteExpandBtn.dataset.loading = "1";
+        quoteExpandBtn.style.opacity = "0.45";
+        void fetchPostByNumber(qTopicId, qPostNum)
+          .then((loadedPost) => {
+            if (!loadedPost?.cookedHtml || !bq.isConnected) {
+              setToastMsg("无法加载完整引用内容");
+              return;
+            }
+            if (bq.dataset.lindoQuoteExcerptHtml === undefined) {
+              bq.dataset.lindoQuoteExcerptHtml = bq.innerHTML;
+            }
+            const fullPrepared = prepareCookedHtml(loadedPost.cookedHtml, {
+              stripPolls: false,
+              currentTopicId: qTopicId,
+            });
+            bq.dataset.lindoQuoteFullHtml = fullPrepared;
+            bq.innerHTML = fullPrepared;
+            observeCookedForumImages(bq);
+            observeCookedRichContent(bq);
+            quoteExpandBtn.setAttribute("aria-expanded", "true");
+            quoteExpandBtn.setAttribute("title", "收起完整引用");
+          })
+          .catch(() => {
+            setToastMsg("无法加载完整引用内容");
+          })
+          .finally(() => {
+            delete quoteExpandBtn.dataset.loading;
+            quoteExpandBtn.style.opacity = "";
+          });
+        return;
+      }
+
       const quoteJumpBtn = target.closest<HTMLButtonElement>("[data-quote-jump-floor]");
       if (quoteJumpBtn) {
         e.preventDefault();
         const targetPostNum = Number(quoteJumpBtn.getAttribute("data-quote-jump-floor") || 0);
         const quoteTopicId = Number(quoteJumpBtn.getAttribute("data-quote-jump-topic") || 0);
-        const currentArticle = target.closest<HTMLElement>("[data-floor]");
-        const fromFloor = Number(currentArticle?.getAttribute("data-floor") || 0) || undefined;
+        const quoteTitle = quoteJumpBtn.getAttribute("data-quote-jump-title") || undefined;
         if (targetPostNum > 0) {
           if (quoteTopicId > 0 && summary?.id && quoteTopicId !== summary.id) {
-            onNavigateTopicLink(quoteTopicId, targetPostNum);
+            onNavigateTopicLink(quoteTopicId, targetPostNum, quoteTitle, fromFloor);
           } else {
             jumpToFloorRef.current(targetPostNum, fromFloor);
           }
@@ -546,14 +871,46 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       if (
         target instanceof HTMLImageElement &&
         !target.classList.contains("emoji") &&
-        !target.classList.contains("avatar")
+        !target.classList.contains("avatar") &&
+        !target.classList.contains("site-icon")
       ) {
         e.preventDefault();
         const fullSrc =
           target.getAttribute("data-full-src") ||
           target.getAttribute("data-canonical-src") ||
           target.src;
-        if (fullSrc) onOpenImageLightbox(fullSrc);
+        if (fullSrc) {
+          // Collect all gallery images from the current post (or entire loaded topic if post has only 1 image)
+          const postScope = target.closest<HTMLElement>("[data-floor]") || scrollContainerRef.current;
+          const collectFrom = (scope: HTMLElement | null) => {
+            if (!scope) return [] as string[];
+            const list: string[] = [];
+            scope
+              .querySelectorAll<HTMLImageElement>(
+                ".lindo-cooked img:not(.emoji):not(.avatar):not(.site-icon)"
+              )
+              .forEach((im) => {
+                const s =
+                  im.getAttribute("data-full-src") ||
+                  im.getAttribute("data-canonical-src") ||
+                  im.src;
+                if (s && !list.includes(s)) list.push(s);
+              });
+            return list;
+          };
+          let galleryImages = collectFrom(postScope);
+          if (galleryImages.length <= 1 && scrollContainerRef.current) {
+            const topicImages = collectFrom(scrollContainerRef.current);
+            if (topicImages.length > galleryImages.length) {
+              galleryImages = topicImages;
+            }
+          }
+          const idx = Math.max(0, galleryImages.indexOf(fullSrc));
+          onOpenImageLightbox(
+            fullSrc,
+            galleryImages.length > 1 ? { images: galleryImages, index: idx } : undefined
+          );
+        }
         return;
       }
       if (target.classList.contains("spoiled")) {
@@ -561,32 +918,63 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         return;
       }
       const anchor = target.closest("a");
-      if (anchor && anchor.href) {
+      if (anchor && (anchor.getAttribute("href") || anchor.href)) {
         e.preventDefault();
+        if (anchor.classList.contains("lightbox") || anchor.closest(".lightbox-wrapper")) {
+          return;
+        }
+        // Clicks directly on a content `<img>` are handled above (`target instanceof HTMLImageElement`).
+        // Any click reaching here on a textless image-only anchor landed in blank layout continuation
+        // space beside the image and must never open a browser or navigate.
+        if (
+          !anchor.textContent?.trim() &&
+          anchor.querySelector("img:not(.emoji):not(.avatar):not(.site-icon)")
+        ) {
+          return;
+        }
         if (anchor.classList.contains("mention") && anchor.textContent?.startsWith("@")) {
           onInspectUser(anchor.textContent.slice(1).trim());
           return;
         }
-        const internal = parseInternalTopicLink(anchor.href);
-        if (internal) {
-          onNavigateTopicLink(internal.topicId, internal.postNumber);
-          return;
-        }
-        // Internal user profile links `/u/{username}` open native PublicUserCardModal
-        try {
-          const u = new URL(anchor.href, "https://linux.do");
-          if (u.hostname === "linux.do") {
-            const um = u.pathname.match(/^\/u\/([^/?#]+)\/?$/i);
-            if (um && um[1] && um[1].toLowerCase() !== "account-created") {
-              onInspectUser(decodeURIComponent(um[1]));
-              return;
+        const rawHref = (anchor.getAttribute("href") || anchor.href || "").trim();
+
+        // In-page footnote & heading anchor handling (NEVER open a WebView window for `#...` anchors!)
+        if (rawHref.startsWith("#")) {
+          const anchorId = decodeURIComponent(rawHref.slice(1));
+          const container = scrollContainerRef.current;
+          if (anchorId && container) {
+            const escapedId =
+              typeof CSS !== "undefined" && typeof CSS.escape === "function"
+                ? CSS.escape(anchorId)
+                : anchorId.replace(/["\\]/g, "\\$&");
+            const localTarget =
+              currentArticle?.querySelector<HTMLElement>(`#${escapedId}, [name="${escapedId}"]`) ||
+              container.querySelector<HTMLElement>(`#${escapedId}, [name="${escapedId}"]`);
+            if (localTarget) {
+              const isFootnoteRef =
+                anchor.classList.contains("footnote-ref") ||
+                Boolean(anchor.closest("sup.footnote-ref")) ||
+                /^footnote-\d+/i.test(anchorId);
+              if (isFootnoteRef && localTarget.tagName === "LI") {
+                const clone = localTarget.cloneNode(true) as HTMLElement;
+                clone.querySelectorAll("a.footnote-backref").forEach((b) => b.remove());
+                setFootnotePopover({
+                  html: clone.innerHTML,
+                  targetId: anchorId,
+                });
+              } else {
+                localTarget.scrollIntoView({ behavior: "smooth", block: "center" });
+              }
             }
           }
-        } catch {
-          // fall through to safety classifier
+          return;
         }
 
-        const assessment = classifyExternalUrl(anchor.href, anchor.textContent);
+        if (navigateInternalTarget(rawHref, anchor)) {
+          return;
+        }
+
+        const assessment = classifyExternalUrl(rawHref, anchor.textContent);
         if (assessment.tier === "BLOCKED") {
           setToastMsg(assessment.riskReason || "已拦截不安全的跳转链接");
           return;
@@ -606,9 +994,33 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           return;
         }
         setPendingExternalLink(assessment);
+        return;
+      }
+
+      // Clicking anywhere on an internal linux.do topic/post Onebox card (when not selecting text) opens natively in Lindo PC
+      const internalOnebox = target.closest<HTMLElement>("[data-internal-onebox-href]");
+      if (internalOnebox) {
+        const sel = window.getSelection()?.toString() || "";
+        if (!sel.trim()) {
+          const obHref = internalOnebox.getAttribute("data-internal-onebox-href") || "";
+          const obTitle =
+            internalOnebox.querySelector("h3, h4")?.textContent?.trim() || undefined;
+          if (obHref && navigateInternalTarget(obHref, null, obTitle)) {
+            e.preventDefault();
+            return;
+          }
+        }
       }
     },
-      [onOpenImageLightbox, onInspectUser, onNavigateTopicLink, onOpenInAppUrl, summary?.id]
+    [
+      onOpenImageLightbox,
+      onInspectUser,
+      onNavigateTopicLink,
+      onSelectCategory,
+      onSelectTag,
+      onOpenInAppUrl,
+      summary?.id,
+    ]
   );
 
   useEffect(() => {
@@ -621,10 +1033,17 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     setActiveReactionPickerPostId(null);
     setActiveFloorMorePostId(null);
     setExpandedRepliesMap({});
+    setExpandedLinkPostIds(new Set());
     setResolvedParentMap({});
     setLoadingParentFloors(new Set());
     setExpandedParentPreviewIds(new Set());
     setReturnFloor(null);
+    setTocOpen(false);
+    setFindOpen(false);
+    setFootnotePopover(null);
+    setRevisionModal(null);
+    setReactionUsersModal(null);
+    setBookmarkModalPost(null);
     visibleFloorRef.current = 1;
     setCurrentVisibleFloor(1);
     attemptedParentFloorsRef.current = new Set();
@@ -643,6 +1062,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       setAiSummaryOpen(false);
     };
     const onKeyDown = (ev: KeyboardEvent) => {
+      if (isImeComposingEvent(ev)) return;
       if (ev.key === "Escape") {
         setActiveFloorMorePostId(null);
         setActiveReactionPickerPostId(null);
@@ -708,6 +1128,26 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       setCurrentVisibleFloor(initialFloor);
     }
   }, [detail?.id, targetFloor, highlightTargetFloor, targetJumpNonce, triggerFloorFlash, clearFloorFlash]);
+
+  // Smooth in-place scroll alignment when toggling 全部 / 热门回复 / 只看楼主 (NEVER resets scrollTop to 0!)
+  useEffect(() => {
+    if (!filterSettledNonce) return;
+    const container = scrollContainerRef.current;
+    if (!container || !detail?.id) return;
+    const dividerEl = container.querySelector<HTMLElement>('[data-replies-divider="1"]');
+    if (!dividerEl) return;
+    const decision = computeFilterScrollTarget({
+      scrollTop: container.scrollTop,
+      clientHeight: container.clientHeight,
+      dividerOffsetTop: dividerEl.offsetTop,
+    });
+    if (decision.shouldScroll) {
+      container.scrollTo({
+        top: decision.targetScrollTop,
+        behavior: decision.behavior,
+      });
+    }
+  }, [filterSettledNonce, detail?.id]);
 
   // Keep imperative 144Hz floor badge text strictly synchronized with topic switches, jumps & refreshes
   useLayoutEffect(() => {
@@ -873,7 +1313,12 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     };
 
     // Immediately inspect initial viewport so visible unread dots fade out smoothly even without scrolling!
-    const initRaf = requestAnimationFrame(() => collectVisibleFloors(true));
+    const initRaf = requestAnimationFrame(() => {
+      if (targetFloor && targetFloor > 0 && floorNumbers.includes(targetFloor)) {
+        pendingDwell.add(targetFloor);
+      }
+      collectVisibleFloors(true);
+    });
 
     container.addEventListener("scroll", handleScroll, { passive: true });
     return () => {
@@ -883,6 +1328,12 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       if (settleTimer) clearTimeout(settleTimer);
       if (dwellTimer) clearTimeout(dwellTimer);
       if (reportTimer) clearTimeout(reportTimer);
+      if (isAuthorized && seenServerBatch.size > 0 && detailRef.current) {
+        const batch = Array.from(seenServerBatch);
+        seenServerBatch.clear();
+        void reportTopicTimings(detailRef.current.id, batch);
+        void flushTopicTimingsNow();
+      }
     };
   }, [detail?.id, detail?.posts.length, isAuthorized, onlyOpFilter, onAppendPosts, onFloorSeen]);
 
@@ -1184,7 +1635,21 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         }}
       >
         <div className="flex min-w-0 items-center gap-2">
-          {showBackButton && (
+          {canGoBackHistory && onGoBackHistory ? (
+            <button
+              type="button"
+              onClick={onGoBackHistory}
+              title={previousTopicTitle ? `返回：${previousTopicTitle} (⌘[)` : "返回上一话题 (⌘[)"}
+              className="lindo-no-drag lindo-interactive -ml-1.5 inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium cursor-pointer"
+              style={{
+                backgroundColor: "var(--subtle-surface)",
+                color: "var(--ink-primary)",
+              }}
+            >
+              <LinDoIcons.ArrowLeft size={14} />
+              <span>返回</span>
+            </button>
+          ) : showBackButton ? (
             <button
               type="button"
               onClick={onBack}
@@ -1193,7 +1658,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             >
               <LinDoIcons.ArrowLeft size={18} />
             </button>
-          )}
+          ) : null}
 
           {detail?.archetype === "private_message" ? (
             <span
@@ -1245,6 +1710,19 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               只看楼主 ×
             </button>
           )}
+          {summaryFilter && onToggleSummaryFilter && (
+            <button
+              type="button"
+              onClick={onToggleSummaryFilter}
+              className="lindo-no-drag ml-1 rounded-full px-2 py-0.5 text-[11px] font-semibold cursor-pointer"
+              style={{
+                backgroundColor: "var(--active-chip-bg)",
+                color: "var(--active-chip-text)",
+              }}
+            >
+              热门回复 ×
+            </button>
+          )}
           {detail?.acceptedAnswerPostNumber && (
             <button
               type="button"
@@ -1261,7 +1739,36 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           )}
         </div>
 
-        <div className="lindo-no-drag flex items-center gap-1.5" data-ai-summary-popover="1">
+        <div className="lindo-no-drag flex items-center gap-1" data-ai-summary-popover="1">
+          {post1Headings.length >= 3 && (
+            <button
+              type="button"
+              onClick={() => {
+                setAiSummaryOpen(false);
+                setTocOpen((v) => !v);
+              }}
+              title="正文目录"
+              aria-label="正文目录"
+              className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
+              style={{
+                color: tocOpen ? "var(--brand-gold)" : "var(--ink-secondary)",
+              }}
+            >
+              <LinDoIcons.ListBullet size={16} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setFindOpen((v) => !v)}
+            title="帖内查找 (⌘F)"
+            aria-label="帖内查找"
+            className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
+            style={{
+              color: findOpen ? "var(--brand-gold)" : "var(--ink-secondary)",
+            }}
+          >
+            <LinDoIcons.Search size={15.5} />
+          </button>
           {(detail?.summarizable || detail?.hasSummary) && (
             <button
               type="button"
@@ -1280,16 +1787,17 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   }
                 }
               }}
-              title="AI 总结"
-              className="lindo-interactive flex h-[30px] items-center gap-1.5 rounded-full px-3 text-[12.2px] font-normal"
+              title="AI 话题总结"
+              aria-label="AI 话题总结"
+              className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
               style={{
-                backgroundColor: aiSummaryOpen ? "var(--active-chip-bg)" : "var(--subtle-surface)",
-                border: "0.5px solid var(--hairline)",
                 color: aiSummaryOpen ? "var(--brand-gold)" : "var(--ink-secondary)",
               }}
             >
-              <LinDoIcons.Sparkles size={14} style={{ color: "var(--brand-gold)" }} />
-              <span>总结</span>
+              <LinDoIcons.Sparkles
+                size={16}
+                style={{ color: "var(--brand-gold)", opacity: aiSummaryOpen ? 1 : 0.85 }}
+              />
             </button>
           )}
 
@@ -1403,6 +1911,43 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         </div>
       )}
 
+      {/* 帖内查找悬浮条 (⌘F) */}
+      {findOpen && (
+        <InTopicFindBar
+          containerRef={scrollContainerRef}
+          onClose={() => setFindOpen(false)}
+        />
+      )}
+
+      {/* 长文目录大纲悬浮面板 */}
+      {tocOpen && post1Headings.length >= 3 && (
+        <TopicTocPopover
+          headings={post1Headings}
+          onSelect={(item) => {
+            const container = scrollContainerRef.current;
+            if (!container) return;
+            const post1El = container.querySelector<HTMLElement>('[data-floor="1"] .lindo-cooked');
+            if (!post1El) return;
+            let targetHeading: HTMLElement | null = null;
+            if (item.id) {
+              const esc =
+                typeof CSS !== "undefined" && typeof CSS.escape === "function"
+                  ? CSS.escape(item.id)
+                  : item.id;
+              targetHeading = post1El.querySelector<HTMLElement>(`#${esc}`);
+            }
+            if (!targetHeading) {
+              const all = Array.from(post1El.querySelectorAll<HTMLElement>("h1, h2, h3")).filter(
+                (el) => !el.closest("aside.quote, aside.onebox")
+              );
+              targetHeading = all[item.index] ?? null;
+            }
+            targetHeading?.scrollIntoView({ behavior: "smooth", block: "start" });
+          }}
+          onClose={() => setTocOpen(false)}
+        />
+      )}
+
       {/* 右上角紧贴弹出的 AI 话题总结浮层（无论在第 1 楼还是第 1280 楼均可即点即看，无 header 分割线） */}
       {aiSummaryOpen && (
         <div
@@ -1454,7 +1999,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           </div>
           <div
             className="lindo-scroll max-h-[min(360px,62vh)] overflow-y-auto text-[13.2px] leading-[1.68] whitespace-pre-wrap"
-            style={{ color: aiSummaryLoading ? "var(--ink-secondary)" : "var(--ink-primary)" }}
+            style={{ color: aiSummaryLoading ? "var(--ink-secondary)" : "var(--ink-body)" }}
           >
             {aiSummaryLoading ? "正在生成话题摘要…" : aiSummaryText || "暂无可用总结"}
           </div>
@@ -1607,7 +2152,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
           style={{ borderBottom: "0.5px solid var(--hairline)" }}
         >
           <h1
-            className="lindo-selectable select-text text-[20px] font-semibold leading-[1.38] tracking-[-0.01em]"
+            className="lindo-selectable lindo-topic-headline select-text text-[21px] font-semibold leading-[1.38]"
             style={{ color: "var(--ink-primary)" }}
           >
             {(detail?.closed ?? summary.closed) && (
@@ -1622,17 +2167,44 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
 
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-2">
-              {(detail?.categoryName || summary.categoryName) && (
-                <LinDoCategoryBadge
-                  name={detail?.categoryName || summary.categoryName}
-                  fallbackColor={catVis.dotColor}
-                  iconSize={12.5}
-                  className="mr-0.5 text-[12.2px]"
-                />
+              {(detail?.categoryName || summary.categoryName) &&
+                (onSelectCategory && (detail?.categoryId || summary.categoryId) ? (
+                  <button
+                    type="button"
+                    onClick={() => onSelectCategory(detail?.categoryId ?? summary.categoryId)}
+                    title={`浏览「${detail?.categoryName || summary.categoryName}」版块`}
+                    className="inline-flex items-center hover:opacity-80 transition-opacity cursor-pointer"
+                  >
+                    <LinDoCategoryBadge
+                      name={detail?.categoryName || summary.categoryName}
+                      fallbackColor={catVis.dotColor}
+                      iconSize={12.5}
+                      className="mr-0.5 text-[12.2px]"
+                    />
+                  </button>
+                ) : (
+                  <LinDoCategoryBadge
+                    name={detail?.categoryName || summary.categoryName}
+                    fallbackColor={catVis.dotColor}
+                    iconSize={12.5}
+                    className="mr-0.5 text-[12.2px]"
+                  />
+                ))}
+              {(detail?.tags ?? summary.tags).map((tg) =>
+                onSelectTag ? (
+                  <button
+                    key={tg}
+                    type="button"
+                    onClick={() => onSelectTag(tg)}
+                    title={`筛选标签 #${tg}`}
+                    className="inline-flex items-center hover:opacity-80 transition-opacity cursor-pointer"
+                  >
+                    <LinDoTopicTagChip tag={tg} />
+                  </button>
+                ) : (
+                  <LinDoTopicTagChip key={tg} tag={tg} />
+                )
               )}
-              {(detail?.tags ?? summary.tags).map((tg) => (
-                <LinDoTopicTagChip key={tg} tag={tg} />
-              ))}
             </div>
 
             <div
@@ -1650,6 +2222,19 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               )}
             </div>
           </div>
+
+          {detail?.archetype === "private_message" && (
+            <PmParticipantsBar
+              topicId={detail.id}
+              participants={detail.allowedUsers ?? []}
+              currentUsername={currentUser?.username}
+              canInvite={Boolean(detail.canInviteTo && isAuthorized)}
+              canRemove={Boolean(detail.canRemoveAllowedUsers && isAuthorized)}
+              onInspectUser={onInspectUser}
+              onChanged={() => void onRefresh({ inPlace: true })}
+              onNotice={(msg) => setToastMsg(msg)}
+            />
+          )}
         </div>
 
         {/* 加载态 / 错误态 / 楼层流 */}
@@ -1787,7 +2372,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                       <span
                         className="lindo-cooked truncate"
                         dangerouslySetInnerHTML={{
-                          __html: prepareCookedHtml(post.cookedHtml || post.actionCode || ""),
+                          __html: prepareCookedHtmlCached(post.cookedHtml || post.actionCode || ""),
                         }}
                       />
                     </div>
@@ -2017,6 +2602,20 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             }}
                           />
                         )}
+                      {(post.version ?? 1) > 1 && post.canViewEditHistory !== false && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRevisionModal({ postId: post.id, postNumber: post.postNumber })
+                          }
+                          title={`查看编辑历史（已编辑 ${(post.version ?? 2) - 1} 次）`}
+                          className="lindo-interactive inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[11px]"
+                          style={{ color: "var(--ink-tertiary)" }}
+                        >
+                          <LinDoIcons.Edit size={11} />
+                          <span>{(post.version ?? 2) - 1}</span>
+                        </button>
+                      )}
                       <span>{formatRelativeTime(post.createdAt)}</span>
                       <span>#{post.postNumber}</span>
                     </div>
@@ -2179,7 +2778,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           </span>
                         </div>
 
-                        <div className="flex shrink-0 items-center gap-1">
+                        <div className="flex shrink-0 items-center gap-0.5">
                           {canExpandParent && (
                             <button
                               type="button"
@@ -2192,14 +2791,15 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                   return next;
                                 });
                               }}
-                              className="lindo-interactive inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-medium"
-                              style={{ color: "var(--ink-secondary)" }}
+                              title={isParentExpanded ? "收起原楼" : "展开原楼"}
+                              aria-label={isParentExpanded ? "收起原楼" : "展开原楼"}
+                              className="lindo-interactive flex h-6 w-6 items-center justify-center rounded-full"
+                              style={{ color: "var(--ink-tertiary)" }}
                             >
-                              <span>{isParentExpanded ? "收起原楼" : "展开原楼"}</span>
                               {isParentExpanded ? (
-                                <LinDoIcons.ChevronUp size={11} />
+                                <LinDoIcons.ChevronUp size={13.5} />
                               ) : (
-                                <LinDoIcons.ChevronDown size={11} />
+                                <LinDoIcons.ChevronDown size={13.5} />
                               )}
                             </button>
                           )}
@@ -2210,11 +2810,11 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                               void jumpToFloor(targetReplyFloor, post.postNumber);
                             }}
                             title={`定位至 #${targetReplyFloor} 楼`}
-                            className="lindo-interactive inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] tabular-nums"
+                            aria-label={`定位至 #${targetReplyFloor} 楼`}
+                            className="lindo-interactive flex h-6 w-6 items-center justify-center rounded-full"
                             style={{ color: "var(--ink-tertiary)" }}
                           >
-                            {isParentExpanded && <span>跳转</span>}
-                            <LinDoIcons.ChevronRight size={11.5} />
+                            <LinDoIcons.ChevronRight size={13.5} />
                           </button>
                         </div>
                       </div>
@@ -2223,6 +2823,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                         <MemoizedCookedBody
                           rawHtml={repliedPost.cookedHtml}
                           stripPolls={false}
+                          currentTopicId={summary.id}
                           onCookedClick={handleCookedClick}
                           className="lindo-cooked lindo-cooked-reply lindo-hairline-t mt-1.5 pt-1.5 text-[13.5px]"
                         />
@@ -2253,6 +2854,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   <MemoizedCookedBody
                     rawHtml={post.cookedHtml}
                     stripPolls={hasPolls}
+                    currentTopicId={summary.id}
                     onCookedClick={handleCookedClick}
                     className={
                       isReplyFloor
@@ -2273,6 +2875,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           onRequestLogin={() =>
                             onRequestGuestLogin("登录后参与投票", "登录后即可参与社区话题投票")
                           }
+                          onInspectUser={onInspectUser}
                           onPollUpdated={(updatedPoll) => {
                             onAppendPosts(
                               [
@@ -2332,7 +2935,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             />
                             <span
                               className="lindo-cooked text-[12px] leading-none"
-                              dangerouslySetInnerHTML={{ __html: prepareCookedHtml(boost.cooked) }}
+                              dangerouslySetInnerHTML={{ __html: prepareCookedHtmlCached(boost.cooked) }}
                             />
                             {isBoostExpanded && (
                               <button
@@ -2434,6 +3037,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             className="flex-1 bg-transparent px-1 text-[13px] outline-none"
                             style={{ color: "var(--ink-primary)" }}
                             onKeyDown={(e) => {
+                              if (isImeComposingEvent(e)) return;
                               if (e.key === "Enter") {
                                 e.preventDefault();
                                 submitBoostNow(boostDraftText);
@@ -2567,9 +3171,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                               backgroundColor: mine
                                 ? "var(--active-chip-bg)"
                                 : "var(--subtle-surface)",
-                              border: mine
-                                ? "0.5px solid var(--brand-gold)"
-                                : "0.5px solid var(--hairline)",
+                              border: "0.5px solid var(--hairline)",
                               color: mine ? "var(--active-chip-text)" : "var(--ink-secondary)",
                             }}
                           >
@@ -2600,12 +3202,10 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             color: inlineReplies ? "var(--brand-gold)" : "var(--ink-secondary)",
                           }}
                         >
-                          <span>
+                          <span className="tabular-nums">
                             {loadingRepliesPostId === post.id && !inlineReplies
                               ? "加载中..."
-                              : inlineReplies
-                                ? "收起回复"
-                                : `${effectiveReplyCount} 条回复`}
+                              : `${effectiveReplyCount} 条回复`}
                           </span>
                           {inlineReplies ? (
                             <LinDoIcons.ChevronUp size={12} />
@@ -2662,6 +3262,9 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                           topicTitle: detail?.title || summary.title,
                           replyToPostNumber: post.postNumber,
                           replyToUsername: post.username,
+                          replyToDisplayName: post.displayName,
+                          replyToAvatarTemplate: post.avatarTemplate,
+                          replyToAnimatedAvatar: post.animatedAvatar,
                           replyToSnippet: plain,
                           initialRaw: `[quote="${post.username}, post:${post.postNumber}, topic:${summary.id}"]\n${plain}\n[/quote]\n\n`,
                         });
@@ -2813,8 +3416,6 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                         isSelected
                                           ? {
                                               backgroundColor: "var(--active-chip-bg)",
-                                              boxShadow:
-                                                "inset 0 0 0 0.5px color-mix(in srgb, var(--brand-gold) 55%, transparent)",
                                             }
                                           : undefined
                                       }
@@ -2958,12 +3559,18 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                   <span>引用本楼</span>
                                 </button>
 
-                                {post.postNumber > 1 && (
                                   <button
                                     type="button"
                                     onClick={() => {
                                       setActiveFloorMorePostId(null);
-                                      void toggleBookmarkFloor();
+                                      if (!isAuthorized) {
+                                        onRequestGuestLogin(
+                                          "登录后收藏回复",
+                                          "可在我的书签随时直达该楼层并设置提醒"
+                                        );
+                                        return;
+                                      }
+                                      setBookmarkModalPost(post);
                                     }}
                                     className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
                                     style={{ color: "var(--ink-primary)" }}
@@ -2979,9 +3586,29 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                         style={{ color: "var(--ink-secondary)" }}
                                       />
                                     )}
-                                    <span>{post.bookmarked ? "取消收藏" : "收藏本楼"}</span>
+                                    <span>{post.bookmarked ? "编辑书签提醒" : "收藏并设提醒"}</span>
                                   </button>
-                                )}
+
+                                  {(post.reactions.length > 0 || post.likeCount > 0) && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setActiveFloorMorePostId(null);
+                                        setReactionUsersModal({
+                                          postId: post.id,
+                                          initialReactionId: post.reactions[0]?.id ?? "heart",
+                                        });
+                                      }}
+                                      className="lindo-interactive flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.8px]"
+                                      style={{ color: "var(--ink-primary)" }}
+                                    >
+                                      <LinDoIcons.Users
+                                        size={15}
+                                        style={{ color: "var(--ink-secondary)" }}
+                                      />
+                                      <span>查看表态成员</span>
+                                    </button>
+                                  )}
 
                                 <button
                                   type="button"
@@ -3148,10 +3775,13 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                 replyToPostNumber:
                                   post.postNumber > 1 ? post.postNumber : undefined,
                                 replyToUsername: post.username,
+                                replyToDisplayName: post.displayName,
+                                replyToAvatarTemplate: post.avatarTemplate,
+                                replyToAnimatedAvatar: post.animatedAvatar,
                                 replyToSnippet: extractPostReplyPreview(
                                   post.id,
                                   post.cookedHtml
-                                ).snippet.slice(0, 120),
+                                ).snippet.slice(0, 180),
                               });
                             }}
                             className={`lindo-interactive flex ${btnSqCls} items-center justify-center rounded-full ${mutedIdleCls}`}
@@ -3221,53 +3851,135 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                                     )}
                                   </div>
 
-                                  <div className="flex shrink-0 items-center gap-1.5 text-[11.2px] tabular-nums">
-                                    <span style={{ color: "var(--ink-tertiary)" }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => void jumpToFloor(rep.postNumber, post.postNumber)}
+                                    title={`定位至 #${rep.postNumber} 楼`}
+                                    className="lindo-interactive inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[11.5px] tabular-nums cursor-pointer"
+                                    style={{ color: "var(--ink-tertiary)" }}
+                                  >
+                                    <span>
                                       {formatRelativeTime(rep.createdAt)} · #{rep.postNumber}
                                     </span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (!isAuthorized) {
-                                          onRequestGuestLogin(
-                                            "登录后参与回复",
-                                            "登录后即可回复楼主或任意楼层"
-                                          );
-                                          return;
-                                        }
-                                        const repMeta = extractPostReplyPreview(rep.id, rep.cookedHtml);
-                                        onOpenComposer({
-                                          action: "REPLY",
-                                          topicId: summary.id,
-                                          topicTitle: detail?.title || summary.title,
-                                          replyToPostNumber: rep.postNumber,
-                                          replyToUsername: rep.username,
-                                          replyToSnippet: repMeta.snippet.slice(0, 120),
-                                        });
-                                      }}
-                                      className="lindo-interactive rounded px-1.5 py-0.5 text-[11px] font-medium"
-                                      style={{ color: "var(--ink-secondary)" }}
-                                    >
-                                      回复
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => void jumpToFloor(rep.postNumber, post.postNumber)}
-                                      className="lindo-interactive inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] font-medium"
-                                      style={{ color: "var(--brand-gold)" }}
-                                    >
-                                      <span>跳转</span>
-                                      <LinDoIcons.ChevronRight size={11} />
-                                    </button>
-                                  </div>
+                                    <LinDoIcons.ChevronRight size={11.5} className="opacity-70" />
+                                  </button>
                                 </div>
 
                                 <MemoizedCookedBody
                                   rawHtml={rep.cookedHtml}
                                   stripPolls={false}
+                                  currentTopicId={summary.id}
                                   onCookedClick={handleCookedClick}
                                   className="lindo-cooked lindo-cooked-reply mt-1 text-[13.5px]"
                                 />
+
+                                <div className="mt-1.5 flex items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    title={rep.liked ? "取消赞" : "赞"}
+                                    disabled={pendingReactionPostIds.has(rep.id)}
+                                    onClick={async () => {
+                                      if (!isAuthorized) {
+                                        onRequestGuestLogin("登录后表达喜欢", "登录后即可为回复点赞");
+                                        return;
+                                      }
+                                      if (pendingReactionPostsRef.current.has(rep.id)) return;
+                                      pendingReactionPostsRef.current.add(rep.id);
+                                      setPendingReactionPostIds((prev) => new Set(prev).add(rep.id));
+                                      const prevLiked = rep.liked;
+                                      const nextLiked = !prevLiked;
+                                      const delta = nextLiked ? 1 : -1;
+                                      setExpandedRepliesMap((prev) => ({
+                                        ...prev,
+                                        [post.id]: (prev[post.id] ?? []).map((item) =>
+                                          item.id === rep.id
+                                            ? {
+                                                ...item,
+                                                liked: nextLiked,
+                                                likeCount: Math.max(0, item.likeCount + delta),
+                                              }
+                                            : item
+                                        ),
+                                      }));
+                                      try {
+                                        const updated = await togglePostReaction(rep.id, "heart");
+                                        if (updated) {
+                                          onAppendPosts([updated], "after");
+                                          setExpandedRepliesMap((prev) => ({
+                                            ...prev,
+                                            [post.id]: (prev[post.id] ?? []).map((item) =>
+                                              item.id === rep.id ? updated : item
+                                            ),
+                                          }));
+                                        }
+                                      } catch (err) {
+                                        setExpandedRepliesMap((prev) => ({
+                                          ...prev,
+                                          [post.id]: (prev[post.id] ?? []).map((item) =>
+                                            item.id === rep.id
+                                              ? {
+                                                  ...item,
+                                                  liked: prevLiked,
+                                                  likeCount: Math.max(0, item.likeCount - delta),
+                                                }
+                                              : item
+                                          ),
+                                        }));
+                                        setToastMsg(
+                                          err instanceof Error ? err.message : "操作失败，请稍后重试"
+                                        );
+                                      } finally {
+                                        pendingReactionPostsRef.current.delete(rep.id);
+                                        setPendingReactionPostIds((prev) => {
+                                          const next = new Set(prev);
+                                          next.delete(rep.id);
+                                          return next;
+                                        });
+                                      }
+                                    }}
+                                    className="lindo-interactive inline-flex h-6 items-center gap-1 rounded-full px-1.5 text-[11.5px] tabular-nums cursor-pointer"
+                                    style={{
+                                      color: rep.liked ? "#F43F5E" : "var(--ink-tertiary)",
+                                    }}
+                                  >
+                                    {rep.liked ? (
+                                      <LinDoIcons.HeartFilled size={13} />
+                                    ) : (
+                                      <LinDoIcons.Heart size={13} />
+                                    )}
+                                    {rep.likeCount > 0 && <span>{rep.likeCount}</span>}
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    title={`回复 ${rep.displayName || rep.username} · #${rep.postNumber} 楼`}
+                                    onClick={() => {
+                                      if (!isAuthorized) {
+                                        onRequestGuestLogin(
+                                          "登录后参与回复",
+                                          "登录后即可回复楼主或任意楼层"
+                                        );
+                                        return;
+                                      }
+                                      const repMeta = extractPostReplyPreview(rep.id, rep.cookedHtml);
+                                      onOpenComposer({
+                                        action: "REPLY",
+                                        topicId: summary.id,
+                                        topicTitle: detail?.title || summary.title,
+                                        replyToPostNumber: rep.postNumber,
+                                        replyToUsername: rep.username,
+                                        replyToDisplayName: rep.displayName,
+                                        replyToAvatarTemplate: rep.avatarTemplate,
+                                        replyToAnimatedAvatar: rep.animatedAvatar,
+                                        replyToSnippet: repMeta.snippet.slice(0, 180),
+                                      });
+                                    }}
+                                    className="lindo-interactive inline-flex h-6 w-6 items-center justify-center rounded-full cursor-pointer"
+                                    style={{ color: "var(--ink-tertiary)" }}
+                                  >
+                                    <LinDoIcons.Reply size={13.5} />
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           </div>
@@ -3275,6 +3987,81 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                       })}
                     </div>
                   )}
+
+                  {/* 站内引用 / 反向关联话题列表（对齐 Web 端 post.link_counts，点击直接在客户端内打开话题） */}
+                  {(() => {
+                    const reflectionLinks = (post.linkCounts ?? []).filter(
+                      (l) => l.internal && l.reflection && l.title && l.topicId && l.topicId !== detail?.id
+                    );
+                    if (reflectionLinks.length === 0) return null;
+                    const isLinksExpanded = expandedLinkPostIds.has(post.id);
+                    const visibleLinks = isLinksExpanded
+                      ? reflectionLinks
+                      : reflectionLinks.slice(0, 5);
+                    const hiddenCount = reflectionLinks.length - visibleLinks.length;
+                    return (
+                      <div
+                        className="mt-2.5 pt-2 space-y-1"
+                        style={{ borderTop: "0.5px solid var(--hairline-soft)" }}
+                      >
+                        {visibleLinks.map((link) => (
+                          <button
+                            key={`${link.topicId}:${link.postNumber ?? 1}`}
+                            type="button"
+                            onClick={() =>
+                              onNavigateTopicLink(
+                                link.topicId!,
+                                link.postNumber,
+                                link.title,
+                                post.postNumber
+                              )
+                            }
+                            className="lindo-interactive group flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[12.5px] transition-colors cursor-pointer"
+                            style={{ color: "var(--ink-secondary)" }}
+                          >
+                            <LinDoIcons.Link
+                              size={12.5}
+                              className="shrink-0 opacity-60 group-hover:opacity-100"
+                              style={{ color: "var(--ink-tertiary)" }}
+                            />
+                            <span className="min-w-0 truncate group-hover:text-[var(--active-chip-text)]">
+                              {link.title}
+                            </span>
+                            {link.clicks > 0 && (
+                              <span
+                                className="shrink-0 rounded-full px-1.5 py-[0.5px] text-[10.8px] tabular-nums"
+                                style={{
+                                  backgroundColor: "var(--subtle-surface)",
+                                  color: "var(--ink-tertiary)",
+                                }}
+                              >
+                                {formatCompactCount(link.clicks)}
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                        {reflectionLinks.length > 5 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedLinkPostIds((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(post.id)) next.delete(post.id);
+                                else next.add(post.id);
+                                return next;
+                              })
+                            }
+                            className="px-1.5 py-0.5 text-[11.8px] font-medium hover:underline cursor-pointer"
+                            style={{ color: "var(--ink-tertiary)" }}
+                          >
+                            {isLinksExpanded
+                              ? "收起关联话题"
+                              : `展开其余 ${hiddenCount} 个关联话题`}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </>
               );
 
@@ -3282,7 +4069,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 <React.Fragment key={post.id}>
                   <article
                     data-floor={post.postNumber}
-                    className={`${isReplyFloor ? "py-2.5" : "py-3.5"}${
+                    className={`${isReplyFloor ? "py-2.5 transition-opacity duration-150" : "py-3.5"}${
                       Math.abs(post.postNumber - currentVisibleFloor) > 3
                         ? " lindo-offscreen-floor"
                         : ""
@@ -3293,6 +4080,11 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                         ? " lindo-floor-flash -mx-2 rounded-lg px-2"
                         : ""
                     }`}
+                    style={
+                      isReplyFloor && isFilterSwitching
+                        ? { opacity: 0.45, pointerEvents: "none" }
+                        : undefined
+                    }
                   >
                     {isReplyFloor ? (
                       <div className="flex items-start gap-3">
@@ -3320,22 +4112,35 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                     />
                   )}
 
-                  {post.postNumber === 1 && (totalFloors > 1 || onlyOpFilter) ? (
+                  {post.postNumber === 1 && (totalFloors > 1 || onlyOpFilter || summaryFilter) ? (
                     <div
+                      data-replies-divider="1"
                       className="flex items-center justify-between py-2"
                       style={{
                         borderTop: "0.5px solid var(--hairline)",
                         borderBottom: "0.5px solid var(--hairline-soft)",
                       }}
                     >
-                    <span
-                      className="text-[13px] font-semibold tabular-nums"
-                      style={{ color: "var(--ink-secondary)" }}
-                    >
-                      {onlyOpFilter
-                        ? "楼主发言"
-                        : `${Math.max(0, totalFloors - 1)} 条回复`}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="text-[13px] font-semibold tabular-nums"
+                        style={{ color: "var(--ink-secondary)" }}
+                      >
+                        {describeRepliesFilterBar(detail, {
+                          onlyOp: onlyOpFilter,
+                          summary: summaryFilter,
+                        }).label}
+                      </span>
+                      {isFilterSwitching && (
+                        <span
+                          className="inline-flex items-center gap-1 text-[11.2px] font-medium"
+                          style={{ color: "var(--ink-tertiary)" }}
+                        >
+                          <SmoothRefreshIcon spinning={true} size={11.5} />
+                          <span>切换中…</span>
+                        </span>
+                      )}
+                    </div>
                     <div
                       className="inline-flex items-center rounded-lg p-[2px] text-[11.5px]"
                       style={{ backgroundColor: "var(--subtle-surface)" }}
@@ -3344,16 +4149,37 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                         type="button"
                         onClick={() => {
                           if (onlyOpFilter) onToggleOnlyOp();
+                          else if (summaryFilter && onToggleSummaryFilter) onToggleSummaryFilter();
                         }}
                         className="rounded-[6px] px-2.5 py-0.5 transition-colors cursor-pointer"
                         style={{
-                          backgroundColor: !onlyOpFilter ? "var(--canvas)" : "transparent",
-                          color: !onlyOpFilter ? "var(--ink-primary)" : "var(--ink-tertiary)",
-                          fontWeight: !onlyOpFilter ? 600 : 400,
+                          backgroundColor:
+                            !onlyOpFilter && !summaryFilter ? "var(--canvas)" : "transparent",
+                          color:
+                            !onlyOpFilter && !summaryFilter
+                              ? "var(--ink-primary)"
+                              : "var(--ink-tertiary)",
+                          fontWeight: !onlyOpFilter && !summaryFilter ? 600 : 400,
                         }}
                       >
                         全部
                       </button>
+                      {onToggleSummaryFilter && (detail.hasSummary || summaryFilter) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!summaryFilter) onToggleSummaryFilter();
+                          }}
+                          className="rounded-[6px] px-2.5 py-0.5 transition-colors cursor-pointer"
+                          style={{
+                            backgroundColor: summaryFilter ? "var(--canvas)" : "transparent",
+                            color: summaryFilter ? "var(--active-chip-text)" : "var(--ink-tertiary)",
+                            fontWeight: summaryFilter ? 600 : 400,
+                          }}
+                        >
+                          热门回复
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => {
@@ -3362,7 +4188,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                         className="rounded-[6px] px-2.5 py-0.5 transition-colors cursor-pointer"
                         style={{
                           backgroundColor: onlyOpFilter ? "var(--canvas)" : "transparent",
-                          color: onlyOpFilter ? "var(--brand-gold)" : "var(--ink-tertiary)",
+                          color: onlyOpFilter ? "var(--active-chip-text)" : "var(--ink-tertiary)",
                           fontWeight: onlyOpFilter ? 600 : 400,
                         }}
                       >
@@ -3381,38 +4207,69 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             })}
 
             {!isLoading &&
+              !isFilterSwitching &&
               !loadingMoreBottom &&
               !errorMessage &&
               detail &&
               detail.posts.length === 1 &&
               detail.posts[0].postNumber === 1 &&
-              (totalFloors <= 1 || onlyOpFilter) && (
+              (totalFloors <= 1 || onlyOpFilter || summaryFilter) && (
                 <div
                   className="flex items-center justify-center gap-2 py-12 text-[12.5px] select-none"
                   style={{ color: "var(--ink-tertiary)" }}
                 >
-                  <MascotExpression
-                    expression={onlyOpFilter ? "sleepy" : "happy"}
-                    sizePx={20}
-                    className="opacity-80"
-                  />
                   {onlyOpFilter ? (
                     <>
+                      <MascotExpression
+                        expression="sleepy"
+                        sizePx={20}
+                        className="opacity-80"
+                      />
                       <span>楼主暂无更多发言</span>
                       <span className="opacity-45">·</span>
                       <button
                         type="button"
                         onClick={onToggleOnlyOp}
-                        className="transition-colors hover:opacity-100 cursor-pointer"
-                        style={{ color: "var(--ink-secondary)" }}
+                        className="font-medium opacity-90 transition-opacity hover:opacity-100 hover:underline cursor-pointer"
+                        style={{ color: "var(--active-chip-text)" }}
+                      >
+                        查看全部
+                      </button>
+                    </>
+                  ) : summaryFilter && onToggleSummaryFilter ? (
+                    <>
+                      <MascotExpression
+                        expression="sleepy"
+                        sizePx={20}
+                        className="opacity-80"
+                      />
+                      <span>暂无精选热门回复</span>
+                      <span className="opacity-45">·</span>
+                      <button
+                        type="button"
+                        onClick={onToggleSummaryFilter}
+                        className="font-medium opacity-90 transition-opacity hover:opacity-100 hover:underline cursor-pointer"
+                        style={{ color: "var(--active-chip-text)" }}
                       >
                         查看全部
                       </button>
                     </>
                   ) : detail.closed || detail.archived ? (
-                    <span>暂无回复 · 话题已关闭</span>
+                    <>
+                      <MascotExpression
+                        expression="sleepy"
+                        sizePx={20}
+                        className="opacity-75"
+                      />
+                      <span>暂无回复 · 话题已关闭</span>
+                    </>
                   ) : (
                     <>
+                      <MascotExpression
+                        expression="happy"
+                        sizePx={20}
+                        className="opacity-80"
+                      />
                       <span>暂无回复</span>
                       <span className="opacity-45">·</span>
                       <button
@@ -3428,10 +4285,10 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             topicTitle: detail.title || summary.title,
                           });
                         }}
-                        className="transition-opacity hover:opacity-100 opacity-85 cursor-pointer"
-                        style={{ color: "var(--brand-gold)" }}
+                        className="font-medium opacity-90 transition-opacity hover:opacity-100 hover:underline cursor-pointer"
+                        style={{ color: "var(--active-chip-text)" }}
                       >
-                        写下第一条
+                        写下第一条回复
                       </button>
                     </>
                   )}
@@ -3446,6 +4303,142 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 <span>正在加载后续楼层...</span>
               </div>
             )}
+
+            {/* 底部零度娘「没有更多了」收尾提示 + 原地增量续拉评论刷新图标（绝不整页重载或跳位） */}
+            {!isLoading &&
+              !isFilterSwitching &&
+              !loadingMoreBottom &&
+              !errorMessage &&
+              detail &&
+              (detail.posts.length > 1 || (totalFloors > 1 && !onlyOpFilter && !summaryFilter)) &&
+              (() => {
+                const lastPost = detail.posts[detail.posts.length - 1];
+                const lastIdx = lastPost ? detail.streamIds.indexOf(lastPost.id) : -1;
+                const atEnd =
+                  detail.streamIds.length === 0 ||
+                  (lastIdx >= 0 && lastIdx >= detail.streamIds.length - 1);
+                if (!atEnd) return null;
+                return (
+                  <div
+                    className="flex items-center justify-center gap-2.5 py-7 text-[12.5px] select-none"
+                    style={{ color: "var(--ink-tertiary)" }}
+                  >
+                    <span
+                      className="h-[0.5px] w-7 shrink-0"
+                      style={{ backgroundColor: "var(--hairline)" }}
+                    />
+                    <MascotExpression
+                      expression={refreshingTail ? "happy" : "sleepy"}
+                      sizePx={22}
+                      className="shrink-0 opacity-85"
+                    />
+                    <span>
+                      {refreshingTail
+                        ? "正在检查新回复…"
+                        : tailFeedback || "没有更多了"}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={refreshingTail}
+                      onClick={() => void handleTailIncrementalRefresh()}
+                      title="检查并加载最新回复（不刷新整页）"
+                      aria-label="检查并加载最新回复"
+                      className="lindo-interactive inline-flex h-6 w-6 items-center justify-center rounded-full cursor-pointer disabled:opacity-50"
+                      style={{
+                        backgroundColor: "var(--subtle-surface)",
+                        color: refreshingTail ? "var(--brand-gold)" : "var(--ink-secondary)",
+                      }}
+                    >
+                      <LinDoIcons.Refresh
+                        size={12.5}
+                        className={refreshingTail ? "animate-spin" : ""}
+                      />
+                    </button>
+                    <span
+                      className="h-[0.5px] w-7 shrink-0"
+                      style={{ backgroundColor: "var(--hairline)" }}
+                    />
+                  </div>
+                );
+              })()}
+
+            {/* 底部相关推荐话题（所有回复加载完成后展示，点击直接在客户端内阅读） */}
+            {!isLoading &&
+              !loadingMoreBottom &&
+              !onlyOpFilter &&
+              detail &&
+              detail.archetype !== "private_message" &&
+              detail.suggestedTopics &&
+              detail.suggestedTopics.length > 0 &&
+              (() => {
+                const lastPost = detail.posts[detail.posts.length - 1];
+                const lastIdx = lastPost ? detail.streamIds.indexOf(lastPost.id) : -1;
+                const atEnd =
+                  detail.streamIds.length === 0 ||
+                  (lastIdx >= 0 && lastIdx >= detail.streamIds.length - 1);
+                if (!atEnd) return null;
+                return (
+                  <div
+                    className="mt-6 pt-4 pb-2"
+                    style={{ borderTop: "0.5px solid var(--hairline)" }}
+                  >
+                    <div
+                      className="mb-2.5 text-[12.2px] font-semibold"
+                      style={{ color: "var(--ink-tertiary)" }}
+                    >
+                      相关话题
+                    </div>
+                    <div className="space-y-1">
+                      {detail.suggestedTopics.map((st) => {
+                        const sCat = resolveCategoryVisual(
+                          st.categoryName || "",
+                          st.categoryColorHex
+                        );
+                        return (
+                          <button
+                            key={st.id}
+                            type="button"
+                            onClick={() =>
+                              onNavigateTopicLink(st.id, 1, st.title, visibleFloorRef.current)
+                            }
+                            className="lindo-interactive flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left cursor-pointer"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div
+                                className="truncate text-[13.2px] font-medium"
+                                style={{ color: "var(--ink-primary)" }}
+                              >
+                                {st.title}
+                              </div>
+                              <div className="mt-0.5 flex items-center gap-2 text-[11.2px]">
+                                {st.categoryName && (
+                                  <LinDoCategoryBadge
+                                    name={st.categoryName}
+                                    fallbackColor={sCat.dotColor}
+                                    iconSize={11}
+                                    className="text-[11px]"
+                                  />
+                                )}
+                                <span
+                                  className="tabular-nums"
+                                  style={{ color: "var(--ink-tertiary)" }}
+                                >
+                                  {st.replyCount} 回复 · {formatCompactCount(st.views)} 浏览
+                                </span>
+                              </div>
+                            </div>
+                            <LinDoIcons.ChevronRight
+                              size={13}
+                              className="shrink-0 opacity-50"
+                              style={{ color: "var(--ink-tertiary)" }}
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
           </div>
         )}
         </div>
@@ -3481,6 +4474,10 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 topicTitle: detail?.title || summary.title,
                 replyToPostNumber: captured.post.postNumber,
                 replyToUsername: captured.post.username,
+                replyToDisplayName: captured.post.displayName,
+                replyToAvatarTemplate: captured.post.avatarTemplate,
+                replyToAnimatedAvatar: captured.post.animatedAvatar,
+                replyToSnippet: captured.text.slice(0, 180),
                 initialRaw: `[quote="${captured.post.username}, post:${captured.post.postNumber}, topic:${summary.id}"]\n${captured.text}\n[/quote]\n\n`,
               });
             }}
@@ -3551,7 +4548,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
               className="lindo-interactive flex h-[30px] items-center gap-1 rounded-full px-3 text-[12px] font-semibold tabular-nums"
               style={{
                 backgroundColor: "var(--active-chip-bg)",
-                border: "0.5px solid color-mix(in srgb, var(--brand-gold) 42%, transparent)",
+                border: "0.5px solid var(--hairline)",
                 color: "var(--active-chip-text)",
               }}
             >
@@ -3629,6 +4626,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                   value={floorInputVal}
                   onChange={(e) => setFloorInputVal(e.target.value)}
                   onKeyDown={(e) => {
+                    if (isImeComposingEvent(e)) return;
                     if (e.key === "Enter") {
                       const f = Math.max(1, Math.min(totalFloors, Number(floorInputVal) || 1));
                       jumpToFloor(f);
@@ -3713,6 +4711,109 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         />
       )}
 
+      {/* 脚注内联浮层（点击正文中 [1] 脚注引用时直接展示，绝不跳 WebView） */}
+      {footnotePopover && (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/30 p-6 sm:items-center"
+          onMouseDown={() => setFootnotePopover(null)}
+        >
+          <div
+            className="w-[min(480px,92vw)] rounded-2xl p-4 shadow-2xl"
+            style={{
+              backgroundColor: "var(--card-surface)",
+              border: "0.5px solid var(--hairline)",
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[12px] font-semibold" style={{ color: "var(--ink-secondary)" }}>
+                脚注说明
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const id = footnotePopover.targetId;
+                    setFootnotePopover(null);
+                    const esc =
+                      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+                        ? CSS.escape(id)
+                        : id;
+                    scrollContainerRef.current
+                      ?.querySelector<HTMLElement>(`#${esc}`)
+                      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+                  }}
+                  className="text-[11.5px] font-medium hover:underline cursor-pointer"
+                  style={{ color: "var(--active-chip-text)" }}
+                >
+                  定位至文末
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFootnotePopover(null)}
+                  className="lindo-interactive flex h-6 w-6 items-center justify-center rounded-full"
+                  style={{ color: "var(--ink-tertiary)" }}
+                >
+                  <LinDoIcons.Close size={13} />
+                </button>
+              </div>
+            </div>
+            <div
+              className="lindo-cooked text-[13.5px]"
+              onClick={handleCookedClick}
+              dangerouslySetInnerHTML={{ __html: footnotePopover.html }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* 帖子编辑历史弹窗 */}
+      {revisionModal && (
+        <PostRevisionsModal
+          postId={revisionModal.postId}
+          postNumber={revisionModal.postNumber}
+          onInspectUser={onInspectUser}
+          onClose={() => setRevisionModal(null)}
+        />
+      )}
+
+      {/* 点赞与表态成员弹窗 */}
+      {reactionUsersModal && (
+        <ReactionUsersModal
+          postId={reactionUsersModal.postId}
+          initialReactionId={reactionUsersModal.initialReactionId}
+          onInspectUser={onInspectUser}
+          onClose={() => setReactionUsersModal(null)}
+        />
+      )}
+
+      {/* 书签备注与定时提醒弹窗 */}
+      {bookmarkModalPost && (
+        <BookmarkReminderModal
+          postId={bookmarkModalPost.id}
+          postNumber={bookmarkModalPost.postNumber}
+          existingBookmarkId={bookmarkModalPost.bookmarkId}
+          initialName={bookmarkModalPost.bookmarkName}
+          initialReminderAt={bookmarkModalPost.bookmarkReminderAt}
+          onSaved={({ id, name, reminderAt }) => {
+            onAppendPosts(
+              [
+                {
+                  ...bookmarkModalPost,
+                  bookmarked: Boolean(id),
+                  bookmarkId: id,
+                  bookmarkName: name,
+                  bookmarkReminderAt: reminderAt,
+                },
+              ],
+              "after"
+            );
+            setToastMsg(id ? (reminderAt ? "已保存书签并设置提醒" : "已保存书签") : "已移除书签");
+          }}
+          onClose={() => setBookmarkModalPost(null)}
+        />
+      )}
+
       {/* 轻提示 Toast */}
       {toastMsg && (
         <div
@@ -3736,9 +4837,10 @@ const InteractivePollCard: React.FC<{
   poll: PostPollModel;
   isAuthorized: boolean;
   onRequestLogin: () => void;
+  onInspectUser: (username: string) => void;
   onPollUpdated: (next: PostPollModel) => void;
   onError: (msg: string) => void;
-}> = ({ postId, poll, isAuthorized, onRequestLogin, onPollUpdated, onError }) => {
+}> = ({ postId, poll, isAuthorized, onRequestLogin, onInspectUser, onPollUpdated, onError }) => {
   const isMulti = poll.type === "multiple";
   const hasVoted = (poll.myVotes?.length ?? 0) > 0;
   const isClosed = poll.status === "closed";
@@ -3747,6 +4849,29 @@ const InteractivePollCard: React.FC<{
     hasVoted || isClosed || poll.results === "always"
   );
   const [busy, setBusy] = useState(false);
+  const [votersByOpt, setVotersByOpt] = useState<
+    Record<string, Array<{ username: string; name?: string; avatarTemplate: string }>>
+  >({});
+  const [loadingVotersOpt, setLoadingVotersOpt] = useState<string | null>(null);
+  const [expandedVotersOpt, setExpandedVotersOpt] = useState<string | null>(null);
+
+  const toggleOptionVoters = async (optId: string) => {
+    if (expandedVotersOpt === optId) {
+      setExpandedVotersOpt(null);
+      return;
+    }
+    setExpandedVotersOpt(optId);
+    if (votersByOpt[optId]) return;
+    setLoadingVotersOpt(optId);
+    try {
+      const list = await fetchPollVoters(postId, poll.name, optId, 1);
+      setVotersByOpt((prev) => ({ ...prev, [optId]: list }));
+    } catch {
+      setVotersByOpt((prev) => ({ ...prev, [optId]: [] }));
+    } finally {
+      setLoadingVotersOpt(null);
+    }
+  };
 
   useEffect(() => {
     setSelectedIds(poll.myVotes ?? []);
@@ -3800,49 +4925,96 @@ const InteractivePollCard: React.FC<{
         {poll.options.map((opt) => {
           const checked = selectedIds.includes(opt.id);
           const pct = Math.min(100, Math.round((opt.votes / totalVotes) * 100));
+          const isVotersExpanded = expandedVotersOpt === opt.id;
+          const optVoters = votersByOpt[opt.id] || [];
           return (
-            <button
-              key={opt.id}
-              type="button"
-              disabled={isClosed || busy}
-              onClick={() => toggleOption(opt.id)}
-              className="relative flex w-full items-center justify-between overflow-hidden rounded-lg px-3 py-2 text-left text-[13px] transition-colors cursor-pointer disabled:cursor-default"
-              style={{
-                backgroundColor: "var(--card-surface)",
-                border: checked
-                  ? "0.5px solid var(--brand-gold)"
-                  : "0.5px solid var(--hairline)",
-              }}
-            >
-              {showResults && (
-                <div
-                  className="pointer-events-none absolute inset-y-0 left-0 transition-all duration-300"
-                  style={{
-                    width: `${pct}%`,
-                    backgroundColor: checked
-                      ? "color-mix(in srgb, var(--brand-gold) 18%, transparent)"
-                      : "color-mix(in srgb, var(--ink-tertiary) 12%, transparent)",
-                  }}
-                />
-              )}
-              <span
-                className="relative z-10 flex items-center gap-2 font-medium"
-                style={{ color: "var(--ink-primary)" }}
+            <div key={opt.id} className="space-y-1">
+              <button
+                type="button"
+                disabled={isClosed || busy}
+                onClick={() => toggleOption(opt.id)}
+                className="relative flex w-full items-center justify-between overflow-hidden rounded-lg px-3 py-2 text-left text-[13px] transition-colors cursor-pointer disabled:cursor-default"
+                style={{
+                  backgroundColor: "var(--card-surface)",
+                  border: "0.5px solid var(--hairline)",
+                }}
               >
-                {checked && (
-                  <LinDoIcons.Check size={13.5} style={{ color: "var(--brand-gold)" }} />
+                {showResults && (
+                  <div
+                    className="pointer-events-none absolute inset-y-0 left-0 transition-all duration-300"
+                    style={{
+                      width: `${pct}%`,
+                      backgroundColor: checked
+                        ? "color-mix(in srgb, var(--brand-gold) 18%, transparent)"
+                        : "color-mix(in srgb, var(--ink-tertiary) 12%, transparent)",
+                    }}
+                  />
                 )}
-                <span dangerouslySetInnerHTML={{ __html: prepareCookedHtml(opt.html) }} />
-              </span>
-              {showResults && (
                 <span
-                  className="relative z-10 ml-2 shrink-0 text-[11.5px] font-semibold tabular-nums"
-                  style={{ color: checked ? "var(--brand-gold)" : "var(--ink-secondary)" }}
+                  className="relative z-10 flex items-center gap-2 font-medium"
+                  style={{ color: "var(--ink-primary)" }}
                 >
-                  {pct}% ({opt.votes})
+                  {checked && (
+                    <LinDoIcons.Check size={13.5} style={{ color: "var(--brand-gold)" }} />
+                  )}
+                  <span dangerouslySetInnerHTML={{ __html: prepareCookedHtmlCached(opt.html) }} />
                 </span>
+                {showResults && (
+                  <span
+                    className="relative z-10 ml-2 shrink-0 text-[11.5px] font-semibold tabular-nums"
+                    style={{ color: checked ? "var(--brand-gold)" : "var(--ink-secondary)" }}
+                  >
+                    {pct}% ({opt.votes})
+                  </span>
+                )}
+              </button>
+              {showResults && poll.isPublic && opt.votes > 0 && (
+                <div className="px-1">
+                  <button
+                    type="button"
+                    onClick={() => void toggleOptionVoters(opt.id)}
+                    className="text-[11px] hover:underline cursor-pointer"
+                    style={{ color: "var(--ink-tertiary)" }}
+                  >
+                    {isVotersExpanded ? "收起投票名单" : `查看 ${opt.votes} 位投票成员`}
+                  </button>
+                  {isVotersExpanded && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 pb-1">
+                      {loadingVotersOpt === opt.id ? (
+                        <span className="text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+                          加载中...
+                        </span>
+                      ) : optVoters.length === 0 ? (
+                        <span className="text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+                          暂无公开投票名单
+                        </span>
+                      ) : (
+                        optVoters.map((v) => (
+                          <button
+                            key={v.username}
+                            type="button"
+                            onClick={() => onInspectUser(v.username)}
+                            className="inline-flex items-center gap-1 rounded-full py-0.5 pl-1 pr-2 text-[11px] hover:underline cursor-pointer"
+                            style={{
+                              backgroundColor: "var(--card-surface)",
+                              border: "0.5px solid var(--hairline)",
+                              color: "var(--ink-secondary)",
+                            }}
+                          >
+                            <AvatarWithFlair
+                              username={v.username}
+                              avatarTemplate={v.avatarTemplate}
+                              sizePx={15}
+                            />
+                            <span>{v.username}</span>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
-            </button>
+            </div>
           );
         })}
       </div>
@@ -4029,9 +5201,7 @@ const FlagPostModal: React.FC<{
                 className="flex w-full items-start gap-2.5 rounded-xl px-3 py-2.5 text-left transition-colors cursor-pointer"
                 style={{
                   backgroundColor: active ? "var(--active-chip-bg)" : "var(--subtle-surface)",
-                  border: active
-                    ? "0.5px solid var(--brand-gold)"
-                    : "0.5px solid var(--hairline)",
+                  border: "0.5px solid var(--hairline)",
                 }}
               >
                 <span

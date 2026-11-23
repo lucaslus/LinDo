@@ -41,6 +41,7 @@ export const SideRail: React.FC<SideRailProps> = ({
     showDot?: boolean
   ) => {
     const selected = currentTab === tab;
+    const isHomeMascot = tab === "HOME";
     const badgeText = badge && badge > 0 ? (badge > 99 ? "99+" : String(badge)) : null;
 
     return (
@@ -48,7 +49,9 @@ export const SideRail: React.FC<SideRailProps> = ({
         key={tab}
         type="button"
         onClick={() => onSelectTab(tab)}
-        className="lindo-no-drag group relative flex h-[52px] w-full flex-col items-center justify-center gap-[3px] cursor-pointer"
+        className={`lindo-no-drag group relative flex ${
+          isHomeMascot ? "h-[56px]" : "h-[52px]"
+        } w-full flex-col items-center justify-center gap-[3px] cursor-pointer`}
       >
         {selected && (
           <span
@@ -59,12 +62,18 @@ export const SideRail: React.FC<SideRailProps> = ({
             }}
           />
         )}
-        <div className="relative flex h-[24px] w-[28px] items-center justify-center">
+        <div
+          className={`relative flex items-center justify-center ${
+            isHomeMascot ? "h-[30px] w-[32px]" : "h-[24px] w-[28px]"
+          }`}
+        >
           <div
-            className="flex h-[22px] w-[22px] items-center justify-center transition-all duration-150 group-hover:scale-[1.06]"
+            className={`flex items-center justify-center transition-all duration-150 group-hover:scale-[1.06] ${
+              isHomeMascot ? "h-[29px] w-[29px]" : "h-[22px] w-[22px]"
+            }`}
             style={{
               color: selected ? "var(--brand-gold)" : "var(--ink-secondary)",
-              opacity: selected ? 1 : 0.82,
+              opacity: isHomeMascot ? 1 : selected ? 1 : 0.82,
             }}
           >
             {iconNode(selected)}
@@ -125,8 +134,8 @@ export const SideRail: React.FC<SideRailProps> = ({
             <img
               src="/brand/lindo-mark.svg"
               alt="首页"
-              className="h-[21px] w-[21px] object-contain pointer-events-none"
-              style={{ opacity: selected ? 1 : 0.78 }}
+              className="h-[29px] w-[29px] object-contain pointer-events-none"
+              style={{ opacity: selected ? 1 : 0.85 }}
             />
           ))}
 
@@ -146,8 +155,7 @@ export const SideRail: React.FC<SideRailProps> = ({
               style={{
                 backgroundColor: "var(--tonal-pill)",
                 color: "var(--brand-gold)",
-                boxShadow:
-                  "inset 0 0 0 0.5px color-mix(in srgb, var(--brand-gold) 32%, transparent)",
+                border: "0.5px solid var(--hairline)",
               }}
             >
               <LinDoIcons.Plus size={18.5} />

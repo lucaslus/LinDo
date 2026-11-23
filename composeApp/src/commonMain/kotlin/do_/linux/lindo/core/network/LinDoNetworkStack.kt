@@ -22,12 +22,19 @@ import do_.linux.lindo.core.connect.UserPresenceService
 import do_.linux.lindo.core.model.BadgeInjector
 import do_.linux.lindo.core.model.BoostInputStats
 import do_.linux.lindo.core.model.CommunitySearchResult
+import do_.linux.lindo.core.model.CommunitySearchTagHit
+import do_.linux.lindo.core.model.CommunitySearchUserHit
 import do_.linux.lindo.core.model.FlairInfo
 import do_.linux.lindo.core.model.GrantedBadge
+import do_.linux.lindo.core.model.PollVoterEntry
 import do_.linux.lindo.core.model.PostBoostItem
 import do_.linux.lindo.core.model.PostItemModel
+import do_.linux.lindo.core.model.PostLinkCountItem
 import do_.linux.lindo.core.model.PostReactionItem
+import do_.linux.lindo.core.model.PostRevisionDetail
 import do_.linux.lindo.core.model.PrivateMessageSendResult
+import do_.linux.lindo.core.model.ReactionUserEntry
+import do_.linux.lindo.core.model.ReactionUserGroup
 import do_.linux.lindo.core.model.SearchPageResult
 import do_.linux.lindo.core.model.TopicDetailModel
 import do_.linux.lindo.core.model.TopicSummary
@@ -65,8 +72,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -123,6 +134,18 @@ object CookieSentinel {
     val cfTrustCookieNames = setOf("cf_clearance", "__cf_bm", "_cfuvid", "cf_chl_rc_i", "cf_chl_rc_ni")
     private val store = LinkedHashMap<CookieQuadrupleKey, StoredCookieRecord>()
     private val sessionRefreshMutex = Mutex()
+    @Volatile
+    private var lastObservedWinningT: String = ""
+
+    private fun notifyIfAuthCookieChanged() {
+        val currentT = resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
+            ?.takeUnless { it == "demo_session_token" }
+            .orEmpty()
+        if (currentT != lastObservedWinningT) {
+            lastObservedWinningT = currentT
+            UserApiKeyAuthManager.bumpAuthStateTick()
+        }
+    }
 
     @Synchronized
     fun putCookie(record: StoredCookieRecord) {
@@ -132,9 +155,11 @@ object CookieSentinel {
                 it.name == record.key.name && matchesDomain(it, normalizedDomain)
             }
             toRemove.forEach { store.remove(it) }
+            notifyIfAuthCookieChanged()
             return
         }
         store[record.key] = record
+        notifyIfAuthCookieChanged()
     }
 
     fun ingestAndDeduplicate(variants: List<CookieVariant>, nowMs: Long = System.currentTimeMillis()): List<CookieVariant> {
@@ -316,6 +341,7 @@ object CookieSentinel {
                 }
             }
         }
+        notifyIfAuthCookieChanged()
     }
 
     @Synchronized
@@ -327,6 +353,7 @@ object CookieSentinel {
             it.name == cleanName && matchesDomain(it, normalizedDomain)
         }
         toRemove.forEach { store.remove(it) }
+        notifyIfAuthCookieChanged()
     }
 
     fun ingestSetCookieHeader(
@@ -403,12 +430,14 @@ object CookieSentinel {
     fun clear() {
         store.clear()
         CfClearanceAuthority.reset()
+        notifyIfAuthCookieChanged()
     }
 
     @Synchronized
     fun clearAll() {
         store.clear()
         CfClearanceAuthority.reset()
+        notifyIfAuthCookieChanged()
     }
 
     /**
@@ -418,6 +447,7 @@ object CookieSentinel {
     fun clearAuthCookiesOnly() {
         val keysToRemove = store.keys.filter { it.name !in cfTrustCookieNames }
         keysToRemove.forEach { store.remove(it) }
+        notifyIfAuthCookieChanged()
     }
 }
 
@@ -445,10 +475,18 @@ data class AuthenticatedUserProfile(
  * 2. 支持系统浏览器一键授权回跳 (`discourse://auth_redirect` + `scopes=one_time_password` + RSA PKCS1 解密与 OTP 兑换)
  */
 object UserApiKeyAuthManager {
+    private val _authStateTick = MutableStateFlow(0L)
+    val authStateTick: StateFlow<Long> = _authStateTick
+
+    internal fun bumpAuthStateTick() {
+        _authStateTick.update { it + 1L }
+    }
+
     @Volatile var sessionGeneration: Long = 0L
         private set
     private var activeUserApiKey: String? = null
     private var clientId: String = "lindo-kmp-${UUID.randomUUID()}"
+    private var qrClientId: String = "lindo-qr-${UUID.randomUUID()}"
     private var pendingPrivateKey: java.security.PrivateKey? = null
     private var pendingNonce: String? = null
     private var pendingAuthCreatedAt: Long = 0L
@@ -500,12 +538,16 @@ object UserApiKeyAuthManager {
     var onNetworkRestored: (() -> Unit)? = null
     var onPrepareManualRecovery: (suspend () -> Unit)? = null
     var onPrepareFreshAuthExchange: (suspend () -> Unit)? = null
+    /** 请求平台在后台零 UI 预热一次 `cf_clearance`（若当前已持有健康票据，平台侧自动 no-op）。 */
+    var onRequestClearancePrewarm: ((reason: String) -> Unit)? = null
     @Volatile
     var lastAuthenticatedAtEpochMs: Long = 0L
     var openExternalUrlLauncher: ((String) -> Unit)? = null
+    var openAuthTabLauncher: ((String) -> Unit)? = null
     var onLogoutPlatformClear: (() -> Unit)? = null
     var onPersistSession: ((AuthenticatedUserProfile?, String?) -> Unit)? = null
     var onPersistPendingKey: ((String?, String?) -> Unit)? = null
+    var onPersistQrClientId: ((String) -> Unit)? = null
     var onPersistUiPrefs: ((Float, Boolean, Boolean) -> Unit)? = null
     var onPersistHomeSearchExpanded: ((Boolean) -> Unit)? = null
     var onPersistThemeAndDensity: ((String, Boolean) -> Unit)? = null
@@ -573,6 +615,29 @@ object UserApiKeyAuthManager {
         }
     }
 
+    fun getOrCreateQrClientId(): String {
+        val clean = qrClientId.trim()
+        if (clean.isEmpty()) {
+            qrClientId = "lindo-qr-${UUID.randomUUID()}"
+        }
+        onPersistQrClientId?.invoke(qrClientId)
+        return qrClientId
+    }
+
+    fun restoreQrClientId(saved: String?) {
+        if (!saved.isNullOrBlank()) {
+            qrClientId = saved.trim()
+        }
+    }
+
+    fun acceptExternalOtpLogin(otp: String) {
+        val clean = otp.trim()
+        if (clean.isEmpty()) return
+        pendingOtpToken = clean
+        onAuthStateChanged?.invoke()
+        bumpAuthStateTick()
+    }
+
     fun exportPendingPrivateKeyBase64(): String? {
         val pk = pendingPrivateKey?.encoded ?: return null
         return Base64.getEncoder().encodeToString(pk)
@@ -609,6 +674,7 @@ object UserApiKeyAuthManager {
         onPersistSession?.invoke(currentUser, activeUserApiKey)
         SavedAccounts.captureCurrent()
         onAuthStateChanged?.invoke()
+        bumpAuthStateTick()
     }
 
     @Volatile
@@ -649,6 +715,7 @@ object UserApiKeyAuthManager {
         LinuxDoRepository.updateCsrfToken(null)
         onPersistSession?.invoke(null, null)
         onAuthStateChanged?.invoke()
+        bumpAuthStateTick()
     }
 
     internal suspend fun <T> withServerAuthInvalidationSuppressed(block: suspend () -> T): T {
@@ -721,6 +788,7 @@ object UserApiKeyAuthManager {
         onPersistSession?.invoke(profile, activeUserApiKey)
         SavedAccounts.captureCurrent()
         onAuthStateChanged?.invoke()
+        bumpAuthStateTick()
     }
 
     fun recordWebSessionLogin(
@@ -763,6 +831,7 @@ object UserApiKeyAuthManager {
             authStateNotifyEpoch++
             onAuthStateChanged?.invoke()
         }
+        bumpAuthStateTick()
     }
 
     fun restorePersistedSession(
@@ -778,6 +847,7 @@ object UserApiKeyAuthManager {
         // 过滤掉旧版曾写入的假占位用户名，确保只保留真实账号
         currentUser = profile?.takeIf { it.username != "linuxdo_user" }
         onAuthStateChanged?.invoke()
+        bumpAuthStateTick()
     }
 
     internal fun replaceActiveSession(profile: AuthenticatedUserProfile?, apiKey: String?, cookies: String?, reads: String?, drafts: String?) {
@@ -805,6 +875,7 @@ object UserApiKeyAuthManager {
         onPersistSession?.invoke(profile, activeUserApiKey)
         onUnreadCountChanged?.invoke(0)
         onAuthStateChanged?.invoke()
+        bumpAuthStateTick()
     }
 
     fun isAuthorized(): Boolean {
@@ -839,6 +910,7 @@ object UserApiKeyAuthManager {
         if (platformClear != null) platformClear.invoke() else onPersistSession?.invoke(null, null)
         onUnreadCountChanged?.invoke(0)
         onAuthStateChanged?.invoke()
+        bumpAuthStateTick()
     }
 
     /**
@@ -885,11 +957,11 @@ object UserApiKeyAuthManager {
      */
     fun startBrowserOneClickAuth(): String {
         val (url, _) = generateAuthorizationUrl(scopes = "one_time_password")
-        openExternalUrlLauncher?.invoke(url)
+        (openAuthTabLauncher ?: openExternalUrlLauncher)?.invoke(url)
         return url
     }
 
-    private fun decryptRsaBase64(rawB64: String, privKey: java.security.PrivateKey): String? {
+    internal fun decryptRsaBase64(rawB64: String, privKey: java.security.PrivateKey): String? {
         return try {
             val normalized = rawB64
                 .trim()
@@ -952,6 +1024,7 @@ object UserApiKeyAuthManager {
             SavedAccounts.captureCurrent()
             LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "BrowserAuth", "Callback accepted; OTP present=${!otp.isNullOrBlank()}")
             onAuthStateChanged?.invoke()
+            bumpAuthStateTick()
             true
         }.getOrDefault(false)
     }
@@ -1305,7 +1378,8 @@ object LinuxDoRepository {
     private val serverConfirmedReadFloor = java.util.concurrent.ConcurrentHashMap<Int, Int>()
     private val readTopicOrder = java.util.concurrent.ConcurrentLinkedQueue<Int>()
     private val readTopicsStateLock = Any()
-    private val detachedDraftScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val detachedDraftJob = SupervisorJob()
+    private val detachedDraftScope = CoroutineScope(detachedDraftJob + Dispatchers.IO)
     private val followFeedCursors = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val userFollowFeedActivityCursors = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val recentNotificationsLock = Any()
@@ -1316,28 +1390,147 @@ object LinuxDoRepository {
     @Volatile
     private var recentNotificationsItems: List<UserNotificationItem> = emptyList()
 
-    private fun storeRecentNotificationsCache(username: String?, items: List<UserNotificationItem>) {
-        if (!UserApiKeyAuthManager.isAuthorized()) return
+    private val pendingNotificationReadDrainActive = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    var notificationsStateVersion by mutableIntStateOf(0)
+        private set
+
+    private fun bumpNotificationsStateVersion() {
+        runUiSafeStateWrite {
+            notificationsStateVersion++
+        }
+    }
+
+    private fun resolveOverlayedNotifications(
+        username: String?,
+        items: List<UserNotificationItem>
+    ): List<UserNotificationItem> {
+        val cleanOwner = username?.trim()?.takeIf { it.isNotEmpty() && it != "linuxdo_user" }
+            ?: UserApiKeyAuthManager.currentUser?.username?.trim()?.takeIf { it.isNotEmpty() && it != "linuxdo_user" }
+        NotificationReadCoordinator.ensureOwner(cleanOwner)
+        return NotificationReadCoordinator.overlayNotifications(items) { topicId ->
+            getServerConfirmedReadFloor(topicId) ?: 0
+        }
+    }
+
+    private fun applyNotificationOverlayToCacheLocked(topicId: Int, confirmedFloor: Int) {
+        if (topicId <= 0 || confirmedFloor <= 0) return
+        val activeUser = UserApiKeyAuthManager.currentUser?.username?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "linuxdo_user" }
+            ?: return
+        NotificationReadCoordinator.ensureOwner(activeUser)
+        var newlyMarked = 0
+        val idsToQueue = mutableListOf<Int>()
+        synchronized(recentNotificationsLock) {
+            if (!recentNotificationsOwner.equals(activeUser, ignoreCase = true) || recentNotificationsItems.isEmpty()) {
+                return
+            }
+            val updated = recentNotificationsItems.map { item ->
+                if (!item.read &&
+                    NotificationReadCoordinator.isAutoReadableByTopicFloor(item) &&
+                    item.topicId == topicId &&
+                    confirmedFloor >= item.postNumber
+                ) {
+                    newlyMarked++
+                    idsToQueue += item.id
+                    item.copy(read = true)
+                } else {
+                    item
+                }
+            }
+            if (newlyMarked > 0) {
+                recentNotificationsItems = updated
+            }
+        }
+        if (idsToQueue.isNotEmpty()) {
+            idsToQueue.forEach { NotificationReadCoordinator.acknowledgeSingleRead(it) }
+            val nextUnread = (UserApiKeyAuthManager.cachedUnreadNotificationCount - newlyMarked).coerceAtLeast(0)
+            UserApiKeyAuthManager.updateCachedUnreadNotifications(nextUnread)
+            bumpNotificationsStateVersion()
+            drainPendingNotificationReadsAsync()
+        }
+    }
+
+    private fun recordLocalNotificationReadLocked(notificationId: Int): Boolean {
+        if (notificationId <= 0) return false
+        val activeOwner = UserApiKeyAuthManager.currentUser?.username?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "linuxdo_user" }
+        NotificationReadCoordinator.ensureOwner(activeOwner)
+        val addedToLedger = NotificationReadCoordinator.acknowledgeSingleRead(notificationId)
+        var cacheChanged = false
+        var shouldDecrement = addedToLedger
+        synchronized(recentNotificationsLock) {
+            val matchesOwner = activeOwner == null || recentNotificationsOwner.equals(activeOwner, ignoreCase = true)
+            if (matchesOwner && recentNotificationsItems.isNotEmpty()) {
+                var matched = false
+                var transitioned = false
+                recentNotificationsItems = recentNotificationsItems.map { item ->
+                    if (item.id == notificationId) {
+                        matched = true
+                        if (!item.read) {
+                            transitioned = true
+                            cacheChanged = true
+                            item.copy(read = true)
+                        } else {
+                            item
+                        }
+                    } else {
+                        item
+                    }
+                }
+                if (matched) {
+                    shouldDecrement = transitioned
+                }
+            }
+        }
+        if (cacheChanged) {
+            bumpNotificationsStateVersion()
+        }
+        if (shouldDecrement && UserApiKeyAuthManager.cachedUnreadNotificationCount > 0) {
+            UserApiKeyAuthManager.updateCachedUnreadNotifications(
+                (UserApiKeyAuthManager.cachedUnreadNotificationCount - 1).coerceAtLeast(0)
+            )
+        }
+        return cacheChanged || shouldDecrement
+    }
+
+    private fun storeRecentNotificationsCache(
+        username: String?,
+        items: List<UserNotificationItem>
+    ): List<UserNotificationItem> {
+        if (!UserApiKeyAuthManager.isAuthorized()) return items
         val resolvedOwner = username?.trim()?.takeIf { it.isNotEmpty() && it != "linuxdo_user" }
             ?: UserApiKeyAuthManager.currentUser?.username?.trim()?.takeIf { it.isNotEmpty() && it != "linuxdo_user" }
-            ?: return
+            ?: return items
+        val overlayed = resolveOverlayedNotifications(resolvedOwner, items)
+        var changed = false
         synchronized(recentNotificationsLock) {
+            changed = !recentNotificationsOwner.equals(resolvedOwner, ignoreCase = true) ||
+                recentNotificationsItems != overlayed
             recentNotificationsOwner = resolvedOwner
-            recentNotificationsItems = items
+            recentNotificationsItems = overlayed
         }
+        if (changed) {
+            bumpNotificationsStateVersion()
+        }
+        if (NotificationReadCoordinator.snapshotPendingIds().isNotEmpty()) {
+            drainPendingNotificationReadsAsync()
+        }
+        return overlayed
     }
 
     fun getCachedRecentNotifications(
         username: String? = UserApiKeyAuthManager.currentUser?.username
     ): List<UserNotificationItem> {
         val clean = username?.trim()?.takeIf { it.isNotEmpty() && it != "linuxdo_user" } ?: return emptyList()
-        return synchronized(recentNotificationsLock) {
+        val cached = synchronized(recentNotificationsLock) {
             if (recentNotificationsOwner.isNotEmpty() && clean.equals(recentNotificationsOwner, ignoreCase = true)) {
                 recentNotificationsItems
             } else {
                 emptyList()
             }
         }
+        return if (cached.isEmpty()) cached else resolveOverlayedNotifications(clean, cached)
     }
 
     @Volatile
@@ -1411,6 +1604,7 @@ object LinuxDoRepository {
             }
         }
         if (updatedFloor > prevFloor) {
+            applyNotificationOverlayToCacheLocked(topicId, updatedFloor)
             bumpReadTopicsVersion()
             if (persist) {
                 UserApiKeyAuthManager.onPersistReadTopics?.invoke(exportReadTopics())
@@ -1482,6 +1676,7 @@ object LinuxDoRepository {
     fun clearUserSessionCaches() {
         activeAuthVerifyJob?.cancel()
         activeAuthVerifyJob = null
+        detachedDraftJob.cancelChildren()
         lastAuthVerifyEpochMs.set(0L)
         ScreenTrackEngine.resetSessionState()
         clearPollVoteState()
@@ -1494,6 +1689,8 @@ object LinuxDoRepository {
             recentNotificationsOwner = ""
             recentNotificationsItems = emptyList()
         }
+        NotificationReadCoordinator.clear()
+        bumpNotificationsStateVersion()
         updateCsrfToken(null)
         clearReadTopics()
         followFeedCursors.clear()
@@ -1535,11 +1732,17 @@ object LinuxDoRepository {
             recentNotificationsOwner = ""
             recentNotificationsItems = emptyList()
         }
+        NotificationReadCoordinator.clear()
+        bumpNotificationsStateVersion()
         synchronized(badgeCacheLock) {
             cachedUserBadgesByUsername = emptyMap()
         }
         cachedCategoryTemplates = null
-        // Cache maintenance must not reopen a rate-limited or challenged connection.
+        detachedDraftJob.cancelChildren()
+        inFlightAvatarJobs.values.forEach { it.cancel() }
+        inFlightAvatarJobs.clear()
+        // 重置自适应令牌桶与策略引擎测试态，避免同一测试进程内前序 429 用例把后续 UI 巡检拖慢成慢速退避
+        NetworkPolicyEngine.resetForTesting()
     }
 
     private fun syncCookieHeaderPairsToPlatform(cookieHeader: String) {
@@ -2274,10 +2477,121 @@ object LinuxDoRepository {
      * 2. 同时扩容 OkHttp Dispatcher 并发上限，并配合内存 LRU 字节缓存与 Coil 磁盘缓存，消除滑动头像排队饥饿。
      */
     val imageHttpClient: HttpClient by lazy {
+        val defaultTm = javax.net.ssl.TrustManagerFactory
+            .getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm())
+            .apply { init(null as java.security.KeyStore?) }
+            .trustManagers
+            .filterIsInstance<javax.net.ssl.X509TrustManager>()
+            .firstOrNull()
+        val echTrustManager = defaultTm?.let { platformTm ->
+            object : javax.net.ssl.X509ExtendedTrustManager() {
+                private fun verifyEchFallback(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    host: String?,
+                    origErr: java.security.cert.CertificateException
+                ) {
+                    val leaf = chain?.firstOrNull() ?: throw origErr
+                    val peerHost = host?.trim()?.takeIf { it.isNotEmpty() } ?: throw origErr
+                    val der = runCatching { leaf.encoded }.getOrNull() ?: throw origErr
+                    if (!EchRoutingPolicy.verifyGatewayLeaf(der, peerHost)) {
+                        throw origErr
+                    }
+                }
+
+                override fun checkClientTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    authType: String?
+                ) = platformTm.checkClientTrusted(chain, authType)
+
+                override fun checkClientTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    authType: String?,
+                    socket: java.net.Socket?
+                ) {
+                    val ext = platformTm as? javax.net.ssl.X509ExtendedTrustManager
+                    if (ext != null) ext.checkClientTrusted(chain, authType, socket)
+                    else platformTm.checkClientTrusted(chain, authType)
+                }
+
+                override fun checkClientTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    authType: String?,
+                    engine: javax.net.ssl.SSLEngine?
+                ) {
+                    val ext = platformTm as? javax.net.ssl.X509ExtendedTrustManager
+                    if (ext != null) ext.checkClientTrusted(chain, authType, engine)
+                    else platformTm.checkClientTrusted(chain, authType)
+                }
+
+                override fun checkServerTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    authType: String?
+                ) = platformTm.checkServerTrusted(chain, authType)
+
+                override fun checkServerTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    authType: String?,
+                    socket: java.net.Socket?
+                ) {
+                    try {
+                        val ext = platformTm as? javax.net.ssl.X509ExtendedTrustManager
+                        if (ext != null) ext.checkServerTrusted(chain, authType, socket)
+                        else platformTm.checkServerTrusted(chain, authType)
+                    } catch (certEx: java.security.cert.CertificateException) {
+                        val host = (socket as? javax.net.ssl.SSLSocket)?.handshakeSession?.peerHost
+                        verifyEchFallback(chain, host, certEx)
+                    }
+                }
+
+                override fun checkServerTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>?,
+                    authType: String?,
+                    engine: javax.net.ssl.SSLEngine?
+                ) {
+                    try {
+                        val ext = platformTm as? javax.net.ssl.X509ExtendedTrustManager
+                        if (ext != null) ext.checkServerTrusted(chain, authType, engine)
+                        else platformTm.checkServerTrusted(chain, authType)
+                    } catch (certEx: java.security.cert.CertificateException) {
+                        verifyEchFallback(chain, engine?.peerHost, certEx)
+                    }
+                }
+
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> =
+                    platformTm.acceptedIssuers
+            }
+        }
         HttpClient(OkHttp) {
             engine {
                 config {
                     dns(SmartDohDns)
+                    proxySelector(object : java.net.ProxySelector() {
+                        override fun select(uri: java.net.URI?): List<java.net.Proxy> {
+                            val snap = EchRoutingPolicy.snapshot
+                            val host = uri?.host
+                            if (snap.active && snap.listenPort > 0 && EchRoutingPolicy.shouldMitmHost(host)) {
+                                return listOf(
+                                    java.net.Proxy(
+                                        java.net.Proxy.Type.HTTP,
+                                        java.net.InetSocketAddress("127.0.0.1", snap.listenPort)
+                                    )
+                                )
+                            }
+                            return listOf(java.net.Proxy.NO_PROXY)
+                        }
+
+                        override fun connectFailed(
+                            uri: java.net.URI?,
+                            sa: java.net.SocketAddress?,
+                            ioe: java.io.IOException?
+                        ) = Unit
+                    })
+                    if (echTrustManager != null) {
+                        val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS").apply {
+                            init(null, arrayOf<javax.net.ssl.TrustManager>(echTrustManager), null)
+                        }
+                        sslSocketFactory(sslCtx.socketFactory, echTrustManager)
+                    }
                     connectionPool(imageConnectionPool)
                     retryOnConnectionFailure(true)
                     dispatcher(
@@ -2438,6 +2752,7 @@ object LinuxDoRepository {
     private suspend fun fetchCsrfTokenViaSharedClient(forceRefresh: Boolean = false): String? {
         if (!forceRefresh) {
             cachedCsrfToken?.takeIf { it.isNotBlank() }?.let { return it }
+            if (NetworkPolicyEngine.isCsrfInCooldown()) return null
         }
         return try {
             val cookieHeader = CookieSentinel.buildCookieHeader(targetHost = "linux.do")
@@ -2455,9 +2770,15 @@ object LinuxDoRepository {
             val token = runCatching {
                 json.parseToJsonElement(body).jsonObject["csrf"]?.jsonPrimitive?.contentOrNull
             }.getOrNull()?.takeIf { it.isNotBlank() }
-            if (token != null) cachedCsrfToken = token
+            if (token != null) {
+                cachedCsrfToken = token
+                NetworkPolicyEngine.clearCsrfCooldown()
+            } else {
+                NetworkPolicyEngine.noteCsrfRefreshFailed()
+            }
             token
         } catch (_: Throwable) {
+            NetworkPolicyEngine.noteCsrfRefreshFailed()
             null
         }
     }
@@ -2486,31 +2807,59 @@ object LinuxDoRepository {
     }
 
     /**
-     * `HTTP 429 + cf-mitigated: challenge` 属于边缘并发限流，绝不可拉黑健康的 `cf_clearance`；
-     * 采用阶梯冷却 `[12s, 24s, 40s]` 并尊重 `Retry-After`，待窗口恢复后继续使用现有凭证。
+     * 两段式自适应 `HTTP 429 + cf-mitigated: challenge` 退让：
+     * - 持有健康 `cf_clearance` 且首次突发：短冷却（默认 1.8s 或服务端 `Retry-After` 上限 8s），保护健康票据不被误杀；
+     * - 12s 内连续第 2 次命中或无健康票据：由上游 `Cf429AdaptiveClassifier` 直接升舱进入单飞过盾轮换，不再傻等 12s→24s→40s。
      */
-    fun noteChallengeRateLimitHit(retryAfterHeader: String? = null) {
+    fun noteChallengeRateLimitHit(retryAfterHeader: String? = null, shortCooldownMs: Long? = null) {
+        NetworkPolicyEngine.apiTokenBucket.onTrue429()
         val streak = challenge429Streak.incrementAndGet()
-        val steppedMs = when {
-            streak <= 1 -> 12_000L
-            streak == 2 -> 24_000L
-            else -> 40_000L
+        val baseMs = shortCooldownMs ?: when {
+            streak <= 1 -> 2_200L
+            streak == 2 -> 6_000L
+            else -> 12_000L
         }
         val headerMs = if (!retryAfterHeader.isNullOrBlank()) {
             NetworkRecoveryPolicy.retryAfterMillis(retryAfterHeader)
         } else 0L
-        noteRateLimitHit(maxOf(steppedMs, headerMs))
+        noteRateLimitHit(maxOf(baseMs, headerMs).coerceAtMost(15_000L))
     }
 
     private fun noteChallengeHit(cooldownMs: Long = 12_000L) {
         val carriedCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
         CfClearanceAuthority.noteChallenged(carriedCf)
+        ScreenTrackEngine.pauseAndDropForSiteVerification()
         val until = System.currentTimeMillis() + cooldownMs
         challengeBlockedUntilMs.updateAndGet { prev -> maxOf(prev, until) }
     }
 
+    private val lastBackgroundChallengeLogAtMs = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
+     * 后台请求撞盾：只记录诊断 + 请求平台零 UI 预热，绝不拉全局熔断、绝不把当前票据标为失效。
+     * （timings 自身已有 90s 挂起，通知轮询下一轮自然重试。）
+     */
+    private fun noteBackgroundChallenge(method: String, url: String, status: Int) {
+        val now = System.currentTimeMillis()
+        val hasCf = !CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value.isNullOrBlank()
+        val last = lastBackgroundChallengeLogAtMs.get()
+        if (now - last >= 30_000L && lastBackgroundChallengeLogAtMs.compareAndSet(last, now)) {
+            LinDoDiagnosticLogger.warn(
+                DiagnosticCategory.NETWORK,
+                "BackgroundChallenge",
+                "${method.uppercase()} ${LinDoDiagnosticLogger.sanitizeUrl(url)} -> HTTP $status [cfMitigated=challenge] (background; hasCf=$hasCf, prewarm=${!hasCf})"
+            )
+        }
+        if (!hasCf) {
+            runCatching { UserApiKeyAuthManager.onRequestClearancePrewarm?.invoke("background_challenge") }
+        }
+    }
+
     internal fun hasInFlightForegroundApi(): Boolean =
         inFlightForegroundApiCount.get() > 0
+
+    internal fun inFlightForegroundCount(): Int =
+        inFlightForegroundApiCount.get()
 
     internal fun isRateLimitedNow(): Boolean =
         System.currentTimeMillis() < rateLimitedUntilMs.get()
@@ -2530,6 +2879,9 @@ object LinuxDoRepository {
         rateLimitedUntilMs.set(0L)
         challenge429Streak.set(0)
         readRateLimitRecovery.reset()
+        NetworkPolicyEngine.apiTokenBucket.reset()
+        NetworkPolicyEngine.mediaTokenBucket.reset()
+        NetworkPolicyEngine.cf429Classifier.reset()
     }
 
     internal fun clearChallengeCooldown() {
@@ -2653,7 +3005,23 @@ object LinuxDoRepository {
             }
         }
         val isSilentTiming = url.contains("/topics/timings")
+        val deadline = CallDeadline.forRequest(isRead = isReadMethod, isBackground = !isForegroundRequest)
+        val attemptBudget = AttemptBudget(method = method)
+        val reqPriority = when {
+            !isReadMethod && isForegroundRequest -> RequestPriority.HIGH
+            isForegroundRequest -> RequestPriority.NORMAL
+            else -> RequestPriority.LOW
+        }
+        val gatePermit = if (!isSilentTiming && !explicitAuthExchange) {
+            NetworkPolicyEngine.priorityGate.acquire(reqPriority)
+        } else null
         try {
+            if (!isSilentTiming && !explicitAuthExchange) {
+                val pacerDelayMs = NetworkPolicyEngine.apiTokenBucket.reserveDelayMs()
+                if (pacerDelayMs > 0L && !deadline.isExpired()) {
+                    kotlinx.coroutines.delay(pacerDelayMs.coerceAtMost(deadline.remainingMs()))
+                }
+            }
             if (UserApiKeyAuthManager.requireBrowserTransportOnly && UserApiKeyAuthManager.webViewHttpExecutor == null) {
                 return@withContext null
             }
@@ -2733,16 +3101,27 @@ object LinuxDoRepository {
             // Mutations need the browser session's CSRF token. Never retry a write through a second transport.
             if (!isReadMethod && UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 val writeResult = callWebView()
-                if (!isSilentTiming && writeResult?.first == 429 && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
-                if (writeResult != null && writeResult.first != 429 && looksLikeCloudflareChallenge(writeResult.second)) {
-                    noteChallengeHit()
+                val writeIsCfChallenge = writeResult != null && looksLikeCloudflareChallenge(writeResult.second)
+                if (!isSilentTiming && writeResult?.first == 429 && !writeIsCfChallenge && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
+                if (writeIsCfChallenge) {
+                    if (SilentVerifyPolicy.backgroundChallengeArmsGlobalPause(!isForegroundRequest)) {
+                        noteChallengeHit()
+                    } else {
+                        noteBackgroundChallenge(method, url, writeResult.first)
+                    }
                 } else if (writeResult != null && isSuccessfulApiResponse(writeResult.first, writeResult.second)) {
                     challengeBlockedUntilMs.set(0L)
                     challenge429Streak.set(0)
+                    NetworkPolicyEngine.timeoutBlackholeDetector.noteHealthyResponse()
+                    NetworkPolicyEngine.verifyCoordinator.resetOnHealthyResponse()
                     CfClearanceAuthority.confirmHealthy(
                         CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                     )
-                } else if (!isSessionProbeUrl && writeResult != null && isDiscourseNotLoggedInResponse(writeResult.first, writeResult.second)) {
+                } else if (!isSessionProbeUrl &&
+                    !NetworkPolicyEngine.isLogoutExemptFromSessionRecovery(method, url) &&
+                    writeResult != null &&
+                    isDiscourseNotLoggedInResponse(writeResult.first, writeResult.second)
+                ) {
                     scheduleAuthVerificationIfNeeded()
                 }
                 return@withContext writeResult?.takeIf {
@@ -2757,6 +3136,7 @@ object LinuxDoRepository {
             var firstBrowserResult: Pair<Int, String>? = null
             if (UserApiKeyAuthManager.webViewHttpExecutor != null) {
                 for (attempt in 0 until maxReadAttempts) {
+                    if (attempt > 0 && deadline.isExpired()) break
                     var candidate = callWebView()
                     if (candidate != null && !isSessionProbeUrl && isDiscourseNotLoggedInResponse(candidate.first, candidate.second)) {
                         scheduleAuthVerificationIfNeeded()
@@ -2768,12 +3148,19 @@ object LinuxDoRepository {
                             }
                         }
                     }
-                    if (candidate?.first == 429 && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
-                    if (candidate != null && candidate.first != 429 && looksLikeCloudflareChallenge(candidate.second)) {
-                        noteChallengeHit()
+                    val candidateIsCfChallenge = candidate != null && looksLikeCloudflareChallenge(candidate.second)
+                    if (candidate?.first == 429 && !candidateIsCfChallenge && (!NetworkRecoveryPolicy.enabled || !isRateLimitedNow())) noteRateLimitHit()
+                    if (candidateIsCfChallenge) {
+                        if (SilentVerifyPolicy.backgroundChallengeArmsGlobalPause(!isForegroundRequest)) {
+                            noteChallengeHit()
+                        } else {
+                            noteBackgroundChallenge(method, url, candidate.first)
+                        }
                     }
                     if (candidate != null && isExpectedResponse(candidate.first, candidate.second)) {
                         challenge429Streak.set(0)
+                        NetworkPolicyEngine.timeoutBlackholeDetector.noteHealthyResponse()
+                        NetworkPolicyEngine.verifyCoordinator.resetOnHealthyResponse()
                         CfClearanceAuthority.confirmHealthy(
                             CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                         )
@@ -2791,7 +3178,13 @@ object LinuxDoRepository {
                         candidate.first in setOf(429, 502, 503, 504) &&
                             !looksLikeCloudflareChallenge(candidate.second)
                     )
-                    if (!retryable || attempt >= maxReadAttempts - 1 || (NetworkRecoveryPolicy.enabled && candidate?.first == 429)) break
+                    if (!retryable ||
+                        attempt >= maxReadAttempts - 1 ||
+                        !attemptBudget.canRetryTransient() ||
+                        deadline.isExpired() ||
+                        (NetworkRecoveryPolicy.enabled && candidate?.first == 429)
+                    ) break
+                    attemptBudget.consumeTransient()
                     if (candidate == null) {
                         try {
                             UserApiKeyAuthManager.onPrepareManualRecovery?.invoke()
@@ -2800,8 +3193,10 @@ object LinuxDoRepository {
                         } catch (_: Throwable) {
                         }
                     }
-                    val backoffMs = if (candidate?.first == 429) 1_200L else 320L
-                    kotlinx.coroutines.delay(backoffMs)
+                    val backoffMs = if (candidate?.first == 429) 1_200L else (320L shl attempt.coerceAtMost(2))
+                    if (backoffMs > 0L && !deadline.isExpired()) {
+                        kotlinx.coroutines.delay(backoffMs.coerceAtMost(deadline.remainingMs()))
+                    }
                 }
                 return@withContext if (preserveFailure) firstBrowserResult else null
             }
@@ -2859,7 +3254,7 @@ object LinuxDoRepository {
                     var status = response.status.value
                     var (text, cfMitigated, cfRay) = decorateOkHttpChallengeBody(status, response.headers, response.bodyAsText())
                     if (!isSilentTiming && status == 429 && !NetworkRecoveryPolicy.enabled) noteRateLimitHit()
-                    if (status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
+                    if (isForegroundRequest && status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
                     if (isMutation && status in setOf(403, 422) && !looksLikeCloudflareChallenge(text) && text.contains("CSRF", ignoreCase = true) && hasWebCookie) {
                         val freshCsrf = fetchCsrfTokenViaSharedClient(forceRefresh = true)
                         if (!freshCsrf.isNullOrBlank()) {
@@ -2875,7 +3270,7 @@ object LinuxDoRepository {
                             text = decorated.first
                             cfMitigated = decorated.second
                             cfRay = decorated.third
-                            if (status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
+                            if (isForegroundRequest && status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
                         }
                     }
                     // 若携带 Discourse-Logged-In 头遭遇非 Cloudflare 403（例如 Cookie 过期被 Discourse check_xhr 拦截），剥离该头自动重试一次并异步复核会话
@@ -2893,7 +3288,7 @@ object LinuxDoRepository {
                         text = decorated.first
                         cfMitigated = decorated.second
                         cfRay = decorated.third
-                        if (status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
+                        if (isForegroundRequest && status != 429 && looksLikeCloudflareChallenge(text)) noteChallengeHit()
                     }
                     if (!isSessionProbeUrl && isDiscourseNotLoggedInResponse(status, text)) {
                         scheduleAuthVerificationIfNeeded()
@@ -2981,6 +3376,7 @@ object LinuxDoRepository {
                 null
             }
         } finally {
+            gatePermit?.release()
             if (isForegroundRequest) {
                 inFlightForegroundApiCount.decrementAndGet()
             }
@@ -2993,9 +3389,152 @@ object LinuxDoRepository {
      * - 再 POST `/session/otp/$otp` 直接捕获服务端下发的 `_t` 会话 Cookie 并同步至系统 `CookieManager`；
      * - 若直连兑换成功返回 `true`（直接完成登录），若被拦截则返回 `false` 交由 WebView 兜底。
      */
+    internal fun isOtpRejectedByServerHtml(body: String?): Boolean {
+        if (body.isNullOrBlank()) return false
+        return body.contains("Missing, invalid or expired token", ignoreCase = true) ||
+            body.contains("incorrect_otp", ignoreCase = true) ||
+            body.contains("page doesn't exist or is private", ignoreCase = true) ||
+            body.contains("page doesn’t exist or is private", ignoreCase = true)
+    }
+
+    internal fun isOtpRejectedByDiscourse(statusCode: Int, body: String?): Boolean {
+        if (looksLikeCloudflareChallenge(body.orEmpty())) return false
+        if (isOtpRejectedByServerHtml(body)) return true
+        if (statusCode in setOf(400, 404, 410, 422)) {
+            if (body.orEmpty().contains("BAD CSRF", ignoreCase = true)) return false
+            return true
+        }
+        return false
+    }
+
+    /**
+     * OTP 兑换后的轻量会话确认：只探测 `/session/current.json`，不在登录瞬间并发拉取 `/u/{username}.json`、
+     * `/u/{username}/summary.json` 与 `/notifications.json`，从根源消除“刚登录即触发 Cloudflare 突发盾”的问题。
+     */
+    private suspend fun confirmAuthenticatedSessionQuietly(): UserFullProfileSummary? = withContext(Dispatchers.IO) {
+        val headers = mapOf("Cache-Control" to "no-cache")
+        val cachedAccount = UserApiKeyAuthManager.currentUser
+        val existingProfile = UserApiKeyAuthManager.fullProfileCache
+
+        var sessionRes = executeHttp(
+            url = "https://linux.do/session/current.json",
+            extraHeaders = headers,
+            preserveFailure = true
+        ) ?: return@withContext null
+
+        if (isConfirmedDiscourseUnauthenticatedSessionResponse(sessionRes.first, sessionRes.second)) {
+            kotlinx.coroutines.delay(350L)
+            runCatching { SavedAccounts.refreshBrowserCookies?.invoke() }
+            sessionRes = executeHttp(
+                url = "https://linux.do/session/current.json",
+                extraHeaders = headers,
+                preserveFailure = true
+            ) ?: return@withContext null
+        }
+
+        val sessionStatus = sessionRes.first
+        val sessionBody = sessionRes.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)
+        val sessionTrimmed = sessionBody.trimStart()
+        if (sessionStatus !in 200..299 ||
+            looksLikeCloudflareChallenge(sessionRes.second) ||
+            !sessionTrimmed.startsWith("{")
+        ) {
+            return@withContext null
+        }
+
+        val sessionRoot = runCatching { json.parseToJsonElement(sessionTrimmed).jsonObject }.getOrNull()
+            ?: return@withContext null
+        val cu = sessionRoot["current_user"] as? JsonObject ?: return@withContext null
+
+        val uname = cu["username"]?.jsonPrimitive?.contentOrNull?.takeIf {
+            it.isNotBlank() && it != "linuxdo_user"
+        } ?: return@withContext null
+
+        clearAuthFailureCooldown()
+        NotificationReadCoordinator.ensureOwner(uname)
+        val sameCachedUser = cachedAccount?.username?.equals(uname, ignoreCase = true) == true
+        val sameProfile = existingProfile?.takeIf { it.username.equals(uname, ignoreCase = true) }
+
+        val userId = cu["id"]?.jsonPrimitive?.intOrNull
+            ?: sameProfile?.id
+            ?: (if (sameCachedUser) cachedAccount?.userId else null)
+            ?: 0
+        val displayName = cu["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: sameProfile?.displayName?.takeIf { it.isNotBlank() }
+            ?: (if (sameCachedUser) cachedAccount?.displayName else null)
+            ?: uname
+        val rawSessionTpl = cu["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val avatarUrl = when {
+            rawSessionTpl.isNotBlank() -> LinuxDoSiteRules.resolveUrl(rawSessionTpl)
+            !sameProfile?.avatarTemplate.isNullOrBlank() -> sameProfile?.avatarTemplate.orEmpty()
+            sameCachedUser -> cachedAccount?.avatarTemplate.orEmpty()
+            else -> ""
+        }
+        val animatedAvatar = LinuxDoSiteRules.resolveAnimatedAvatarUrl(
+            cu["animated_avatar"]?.jsonPrimitive?.contentOrNull
+        ) ?: sameProfile?.animatedAvatar ?: if (sameCachedUser) cachedAccount?.animatedAvatar else null
+        val trustLevel = cu["trust_level"]?.jsonPrimitive?.intOrNull
+            ?: sameProfile?.trustLevel
+            ?: (if (sameCachedUser) cachedAccount?.trustLevel else null)
+            ?: 1
+        val title = cu["title"]?.jsonPrimitive?.contentOrNull
+            ?: sameProfile?.title
+            ?: (if (sameCachedUser) cachedAccount?.userTitle else null).orEmpty()
+        val sessionUnread = parseSessionUnreadCount(cu)
+
+        UserApiKeyAuthManager.recordWebSessionLogin(
+            username = uname,
+            displayName = displayName.ifBlank { uname },
+            avatarUrl = avatarUrl,
+            trustLevel = trustLevel,
+            userId = userId,
+            animatedAvatar = animatedAvatar,
+            userTitle = title
+        )
+
+        val cachedDistinctCount = getCachedUserBadges(uname)?.distinctBy { it.id }?.size ?: 0
+        val summary = UserFullProfileSummary(
+            id = userId,
+            username = uname,
+            displayName = displayName.ifBlank { uname },
+            avatarTemplate = avatarUrl,
+            animatedAvatar = animatedAvatar,
+            trustLevel = trustLevel,
+            title = title,
+            bioExcerpt = sameProfile?.bioExcerpt.orEmpty(),
+            primaryGroupName = sameProfile?.primaryGroupName,
+            admin = sameProfile?.admin ?: false,
+            moderator = sameProfile?.moderator ?: false,
+            createdAtText = sameProfile?.createdAtText.orEmpty(),
+            daysVisited = sameProfile?.daysVisited ?: 0,
+            reportedDaysVisited = sameProfile?.reportedDaysVisited,
+            communityScore = sameProfile?.communityScore,
+            timeReadSeconds = sameProfile?.timeReadSeconds ?: 0,
+            recentTimeReadSeconds = sameProfile?.recentTimeReadSeconds ?: 0,
+            topicsEntered = sameProfile?.topicsEntered ?: 0,
+            postsReadCount = sameProfile?.postsReadCount ?: 0,
+            likesReceived = sameProfile?.likesReceived ?: 0,
+            likesGiven = sameProfile?.likesGiven ?: 0,
+            topicCount = sameProfile?.topicCount ?: 0,
+            postCount = sameProfile?.postCount ?: 0,
+            badgeCount = maxOf(sameProfile?.badgeCount ?: 0, cachedDistinctCount),
+            unreadNotifications = sessionUnread,
+            location = sameProfile?.location.orEmpty(),
+            websiteName = sameProfile?.websiteName.orEmpty(),
+            websiteUrl = sameProfile?.websiteUrl.orEmpty(),
+            statusText = sameProfile?.statusText.orEmpty(),
+            badges = sameProfile?.badges ?: emptyList(),
+            flair = sameProfile?.flair ?: FlairInfo()
+        )
+        UserApiKeyAuthManager.fullProfileCache = summary
+        UserApiKeyAuthManager.updateCachedUnreadNotifications(sessionUnread)
+        summary
+    }
+
     suspend fun redeemOtpSilently(
         otp: String,
-        onSessionAccepted: (() -> Unit)? = null
+        onSessionAccepted: (() -> Unit)? = null,
+        onOtpRejected: (() -> Unit)? = null
     ): Boolean = withContext(Dispatchers.IO) {
         if (NetworkRecoveryPolicy.enabled && isRateLimitedNow()) return@withContext false
         if (otp.isBlank()) {
@@ -3014,8 +3553,20 @@ object LinuxDoRepository {
         }
 
         suspend fun verifyAndFinalizeOtpSession(previousT: String): Boolean {
-            val currentT = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value.orEmpty()
-            if (currentT.isBlank() || currentT == "demo_session_token") {
+            fun readT() = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["_t"]?.value.orEmpty()
+                .takeUnless { it == "demo_session_token" }.orEmpty()
+            // 兑换响应后的 Cookie 同步是异步投递到 CookieIo 线程的：先同步拉取一次浏览器 Cookie 罐，
+            // 仍未见 _t 时短暂重试，杜绝“服务端已登录、App 却读不到 _t”的竞态。
+            var currentT = readT()
+            var syncAttempt = 0
+            while (currentT.isBlank() && syncAttempt < 4) {
+                if (syncAttempt > 0) kotlinx.coroutines.delay(250L)
+                runCatching { SavedAccounts.refreshBrowserCookies?.invoke() }
+                currentT = readT()
+                syncAttempt++
+            }
+            if (currentT.isBlank()) {
+                LinDoDiagnosticLogger.warn(DiagnosticCategory.AUTH, "BrowserAuth", "OTP accepted by server but _t not visible after cookie sync")
                 return false
             }
             // Tell the caller the one-time token was consumed even if the profile probe fails.
@@ -3023,13 +3574,15 @@ object LinuxDoRepository {
             // Successful explicit redemption permits one new session check, even if the
             // browser kept the same valid token. A new challenge immediately pauses again.
             clearChallengeCooldown()
+            // 新会话：清掉登录前（如切去系统浏览器授权期间）遗留的静默退避
+            NetworkPolicyEngine.verifyCoordinator.resetOnSessionChange()
             val epochBefore = UserApiKeyAuthManager.authStateNotifyEpoch
             if (currentT == previousT) {
                 val preservedApiKey = UserApiKeyAuthManager.getApiKey()
                 val preservedCachedProfile = UserApiKeyAuthManager.fullProfileCache
                 UserApiKeyAuthManager.fullProfileCache = null
                 val profile = UserApiKeyAuthManager.withServerAuthInvalidationSuppressed {
-                    fetchCurrentUserProfile()
+                    confirmAuthenticatedSessionQuietly()
                 }
                 if (profile == null) {
                     if (!preservedApiKey.isNullOrBlank() && UserApiKeyAuthManager.getApiKey() != preservedApiKey) {
@@ -3054,7 +3607,7 @@ object LinuxDoRepository {
             // a transient probe during OTP finalization to evict the newly minted session.
             UserApiKeyAuthManager.fullProfileCache = null
             val profile = UserApiKeyAuthManager.withServerAuthInvalidationSuppressed {
-                fetchCurrentUserProfile()
+                confirmAuthenticatedSessionQuietly()
             }
             if (profile != null) {
                 UserApiKeyAuthManager.lastAuthenticatedAtEpochMs = System.currentTimeMillis()
@@ -3064,7 +3617,7 @@ object LinuxDoRepository {
             if (UserApiKeyAuthManager.authStateNotifyEpoch == epochBefore) {
                 UserApiKeyAuthManager.onAuthStateChanged?.invoke()
             }
-            return profile != null && !isChallengeCooldownActive()
+            return profile != null
         }
 
         try {
@@ -3081,17 +3634,42 @@ object LinuxDoRepository {
                     preserveFailure = true,
                     explicitAuthExchange = true
                 )
-                if (otpRes != null && otpRes.first in 200..399 && !looksLikeCloudflareChallenge(otpRes.second)) {
-                    return@withContext verifyAndFinalizeOtpSession(previousT)
+                if (otpRes != null && isOtpRejectedByDiscourse(otpRes.first, otpRes.second)) {
+                    onOtpRejected?.invoke()
+                    LinDoDiagnosticLogger.warn(
+                        DiagnosticCategory.AUTH,
+                        "BrowserAuth",
+                        "OTP rejected by server as invalid or expired (HTTP ${otpRes.first})"
+                    )
+                    return@withContext false
                 }
+                if (otpRes != null && otpRes.first in 200..399 && !looksLikeCloudflareChallenge(otpRes.second)) {
+                    // Discourse 已接受该一次性 OTP：无论后续 _t 同步或资料探测如何，都绝不能在内置网页里再次回放 /session/otp/$otp
+                    onSessionAccepted?.invoke()
+                    LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "BrowserAuth", "OTP exchange accepted (HTTP ${otpRes.first})")
+                    val finalized = verifyAndFinalizeOtpSession(previousT)
+                    QrLoginManager.consumePendingRevokeApiKey()?.let { qrKey ->
+                        launchDetachedDraftOp { revokeUserApiKeySilently(qrKey) }
+                    }
+                    return@withContext finalized
+                }
+                LinDoDiagnosticLogger.warn(
+                    DiagnosticCategory.AUTH,
+                    "BrowserAuth",
+                    "OTP exchange not accepted (HTTP ${otpRes?.first ?: 0}, challenge=${otpRes != null && looksLikeCloudflareChallenge(otpRes.second)})"
+                )
                 return@withContext false
             }
             if (UserApiKeyAuthManager.requireBrowserTransportOnly) {
                 return@withContext false
             }
 
-            if (exchangeOtpSessionCookies(otp, otpExchangeClient)) {
-                return@withContext verifyAndFinalizeOtpSession(previousT)
+            if (exchangeOtpSessionCookies(otp, otpExchangeClient, onOtpRejected = onOtpRejected)) {
+                val finalized = verifyAndFinalizeOtpSession(previousT)
+                QrLoginManager.consumePendingRevokeApiKey()?.let { qrKey ->
+                    launchDetachedDraftOp { revokeUserApiKeySilently(qrKey) }
+                }
+                return@withContext finalized
             }
         } catch (ce: kotlinx.coroutines.CancellationException) {
             throw ce
@@ -3400,7 +3978,8 @@ object LinuxDoRepository {
         summaryFallback: TopicSummary? = null,
         trackVisit: Boolean = true,
         filterUsername: String? = null,
-        targetPostNumber: Int? = null
+        targetPostNumber: Int? = null,
+        filterSummary: Boolean = false
     ): TopicDetailModel = withContext(Dispatchers.IO) {
         markForegroundPriority(2_600L)
         val s = summaryFallback
@@ -3418,11 +3997,13 @@ object LinuxDoRepository {
                 loadError = LinDoNetworkCopy.NOTIFICATION_NO_TOPIC_BODY.text
             )
         }
+        val effectiveFilterSummary = filterSummary && filterUsername.isNullOrBlank()
         val queryParts = mutableListOf<String>()
         if (trackVisit) queryParts.add("track_visit=true")
         if (!filterUsername.isNullOrBlank()) queryParts.add("username_filters=${encodeUrlSegment(filterUsername)}")
+        if (effectiveFilterSummary) queryParts.add("filter=summary")
         val querySuffix = if (queryParts.isNotEmpty()) "?${queryParts.joinToString("&")}" else ""
-        val pathSegment = if (targetPostNumber != null && targetPostNumber > 1) {
+        val pathSegment = if (targetPostNumber != null && targetPostNumber > 1 && filterUsername.isNullOrBlank() && !effectiveFilterSummary) {
             "$topicId/$targetPostNumber.json"
         } else {
             "$topicId.json"
@@ -3438,12 +4019,27 @@ object LinuxDoRepository {
         }
 
         var res = executeHttp(url = url, method = "GET", extraHeaders = extraHeaders, preserveFailure = true)
+        if (res != null && res.first == 404 && !looksLikeCloudflareChallenge(res.second) && UserApiKeyAuthManager.isAuthorized()) {
+            // Private messages & restricted categories return 404 when WebView transiently misses `_t`.
+            // Force one auth-cookie recovery sync and replay once before declaring the topic unavailable.
+            runCatching { UserApiKeyAuthManager.onPrepareManualRecovery?.invoke() }
+            val recovered = executeHttp(
+                url = url,
+                method = "GET",
+                extraHeaders = extraHeaders,
+                preserveFailure = true
+            )
+            if (recovered != null) {
+                res = recovered
+            }
+        }
         if (trackVisit && res != null && res.first in setOf(502, 503, 504) && !looksLikeCloudflareChallenge(res.second)) {
             // Discourse track_visit=true 写计数锁偶发返回 502/503/504（不含 500 帖子级异常，避免 4 连发触发 Cloudflare 429 挑战），清理连接池后降级为纯只读路径重试一次
             evictHttpConnectionPools()
-            val fallbackQuery = if (!filterUsername.isNullOrBlank()) {
-                "?username_filters=${encodeUrlSegment(filterUsername)}"
-            } else ""
+            val fallbackParts = mutableListOf<String>()
+            if (!filterUsername.isNullOrBlank()) fallbackParts.add("username_filters=${encodeUrlSegment(filterUsername)}")
+            if (effectiveFilterSummary) fallbackParts.add("filter=summary")
+            val fallbackQuery = if (fallbackParts.isNotEmpty()) "?${fallbackParts.joinToString("&")}" else ""
             val fallbackRes = executeHttp(
                 url = "https://linux.do/t/$pathSegment$fallbackQuery",
                 method = "GET",
@@ -3561,6 +4157,51 @@ object LinuxDoRepository {
         lastReadPostNumber = lastReadPostNumber
     )
 
+    /**
+     * 增量刷新话题尾部新评论：优先请求轻量 `/t/{id}/post_ids.json?post_number={last}&limit=100`，
+     * 失败时降级请求 `/t/{id}/{last}.json?track_visit=false` 取 `post_stream.stream`，
+     * 仅按差集拉取新增楼层并原地追加，不刷新整页也不丢失滚动位置。
+     */
+    suspend fun fetchTopicTailNewPosts(
+        topicId: Int,
+        afterPostNumber: Int,
+        loadedPosts: List<PostItemModel>,
+        knownAuthorBadges: Map<Int, List<GrantedBadge>> = emptyMap()
+    ): Pair<List<Int>, List<PostItemModel>> = withContext(Dispatchers.IO) {
+        markForegroundPriority(2_200L)
+        val safeFloor = afterPostNumber.coerceAtLeast(1)
+        var candidateIds: List<Int> = emptyList()
+
+        try {
+            val idsUrl = "https://linux.do/t/$topicId/post_ids.json?post_number=$safeFloor&limit=100"
+            val idsRoot = readApiObject(executeHttp(url = idsUrl, method = "GET", preserveFailure = true))
+            candidateIds = (idsRoot["post_ids"] as? JsonArray)
+                ?.mapNotNull { it.jsonPrimitive.intOrNull }
+                .orEmpty()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // 降级路径：某些代理/站端版本未开放 post_ids.json 时改读尾部 stream
+            val tailUrl = "https://linux.do/t/$topicId/$safeFloor.json?track_visit=false"
+            val tailRoot = readApiObject(executeHttp(url = tailUrl, method = "GET", preserveFailure = true))
+            val stream = (tailRoot["post_stream"] as? JsonObject)?.get("stream") as? JsonArray
+            candidateIds = stream?.mapNotNull { it.jsonPrimitive.intOrNull }.orEmpty()
+        }
+
+        val newIds = do_.linux.lindo.core.model.TopicTailRefresh.extractNewTailIds(loadedPosts, candidateIds)
+        if (newIds.isEmpty()) return@withContext emptyList<Int>() to emptyList()
+
+        val fetched = mutableListOf<PostItemModel>()
+        for (chunk in newIds.take(40).chunked(20)) {
+            fetched += fetchMoreTopicPosts(
+                topicId = topicId,
+                postIds = chunk,
+                knownAuthorBadges = knownAuthorBadges
+            )
+        }
+        newIds to fetched
+    }
+
     internal fun isDiscourseNotLoggedInResponse(status: Int, rawBody: String?): Boolean {
         if (rawBody.isNullOrBlank() || looksLikeCloudflareChallenge(rawBody)) return false
         if (status == 401) return true
@@ -3646,6 +4287,19 @@ object LinuxDoRepository {
             extraHeaders = headers,
             preserveFailure = true
         ) ?: return@withContext UserApiKeyAuthManager.fullProfileCache
+
+        // Legacy poisoned `one_time_password`-only API key (no `_t` cookie) returning 403 `invalid_access`
+        // on `/session/current.json` cannot access any authenticated endpoint — clear it cleanly to self-heal.
+        if (initialToken.isNullOrBlank() &&
+            !initialApiKey.isNullOrBlank() &&
+            sessionRes.first == 403 &&
+            !looksLikeCloudflareChallenge(sessionRes.second) &&
+            sessionRes.second.contains("invalid_access", ignoreCase = true) &&
+            sameSession()
+        ) {
+            UserApiKeyAuthManager.handleServerAuthInvalidated()
+            return@withContext null
+        }
 
         if (isConfirmedDiscourseUnauthenticatedSessionResponse(sessionRes.first, sessionRes.second)) {
             if (!sameSession()) return@withContext UserApiKeyAuthManager.fullProfileCache
@@ -3760,12 +4414,19 @@ object LinuxDoRepository {
         val (userRes, summaryRes, probedNotifs) = coroutineScope {
             val dUser = async { executeHttp("https://linux.do/u/$encodedUname.json", extraHeaders = headers) }
             val dSummary = async { executeHttp("https://linux.do/u/$encodedUname/summary.json", extraHeaders = headers) }
-            val dNotifs = async { runCatching { probeRecentNotificationsQuietly(uname, headers) }.getOrNull() }
+            val dNotifs = async {
+                runCatching {
+                    probeRecentNotificationsQuietly(uname, headers + ("Discourse-Background" to "true"))
+                }.getOrNull()
+            }
             Triple(dUser.await(), dSummary.await(), dNotifs.await())
         }
         val unreadNotifs = probedNotifs?.let { items ->
-            val pageUnread = items.count { !it.read }
-            if (items.size < 60 && pageUnread == 0 && items.isNotEmpty()) 0 else maxOf(sessionUnread, pageUnread)
+            NotificationReadCoordinator.resolveAuthoritativeUnreadCount(
+                pageZeroItems = items,
+                previousCachedCount = sessionUnread,
+                pageSizeLimit = 60
+            )
         } ?: sessionUnread
 
         if (userRes != null && userRes.second.trimStart().startsWith("{")) {
@@ -4404,11 +5065,12 @@ object LinuxDoRepository {
             return null
         }
         val root = runCatching { json.parseToJsonElement(bodyTrimmed).jsonObject }.getOrNull() ?: return null
-        val items = parseNotificationItemsFromRoot(root) ?: return null
-        if (UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.sessionGeneration == expectedGeneration) {
-            storeRecentNotificationsCache(expectedUsername, items)
+        val parsedItems = parseNotificationItemsFromRoot(root) ?: return null
+        return if (UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.sessionGeneration == expectedGeneration) {
+            storeRecentNotificationsCache(expectedUsername, parsedItems)
+        } else {
+            resolveOverlayedNotifications(expectedUsername, parsedItems)
         }
-        return items
     }
 
     suspend fun refreshUnreadNotifications(background: Boolean = true): Int? = withContext(Dispatchers.IO) {
@@ -4424,12 +5086,11 @@ object LinuxDoRepository {
         if (!UserApiKeyAuthManager.isAuthorized() || UserApiKeyAuthManager.sessionGeneration != startGen) {
             return@withContext null
         }
-        val pageUnread = items.count { !it.read }
-        val resolved = if (items.size < 60 || pageUnread == 0) {
-            pageUnread
-        } else {
-            maxOf(UserApiKeyAuthManager.cachedUnreadNotificationCount, pageUnread)
-        }
+        val resolved = NotificationReadCoordinator.resolveAuthoritativeUnreadCount(
+            pageZeroItems = items,
+            previousCachedCount = UserApiKeyAuthManager.cachedUnreadNotificationCount,
+            pageSizeLimit = 60
+        )
         UserApiKeyAuthManager.updateCachedUnreadNotifications(resolved)
         resolved
     }
@@ -4448,17 +5109,19 @@ object LinuxDoRepository {
             val root = readApiObject(res)
             val parsedItems = parseNotificationItemsFromRoot(root)
                 ?: throw ApiReadException(ApiFailureKind.InvalidPayload)
-            if (cleanOffset == 0 && UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.sessionGeneration == startGen) {
-                storeRecentNotificationsCache(expectedUsername, parsedItems)
-                val pageUnread = parsedItems.count { !it.read }
-                val resolved = if (parsedItems.size < 60 || pageUnread == 0) {
-                    pageUnread
-                } else {
-                    maxOf(UserApiKeyAuthManager.cachedUnreadNotificationCount, pageUnread)
-                }
+            val overlayedItems = if (cleanOffset == 0 && UserApiKeyAuthManager.isAuthorized() && UserApiKeyAuthManager.sessionGeneration == startGen) {
+                val cached = storeRecentNotificationsCache(expectedUsername, parsedItems)
+                val resolved = NotificationReadCoordinator.resolveAuthoritativeUnreadCount(
+                    pageZeroItems = cached,
+                    previousCachedCount = UserApiKeyAuthManager.cachedUnreadNotificationCount,
+                    pageSizeLimit = 60
+                )
                 UserApiKeyAuthManager.updateCachedUnreadNotifications(resolved)
+                cached
+            } else {
+                resolveOverlayedNotifications(expectedUsername, parsedItems)
             }
-            parsedItems
+            overlayedItems
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: ApiReadException) {
@@ -4809,9 +5472,32 @@ object LinuxDoRepository {
         try {
             val root = readApiObject(executeHttp(endpoint, method = "GET", preserveFailure = true))
             val items = parseSearchResponseRoot(root)
+            val users = (root["users"] as? JsonArray)?.mapNotNull { elem ->
+                val u = elem as? JsonObject ?: return@mapNotNull null
+                val uname = u["username"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                CommunitySearchUserHit(
+                    username = uname,
+                    name = u["name"]?.jsonPrimitive?.contentOrNull,
+                    avatarTemplate = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    trustLevel = u["trust_level"]?.jsonPrimitive?.intOrNull ?: 1
+                )
+            }.orEmpty()
+            val tags = (root["tags"] as? JsonArray)?.mapNotNull { elem ->
+                when (elem) {
+                    is JsonObject -> {
+                        val tName = elem["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                        CommunitySearchTagHit(
+                            name = tName,
+                            topicCount = elem["topic_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        )
+                    }
+                    is JsonPrimitive -> elem.contentOrNull?.takeIf { it.isNotBlank() }?.let { CommunitySearchTagHit(name = it) }
+                    else -> null
+                }
+            }.orEmpty()
             val grouped = root["grouped_search_result"] as? JsonObject
             val hasMore = grouped?.get("more_full_page_results")?.jsonPrimitive?.booleanOrNull == true
-            SearchPageResult(items = items, hasMore = hasMore)
+            SearchPageResult(items = items, hasMore = hasMore, users = users, tags = tags)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (apiErr: ApiReadException) {
@@ -4880,6 +5566,9 @@ object LinuxDoRepository {
      * 一键将全部未读通知标记为已读 (`PUT /notifications/mark-read.json`)
      */
     suspend fun markNotificationsRead(): Boolean = withContext(Dispatchers.IO) {
+        val knownIds = synchronized(recentNotificationsLock) {
+            recentNotificationsItems.map { it.id }
+        }
         val res = executeHttp(
             url = "https://linux.do/notifications/mark-read.json",
             method = "PUT",
@@ -4888,16 +5577,97 @@ object LinuxDoRepository {
         )
         val ok = checkBooleanMutationResponse(res)
         if (ok) {
+            val activeOwner = UserApiKeyAuthManager.currentUser?.username?.trim()
+                ?.takeIf { it.isNotEmpty() && it != "linuxdo_user" }
+            NotificationReadCoordinator.ensureOwner(activeOwner)
+            NotificationReadCoordinator.acknowledgeAllRead(knownIds)
+            var cacheChanged = false
             synchronized(recentNotificationsLock) {
                 if (recentNotificationsItems.isNotEmpty()) {
-                    recentNotificationsItems = recentNotificationsItems.map { item ->
-                        if (item.read) item else item.copy(read = true)
+                    val updated = recentNotificationsItems.map { item ->
+                        if (item.read) {
+                            item
+                        } else {
+                            cacheChanged = true
+                            item.copy(read = true)
+                        }
+                    }
+                    if (cacheChanged) {
+                        recentNotificationsItems = updated
                     }
                 }
             }
             UserApiKeyAuthManager.updateCachedUnreadNotifications(0)
+            if (cacheChanged) {
+                bumpNotificationsStateVersion()
+            }
         }
         ok
+    }
+
+    /**
+     * 在通知被点击跳转的瞬间同步落账，并投递到独立协程作用域回写 `/notifications/mark-read.json`，
+     * 即使来源面板或弹窗下一帧即被卸载/关闭，也绝不因 UI 作用域取消而丢失已读回写。
+     */
+    fun acknowledgeNotificationRead(notificationId: Int) {
+        if (notificationId <= 0 || !UserApiKeyAuthManager.isAuthorized()) return
+        recordLocalNotificationReadLocked(notificationId)
+        val startGen = UserApiKeyAuthManager.sessionGeneration
+        launchDetachedDraftOp {
+            if (!UserApiKeyAuthManager.isAuthorized() || UserApiKeyAuthManager.sessionGeneration != startGen) {
+                return@launchDetachedDraftOp
+            }
+            val res = executeHttp(
+                url = "https://linux.do/notifications/mark-read.json",
+                method = "PUT",
+                formParams = mapOf("id" to notificationId.toString()),
+                extraHeaders = mapOf("Discourse-Background" to "true"),
+                preserveFailure = true
+            )
+            if (UserApiKeyAuthManager.sessionGeneration == startGen && checkBooleanMutationResponse(res)) {
+                NotificationReadCoordinator.onServerMarkReadConfirmed(notificationId)
+            }
+        }
+    }
+
+    fun drainPendingNotificationReadsAsync() {
+        if (!UserApiKeyAuthManager.isAuthorized() || NotificationReadCoordinator.snapshotPendingIds().isEmpty()) {
+            return
+        }
+        if (!pendingNotificationReadDrainActive.compareAndSet(false, true)) {
+            return
+        }
+        detachedDraftScope.launch {
+            try {
+                val startGen = UserApiKeyAuthManager.sessionGeneration
+                val pendingIds = NotificationReadCoordinator.snapshotPendingIds()
+                for (id in pendingIds) {
+                    if (!UserApiKeyAuthManager.isAuthorized() || UserApiKeyAuthManager.sessionGeneration != startGen) {
+                        break
+                    }
+                    if (isChallengeCooldownActive() || isAuthFailureCooldownActive()) {
+                        break
+                    }
+                    val res = executeHttp(
+                        url = "https://linux.do/notifications/mark-read.json",
+                        method = "PUT",
+                        formParams = mapOf("id" to id.toString()),
+                        extraHeaders = mapOf("Discourse-Background" to "true"),
+                        preserveFailure = true
+                    )
+                    if (UserApiKeyAuthManager.sessionGeneration != startGen) {
+                        break
+                    }
+                    if (checkBooleanMutationResponse(res)) {
+                        NotificationReadCoordinator.onServerMarkReadConfirmed(id)
+                    } else {
+                        break
+                    }
+                }
+            } finally {
+                pendingNotificationReadDrainActive.set(false)
+            }
+        }
     }
 
     /**
@@ -4905,42 +5675,17 @@ object LinuxDoRepository {
      */
     suspend fun markSingleNotificationRead(notificationId: Int): Boolean = withContext(Dispatchers.IO) {
         if (notificationId <= 0) return@withContext false
+        recordLocalNotificationReadLocked(notificationId)
         val res = executeHttp(
             url = "https://linux.do/notifications/mark-read.json",
             method = "PUT",
             formParams = mapOf("id" to notificationId.toString()),
+            extraHeaders = mapOf("Discourse-Background" to "true"),
             preserveFailure = true
         )
         val ok = checkBooleanMutationResponse(res)
         if (ok) {
-            var shouldDecrement = true
-            synchronized(recentNotificationsLock) {
-                if (recentNotificationsItems.isNotEmpty()) {
-                    var matched = false
-                    var transitioned = false
-                    recentNotificationsItems = recentNotificationsItems.map { item ->
-                        if (item.id == notificationId) {
-                            matched = true
-                            if (!item.read) {
-                                transitioned = true
-                                item.copy(read = true)
-                            } else {
-                                item
-                            }
-                        } else {
-                            item
-                        }
-                    }
-                    if (matched) {
-                        shouldDecrement = transitioned
-                    }
-                }
-            }
-            if (shouldDecrement && UserApiKeyAuthManager.cachedUnreadNotificationCount > 0) {
-                UserApiKeyAuthManager.updateCachedUnreadNotifications(
-                    (UserApiKeyAuthManager.cachedUnreadNotificationCount - 1).coerceAtLeast(0)
-                )
-            }
+            NotificationReadCoordinator.onServerMarkReadConfirmed(notificationId)
         }
         ok
     }
@@ -6127,6 +6872,19 @@ object LinuxDoRepository {
             putBounded(topicOpCache, resolvedTopicId, postAuthorTopicUser)
         }
 
+        val parsedLinkCounts = (pObj["link_counts"] as? JsonArray)?.mapNotNull { elem ->
+            val obj = elem as? JsonObject ?: return@mapNotNull null
+            val linkUrl = obj["url"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            if (linkUrl.isEmpty()) return@mapNotNull null
+            PostLinkCountItem(
+                url = linkUrl,
+                title = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
+                clicks = obj["clicks"]?.jsonPrimitive?.intOrNull ?: 0,
+                internal = obj["internal"]?.jsonPrimitive?.booleanOrNull == true,
+                reflection = obj["reflection"]?.jsonPrimitive?.booleanOrNull == true
+            )
+        }.orEmpty()
+
         return PostItemModel(
             id = pid,
             postNumber = postNumber,
@@ -6171,7 +6929,15 @@ object LinuxDoRepository {
             actionCode = actionCode.takeIf { it.isNotEmpty() },
             canEdit = canEdit,
             canDelete = canDelete,
-            raw = rawMarkdown
+            raw = rawMarkdown,
+            version = pObj["version"]?.jsonPrimitive?.intOrNull ?: 1,
+            updatedAtIso = pObj["updated_at"]?.jsonPrimitive?.contentOrNull,
+            editReason = pObj["edit_reason"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
+            canViewEditHistory = pObj["can_view_edit_history"]?.jsonPrimitive?.booleanOrNull == true,
+            linkCounts = parsedLinkCounts,
+            bookmarkId = pObj["bookmark_id"]?.jsonPrimitive?.intOrNull,
+            bookmarkName = pObj["bookmark_name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
+            bookmarkReminderAt = pObj["bookmark_reminder_at"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
         )
     }
 
@@ -6244,6 +7010,53 @@ object LinuxDoRepository {
             ?: smallActionArchived
             ?: summaryFallback?.archived
             ?: false
+        val suggestedRaw = (root["suggested_topics"] as? JsonArray)?.takeIf { it.isNotEmpty() }
+            ?: (root["related_topics"] as? JsonArray)
+        val suggestedTopics = suggestedRaw?.mapNotNull { elem ->
+            val st = elem as? JsonObject ?: return@mapNotNull null
+            val stId = st["id"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 && it != id } ?: return@mapNotNull null
+            val stTitle = st["title"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val stCatId = st["category_id"]?.jsonPrimitive?.intOrNull ?: 4
+            val (stCatName, stCatColor) = resolveCategoryMeta(stCatId)
+            val stPostsCount = st["posts_count"]?.jsonPrimitive?.intOrNull ?: 1
+            TopicSummary(
+                id = stId,
+                title = stTitle,
+                slug = st["slug"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                postsCount = stPostsCount,
+                highestPostNumber = st["highest_post_number"]?.jsonPrimitive?.intOrNull ?: stPostsCount,
+                replyCount = (st["reply_count"]?.jsonPrimitive?.intOrNull ?: (stPostsCount - 1)).coerceAtLeast(0),
+                views = st["views"]?.jsonPrimitive?.intOrNull ?: 0,
+                likeCount = st["like_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                categoryId = stCatId,
+                categoryName = stCatName,
+                categoryColorHex = stCatColor,
+                tags = parseTagsArray(st["tags"] as? JsonArray),
+                lastPostedAt = formatRelativeTime(
+                    st["last_posted_at"]?.jsonPrimitive?.contentOrNull
+                        ?: st["bumped_at"]?.jsonPrimitive?.contentOrNull
+                        ?: st["created_at"]?.jsonPrimitive?.contentOrNull
+                ),
+                originalPoster = TopicUser(
+                    id = 0,
+                    username = st["last_poster_username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo"
+                )
+            )
+        }.orEmpty().take(6)
+
+        val allowedUsers = (detailsObj?.get("allowed_users") as? JsonArray)?.mapNotNull { elem ->
+            val u = elem as? JsonObject ?: return@mapNotNull null
+            val uname = u["username"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            TopicUser(
+                id = u["id"]?.jsonPrimitive?.intOrNull ?: 0,
+                username = uname,
+                name = u["name"]?.jsonPrimitive?.contentOrNull,
+                avatarTemplate = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                animatedAvatar = u["animated_avatar"]?.jsonPrimitive?.contentOrNull,
+                primaryGroupName = u["primary_group_name"]?.jsonPrimitive?.contentOrNull
+            )
+        }.orEmpty()
+
         return TopicDetailModel(
             id = id,
             title = title,
@@ -6263,7 +7076,13 @@ object LinuxDoRepository {
             canEditTopic = canEditTopic,
             posts = posts,
             streamIds = streamIds,
-            bookmarked = bookmarked
+            bookmarked = bookmarked,
+            hasSummary = root["has_summary"]?.jsonPrimitive?.booleanOrNull == true,
+            archetype = root["archetype"]?.jsonPrimitive?.contentOrNull ?: "regular",
+            suggestedTopics = suggestedTopics,
+            allowedUsers = allowedUsers,
+            canInviteTo = detailsObj?.get("can_invite_to")?.jsonPrimitive?.booleanOrNull == true,
+            canRemoveAllowedUsers = detailsObj?.get("can_remove_allowed_users")?.jsonPrimitive?.booleanOrNull == true
         )
     }
 
@@ -6419,6 +7238,8 @@ object LinuxDoRepository {
     private val avatarResolveSemaphore = Semaphore(6)
 
     internal fun clearAvatarAndActorCachesForTest() {
+        inFlightAvatarJobs.values.forEach { it.cancel() }
+        inFlightAvatarJobs.clear()
         userAvatarCache.clear()
         userVisualCache.clear()
         topicOpCache.clear()
@@ -6792,13 +7613,13 @@ object LinuxDoRepository {
             val fastUrl = "https://linux.do/posts/by_number/" + topicId.toString() + "/1.json"
             val fastRes = executeHttp(url = fastUrl, method = "GET", extraHeaders = bgHeaders, preserveFailure = true)
             val statusCode = fastRes?.first ?: 0
-            if (statusCode == 429) {
-                noteRateLimitHit()
+            val fastBody = fastRes?.second
+            if (fastBody != null && looksLikeCloudflareChallenge(fastBody)) {
+                noteBackgroundChallenge("GET", fastUrl, statusCode)
                 return@withPermit null
             }
-            val fastBody = fastRes?.second
-            if (fastBody != null && statusCode != 429 && looksLikeCloudflareChallenge(fastBody)) {
-                noteChallengeHit()
+            if (statusCode == 429) {
+                noteRateLimitHit()
                 return@withPermit null
             }
             if (statusCode in 200..299 && fastBody != null && fastBody.trimStart().startsWith("{")) {
@@ -6895,8 +7716,9 @@ object LinuxDoRepository {
             extraHeaders = headers,
             preserveFailure = true
         )
-        if (res != null && res.first != 429 && looksLikeCloudflareChallenge(res.second)) {
-            noteChallengeHit()
+        if (res != null && looksLikeCloudflareChallenge(res.second)) {
+            // 后台阅读时长上报撞盾：ScreenTrackEngine 自身挂起 90s，executeHttp 已触发零 UI 预热；
+            // 绝不 noteChallengeHit()，否则会把用户接下来 12s 内的所有前台请求短路成「需要完成站点验证」。
             return@withContext ScreenTrackEngine.STATUS_SITE_VERIFICATION_REQUIRED
         }
         val statusCode = res?.first
@@ -7128,11 +7950,29 @@ object LinuxDoRepository {
     /**
      * 删除指定云端草稿 (`DELETE /drafts/{draft_key}.json`)
      */
-    suspend fun deleteCloudDraft(draftKey: String, sequence: Int): Boolean = withContext(Dispatchers.IO) {
+    suspend fun deleteCloudDraft(
+        draftKey: String,
+        sequence: Int,
+        background: Boolean = false
+    ): Boolean = withContext(Dispatchers.IO) {
         val encoded = encodeUrlSegment(draftKey)
-        requireMutationObject(executeHttp("https://linux.do/drafts/$encoded.json?sequence=$sequence", "DELETE", preserveFailure = true))
+        val headers = if (background) mapOf("Discourse-Background" to "true") else emptyMap()
+        requireMutationObject(
+            executeHttp(
+                url = "https://linux.do/drafts/$encoded.json?sequence=$sequence",
+                method = "DELETE",
+                extraHeaders = headers,
+                preserveFailure = true
+            )
+        )
         // Discourse deliberately returns success for sequence conflicts; verify the actual outcome.
-        val root = readApiObject(executeHttp("https://linux.do/drafts/$encoded.json", preserveFailure = true))
+        val root = readApiObject(
+            executeHttp(
+                url = "https://linux.do/drafts/$encoded.json",
+                extraHeaders = headers,
+                preserveFailure = true
+            )
+        )
         root["draft"] == null || root["draft"] is JsonNull
     }
 
@@ -8110,6 +8950,343 @@ object LinuxDoRepository {
             admins = admins,
             moderators = moderators
         )
+    }
+
+    /**
+     * 按话题 ID 与楼层号拉取单楼完整内容 (`/posts/by_number/{topicId}/{postNumber}.json`)，用于跨帖/摘要引用行内展开
+     */
+    suspend fun fetchPostByNumber(topicId: Int, postNumber: Int): PostItemModel? = withContext(Dispatchers.IO) {
+        if (topicId <= 0 || postNumber <= 0) return@withContext null
+        val res = executeHttp(
+            url = "https://linux.do/posts/by_number/$topicId/$postNumber.json",
+            method = "GET",
+            preserveFailure = true
+        ) ?: return@withContext null
+        if (res.first !in 200..299 || looksLikeCloudflareChallenge(res.second)) return@withContext null
+        runCatching {
+            val obj = json.parseToJsonElement(res.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)).jsonObject
+            parseSinglePostObject(obj, fallbackIdx = 0, topicId = topicId)
+        }.getOrNull()
+    }
+
+    /**
+     * 解析 `/p/{postId}` 短链到 `(topicId, postNumber)`，让短链也在 App 内原生打开
+     */
+    suspend fun fetchPostLocationById(postId: Int): Pair<Int, Int>? = withContext(Dispatchers.IO) {
+        if (postId <= 0) return@withContext null
+        val res = executeHttp(
+            url = "https://linux.do/posts/$postId.json",
+            method = "GET",
+            preserveFailure = true
+        ) ?: return@withContext null
+        if (res.first !in 200..299 || looksLikeCloudflareChallenge(res.second)) return@withContext null
+        runCatching {
+            val obj = json.parseToJsonElement(res.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)).jsonObject
+            val tid = obj["topic_id"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 } ?: return@runCatching null
+            val pnum = obj["post_number"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 } ?: 1
+            tid to pnum
+        }.getOrNull()
+    }
+
+    /**
+     * 获取楼层编辑历史 (`GET /posts/{postId}/revisions/{rev|latest}.json`)
+     */
+    suspend fun fetchPostRevisions(postId: Int, revision: Int? = null): PostRevisionDetail? = withContext(Dispatchers.IO) {
+        if (postId <= 0) return@withContext null
+        val seg = if (revision != null && revision > 0) revision.toString() else "latest"
+        val res = executeHttp(
+            url = "https://linux.do/posts/$postId/revisions/$seg.json",
+            method = "GET",
+            preserveFailure = true
+        ) ?: return@withContext null
+        if (res.first !in 200..299 || looksLikeCloudflareChallenge(res.second)) return@withContext null
+        runCatching {
+            val obj = json.parseToJsonElement(res.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)).jsonObject
+            val bodyChanges = (obj["body_changes"] as? JsonObject)?.let { bc ->
+                bc["inline"]?.jsonPrimitive?.contentOrNull
+                    ?: bc["side_by_side_markdown"]?.jsonPrimitive?.contentOrNull
+                    ?: bc["side_by_side"]?.jsonPrimitive?.contentOrNull
+            }
+            val titleChanges = (obj["title_changes"] as? JsonObject)?.let { tc ->
+                tc["inline"]?.jsonPrimitive?.contentOrNull
+                    ?: tc["side_by_side"]?.jsonPrimitive?.contentOrNull
+            }
+            val curRev = obj["current_revision"]?.jsonPrimitive?.intOrNull ?: (revision ?: 2)
+            PostRevisionDetail(
+                postId = postId,
+                currentRevision = curRev,
+                previousRevision = obj["previous_revision"]?.jsonPrimitive?.intOrNull,
+                nextRevision = obj["next_revision"]?.jsonPrimitive?.intOrNull,
+                versionCount = obj["version_count"]?.jsonPrimitive?.intOrNull ?: curRev,
+                username = obj["username"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                displayName = obj["display_name"]?.jsonPrimitive?.contentOrNull,
+                avatarTemplate = obj["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                createdAtText = formatRelativeTime(obj["created_at"]?.jsonPrimitive?.contentOrNull),
+                editReason = obj["edit_reason"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
+                bodyChangesHtml = bodyChanges,
+                titleChangesHtml = titleChanges
+            )
+        }.getOrNull()
+    }
+
+    /**
+     * 查询某楼层的表情表态成员明细 (`GET /discourse-reactions/posts/{postId}/reactions-users.json`)
+     */
+    suspend fun fetchReactionUsers(postId: Int, reactionId: String? = null): List<ReactionUserGroup> = withContext(Dispatchers.IO) {
+        if (postId <= 0) return@withContext emptyList()
+        val qs = reactionId?.trim()?.takeIf { it.isNotEmpty() }?.let { "?reaction_value=${encodeUrlSegment(it)}" }.orEmpty()
+        val res = executeHttp(
+            url = "https://linux.do/discourse-reactions/posts/$postId/reactions-users.json$qs",
+            method = "GET",
+            preserveFailure = true
+        ) ?: return@withContext emptyList()
+        if (res.first !in 200..299 || looksLikeCloudflareChallenge(res.second)) return@withContext emptyList()
+        runCatching {
+            val root = json.parseToJsonElement(res.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)).jsonObject
+            val arr = root["reaction_users"] as? JsonArray ?: return@runCatching emptyList()
+            arr.mapNotNull { elem ->
+                val g = elem as? JsonObject ?: return@mapNotNull null
+                val gid = g["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val users = (g["users"] as? JsonArray)?.mapNotNull { uElem ->
+                    val u = uElem as? JsonObject ?: return@mapNotNull null
+                    val uname = u["username"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    ReactionUserEntry(
+                        username = uname,
+                        displayName = u["name"]?.jsonPrimitive?.contentOrNull,
+                        avatarTemplate = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    )
+                }.orEmpty()
+                ReactionUserGroup(
+                    id = gid,
+                    count = g["count"]?.jsonPrimitive?.intOrNull ?: users.size,
+                    users = users
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * 查询公开投票选项的投票成员列表 (`GET /polls/voters.json`)
+     */
+    suspend fun fetchPollVoters(
+        postId: Int,
+        pollName: String,
+        optionId: String,
+        page: Int = 1
+    ): List<PollVoterEntry> = withContext(Dispatchers.IO) {
+        if (postId <= 0 || pollName.isBlank() || optionId.isBlank()) return@withContext emptyList()
+        val url = "https://linux.do/polls/voters.json?post_id=$postId&poll_name=${encodeUrlSegment(pollName)}&option_id=${encodeUrlSegment(optionId)}&page=${page.coerceAtLeast(1)}"
+        val res = executeHttp(url = url, method = "GET", preserveFailure = true) ?: return@withContext emptyList()
+        if (res.first !in 200..299 || looksLikeCloudflareChallenge(res.second)) return@withContext emptyList()
+        runCatching {
+            val root = json.parseToJsonElement(res.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)).jsonObject
+            val votersMap = root["voters"] as? JsonObject ?: return@runCatching emptyList()
+            val arr = votersMap[optionId] as? JsonArray ?: votersMap.values.firstOrNull() as? JsonArray ?: return@runCatching emptyList()
+            arr.mapNotNull { elem ->
+                val u = elem as? JsonObject ?: return@mapNotNull null
+                val uname = u["username"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                PollVoterEntry(
+                    username = uname,
+                    displayName = u["name"]?.jsonPrimitive?.contentOrNull,
+                    avatarTemplate = u["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * 创建或更新带备注与提醒时间的楼层书签 (`POST /bookmarks.json` / `PUT /bookmarks/{id}.json`)
+     */
+    suspend fun saveBookmarkWithReminder(
+        postId: Int,
+        name: String? = null,
+        reminderAtIso: String? = null,
+        existingBookmarkId: Int? = null
+    ): Int? = withContext(Dispatchers.IO) {
+        if (postId <= 0) return@withContext null
+        val params = buildMap {
+            put("bookmarkable_id", postId.toString())
+            put("bookmarkable_type", "Post")
+            if (!name.isNullOrBlank()) put("name", name.trim())
+            if (!reminderAtIso.isNullOrBlank()) put("reminder_at", reminderAtIso.trim())
+            put("auto_delete_preference", "0")
+        }
+        val isUpdate = existingBookmarkId != null && existingBookmarkId > 0
+        val res = executeHttp(
+            url = if (isUpdate) "https://linux.do/bookmarks/$existingBookmarkId.json" else "https://linux.do/bookmarks.json",
+            method = if (isUpdate) "PUT" else "POST",
+            formParams = params,
+            preserveFailure = true
+        ) ?: return@withContext null
+        if (res.first !in 200..299 || looksLikeCloudflareChallenge(res.second)) return@withContext null
+        runCatching {
+            val obj = json.parseToJsonElement(res.second.removePrefix(CF_MITIGATED_CHALLENGE_PREFIX)).jsonObject
+            obj["id"]?.jsonPrimitive?.intOrNull ?: existingBookmarkId ?: 1
+        }.getOrNull()
+    }
+
+    suspend fun deleteBookmarkById(bookmarkId: Int): Boolean = withContext(Dispatchers.IO) {
+        if (bookmarkId <= 0) return@withContext false
+        val res = executeHttp(
+            url = "https://linux.do/bookmarks/$bookmarkId.json",
+            method = "DELETE",
+            formParams = emptyMap(),
+            preserveFailure = true
+        )
+        checkBooleanMutationResponse(res)
+    }
+
+    /**
+     * 邀请成员加入当前私信会话 (`POST /t/{topicId}/invite.json`)
+     */
+    suspend fun inviteUserToPm(topicId: Int, username: String): Boolean = withContext(Dispatchers.IO) {
+        val clean = username.trim().removePrefix("@")
+        if (topicId <= 0 || clean.isEmpty()) return@withContext false
+        val res = executeHttp(
+            url = "https://linux.do/t/$topicId/invite.json",
+            method = "POST",
+            formParams = mapOf("user" to clean),
+            preserveFailure = true
+        )
+        checkBooleanMutationResponse(res)
+    }
+
+    /**
+     * 从私信会话移除参与者 (`PUT /t/{topicId}/remove-allowed-user.json`)
+     */
+    suspend fun removeUserFromPm(topicId: Int, username: String): Boolean = withContext(Dispatchers.IO) {
+        val clean = username.trim().removePrefix("@")
+        if (topicId <= 0 || clean.isEmpty()) return@withContext false
+        val res = executeHttp(
+            url = "https://linux.do/t/$topicId/remove-allowed-user.json",
+            method = "PUT",
+            formParams = mapOf("username" to clean),
+            preserveFailure = true
+        )
+        checkBooleanMutationResponse(res)
+    }
+
+    /**
+     * 用完即焚撤销临时 User API Key（`POST /user-api-key/revoke.json`，由 `is_revoke_self_request?` 豁免作用域）。
+     */
+    suspend fun revokeUserApiKeySilently(apiKey: String): Boolean = withContext(Dispatchers.IO) {
+        val clean = apiKey.trim()
+        if (clean.isEmpty()) return@withContext false
+        val res = executeHttp(
+            url = "https://linux.do/user-api-key/revoke.json",
+            method = "POST",
+            formParams = emptyMap(),
+            extraHeaders = mapOf(
+                "User-Api-Key" to clean,
+                "Discourse-Background" to "true"
+            ),
+            preserveFailure = true
+        )
+        val ok = res != null && res.first in 200..299 && !looksLikeCloudflareChallenge(res.second)
+        if (ok) {
+            LinDoDiagnosticLogger.info(DiagnosticCategory.AUTH, "QrLogin", "Temporary QR API key self-revoked")
+        } else {
+            LinDoDiagnosticLogger.warn(
+                DiagnosticCategory.AUTH,
+                "QrLogin",
+                "Temporary QR API key revoke did not complete (HTTP ${res?.first ?: 0})"
+            )
+        }
+        ok
+    }
+
+    /**
+     * 已登录设备生成跨设备一次性扫码登录凭证 (`POST /user-api-key.json`)。
+     */
+    suspend fun createCrossDeviceQrLoginUri(): Result<Pair<String, QrLoginPayload>> = withContext(Dispatchers.IO) {
+        try {
+            val kpg = java.security.KeyPairGenerator.getInstance("RSA")
+            kpg.initialize(2048)
+            val kp = kpg.generateKeyPair()
+            val publicPem = buildString {
+                appendLine("-----BEGIN PUBLIC KEY-----")
+                appendLine(Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(kp.public.encoded))
+                append("-----END PUBLIC KEY-----")
+            }
+            val nonce = UUID.randomUUID().toString().replace("-", "")
+            val qrClientId = UserApiKeyAuthManager.getOrCreateQrClientId()
+            val res = executeHttp(
+                url = "https://linux.do/user-api-key.json",
+                method = "POST",
+                formParams = mapOf(
+                    "application_name" to QrLoginManager.QR_APPLICATION_NAME,
+                    "client_id" to qrClientId,
+                    "scopes" to "one_time_password",
+                    "public_key" to publicPem,
+                    "nonce" to nonce,
+                    "auth_redirect" to "discourse://auth_redirect"
+                ),
+                preserveFailure = true
+            )
+            val root = readApiObject(res)
+            val redirectUrl = root["redirect_url"]?.jsonPrimitive?.contentOrNull?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: return@withContext Result.failure(IllegalStateException("服务端未返回授权结果，请先确认登录状态"))
+            val redirectUri = java.net.URI(redirectUrl)
+            val queryParams = redirectUri.rawQuery.orEmpty().split('&').mapNotNull { entry ->
+                val eq = entry.indexOf('=')
+                if (eq <= 0) null
+                else {
+                    val k = java.net.URLDecoder.decode(entry.substring(0, eq), "UTF-8")
+                    val v = java.net.URLDecoder.decode(entry.substring(eq + 1), "UTF-8")
+                    k to v
+                }
+            }.toMap()
+            val rawPayload = queryParams["payload"]?.takeIf { it.isNotBlank() }
+                ?: return@withContext Result.failure(IllegalStateException("授权响应缺少加密载荷"))
+            val rawOtp = (queryParams["oneTimePassword"] ?: queryParams["one_time_password"])?.takeIf { it.isNotBlank() }
+                ?: return@withContext Result.failure(IllegalStateException("授权响应缺少一次性登录令牌"))
+            val payloadJson = UserApiKeyAuthManager.decryptRsaBase64(rawPayload, kp.private)
+                ?: return@withContext Result.failure(IllegalStateException("授权载荷解密失败"))
+            val payloadObj = json.parseToJsonElement(payloadJson).jsonObject
+            val returnedNonce = payloadObj["nonce"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (!java.security.MessageDigest.isEqual(returnedNonce.toByteArray(), nonce.toByteArray())) {
+                return@withContext Result.failure(IllegalStateException("授权校验随机数不匹配"))
+            }
+            val apiKey = payloadObj["key"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: return@withContext Result.failure(IllegalStateException("授权响应缺少 API Key"))
+            val otp = UserApiKeyAuthManager.decryptRsaBase64(rawOtp, kp.private)?.trim()?.takeIf { it.isNotEmpty() }
+                ?: return@withContext Result.failure(IllegalStateException("一次性登录令牌解密失败"))
+            val username = UserApiKeyAuthManager.currentUser?.username
+                ?.takeIf { it.isNotBlank() && it != "linuxdo_user" }
+                .orEmpty()
+            val uri = QrLoginManager.encodePayload(
+                apiKey = apiKey,
+                otp = otp,
+                username = username,
+                expiresAtEpochMs = 0L
+            )
+            val payload = QrLoginPayload(
+                version = QrLoginManager.CURRENT_VERSION,
+                apiKey = apiKey,
+                otp = otp,
+                username = username,
+                expiresAtEpochMs = 0L
+            )
+            LinDoDiagnosticLogger.info(
+                DiagnosticCategory.AUTH,
+                "QrLogin",
+                "Generated cross-device QR login payload (user=${username.ifBlank { "current" }})"
+            )
+            Result.success(uri to payload)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: ApiReadException) {
+            val msg = when (e.kind) {
+                ApiFailureKind.Verification -> "需要先完成站点安全确认后才能生成登录二维码"
+                ApiFailureKind.Authentication -> "登录状态已失效，请重新登录后再试"
+                ApiFailureKind.RateLimited -> "操作过于频繁，请稍后再试"
+                else -> "生成二维码失败，请检查网络连接"
+            }
+            Result.failure(IllegalStateException(msg, e))
+        } catch (t: Throwable) {
+            Result.failure(IllegalStateException(t.message ?: "生成二维码失败，请重试", t))
+        }
     }
 }
 

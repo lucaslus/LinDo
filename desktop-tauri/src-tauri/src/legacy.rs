@@ -53,6 +53,9 @@ pub struct UserPreferences {
     pub default_search_expanded: bool,
     #[serde(default = "default_true")]
     pub enable_animations: bool,
+    /// "smart_auto" | "ech_priority" | "system_default"
+    #[serde(default = "default_ech_routing_mode")]
+    pub ech_routing_mode: String,
 }
 
 fn default_appearance() -> String {
@@ -70,6 +73,9 @@ fn default_split_fraction() -> f32 {
 fn default_true() -> bool {
     true
 }
+fn default_ech_routing_mode() -> String {
+    "smart_auto".to_string()
+}
 
 impl Default for UserPreferences {
     fn default() -> Self {
@@ -81,6 +87,7 @@ impl Default for UserPreferences {
             compact_feed: false,
             default_search_expanded: true,
             enable_animations: true,
+            ech_routing_mode: default_ech_routing_mode(),
         }
     }
 }

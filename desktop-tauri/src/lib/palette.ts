@@ -1,4 +1,5 @@
 import { flushSync } from "react-dom";
+import { computeTieredFontScales } from "./typographyScale";
 
 export type BrandThemeKey =
   | "OFFICIAL_GOLD"
@@ -193,9 +194,12 @@ export function resolveEmojiShortcodeUrl(raw?: string | null): string | null {
 export function applyPaletteToDocument(isDark: boolean, optionKey: string, fontScale: number): void {
   const opt = BRAND_THEMES.find((t) => t.key === optionKey) ?? BRAND_THEMES[0];
   const root = document.documentElement;
+  const tiers = computeTieredFontScales(fontScale || 1);
   root.classList.toggle("dark", isDark);
   root.style.colorScheme = isDark ? "dark" : "light";
-  root.style.setProperty("--font-scale", String(fontScale || 1));
+  root.style.setProperty("--font-scale", String(tiers.reading));
+  root.style.setProperty("--font-scale-meta", String(tiers.meta));
+  root.style.setProperty("--font-scale-chrome", String(tiers.chrome));
 
   if (isDark) {
     root.style.setProperty("--canvas", "#161A23");
@@ -210,22 +214,26 @@ export function applyPaletteToDocument(isDark: boolean, optionKey: string, fontS
     root.style.setProperty("--subtle-surface", "#1B202B");
     root.style.setProperty("--nav-bar-surface", "#0C0E13");
     root.style.setProperty("--tonal-pill", "#212735");
-    root.style.setProperty("--on-tonal-pill", "#F1F3F7");
-    root.style.setProperty("--ink-primary", "#F1F3F7");
-    root.style.setProperty("--ink-secondary", "#9BA3B2");
-    root.style.setProperty("--ink-tertiary", "#6E7787");
+    root.style.setProperty("--on-tonal-pill", "#DADBDF");
+    root.style.setProperty("--ink-primary", "#DADBDF");
+    root.style.setProperty("--ink-body", "#C9CBCF");
+    root.style.setProperty("--ink-secondary", "#9297A3");
+    root.style.setProperty("--ink-tertiary", "#6F7582");
     root.style.setProperty("--hairline", "rgba(255, 255, 255, 0.058)");
     root.style.setProperty("--hairline-soft", "rgba(255, 255, 255, 0.042)");
     root.style.setProperty("--accent", opt.darkChipText);
     root.style.setProperty("--brand-gold", opt.darkChipText);
     root.style.setProperty("--logo-do", "#F59E0B");
     root.style.setProperty("--tab-indicator", opt.darkChipText);
-    root.style.setProperty("--active-chip-bg", opt.darkChipBg);
+    root.style.setProperty(
+      "--active-chip-bg",
+      `color-mix(in srgb, ${opt.darkChipText} 12%, #1B202B)`
+    );
     root.style.setProperty("--active-chip-text", opt.darkChipText);
     root.style.setProperty("--publish-btn-bg", opt.darkChipText);
     root.style.setProperty("--publish-btn-fg", "#111827");
-    root.style.setProperty("--hover-overlay", "rgba(241, 243, 247, 0.046)");
-    root.style.setProperty("--press-overlay", "rgba(241, 243, 247, 0.082)");
+    root.style.setProperty("--hover-overlay", "rgba(218, 219, 223, 0.05)");
+    root.style.setProperty("--press-overlay", "rgba(218, 219, 223, 0.088)");
   } else {
     root.style.setProperty("--canvas", "#FFFFFF");
     root.style.setProperty("--grouped-canvas", "#FFFFFF");
@@ -241,6 +249,7 @@ export function applyPaletteToDocument(isDark: boolean, optionKey: string, fontS
     root.style.setProperty("--tonal-pill", "#EAECEF");
     root.style.setProperty("--on-tonal-pill", "#161920");
     root.style.setProperty("--ink-primary", "#161920");
+    root.style.setProperty("--ink-body", "#262B35");
     root.style.setProperty("--ink-secondary", "#5E6675");
     root.style.setProperty("--ink-tertiary", "#8A93A3");
     root.style.setProperty("--hairline", "rgba(15, 23, 42, 0.072)");

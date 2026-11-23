@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { isImeComposingEvent } from "../lib/imeGuard";
+import { SearchResultLruCache, useImeSearchInput } from "../lib/imeSearch";
 import {
   LinDoCategoryBadge,
   LinDoIcons,
@@ -26,10 +28,15 @@ import {
 import type {
   CategoryMeta,
   CloudDraftItem,
+  CommunitySearchFilters,
+  CommunitySearchTagHit,
+  CommunitySearchUserHit,
   ComposerLaunchRequest,
   ConnectTrustLevelReport,
   DesktopUpdateInfo,
   DiagRuntimeSnapshot,
+  EchDesktopSnapshot,
+  EchRoutingModePref,
   FlairInfo,
   FollowUserEntry,
   GrantedBadge,
@@ -73,6 +80,7 @@ import {
   markSingleNotificationRead,
   refreshCurrentUserSession,
   requestUserArchive,
+  resolveAuthoritativeUnreadCount,
   searchCommunity,
   sendPrivateMessage,
   SiteError,
@@ -87,6 +95,15 @@ import {
   handleComposerTextareaPaste,
   type PreparedUploadFile,
 } from "../lib/composerMedia";
+import {
+  FONT_SCALE_PRESETS,
+  nearestFontPreset,
+} from "../lib/typographyScale";
+import {
+  buildSeenHistorySearchQuery,
+  filterAndMergeHistoryItems,
+  type SearchableHistoryItem,
+} from "../lib/historySearch";
 import {
   badgeTierMeta,
   BRAND_THEMES,
@@ -710,20 +727,6 @@ export const BadgeDetailModal: React.FC<{
   );
 };
 
-const FONT_SCALE_PRESETS = [
-  { label: "最小", scale: 0.85 },
-  { label: "小", scale: 0.92 },
-  { label: "标准", scale: 1.0 },
-  { label: "大", scale: 1.1 },
-  { label: "最大", scale: 1.2 },
-];
-
-function nearestFontPreset(scale: number) {
-  return FONT_SCALE_PRESETS.reduce((best, cur) =>
-    Math.abs(cur.scale - scale) < Math.abs(best.scale - scale) ? cur : best
-  );
-}
-
 /* ==================== 0. 欢迎首屏 (LinDoWelcomeScreen 1:1 对齐) ==================== */
 export const WelcomeLoginScreen: React.FC<{
   isDark: boolean;
@@ -858,7 +861,7 @@ export const WelcomeLoginScreen: React.FC<{
                   className="mb-2 flex items-start gap-2.5 rounded-xl px-3.5 py-2.5 text-left"
                   style={{
                     backgroundColor: "var(--subtle-surface)",
-                    border: "0.5px solid color-mix(in srgb, var(--brand-gold) 36%, var(--hairline))",
+                    border: "0.5px solid var(--hairline)",
                   }}
                 >
                   <span
@@ -1420,6 +1423,7 @@ export const MessagesView: React.FC<{
   onOpenNotificationTopic: (topicId: number, title: string, postNumber?: number) => void;
   onUnreadCleared: () => void;
   onDecrementUnread?: () => void;
+  onSyncUnreadCount?: (count: number) => void;
   onInspectUser?: (username: string) => void;
   onInspectBadge?: (badge: GrantedBadge) => void;
   onOpenAuth: () => void;
@@ -1436,6 +1440,7 @@ export const MessagesView: React.FC<{
   onOpenNotificationTopic,
   onUnreadCleared,
   onDecrementUnread,
+  onSyncUnreadCount,
   onInspectUser,
   onInspectBadge,
   onOpenAuth,
@@ -1572,6 +1577,10 @@ export const MessagesView: React.FC<{
       const list = await fetchNotifications(0, forceRefresh);
       setItems(list);
       setHasMoreNotifs(list.length >= 55);
+      const pageUnread = list.filter((x) => !x.read).length;
+      if (list.length < 60 || pageUnread < list.length) {
+        onSyncUnreadCount?.(resolveAuthoritativeUnreadCount(list, pageUnread, 60));
+      }
     } catch (err: any) {
       setLoadError(err?.message || "通知加载失败，请重试");
     } finally {
@@ -2417,6 +2426,468 @@ export const MessagesView: React.FC<{
   );
 };
 
+export const LINDO_AUTHOR_USERNAME = "jedilus";
+
+export type FeedbackCategoryKey = "bug" | "ux" | "feature" | "other";
+
+const FEEDBACK_CATEGORIES: Array<{ key: FeedbackCategoryKey; label: string }> = [
+  { key: "bug", label: "Bug 反馈" },
+  { key: "ux", label: "体验建议" },
+  { key: "feature", label: "功能需求" },
+  { key: "other", label: "其他问题" },
+];
+
+export function buildAuthorFeedbackPayload(params: {
+  category: FeedbackCategoryKey;
+  title: string;
+  body: string;
+  version: string;
+  platformLabel: string;
+  includeEnv: boolean;
+  diagLogSnippet?: string | null;
+}): { title: string; raw: string } {
+  const catLabel =
+    FEEDBACK_CATEGORIES.find((c) => c.key === params.category)?.label || "反馈";
+  const cleanTitle = params.title.trim();
+  const prefixedTitle = cleanTitle.startsWith("[Lindo")
+    ? cleanTitle
+    : `[Lindo PC · ${catLabel}] ${cleanTitle}`;
+
+  const sections: string[] = [params.body.trim()];
+  if (params.includeEnv) {
+    sections.push(
+      `---\n**客户端版本**：Lindo Desktop v${params.version}\n**运行平台**：${params.platformLabel}`
+    );
+  }
+  if (params.diagLogSnippet && params.diagLogSnippet.trim()) {
+    const capped = params.diagLogSnippet.trim().slice(0, 8000);
+    sections.push(
+      `[details="诊断日志摘要（已脱敏）"]\n\`\`\`text\n${capped}\n\`\`\`\n[/details]`
+    );
+  }
+  return {
+    title: prefixedTitle,
+    raw: sections.filter(Boolean).join("\n\n"),
+  };
+}
+
+const AuthorFeedbackModal: React.FC<{
+  appVersion: string;
+  currentUsername?: string | null;
+  isAuthorized: boolean;
+  onInspectAuthor: (username: string) => void;
+  onSent: (topicId: number, title: string) => void;
+  onClose: () => void;
+}> = ({ appVersion, currentUsername, isAuthorized, onInspectAuthor, onSent, onClose }) => {
+  const [category, setCategory] = useState<FeedbackCategoryKey>("bug");
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [includeEnv, setIncludeEnv] = useState(true);
+  const [includeDiag, setIncludeDiag] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [attempted, setAttempted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const bodyRef = useRef(body);
+  bodyRef.current = body;
+  const uploadSeqRef = useRef(0);
+
+  const isWindows =
+    typeof document !== "undefined" && document.documentElement.dataset.platform === "windows";
+  const platformLabel = isWindows ? "Windows" : "macOS";
+  const submitShortcut = isWindows ? "Ctrl+Enter" : "⌘+Enter";
+  const isAuthorSelf =
+    Boolean(currentUsername) &&
+    currentUsername!.toLowerCase() === LINDO_AUTHOR_USERNAME.toLowerCase();
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isImeComposingEvent(e)) return;
+      if (e.key === "Escape" && !sending && !uploading) {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sending, uploading, onClose]);
+
+  const insertTextAtCursor = (text: string) => {
+    if (!text) return;
+    const el = textareaRef.current;
+    const cur = bodyRef.current;
+    if (!el) {
+      const next = `${cur}${text}`;
+      bodyRef.current = next;
+      setBody(next);
+      return;
+    }
+    const start = el.selectionStart ?? cur.length;
+    const end = el.selectionEnd ?? cur.length;
+    const next = `${cur.slice(0, start)}${text}${cur.slice(end)}`;
+    bodyRef.current = next;
+    setBody(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const cursor = start + text.length;
+      el.setSelectionRange(cursor, cursor);
+    });
+  };
+
+  const uploadFiles = async (files: PreparedUploadFile[]) => {
+    if (files.length === 0) return;
+    setError(null);
+    const entries = files.map((file) => {
+      uploadSeqRef.current += 1;
+      return {
+        file,
+        placeholder: buildUploadPlaceholder(
+          file.filename,
+          file.isImage,
+          `feedback-up-${uploadSeqRef.current}`
+        ),
+      };
+    });
+    const el = textareaRef.current;
+    const cur = bodyRef.current;
+    const start = el ? (el.selectionStart ?? cur.length) : cur.length;
+    const end = el ? (el.selectionEnd ?? cur.length) : cur.length;
+    const before = cur.slice(0, start);
+    const after = cur.slice(end);
+    const needLeadNl = before.length > 0 && !before.endsWith("\n");
+    const block = `${needLeadNl ? "\n" : ""}${entries.map((e) => e.placeholder).join("\n")}\n`;
+    const nextWithPh = `${before}${block}${after}`;
+    bodyRef.current = nextWithPh;
+    setBody(nextWithPh);
+
+    setUploading(true);
+    try {
+      for (const { file, placeholder } of entries) {
+        try {
+          const uploaded = await uploadMediaToSite(
+            file.filename,
+            file.mime || "application/octet-stream",
+            file.dataBase64
+          );
+          const snippet = formatUploadedMarkdown(uploaded, file.isImage);
+          setBody((prev) => {
+            const next = prev.includes(placeholder)
+              ? prev.replace(placeholder, snippet)
+              : `${prev}\n${snippet}\n`;
+            bodyRef.current = next;
+            return next;
+          });
+        } catch (err: any) {
+          setBody((prev) => {
+            const next = prev
+              .replace(`\n${placeholder}\n`, "\n")
+              .replace(`${placeholder}\n`, "")
+              .replace(placeholder, "");
+            bodyRef.current = next;
+            return next;
+          });
+          setError(err?.message || "截图上传失败，请重试");
+        } finally {
+          if (file.localPreviewUrl) {
+            try {
+              URL.revokeObjectURL(file.localPreviewUrl);
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const titleErr =
+    title.trim().length === 0
+      ? "请填写简要标题"
+      : Array.from(title.trim()).length < 3
+        ? "标题至少 3 个字"
+        : null;
+  const bodyErr =
+    body.trim().length === 0
+      ? "请填写反馈内容"
+      : Array.from(body.trim()).length < 5
+        ? "内容至少 5 个字"
+        : null;
+
+  const handleSubmit = async () => {
+    if (sending || uploading) return;
+    if (titleErr || bodyErr) {
+      setAttempted(true);
+      return;
+    }
+    setSending(true);
+    setError(null);
+    try {
+      let diagSnippet: string | null = null;
+      if (includeDiag) {
+        const snap = await fetchDiagRuntimeSnapshot().catch(() => null);
+        diagSnippet = buildDiagReport(
+          appVersion,
+          isAuthorized,
+          "ERROR",
+          snap,
+          currentUsername ?? undefined
+        );
+      }
+      const payload = buildAuthorFeedbackPayload({
+        category,
+        title,
+        body,
+        version: appVersion,
+        platformLabel,
+        includeEnv,
+        diagLogSnippet: diagSnippet,
+      });
+      const topicId = await sendPrivateMessage({
+        recipients: LINDO_AUTHOR_USERNAME,
+        title: payload.title,
+        raw: payload.raw,
+      });
+      onSent(topicId, payload.title);
+    } catch (e: any) {
+      setError(e?.message || "私信发送未成功，请稍后重试");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/58 p-5"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !sending && !uploading) onClose();
+      }}
+    >
+      <div
+        className="flex h-[min(580px,84vh)] w-[min(640px,92vw)] flex-col overflow-hidden rounded-2xl shadow-2xl"
+        style={{
+          backgroundColor: "var(--card-surface)",
+          border: "0.5px solid var(--hairline)",
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <header className="lindo-hairline-b flex h-[50px] shrink-0 items-center justify-between gap-3 px-5">
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              disabled={sending || uploading}
+              onClick={onClose}
+              title="关闭"
+              className="lindo-interactive flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              <LinDoIcons.Close size={15.5} />
+            </button>
+            <span className="truncate text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
+              私信作者反馈
+            </span>
+            <button
+              type="button"
+              onClick={() => onInspectAuthor(LINDO_AUTHOR_USERNAME)}
+              className="rounded-full px-2 py-0.5 text-[11.5px] font-medium hover:underline cursor-pointer"
+              style={{
+                backgroundColor: "var(--subtle-surface)",
+                color: "var(--active-chip-text)",
+              }}
+            >
+              @{LINDO_AUTHOR_USERNAME}
+            </button>
+          </div>
+          <button
+            type="button"
+            disabled={sending || uploading}
+            onClick={() => void handleSubmit()}
+            className="rounded-full px-4 py-1 text-[13px] font-semibold transition-opacity hover:opacity-90 cursor-pointer disabled:opacity-45"
+            style={{
+              backgroundColor: "var(--publish-btn-bg)",
+              color: "var(--publish-btn-fg)",
+            }}
+          >
+            {sending ? "发送中..." : "发送私信"}
+          </button>
+        </header>
+
+        {/* 反馈类型选择条 */}
+        <div className="lindo-hairline-b flex shrink-0 flex-wrap items-center justify-between gap-2 px-5 py-2.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {FEEDBACK_CATEGORIES.map((item) => {
+              const active = category === item.key;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => setCategory(item.key)}
+                  className="rounded-full px-3 py-1 text-[12px] font-medium transition-colors cursor-pointer"
+                  style={{
+                    backgroundColor: active ? "var(--active-chip-bg)" : "var(--subtle-surface)",
+                    color: active ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                  }}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+          {isAuthorSelf && (
+            <span className="text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+              当前为作者本人账号
+            </span>
+          )}
+        </div>
+
+        {/* 标题栏 */}
+        <div
+          className="flex shrink-0 items-center gap-2 px-5 py-2.5"
+          style={{
+            borderBottom:
+              attempted && titleErr
+                ? "0.5px solid var(--error-border)"
+                : "0.5px solid var(--hairline)",
+          }}
+        >
+          <input
+            type="text"
+            autoFocus
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onKeyDown={(e) => {
+              if (isImeComposingEvent(e)) return;
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                void handleSubmit();
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                textareaRef.current?.focus();
+              }
+            }}
+            placeholder="简要概括遇到的问题或建议..."
+            className="flex-1 bg-transparent text-[15px] font-semibold outline-none"
+            style={{ color: "var(--ink-primary)" }}
+          />
+          {attempted && titleErr && (
+            <span className="shrink-0 text-[11.5px]" style={{ color: "var(--error-fg)" }}>
+              {titleErr}
+            </span>
+          )}
+        </div>
+
+        {/* 错误提示 */}
+        {error && (
+          <div
+            className="shrink-0 px-5 py-2 text-[12px]"
+            style={{
+              backgroundColor: "var(--error-bg)",
+              borderBottom: "0.5px solid var(--error-border)",
+              color: "var(--error-fg)",
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        {/* 正文编辑区（支持直接粘贴截图上传） */}
+        <textarea
+          ref={textareaRef}
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          onPaste={(e) =>
+            handleComposerTextareaPaste(e, {
+              textarea: textareaRef.current,
+              value: bodyRef.current,
+              onUploadFiles: (files) => void uploadFiles(files),
+              onInsertText: insertTextAtCursor,
+            })
+          }
+          onKeyDown={(e) => {
+            if (isImeComposingEvent(e)) return;
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault();
+              void handleSubmit();
+            }
+          }}
+          placeholder={`详细描述复现步骤、现象或建议（支持直接 ${isWindows ? "Ctrl+V" : "⌘+V"} 粘贴截图上传，${submitShortcut} 发送）`}
+          className="lindo-scroll flex-1 min-h-0 resize-none bg-transparent px-5 py-3.5 text-[14px] leading-[1.68] outline-none select-text"
+          style={{ color: "var(--ink-body)" }}
+        />
+
+        {/* 底部工具条（截图上传 / 附带环境 / 附带脱敏日志） */}
+        <footer
+          className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-5 py-2.5 text-[12px]"
+          style={{
+            borderTop:
+              attempted && bodyErr
+                ? "0.5px solid var(--error-border)"
+                : "0.5px solid var(--hairline-soft)",
+            color: "var(--ink-secondary)",
+          }}
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,*/*"
+              multiple
+              className="hidden"
+              onChange={async (e) => {
+                const list = e.target.files ? Array.from(e.target.files) : [];
+                e.target.value = "";
+                if (list.length === 0) return;
+                const prepared = await Promise.all(
+                  list.map((f, idx) => fileToPreparedUpload(f, idx))
+                );
+                void uploadFiles(prepared);
+              }}
+            />
+            <button
+              type="button"
+              disabled={uploading}
+              onClick={() => fileInputRef.current?.click()}
+              className="lindo-interactive inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px]"
+              style={{ color: uploading ? "var(--active-chip-text)" : "var(--ink-secondary)" }}
+            >
+              <LinDoIcons.Image size={14.5} />
+              <span>{uploading ? "上传中..." : "添加截图"}</span>
+            </button>
+
+            <label className="inline-flex items-center gap-1.5 text-[11.8px] select-none cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includeEnv}
+                onChange={(e) => setIncludeEnv(e.target.checked)}
+                className="accent-amber-400 cursor-pointer"
+              />
+              <span>附带版本环境</span>
+            </label>
+
+            <label className="inline-flex items-center gap-1.5 text-[11.8px] select-none cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includeDiag}
+                onChange={(e) => setIncludeDiag(e.target.checked)}
+                className="accent-amber-400 cursor-pointer"
+              />
+              <span>附带异常日志（脱敏）</span>
+            </label>
+          </div>
+
+          <span className="shrink-0 text-[11.5px]" style={{ color: attempted && bodyErr ? "var(--error-fg)" : "var(--ink-tertiary)" }}>
+            {attempted && bodyErr ? bodyErr : `通过站内私信直达 · ${submitShortcut}`}
+          </span>
+        </footer>
+      </div>
+    </div>
+  );
+};
+
 /* ==================== 3. 个人中心与设置 (CommunityProfileScreen 1:1 对齐) ==================== */
 export const ProfileSettingsView: React.FC<{
   isAuthorized: boolean;
@@ -2446,6 +2917,8 @@ export const ProfileSettingsView: React.FC<{
   onCheckUpdate?: () => void;
   onOpenUpdateModal?: () => void;
   onOpenMessages?: () => void;
+  echStatus?: EchDesktopSnapshot | null;
+  onRefreshEchStatus?: () => void;
 }> = ({
   isAuthorized,
   isDark,
@@ -2474,9 +2947,11 @@ export const ProfileSettingsView: React.FC<{
   onCheckUpdate,
   onOpenUpdateModal,
   onOpenMessages,
+  echStatus,
+  onRefreshEchStatus,
 }) => {
   const [expandedRow, setExpandedRow] = useState<
-    "appearance" | "theme" | "density" | "font" | null
+    "appearance" | "theme" | "density" | "font" | "ech" | null
   >(null);
   const [subSheet, setSubSheet] = useState<
     | "bookmarks"
@@ -2490,6 +2965,7 @@ export const ProfileSettingsView: React.FC<{
     | "about"
     | null
   >(null);
+  const [showAuthorFeedback, setShowAuthorFeedback] = useState(false);
   const [diagFilter, setDiagFilter] = useState<DiagCategory | "ALL">("ALL");
   const [diagQuery, setDiagQuery] = useState("");
   const [diagSnapshot, setDiagSnapshot] = useState<DiagRuntimeSnapshot | null>(null);
@@ -2570,6 +3046,13 @@ export const ProfileSettingsView: React.FC<{
   const [historyPage, setHistoryPage] = useState(0);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
+  const historySearchInput = useImeSearchInput("");
+  const historySearchQuery = historySearchInput.committedValue;
+  const readFloorsRef = useRef(readFloors);
+  readFloorsRef.current = readFloors;
+  const historySearchSeqRef = useRef(0);
+  const [historyCloudHits, setHistoryCloudHits] = useState<SearchableHistoryItem[]>([]);
+  const [historyCloudSearching, setHistoryCloudSearching] = useState(false);
   const [cloudDrafts, setCloudDrafts] = useState<CloudDraftItem[]>([]);
   const [activityFilter, setActivityFilter] = useState<"1,4,5" | "4" | "5" | "1">("1,4,5");
   const [activities, setActivities] = useState<any[]>([]);
@@ -2615,6 +3098,9 @@ export const ProfileSettingsView: React.FC<{
       const localSnap = getLocalTopicHistory();
       setLocalHistory(localSnap);
       setHistoryPage(0);
+      historySearchInput.setDirect("");
+      setHistoryCloudHits([]);
+      setHistoryCloudSearching(false);
       if (isAuthorized) {
         setSubLoading(localSnap.length === 0);
         fetchReadHistoryTopics(0)
@@ -2676,6 +3162,71 @@ export const ProfileSettingsView: React.FC<{
         .finally(() => setSubLoading(false));
     }
   }, [subSheet, isAuthorized, currentUser?.username, activityFilter, followTab, badgeTab]);
+
+  // 阅读历史云端深度补查（已登录时防抖请求 Discourse `in:seen`，仅响应已上屏词 + 60s 缓存 + 竞态保护）
+  useEffect(() => {
+    if (subSheet !== "history" || !isAuthorized) {
+      historySearchSeqRef.current += 1;
+      setHistoryCloudHits([]);
+      setHistoryCloudSearching(false);
+      return;
+    }
+    const seenQuery = buildSeenHistorySearchQuery(historySearchQuery);
+    if (!seenQuery) {
+      historySearchSeqRef.current += 1;
+      setHistoryCloudHits([]);
+      setHistoryCloudSearching(false);
+      return;
+    }
+    const cached = historyCloudSearchCache.get(seenQuery);
+    if (cached) {
+      historySearchSeqRef.current += 1;
+      setHistoryCloudHits(cached);
+      setHistoryCloudSearching(false);
+      return;
+    }
+    const seq = ++historySearchSeqRef.current;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled || seq !== historySearchSeqRef.current) return;
+      setHistoryCloudSearching(true);
+      searchCommunity(seenQuery, 1)
+        .then((res) => {
+          if (cancelled || seq !== historySearchSeqRef.current) return;
+          const mapped: SearchableHistoryItem[] = [];
+          const seenTopicIds = new Set<number>();
+          const floors = readFloorsRef.current;
+          for (const hit of res.posts) {
+            if (!hit.topicId || seenTopicIds.has(hit.topicId)) continue;
+            seenTopicIds.add(hit.topicId);
+            mapped.push({
+              topicId: hit.topicId,
+              title: hit.title,
+              categoryName: hit.categoryName,
+              categoryColorHex: hit.categoryColorHex,
+              authorUsername: hit.username,
+              authorAvatar: hit.avatarTemplate,
+              replyCount: Math.max(0, (hit.postsCount || 1) - 1),
+              timeIso: hit.createdAt,
+              resumeFloor: floors[String(hit.topicId)] || hit.postNumber || undefined,
+              fromCloudSearch: true,
+            });
+          }
+          historyCloudSearchCache.set(seenQuery, mapped);
+          setHistoryCloudHits(mapped);
+        })
+        .catch(() => {
+          if (!cancelled && seq === historySearchSeqRef.current) setHistoryCloudHits([]);
+        })
+        .finally(() => {
+          if (!cancelled && seq === historySearchSeqRef.current) setHistoryCloudSearching(false);
+        });
+    }, 360);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [subSheet, isAuthorized, historySearchQuery]);
 
   const currentThemeSpec =
     BRAND_THEMES.find((t) => t.key === preferences.themeOption) ?? BRAND_THEMES[0];
@@ -3095,6 +3646,62 @@ export const ProfileSettingsView: React.FC<{
           {/* 5. 通用 */}
           <div className="lindo-hairline-b">
             <GroupHeader title="通用" />
+            {echStatus?.supported &&
+              (() => {
+                const rawMode = preferences.echRoutingMode;
+                const normalizedEchMode: EchRoutingModePref =
+                  rawMode === "ech_priority" || rawMode === "direct_only"
+                    ? "ech_priority"
+                    : rawMode === "system_default"
+                      ? "system_default"
+                      : "smart_auto";
+                const echModeTitle =
+                  normalizedEchMode === "ech_priority"
+                    ? "直连优先"
+                    : normalizedEchMode === "system_default"
+                      ? "系统默认"
+                      : "智能模式";
+                const echModeDesc =
+                  normalizedEchMode === "ech_priority"
+                    ? "优先使用内置 DoH + TLS 1.3 ECH 直连绕过系统代理；若遇到全局 TUN 接管默认路由则自动安全回退至 VPN 通道。"
+                    : normalizedEchMode === "system_default"
+                      ? "完全关闭内置 ECH 网关，所有请求交由操作系统默认网络或代理处理。"
+                      : "未开代理/VPN 时自动启用原生 DoH + TLS 1.3 ECH 直连；检测到系统代理或 VPN 时自动无缝让行代理通道，零冲突免手动切换。";
+                return (
+                  <ExpandableSetting
+                    icon={<LinDoIcons.Globe size={19} />}
+                    title="网络加速 (ECH)"
+                    value={echModeTitle}
+                    expanded={expandedRow === "ech"}
+                    onToggle={() => {
+                      const next = expandedRow === "ech" ? null : "ech";
+                      setExpandedRow(next);
+                      if (next === "ech") onRefreshEchStatus?.();
+                    }}
+                  >
+                    <SettingsSegmentedChoices
+                      options={[
+                        { key: "smart_auto" as const, label: "智能模式（推荐）" },
+                        { key: "ech_priority" as const, label: "直连优先" },
+                        { key: "system_default" as const, label: "系统默认" },
+                      ]}
+                      selected={normalizedEchMode}
+                      onSelect={(next) =>
+                        onUpdatePreferences({ ...preferences, echRoutingMode: next })
+                      }
+                    />
+                    <div
+                      className="px-1 pt-2.5 pb-1 text-[12px] leading-[1.55]"
+                      style={{ color: "var(--ink-tertiary)" }}
+                    >
+                      <div>{echModeDesc}</div>
+                      <div className="mt-1">
+                        当前状态：{echStatus.statusSubtitle || "正在检测网络环境…"}
+                      </div>
+                    </div>
+                  </ExpandableSetting>
+                );
+              })()}
             <ToggleSettingRow
               icon={<LinDoIcons.Sparkles size={19} />}
               title="界面与头像动效"
@@ -3193,6 +3800,21 @@ export const ProfileSettingsView: React.FC<{
               icon={<LinDoIcons.FileText size={19} />}
               title="诊断日志与导出"
               onClick={() => setSubSheet("diagnostics")}
+            />
+            <SettingRow
+              icon={<LinDoIcons.MessageCircle size={19} />}
+              title="私信作者反馈"
+              value={`@${LINDO_AUTHOR_USERNAME}`}
+              onClick={() => {
+                if (!isAuthorized) {
+                  onRequestGuestLogin(
+                    "登录后私信作者反馈",
+                    "登录 LINUX DO 账号即可通过站内私信直接联系作者"
+                  );
+                  return;
+                }
+                setShowAuthorFeedback(true);
+              }}
             />
             <SettingRow
               icon={<LinDoIcons.InfoCircle size={19} />}
@@ -3402,7 +4024,52 @@ export const ProfileSettingsView: React.FC<{
               </div>
             </div>
 
-            {/* 二级切换标签栏 */}
+            {/* 二级切换标签栏 / 阅读历史搜索栏 */}
+            {subSheet === "history" && (
+              <div className="lindo-hairline-b shrink-0 px-4 pb-3 pt-1">
+                <div
+                  className="flex h-9 items-center gap-2 rounded-lg px-3"
+                  style={{
+                    backgroundColor: "var(--subtle-surface)",
+                    border: "0.5px solid var(--hairline)",
+                  }}
+                >
+                  <LinDoIcons.Search
+                    size={14}
+                    className="shrink-0"
+                    style={{ color: "var(--ink-tertiary)" }}
+                  />
+                  <input
+                    type="text"
+                    {...historySearchInput.inputProps}
+                    placeholder="搜索历史帖子标题、作者、版块或 #ID…"
+                    aria-label="搜索阅读历史"
+                    className="min-w-0 flex-1 bg-transparent text-[13px] outline-none"
+                    style={{ color: "var(--ink-primary)" }}
+                  />
+                  {historyCloudSearching && (
+                    <span
+                      className="shrink-0 text-[11px]"
+                      style={{ color: "var(--ink-tertiary)" }}
+                    >
+                      云端检索中…
+                    </span>
+                  )}
+                  {historySearchInput.inputValue && (
+                    <button
+                      type="button"
+                      onClick={() => historySearchInput.setDirect("")}
+                      aria-label="清空历史搜索"
+                      className="lindo-interactive flex h-5 w-5 shrink-0 items-center justify-center rounded-full cursor-pointer"
+                      style={{ color: "var(--ink-tertiary)" }}
+                    >
+                      <LinDoIcons.Close size={12.5} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {subSheet === "activity" && (
               <div className="lindo-hairline-b no-scrollbar flex shrink-0 items-center gap-1.5 overflow-x-auto px-4 py-2">
                 {[
@@ -3586,21 +4253,7 @@ export const ProfileSettingsView: React.FC<{
                 )
               ) : subSheet === "history" ? (
                 (() => {
-                  const mergedMap = new Map<
-                    number,
-                    {
-                      topicId: number;
-                      title: string;
-                      categoryName?: string;
-                      categoryColorHex?: string;
-                      authorUsername: string;
-                      authorName?: string;
-                      authorAvatar: string;
-                      replyCount: number;
-                      timeIso: string;
-                      resumeFloor?: number;
-                    }
-                  >();
+                  const mergedMap = new Map<number, SearchableHistoryItem>();
 
                   // 1. 优先展示本次/本地真实访问记录（含完整标题、作者、分类、时间）
                   for (const loc of localHistory) {
@@ -3632,6 +4285,7 @@ export const ProfileSettingsView: React.FC<{
                           st.originalPoster.animatedAvatar || st.originalPoster.avatarTemplate,
                         replyCount: st.replyCount,
                         timeIso: st.lastPostedAt || st.createdAt,
+                        tags: st.tags,
                         resumeFloor:
                           readFloors[String(st.id)] || st.lastReadPostNumber || undefined,
                       });
@@ -3656,19 +4310,37 @@ export const ProfileSettingsView: React.FC<{
                           matched.originalPoster.avatarTemplate,
                         replyCount: matched.replyCount,
                         timeIso: matched.lastPostedAt || matched.createdAt,
+                        tags: matched.tags,
                         resumeFloor: floor,
                       });
                     }
                   }
 
-                  const displayHistory = Array.from(mergedMap.values());
+                  const allHistory = Array.from(mergedMap.values());
+                  const hasSearchQuery = historySearchQuery.trim().length > 0;
+                  const displayHistory = filterAndMergeHistoryItems(
+                    allHistory,
+                    historyCloudHits,
+                    historySearchQuery
+                  );
                   if (displayHistory.length === 0) {
                     return (
                       <div
-                        className="flex h-full flex-col items-center justify-center p-10 text-center text-[13px]"
+                        className="flex h-full flex-col items-center justify-center gap-2 p-10 text-center text-[13px]"
                         style={{ color: "var(--ink-tertiary)" }}
                       >
-                        暂无浏览记录
+                        <MascotExpression
+                          expression={historyCloudSearching ? "happy" : "sleepy"}
+                          sizePx={28}
+                          className="opacity-80"
+                        />
+                        <span>
+                          {hasSearchQuery
+                            ? historyCloudSearching
+                              ? `正在检索「${historySearchQuery.trim()}」的阅读记录…`
+                              : `未找到包含「${historySearchQuery.trim()}」的历史帖子`
+                            : "暂无浏览记录"}
+                        </span>
                       </div>
                     );
                   }
@@ -3699,14 +4371,14 @@ export const ProfileSettingsView: React.FC<{
                             <div className="min-w-0 flex-1">
                               <div className="flex items-baseline justify-between gap-3">
                                 <span
-                                  className="line-clamp-1 text-[13.8px] font-semibold leading-snug"
+                                  className="line-clamp-1 text-[14.5px] font-semibold leading-snug"
                                   style={{ color: "var(--ink-primary)" }}
                                 >
                                   {h.title}
                                 </span>
                                 {h.timeIso && (
                                   <span
-                                    className="shrink-0 text-[11px] tabular-nums"
+                                    className="shrink-0 text-[11.5px] tabular-nums"
                                     style={{ color: "var(--ink-tertiary)" }}
                                   >
                                     {formatRelativeTime(h.timeIso)}
@@ -3714,7 +4386,7 @@ export const ProfileSettingsView: React.FC<{
                                 )}
                               </div>
                               <div
-                                className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px]"
+                                className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px]"
                                 style={{ color: "var(--ink-secondary)" }}
                               >
                                 {h.categoryName && (
@@ -3722,8 +4394,8 @@ export const ProfileSettingsView: React.FC<{
                                     <LinDoCategoryBadge
                                       name={h.categoryName}
                                       fallbackColor={cv.dotColor}
-                                      iconSize={11}
-                                      className="text-[11.5px]"
+                                      iconSize={11.5}
+                                      className="text-[12px]"
                                     />
                                     <span style={{ color: "var(--ink-tertiary)" }}>·</span>
                                   </>
@@ -3737,13 +4409,24 @@ export const ProfileSettingsView: React.FC<{
                                     </span>
                                   </>
                                 )}
+                                {h.fromCloudSearch && (
+                                  <span
+                                    className="rounded px-1.5 py-[0.5px] text-[10.5px] font-medium"
+                                    style={{
+                                      backgroundColor: "var(--subtle-surface)",
+                                      color: "var(--ink-tertiary)",
+                                    }}
+                                  >
+                                    更早记录
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </button>
                         );
                       })}
 
-                      {isAuthorized && historyHasMore && (
+                      {!hasSearchQuery && isAuthorized && historyHasMore && (
                         <div className="py-3 text-center">
                           <button
                             type="button"
@@ -4074,9 +4757,7 @@ export const ProfileSettingsView: React.FC<{
                           className="lindo-interactive group flex flex-col justify-between rounded-xl p-3 cursor-pointer"
                           style={{
                             backgroundColor: "var(--subtle-surface)",
-                            border: isCurrentTitle
-                              ? "0.5px solid color-mix(in srgb, var(--brand-gold) 55%, var(--hairline))"
-                              : "0.5px solid var(--hairline)",
+                            border: "0.5px solid var(--hairline)",
                           }}
                         >
                           {/* 顶栏：左侧徽章图标+名称，右侧紧凑「佩戴中 / 设为头衔」胶囊 + 获取人数（绝不撑高底栏！） */}
@@ -4798,6 +5479,27 @@ export const ProfileSettingsView: React.FC<{
                     </button>
                     <button
                       type="button"
+                      onClick={() => {
+                        setSubSheet(null);
+                        if (!isAuthorized) {
+                          onRequestGuestLogin(
+                            "登录后私信作者反馈",
+                            "登录 LINUX DO 账号即可通过站内私信直接联系作者"
+                          );
+                          return;
+                        }
+                        setShowAuthorFeedback(true);
+                      }}
+                      className="lindo-interactive rounded-full px-4 py-1.5 text-[12.5px]"
+                      style={{
+                        border: "0.5px solid var(--hairline)",
+                        color: "var(--active-chip-text)",
+                      }}
+                    >
+                      私信作者反馈
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => openUrl("https://github.com/lucaslus/LinDo")}
                       className="lindo-interactive rounded-full px-4 py-1.5 text-[12.5px]"
                       style={{
@@ -4813,6 +5515,23 @@ export const ProfileSettingsView: React.FC<{
             </div>
           </div>
         </div>
+      )}
+
+      {showAuthorFeedback && (
+        <AuthorFeedbackModal
+          appVersion={updateInfo?.currentVersion || DESKTOP_APP_VERSION}
+          currentUsername={currentUser?.username}
+          isAuthorized={isAuthorized}
+          onInspectAuthor={(uname) => onInspectUser(uname)}
+          onSent={(topicId, sentTitle) => {
+            setShowAuthorFeedback(false);
+            setToast(`反馈私信已发送给 @${LINDO_AUTHOR_USERNAME}`);
+            if (topicId > 0) {
+              onOpenTopicById(topicId, sentTitle, 1);
+            }
+          }}
+          onClose={() => setShowAuthorFeedback(false)}
+        />
       )}
 
       {toast && (
@@ -4946,13 +5665,14 @@ function SettingsSegmentedChoices<K extends string>({
   selected: K;
   onSelect: (key: K) => void;
 }) {
+  const perColWidth = options.some((opt) => opt.label.length > 5) ? 144 : 124;
   return (
     <div
       role="radiogroup"
       className="grid gap-1.5"
       style={{
         gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`,
-        maxWidth: `${options.length * 124}px`,
+        maxWidth: `${options.length * perColWidth}px`,
       }}
     >
       {options.map((opt) => {
@@ -4964,7 +5684,7 @@ function SettingsSegmentedChoices<K extends string>({
             role="radio"
             aria-checked={active}
             onClick={() => onSelect(opt.key)}
-            className="lindo-interactive flex h-[36px] items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[13px] transition-colors cursor-pointer"
+            className="lindo-interactive flex h-[36px] items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[13px] whitespace-nowrap transition-colors cursor-pointer"
             style={{
               backgroundColor: active
                 ? "var(--active-chip-bg)"
@@ -5404,11 +6124,11 @@ export const AuthModal: React.FC<{
                   className="flex w-full items-center justify-center gap-1 py-1.5 text-[12.5px] cursor-pointer"
                   style={{ color: "var(--ink-tertiary)" }}
                 >
-                  <span>{manualExpanded ? "收起手动登录" : "展开手动登录"}</span>
+                  <span>手动登录</span>
                   {manualExpanded ? (
-                    <LinDoIcons.ChevronDown size={12} />
+                    <LinDoIcons.ChevronUp size={12} />
                   ) : (
-                    <LinDoIcons.ChevronRight size={12} />
+                    <LinDoIcons.ChevronDown size={12} />
                   )}
                 </button>
 
@@ -5767,66 +6487,172 @@ export const ConfirmDialog: React.FC<{
   </div>
 );
 
-/* ==================== 7. 全站搜索（支持 相关性/最新/最多赞/最多浏览 排序与分页） ==================== */
+/* ==================== 7. 全站搜索（支持高级筛选、用户/标签直达、相关性/最新/获赞/浏览排序与分页） ==================== */
+const globalSearchCache = new SearchResultLruCache<{
+  posts: CommunitySearchHit[];
+  users: CommunitySearchUserHit[];
+  tags: CommunitySearchTagHit[];
+  hasMore: boolean;
+}>(32, 60_000);
+
+const historyCloudSearchCache = new SearchResultLruCache<SearchableHistoryItem[]>(24, 60_000);
+
 export const GlobalSearchModal: React.FC<{
+  categories?: CategoryMeta[];
   onSelectHit: (topicId: number, title: string, postNumber?: number) => void;
+  onInspectUser?: (username: string) => void;
+  onSelectTag?: (tag: string) => void;
   onClose: () => void;
-}> = ({ onSelectHit, onClose }) => {
-  const [query, setQuery] = useState("");
+}> = ({ categories = [], onSelectHit, onInspectUser, onSelectTag, onClose }) => {
+  const queryInput = useImeSearchInput("");
+  const query = queryInput.inputValue;
+  const committedQuery = queryInput.committedValue;
+  const [immediateNonce, setImmediateNonce] = useState(0);
   const [order, setOrder] = useState<"" | "latest" | "likes" | "views">("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [categorySlug, setCategorySlug] = useState("");
+  const tagFilterInput = useImeSearchInput("");
+  const authorFilterInput = useImeSearchInput("");
+  const tagFilter = tagFilterInput.committedValue;
+  const authorFilter = authorFilterInput.committedValue;
+  const [inTitle, setInTitle] = useState(false);
+  const [solvedOnly, setSolvedOnly] = useState(false);
+  const [afterDays, setAfterDays] = useState<number>(0);
+
   const [hits, setHits] = useState<CommunitySearchHit[]>([]);
+  const [userHits, setUserHits] = useState<CommunitySearchUserHit[]>([]);
+  const [tagHits, setTagHits] = useState<CommunitySearchTagHit[]>([]);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [searching, setSearching] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const searchSeqRef = useRef(0);
+  const lastImmediateNonceRef = useRef(0);
+
+  const activeFilters: CommunitySearchFilters = useMemo(
+    () => ({
+      categorySlug: categorySlug || undefined,
+      tag: tagFilter.trim() || undefined,
+      author: authorFilter.trim() || undefined,
+      inTitle: inTitle || undefined,
+      solved: solvedOnly || undefined,
+      afterDays: afterDays > 0 ? afterDays : undefined,
+    }),
+    [categorySlug, tagFilter, authorFilter, inTitle, solvedOnly, afterDays]
+  );
+
+  const activeFilterCount =
+    (categorySlug ? 1 : 0) +
+    (tagFilter.trim() ? 1 : 0) +
+    (authorFilter.trim() ? 1 : 0) +
+    (inTitle ? 1 : 0) +
+    (solvedOnly ? 1 : 0) +
+    (afterDays > 0 ? 1 : 0);
+
+  const topCategories = useMemo(
+    () => categories.filter((c) => !c.parentId && c.slug),
+    [categories]
+  );
 
   useEffect(() => {
-    const q = query.trim();
-    if (q.length < 2) {
+    const q = committedQuery.trim();
+    if (q.length < 2 && activeFilterCount === 0) {
+      searchSeqRef.current += 1;
       setHits([]);
+      setUserHits([]);
+      setTagHits([]);
       setHasMore(false);
       setError(null);
+      setSearching(false);
       return;
     }
-    const timer = setTimeout(() => {
-      setSearching(true);
-      setError(null);
+
+    const cacheKey = JSON.stringify({ q, order: order || "", activeFilters });
+    const cached = globalSearchCache.get(cacheKey);
+    if (cached && immediateNonce === lastImmediateNonceRef.current) {
+      searchSeqRef.current += 1;
+      setHits(cached.posts);
+      setUserHits(cached.users);
+      setTagHits(cached.tags);
+      setHasMore(cached.hasMore);
       setPage(1);
-      searchCommunity(q, 1, order || null)
-        .then((res) => {
-          setHits(res.posts);
-          setHasMore(res.hasMore);
-        })
-        .catch((err: any) => setError(err?.message || "搜索失败，请稍后重试"))
-        .finally(() => setSearching(false));
-    }, 280);
-    return () => clearTimeout(timer);
-  }, [query, order]);
+      setError(null);
+      setSearching(false);
+      return;
+    }
+
+    const isImmediate = immediateNonce !== lastImmediateNonceRef.current;
+    lastImmediateNonceRef.current = immediateNonce;
+    const seq = ++searchSeqRef.current;
+    let cancelled = false;
+    const timer = setTimeout(
+      () => {
+        if (cancelled || seq !== searchSeqRef.current) return;
+        setSearching(true);
+        setError(null);
+        setPage(1);
+        searchCommunity(q, 1, order || null, activeFilters)
+          .then((res) => {
+            if (cancelled || seq !== searchSeqRef.current) return;
+            globalSearchCache.set(cacheKey, res);
+            setHits(res.posts);
+            setUserHits(res.users);
+            setTagHits(res.tags);
+            setHasMore(res.hasMore);
+          })
+          .catch((err: any) => {
+            if (cancelled || seq !== searchSeqRef.current) return;
+            setError(err?.message || "搜索失败，请稍后重试");
+          })
+          .finally(() => {
+            if (!cancelled && seq === searchSeqRef.current) {
+              setSearching(false);
+            }
+          });
+      },
+      isImmediate ? 0 : 320
+    );
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [committedQuery, order, activeFilters, activeFilterCount, immediateNonce]);
 
   const handleLoadMore = async () => {
     if (loadingMore || !hasMore) return;
     const nextPage = page + 1;
+    const seq = searchSeqRef.current;
     setLoadingMore(true);
     try {
-      const res = await searchCommunity(query.trim(), nextPage, order || null);
+      const res = await searchCommunity(committedQuery.trim(), nextPage, order || null, activeFilters);
+      if (seq !== searchSeqRef.current) return;
       setHits((prev) => [...prev, ...res.posts]);
       setPage(nextPage);
       setHasMore(res.hasMore);
     } catch {
-      setHasMore(false);
+      if (seq === searchSeqRef.current) setHasMore(false);
     } finally {
-      setLoadingMore(false);
+      if (seq === searchSeqRef.current) setLoadingMore(false);
     }
+  };
+
+  const resetFilters = () => {
+    setCategorySlug("");
+    tagFilterInput.setDirect("");
+    authorFilterInput.setDirect("");
+    setInTitle(false);
+    setSolvedOnly(false);
+    setAfterDays(0);
   };
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/62 pt-14 px-4"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/62 pt-12 px-4"
       onClick={onClose}
     >
       <div
-        className="flex h-[min(580px,78vh)] w-[640px] max-w-full flex-col rounded-2xl shadow-2xl overflow-hidden"
+        className="flex h-[min(620px,82vh)] w-[680px] max-w-full flex-col rounded-2xl shadow-2xl overflow-hidden"
         style={{
           backgroundColor: "var(--card-surface)",
           border: "0.5px solid var(--hairline)",
@@ -5838,8 +6664,14 @@ export const GlobalSearchModal: React.FC<{
           <input
             type="text"
             autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            {...queryInput.inputProps}
+            onKeyDown={(e) => {
+              if (isImeComposingEvent(e)) return;
+              if (e.key === "Enter") {
+                e.preventDefault();
+                setImmediateNonce((n) => n + 1);
+              }
+            }}
             placeholder="搜索话题、#标签 或 @用户..."
             className="flex-1 bg-transparent text-[14.5px] outline-none"
             style={{ color: "var(--ink-primary)" }}
@@ -5847,7 +6679,7 @@ export const GlobalSearchModal: React.FC<{
           {query && (
             <button
               type="button"
-              onClick={() => setQuery("")}
+              onClick={() => queryInput.setDirect("")}
               className="lindo-interactive rounded-full p-1"
             >
               <LinDoIcons.Close size={13.5} style={{ color: "var(--ink-tertiary)" }} />
@@ -5862,30 +6694,163 @@ export const GlobalSearchModal: React.FC<{
           </button>
         </div>
 
-        {/* 搜索排序切换条 */}
-        <div className="lindo-hairline-b no-scrollbar flex items-center gap-1.5 overflow-x-auto px-4 py-2">
-          {[
-            { key: "", label: "相关性" },
-            { key: "latest", label: "最新发帖" },
-            { key: "likes", label: "最多获赞" },
-            { key: "views", label: "最多浏览" },
-          ].map((opt) => (
-            <button
-              key={opt.key}
-              type="button"
-              onClick={() => setOrder(opt.key as any)}
-              className="shrink-0 rounded-full px-3 py-0.5 text-[11.8px] font-medium cursor-pointer"
-              style={{
-                backgroundColor:
-                  order === opt.key ? "var(--active-chip-bg)" : "var(--subtle-surface)",
-                color:
-                  order === opt.key ? "var(--active-chip-text)" : "var(--ink-secondary)",
-              }}
-            >
-              {opt.label}
-            </button>
-          ))}
+        {/* 搜索排序切换条 + 高级筛选展开 */}
+        <div className="lindo-hairline-b flex items-center justify-between gap-2 px-4 py-2">
+          <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto">
+            {[
+              { key: "", label: "相关性" },
+              { key: "latest", label: "最新发帖" },
+              { key: "likes", label: "最多获赞" },
+              { key: "views", label: "最多浏览" },
+            ].map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => setOrder(opt.key as any)}
+                className="shrink-0 rounded-full px-3 py-0.5 text-[11.8px] font-medium cursor-pointer"
+                style={{
+                  backgroundColor:
+                    order === opt.key ? "var(--active-chip-bg)" : "var(--subtle-surface)",
+                  color:
+                    order === opt.key ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowFilters((v) => !v)}
+            className="lindo-interactive flex shrink-0 items-center gap-1 rounded-full px-2.5 py-0.5 text-[11.8px] font-medium"
+            style={{
+              backgroundColor:
+                showFilters || activeFilterCount > 0
+                  ? "var(--active-chip-bg)"
+                  : "var(--subtle-surface)",
+              color:
+                showFilters || activeFilterCount > 0
+                  ? "var(--active-chip-text)"
+                  : "var(--ink-secondary)",
+            }}
+          >
+            <span>高级筛选{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}</span>
+            {showFilters ? <LinDoIcons.ChevronUp size={11.5} /> : <LinDoIcons.ChevronDown size={11.5} />}
+          </button>
         </div>
+
+        {/* 高级过滤条件面板 */}
+        {showFilters && (
+          <div
+            className="lindo-hairline-b space-y-2.5 px-4 py-2.5 text-[12px]"
+            style={{ backgroundColor: "var(--subtle-surface)" }}
+          >
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <select
+                value={categorySlug}
+                onChange={(e) => setCategorySlug(e.target.value)}
+                className="h-8 rounded-lg px-2.5 text-[12px] outline-none"
+                style={{
+                  backgroundColor: "var(--card-surface)",
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-primary)",
+                }}
+              >
+                <option value="">全部版块</option>
+                {topCategories.map((c) => (
+                  <option key={c.id} value={c.slug}>
+                    {c.displayName}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                {...tagFilterInput.inputProps}
+                placeholder="限定标签（如 Claude）"
+                className="h-8 rounded-lg px-2.5 text-[12px] outline-none"
+                style={{
+                  backgroundColor: "var(--card-surface)",
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-primary)",
+                }}
+              />
+              <input
+                type="text"
+                {...authorFilterInput.inputProps}
+                placeholder="限定作者（@用户名）"
+                className="h-8 rounded-lg px-2.5 text-[12px] outline-none"
+                style={{
+                  backgroundColor: "var(--card-surface)",
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-primary)",
+                }}
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setInTitle((v) => !v)}
+                  className="rounded-full px-2.5 py-0.5 text-[11.5px] font-medium cursor-pointer"
+                  style={{
+                    backgroundColor: inTitle ? "var(--active-chip-bg)" : "var(--card-surface)",
+                    color: inTitle ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                    border: "0.5px solid var(--hairline)",
+                  }}
+                >
+                  仅搜标题
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSolvedOnly((v) => !v)}
+                  className="rounded-full px-2.5 py-0.5 text-[11.5px] font-medium cursor-pointer"
+                  style={{
+                    backgroundColor: solvedOnly ? "var(--active-chip-bg)" : "var(--card-surface)",
+                    color: solvedOnly ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                    border: "0.5px solid var(--hairline)",
+                  }}
+                >
+                  仅已解答
+                </button>
+                {(
+                  [
+                    { days: 7, label: "近 7 天" },
+                    { days: 30, label: "近 30 天" },
+                    { days: 365, label: "近一年" },
+                  ] as const
+                ).map((d) => (
+                  <button
+                    key={d.days}
+                    type="button"
+                    onClick={() => setAfterDays((prev) => (prev === d.days ? 0 : d.days))}
+                    className="rounded-full px-2.5 py-0.5 text-[11.5px] font-medium cursor-pointer"
+                    style={{
+                      backgroundColor:
+                        afterDays === d.days ? "var(--active-chip-bg)" : "var(--card-surface)",
+                      color:
+                        afterDays === d.days ? "var(--active-chip-text)" : "var(--ink-secondary)",
+                      border: "0.5px solid var(--hairline)",
+                    }}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </div>
+              {activeFilterCount > 0 && (
+                <button
+                  type="button"
+                  onClick={resetFilters}
+                  className="text-[11.5px] hover:underline cursor-pointer"
+                  style={{ color: "var(--ink-tertiary)" }}
+                >
+                  清空筛选
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="lindo-scroll flex-1 divide-y">
           {searching ? (
@@ -5905,12 +6870,81 @@ export const GlobalSearchModal: React.FC<{
             <div className="p-8 text-center text-[12.5px]" style={{ color: "var(--error-fg)" }}>
               {error}
             </div>
-          ) : hits.length === 0 ? (
+          ) : hits.length === 0 && userHits.length === 0 && tagHits.length === 0 ? (
             <div className="p-8 text-center text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
-              {query.trim().length < 2 ? "输入至少 2 个字符开始全站检索" : "未找到匹配结果，试试其他关键词"}
+              {query.trim().length < 2 && activeFilterCount === 0
+                ? "输入至少 2 个字符，或选择高级筛选条件开始检索"
+                : "未找到匹配结果，试试其他关键词或放宽筛选"}
             </div>
           ) : (
             <>
+              {(userHits.length > 0 || tagHits.length > 0) && (
+                <div className="space-y-2 px-4 py-2.5" style={{ backgroundColor: "color-mix(in srgb, var(--subtle-surface) 45%, transparent)" }}>
+                  {userHits.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+                        用户
+                      </span>
+                      {userHits.map((u) => (
+                        <button
+                          key={u.username}
+                          type="button"
+                          onClick={() => {
+                            if (onInspectUser) {
+                              onClose();
+                              onInspectUser(u.username);
+                            }
+                          }}
+                          className="lindo-interactive inline-flex items-center gap-1.5 rounded-full py-0.5 pl-1 pr-2.5 text-[11.8px]"
+                          style={{
+                            backgroundColor: "var(--card-surface)",
+                            border: "0.5px solid var(--hairline)",
+                            color: "var(--ink-primary)",
+                          }}
+                        >
+                          <AvatarWithFlair
+                            username={u.username}
+                            avatarTemplate={u.avatarTemplate}
+                            sizePx={16}
+                          />
+                          <span className="font-medium">@{u.username}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {tagHits.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px]" style={{ color: "var(--ink-tertiary)" }}>
+                        标签
+                      </span>
+                      {tagHits.map((tg) => (
+                        <button
+                          key={tg.name}
+                          type="button"
+                          onClick={() => {
+                            if (onSelectTag) {
+                              onClose();
+                              onSelectTag(tg.name);
+                            }
+                          }}
+                          className="lindo-interactive inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11.5px]"
+                          style={{
+                            backgroundColor: "var(--card-surface)",
+                            border: "0.5px solid var(--hairline)",
+                            color: "var(--active-chip-text)",
+                          }}
+                        >
+                          <span>#{tg.name}</span>
+                          {tg.topicCount > 0 && (
+                            <span style={{ color: "var(--ink-tertiary)" }}>{tg.topicCount}</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {hits.map((h) => {
                 const cv = resolveCategoryVisual(h.categoryName || "", h.categoryColorHex);
                 return (
@@ -6316,35 +7350,214 @@ export const PublicUserCardModal: React.FC<{
   );
 };
 
-/* ==================== 9. 增强型大图灯箱（支持 缩放 / 复制链接 / 原图打开） ==================== */
+/* ==================== 9. 增强型多图大图灯箱（支持左右切图 / 滚轮缩放 / 拖拽平移 / 复制图片 / 本地保存） ==================== */
 export const ImageLightboxModal: React.FC<{
   src: string;
+  images?: string[];
+  initialIndex?: number;
   onClose: () => void;
-}> = ({ src, onClose }) => {
+}> = ({ src, images, initialIndex = 0, onClose }) => {
+  const gallery = useMemo(() => {
+    const list = images && images.length > 0 ? images : [src];
+    return list;
+  }, [images, src]);
+  const [idx, setIdx] = useState(() =>
+    Math.max(0, Math.min(gallery.length - 1, initialIndex))
+  );
+  const currentSrc = gallery[idx] || src;
   const [zoom, setZoom] = useState(1);
-  const [copied, setCopied] = useState(false);
-  const displaySrc = useForumImageSrc(src);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [copiedMode, setCopiedMode] = useState<"none" | "image" | "link" | "saved">("none");
+  const dragRef = useRef<{ active: boolean; startX: number; startY: number; baseX: number; baseY: number }>({
+    active: false,
+    startX: 0,
+    startY: 0,
+    baseX: 0,
+    baseY: 0,
+  });
+  const displaySrc = useForumImageSrc(currentSrc);
+
+  useEffect(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, [currentSrc]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowLeft" && gallery.length > 1) {
+        e.preventDefault();
+        setIdx((i) => (i - 1 + gallery.length) % gallery.length);
+      } else if (e.key === "ArrowRight" && gallery.length > 1) {
+        e.preventDefault();
+        setIdx((i) => (i + 1) % gallery.length);
+      } else if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        setZoom((z) => Math.min(4, Number((z + 0.25).toFixed(2))));
+      } else if (e.key === "-") {
+        e.preventDefault();
+        setZoom((z) => {
+          const next = Math.max(0.5, Number((z - 0.25).toFixed(2)));
+          if (next <= 1) setPan({ x: 0, y: 0 });
+          return next;
+        });
+      } else if (e.key === "0") {
+        e.preventDefault();
+        setZoom(1);
+        setPan({ x: 0, y: 0 });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [gallery.length]);
+
+  const handleCopyImage = async () => {
+    try {
+      const targetUrl = displaySrc || currentSrc;
+      const resp = await fetch(targetUrl);
+      const blob = await resp.blob();
+      let pngBlob = blob;
+      if (blob.type !== "image/png" && typeof createImageBitmap === "function") {
+        const bmp = await createImageBitmap(blob);
+        const canvas = document.createElement("canvas");
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        const ctx = canvas.getContext("2d");
+        ctx?.drawImage(bmp, 0, 0);
+        const converted = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob((b) => resolve(b), "image/png")
+        );
+        if (converted) pngBlob = converted;
+      }
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": pngBlob })]);
+        setCopiedMode("image");
+        setTimeout(() => setCopiedMode("none"), 1600);
+        return;
+      }
+    } catch {
+      // fallback to URL copy below
+    }
+    await navigator.clipboard.writeText(currentSrc).catch(() => {});
+    setCopiedMode("link");
+    setTimeout(() => setCopiedMode("none"), 1600);
+  };
+
+  const handleSaveImage = async () => {
+    try {
+      const targetUrl = displaySrc || currentSrc;
+      const resp = await fetch(targetUrl);
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const rawName = currentSrc.split("/").pop()?.split("?")[0] || `lindo-image-${Date.now()}.png`;
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = rawName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 3000);
+      setCopiedMode("saved");
+      setTimeout(() => setCopiedMode("none"), 1600);
+    } catch {
+      openUrl(currentSrc);
+    }
+  };
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/88 p-8 select-none"
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/88 p-6 select-none"
       onClick={onClose}
+      onWheel={(e) => {
+        if (Math.abs(e.deltaY) < 1) return;
+        e.stopPropagation();
+        const step = e.deltaY < 0 ? 0.18 : -0.18;
+        setZoom((z) => {
+          const next = Math.max(0.5, Math.min(4, Number((z + step).toFixed(2))));
+          if (next <= 1) setPan({ x: 0, y: 0 });
+          return next;
+        });
+      }}
+      onMouseMove={(e) => {
+        if (!dragRef.current.active) return;
+        setPan({
+          x: dragRef.current.baseX + (e.clientX - dragRef.current.startX),
+          y: dragRef.current.baseY + (e.clientY - dragRef.current.startY),
+        });
+      }}
+      onMouseUp={() => {
+        dragRef.current.active = false;
+      }}
     >
+      {/* 左右切图按钮 */}
+      {gallery.length > 1 && (
+        <>
+          <button
+            type="button"
+            title="上一张 (←)"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIdx((i) => (i - 1 + gallery.length) % gallery.length);
+            }}
+            className="fixed left-5 top-1/2 z-50 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-white/85 transition-colors hover:bg-white/15 cursor-pointer"
+            style={{ backgroundColor: "rgba(24, 27, 34, 0.72)", border: "0.5px solid rgba(255,255,255,0.14)" }}
+          >
+            <LinDoIcons.ChevronLeft size={18} />
+          </button>
+          <button
+            type="button"
+            title="下一张 (→)"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIdx((i) => (i + 1) % gallery.length);
+            }}
+            className="fixed right-5 top-1/2 z-50 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-white/85 transition-colors hover:bg-white/15 cursor-pointer"
+            style={{ backgroundColor: "rgba(24, 27, 34, 0.72)", border: "0.5px solid rgba(255,255,255,0.14)" }}
+          >
+            <LinDoIcons.ChevronRight size={18} />
+          </button>
+        </>
+      )}
+
       <div
-        className="flex flex-1 items-center justify-center overflow-auto w-full"
+        className="flex flex-1 items-center justify-center overflow-hidden w-full"
         onClick={onClose}
       >
         <img
           src={displaySrc}
           alt=""
+          draggable={false}
           onClick={(e) => e.stopPropagation()}
-          style={{ transform: `scale(${zoom})`, transition: "transform 150ms ease" }}
-          className="max-h-[82vh] max-w-[88vw] rounded-lg object-contain shadow-2xl"
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            if (zoom > 1.05) {
+              setZoom(1);
+              setPan({ x: 0, y: 0 });
+            } else {
+              setZoom(2);
+            }
+          }}
+          onMouseDown={(e) => {
+            if (zoom <= 1) return;
+            e.stopPropagation();
+            e.preventDefault();
+            dragRef.current = {
+              active: true,
+              startX: e.clientX,
+              startY: e.clientY,
+              baseX: pan.x,
+              baseY: pan.y,
+            };
+          }}
+          style={{
+            transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+            transition: dragRef.current.active ? "none" : "transform 130ms ease",
+          }}
+          className="max-h-[82vh] max-w-[86vw] rounded-lg object-contain shadow-2xl"
         />
       </div>
 
       <div
-        className="mt-4 flex items-center gap-2 rounded-full px-4 py-1.5 shadow-2xl"
+        className="mt-4 flex flex-wrap items-center justify-center gap-1.5 rounded-full px-4 py-1.5 shadow-2xl"
         style={{
           backgroundColor: "rgba(24, 27, 34, 0.92)",
           border: "0.5px solid rgba(255,255,255,0.14)",
@@ -6352,56 +7565,97 @@ export const ImageLightboxModal: React.FC<{
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        {gallery.length > 1 && (
+          <>
+            <span className="px-1.5 text-[12px] tabular-nums text-white/75">
+              {idx + 1} / {gallery.length}
+            </span>
+            <span className="h-3.5 w-[0.5px] bg-white/20" />
+          </>
+        )}
         <button
           type="button"
-          onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.25).toFixed(2))))}
+          onClick={() =>
+            setZoom((z) => {
+              const next = Math.max(0.5, Number((z - 0.25).toFixed(2)));
+              if (next <= 1) setPan({ x: 0, y: 0 });
+              return next;
+            })
+          }
           className="rounded-full p-1 hover:bg-white/10 cursor-pointer"
-          title="缩小"
+          title="缩小 (-)"
         >
           <LinDoIcons.ZoomOut size={16} />
         </button>
         <button
           type="button"
-          onClick={() => setZoom(1)}
+          onClick={() => {
+            setZoom(1);
+            setPan({ x: 0, y: 0 });
+          }}
           className="px-1.5 text-[12px] tabular-nums cursor-pointer"
-          title="重置缩放"
+          title="重置缩放 (0)"
         >
           {Math.round(zoom * 100)}%
         </button>
         <button
           type="button"
-          onClick={() => setZoom((z) => Math.min(3, Number((z + 0.25).toFixed(2))))}
+          onClick={() => setZoom((z) => Math.min(4, Number((z + 0.25).toFixed(2))))}
           className="rounded-full p-1 hover:bg-white/10 cursor-pointer"
-          title="放大"
+          title="放大 (+)"
         >
           <LinDoIcons.ZoomIn size={16} />
         </button>
         <span className="h-3.5 w-[0.5px] bg-white/20" />
         <button
           type="button"
-          onClick={() => {
-            navigator.clipboard.writeText(src);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          }}
-          className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] hover:bg-white/10 cursor-pointer"
+          onClick={() => void handleCopyImage()}
+          title={copiedMode === "image" ? "已复制图片" : "复制图片"}
+          aria-label="复制图片"
+          className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
+          style={copiedMode === "image" ? { color: "var(--brand-gold)" } : undefined}
         >
-          {copied ? <LinDoIcons.Check size={14} /> : <LinDoIcons.Link size={14} />}
-          <span>{copied ? "已复制" : "复制链接"}</span>
+          {copiedMode === "image" ? <LinDoIcons.Check size={15} /> : <LinDoIcons.Copy size={15} />}
         </button>
         <button
           type="button"
-          onClick={() => openUrl(src)}
-          className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] hover:bg-white/10 cursor-pointer"
+          onClick={() => {
+            navigator.clipboard.writeText(currentSrc);
+            setCopiedMode("link");
+            setTimeout(() => setCopiedMode("none"), 1500);
+          }}
+          title={copiedMode === "link" ? "已复制图片链接" : "复制图片链接"}
+          aria-label="复制图片链接"
+          className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
+          style={copiedMode === "link" ? { color: "var(--brand-gold)" } : undefined}
         >
-          <LinDoIcons.ExternalLink size={14} />
-          <span>原图</span>
+          {copiedMode === "link" ? <LinDoIcons.Check size={15} /> : <LinDoIcons.Link size={15} />}
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSaveImage()}
+          title={copiedMode === "saved" ? "已保存图片" : "保存图片"}
+          aria-label="保存图片"
+          className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
+          style={copiedMode === "saved" ? { color: "var(--brand-gold)" } : undefined}
+        >
+          {copiedMode === "saved" ? <LinDoIcons.Check size={15} /> : <LinDoIcons.Download size={15} />}
+        </button>
+        <button
+          type="button"
+          onClick={() => openUrl(currentSrc)}
+          title="浏览器打开原图"
+          aria-label="浏览器打开原图"
+          className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
+        >
+          <LinDoIcons.ExternalLink size={15} />
         </button>
         <button
           type="button"
           onClick={onClose}
-          className="ml-1 rounded-full p-1 hover:bg-white/10 cursor-pointer"
+          className="ml-0.5 flex h-7 w-7 items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
           title="关闭 (Esc)"
+          aria-label="关闭"
         >
           <LinDoIcons.Close size={16} />
         </button>
@@ -6954,6 +8208,172 @@ export const ConnectTrustLevelModal: React.FC<{
               </div>
             </div>
           ) : null}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ==================== 13. 原生全站徽章墙弹窗（发现页直开，不再跳 WebView） ==================== */
+export const SiteBadgesModal: React.FC<{
+  onInspectBadge: (badge: GrantedBadge) => void;
+  onClose: () => void;
+}> = ({ onInspectBadge, onClose }) => {
+  const [badges, setBadges] = useState<GrantedBadge[]>([]);
+  const queryInput = useImeSearchInput("");
+  const query = queryInput.committedValue;
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    fetchSiteBadges()
+      .then((list) => {
+        if (alive) setBadges(list);
+      })
+      .catch((e: any) => {
+        if (alive) setError(e?.message || "加载全站徽章失败");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isImeComposingEvent(e)) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return badges;
+    return badges.filter(
+      (b) =>
+        b.name.toLowerCase().includes(q) ||
+        (b.description || "").toLowerCase().includes(q)
+    );
+  }, [badges, query]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/58 p-5"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="flex h-[min(640px,84vh)] w-[min(820px,92vw)] flex-col overflow-hidden rounded-2xl shadow-2xl"
+        style={{
+          backgroundColor: "var(--card-surface)",
+          border: "0.5px solid var(--hairline)",
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <header className="lindo-hairline-b flex h-[50px] shrink-0 items-center justify-between gap-3 px-5">
+          <div className="flex items-center gap-2">
+            <LinDoIcons.Trophy size={16.5} style={{ color: "var(--brand-gold)" }} />
+            <span className="text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
+              全站徽章墙
+            </span>
+            {!loading && (
+              <span className="text-[12px] tabular-nums" style={{ color: "var(--ink-tertiary)" }}>
+                {filtered.length} 枚
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <div
+              className="flex h-8 w-52 items-center gap-1.5 rounded-lg px-2.5"
+              style={{
+                backgroundColor: "var(--subtle-surface)",
+                border: "0.5px solid var(--hairline)",
+              }}
+            >
+              <LinDoIcons.Search size={13.5} style={{ color: "var(--ink-tertiary)" }} />
+              <input
+                type="text"
+                {...queryInput.inputProps}
+                placeholder="筛选徽章名称..."
+                className="flex-1 bg-transparent text-[12.5px] outline-none"
+                style={{ color: "var(--ink-primary)" }}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              <LinDoIcons.Close size={15} />
+            </button>
+          </div>
+        </header>
+
+        <div className="lindo-scroll flex-1 min-h-0 p-5">
+          {loading ? (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {Array.from({ length: 9 }).map((_, i) => (
+                <div key={i} className="lindo-shimmer h-20 rounded-xl" />
+              ))}
+            </div>
+          ) : error ? (
+            <div className="py-12 text-center text-[13px]" style={{ color: "var(--error-fg)" }}>
+              {error}
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="py-12 text-center text-[13px]" style={{ color: "var(--ink-tertiary)" }}>
+              未找到匹配的徽章
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+              {filtered.map((b) => (
+                <button
+                  key={b.id}
+                  type="button"
+                  onClick={() => onInspectBadge(b)}
+                  className="lindo-interactive flex items-start gap-2.5 rounded-xl p-3 text-left"
+                  style={{
+                    backgroundColor: "var(--subtle-surface)",
+                    border: "0.5px solid var(--hairline)",
+                  }}
+                >
+                  <span className="mt-0.5 shrink-0">
+                    <OfficialBadgeIcon badge={b} size={22} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] font-semibold" style={{ color: "var(--ink-primary)" }}>
+                      {b.name}
+                    </div>
+                    {b.description && (
+                      <div
+                        className="mt-0.5 line-clamp-2 text-[11.5px] leading-snug"
+                        style={{ color: "var(--ink-secondary)" }}
+                      >
+                        {b.description.replace(/<[^>]+>/g, "")}
+                      </div>
+                    )}
+                    {b.grantCount != null && b.grantCount > 0 && (
+                      <div className="mt-1 text-[10.8px] tabular-nums" style={{ color: "var(--ink-tertiary)" }}>
+                        {formatCompactCount(b.grantCount)} 人已获得
+                      </div>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -149,6 +149,7 @@ internal fun LinDoWelcomeScreen(
     onOpenSavedAccounts: (() -> Unit)? = null,
     onPrimaryWebLogin: () -> Unit,
     onBrowserOneClickAuth: () -> Unit,
+    onScanQrLogin: (() -> Unit)? = null,
     onToggleDark: () -> Unit,
     onOpenAppIcon: (() -> Unit)? = null,
     onGuestBrowse: (() -> Unit)? = null,
@@ -219,25 +220,83 @@ internal fun LinDoWelcomeScreen(
                     Spacer(Modifier.width(10.dp))
                     Icon(LinDoIcons.ArrowRight, contentDescription = null, modifier = Modifier.size(18.dp))
                 }
-                OutlinedButton(
-                    onClick = onBrowserOneClickAuth,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                    shape = actionShape,
-                    border = BorderStroke(1.dp, brandBorder(isDark)),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = Color.Transparent,
-                        contentColor = brandText(isDark)
-                    ),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
-                ) {
-                    Icon(
-                        secondaryActionIcon,
-                        contentDescription = null,
-                        tint = brandSecondary(isDark),
-                        modifier = Modifier.size(17.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(secondaryActionLabel, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                if (onScanQrLogin != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onBrowserOneClickAuth,
+                            modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                            shape = actionShape,
+                            border = BorderStroke(1.dp, brandBorder(isDark)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = Color.Transparent,
+                                contentColor = brandText(isDark)
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
+                        ) {
+                            Icon(
+                                secondaryActionIcon,
+                                contentDescription = null,
+                                tint = brandSecondary(isDark),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                secondaryActionLabel,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = onScanQrLogin,
+                            modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                            shape = actionShape,
+                            border = BorderStroke(1.dp, brandBorder(isDark)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = Color.Transparent,
+                                contentColor = brandText(isDark)
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
+                        ) {
+                            Icon(
+                                LinDoIcons.QrCode,
+                                contentDescription = null,
+                                tint = brandSecondary(isDark),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "扫码登录",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onBrowserOneClickAuth,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                        shape = actionShape,
+                        border = BorderStroke(1.dp, brandBorder(isDark)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = brandText(isDark)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
+                    ) {
+                        Icon(
+                            secondaryActionIcon,
+                            contentDescription = null,
+                            tint = brandSecondary(isDark),
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(secondaryActionLabel, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                    }
                 }
                 if (onOpenSavedAccounts != null) {
                     TextButton(onClick = onOpenSavedAccounts, modifier = Modifier.fillMaxWidth()) {

@@ -31,10 +31,15 @@ object NetworkRecoveryPolicy {
         catch (error: Throwable) { result.completeExceptionally(error); throw error }
         finally { reads.remove(key, result) }
     }
-    internal fun retryAfterMillis(value: String?, now: Long = System.currentTimeMillis()): Long {
-        val raw = value?.trim().orEmpty()
-        val seconds = raw.toLongOrNull()
-        if (seconds != null) return (seconds.coerceIn(0, Long.MAX_VALUE / 1000) * 1000).coerceAtLeast(1_000)
-        return runCatching { (ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli() - now).coerceAtLeast(1_000) }.getOrDefault(2_000)
-    }
+    internal fun retryAfterMillis(
+        value: String?,
+        now: Long = System.currentTimeMillis(),
+        rateLimitReset: String? = null,
+        bodyText: String? = null
+    ): Long = NetworkPolicyEngine.parseRetryAfterMillis(
+        retryAfterHeader = value,
+        rateLimitResetHeader = rateLimitReset,
+        bodyText = bodyText,
+        nowMs = now
+    )
 }

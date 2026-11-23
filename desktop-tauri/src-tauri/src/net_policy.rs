@@ -114,6 +114,11 @@ impl CfClearanceAuthority {
         self.updated_at_ms = 0;
     }
 
+    pub fn mark_rotation_open(&mut self) {
+        self.updated_at_ms = 0;
+        self.last_challenged = None;
+    }
+
     /// `candidates` is `Vec<(value, host_only)>`. Canonical Cloudflare `cf_clearance` has `host_only == false` (`Domain=.linux.do`).
     pub fn select_winner(
         &mut self,
@@ -219,33 +224,221 @@ impl CfClearanceAuthority {
 // 2. Single-Flight VerifyCoordinator with Monotonic Escalation & Circuit Breaker
 // ============================================================================
 
-/// Monotonic UI intrusiveness level for a Cloudflare verification round.
-/// Concurrent callers joining the same round atomically take `max(current, requested)` —
-/// never downgrading, and waking the leader immediately when escalating `Silent -> Blocking/Manual`.
+/// Monotonic 4-tier UI intrusiveness level for a Cloudflare verification round.
+/// `Silent(0) < Pill(1) < Blocking(2) < Manual(3)` — concurrent callers joining the same round
+/// atomically take `max(current, requested)`, never downgrading, and waking the leader immediately.
+pub const VERIFY_PILL_DELAY_MS: u64 = 2_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum VerifyPresentation {
-    /// Background prewarm / silent poll: never displays any sheet; aborting does NOT count as failure.
+    /// Background prewarm / silent near-expiry refresh: never displays any UI; aborting never counts as failure.
     Silent = 0,
+    /// Non-intrusive delayed corner progress pill (shown after 2s if hidden check still running; click opens panel).
+    Pill = 1,
     /// Foreground user-waiting request: starts hidden on `/challenge`; if invisible JS passes -> 0 UI;
-    /// if Turnstile requires interaction -> promotes straight to the `480×380` sheet on the SAME loaded page!
-    Blocking = 1,
-    /// User explicitly clicked 「安全验证」: bypasses all cooldowns and displays the `480×380` sheet immediately.
-    Manual = 2,
+    /// >2s -> gentle corner Pill; if Turnstile triggers `interactiveBegin` -> promotes straight to panel on the SAME page!
+    Blocking = 2,
+    /// User explicitly clicked 「安全验证」: bypasses all cooldowns and displays the native sheet immediately.
+    Manual = 3,
 }
 
 impl VerifyPresentation {
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Silent,
-            1 => Self::Blocking,
+            1 => Self::Pill,
+            2 => Self::Blocking,
             _ => Self::Manual,
         }
     }
 
-    pub fn allows_ui(self) -> bool {
+    pub fn allows_pill_ui(self) -> bool {
+        self >= Self::Pill
+    }
+
+    pub fn allows_panel_ui(self) -> bool {
         self >= Self::Blocking
     }
+
+    pub fn allows_ui(self) -> bool {
+        self.allows_panel_ui()
+    }
+}
+
+// ============================================================================
+// 1b. Adaptive Two-Stage CF 429 Challenge Classifier (Surpasses FluxDO)
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cf429Decision {
+    ShortCooldown { cooldown_ms: u64 },
+    EscalateVerify,
+}
+
+/// Two-stage adaptive classifier for `429 + cf-mitigated: challenge`:
+/// - When we hold a healthy incumbent clearance and hit a first transient 429 challenge burst,
+///   apply a short backoff (`1800ms`) so a brief rate spike never kills a healthy ticket.
+/// - If a 2nd consecutive 429 challenge hits within 12s (or no healthy incumbent exists),
+///   immediately escalate to single-flight `VerifyCoordinator` rotation.
+#[derive(Debug, Clone)]
+pub struct Cf429AdaptiveClassifier {
+    burst_window: Duration,
+    first_hit_cooldown_ms: u64,
+    consecutive_hits: u32,
+    last_hit_at: Option<Instant>,
+}
+
+impl Default for Cf429AdaptiveClassifier {
+    fn default() -> Self {
+        Self {
+            burst_window: Duration::from_secs(12),
+            first_hit_cooldown_ms: 1_800,
+            consecutive_hits: 0,
+            last_hit_at: None,
+        }
+    }
+}
+
+impl Cf429AdaptiveClassifier {
+    pub fn classify(&mut self, has_healthy_incumbent: bool, now: Instant) -> Cf429Decision {
+        if let Some(prev) = self.last_hit_at {
+            if now.saturating_duration_since(prev) > self.burst_window {
+                self.consecutive_hits = 0;
+            }
+        }
+        self.last_hit_at = Some(now);
+        self.consecutive_hits = self.consecutive_hits.saturating_add(1);
+        if has_healthy_incumbent && self.consecutive_hits == 1 {
+            Cf429Decision::ShortCooldown {
+                cooldown_ms: self.first_hit_cooldown_ms,
+            }
+        } else {
+            Cf429Decision::EscalateVerify
+        }
+    }
+
+    pub fn note_healthy_2xx(&mut self) {
+        self.consecutive_hits = 0;
+        self.last_hit_at = None;
+    }
+
+    pub fn reset(&mut self) {
+        self.consecutive_hits = 0;
+        self.last_hit_at = None;
+    }
+}
+
+// ============================================================================
+// 1c. P1 Primitives: CallDeadline (CF-Pauseable), CsrfFailureCooldown,
+//     Logout Exemption & Idle Near-Expiry Silent Refresh Policy
+// ============================================================================
+
+pub const CF_NEAR_EXPIRY_SILENT_REFRESH_SECS: u64 = 10 * 3600 + 1800; // 10.5 hours
+pub const CSRF_FAILURE_COOLDOWN_SECS: u64 = 30;
+
+/// End-to-end logical call deadline across queue wait, retries, and body read.
+/// Supports `pause()` / `resume()` while user interacts with Cloudflare Turnstile
+/// so manual verification never causes the waiting request to expire prematurely.
+#[derive(Debug, Clone)]
+pub struct CallDeadline {
+    budget: Duration,
+    started_at: Instant,
+    paused_at: Option<Instant>,
+    paused_total: Duration,
+}
+
+impl CallDeadline {
+    pub fn new(budget: Duration, now: Instant) -> Self {
+        Self {
+            budget,
+            started_at: now,
+            paused_at: None,
+            paused_total: Duration::ZERO,
+        }
+    }
+
+    pub fn for_request(idempotent: bool, is_background: bool, now: Instant) -> Self {
+        let secs = if is_background {
+            10
+        } else if idempotent {
+            28
+        } else {
+            35
+        };
+        Self::new(Duration::from_secs(secs), now)
+    }
+
+    pub fn pause(&mut self, now: Instant) {
+        if self.paused_at.is_none() {
+            self.paused_at = Some(now);
+        }
+    }
+
+    pub fn resume(&mut self, now: Instant) {
+        if let Some(p) = self.paused_at.take() {
+            self.paused_total = self.paused_total.saturating_add(now.saturating_duration_since(p));
+        }
+    }
+
+    pub fn elapsed_active(&self, now: Instant) -> Duration {
+        let wall = now.saturating_duration_since(self.started_at);
+        let current_pause = self
+            .paused_at
+            .map(|p| now.saturating_duration_since(p))
+            .unwrap_or(Duration::ZERO);
+        wall.saturating_sub(self.paused_total.saturating_add(current_pause))
+    }
+
+    pub fn remaining_ms(&self, now: Instant) -> u64 {
+        self.budget
+            .saturating_sub(self.elapsed_active(now))
+            .as_millis() as u64
+    }
+
+    pub fn is_expired(&self, now: Instant) -> bool {
+        self.elapsed_active(now) >= self.budget
+    }
+}
+
+/// 30s cooldown on `/session/csrf.json` failures to prevent CSRF storming during 403/429 windows.
+#[derive(Debug, Clone, Default)]
+pub struct CsrfFailureCooldown {
+    until: Option<Instant>,
+}
+
+impl CsrfFailureCooldown {
+    pub fn record_failure(&mut self, now: Instant) {
+        self.until = Some(now + Duration::from_secs(CSRF_FAILURE_COOLDOWN_SECS));
+    }
+
+    pub fn is_in_cooldown(&self, now: Instant) -> bool {
+        self.until.map(|u| now < u).unwrap_or(false)
+    }
+
+    pub fn clear(&mut self) {
+        self.until = None;
+    }
+}
+
+/// Logout endpoints (`DELETE /session/...`) must NEVER trigger 401 session self-heal loops.
+pub fn is_logout_exempt_from_session_recovery(method: &str, url: &str) -> bool {
+    method.eq_ignore_ascii_case("DELETE") && url.to_ascii_lowercase().contains("/session/")
+}
+
+/// Zero-resident idle near-expiry silent refresh:
+/// Triggers only when incumbent clearance age >= 10.5h, no foreground requests are active, and not verifying.
+pub fn should_trigger_near_expiry_silent_refresh(
+    incumbent_age_secs: Option<u64>,
+    active_fg_requests: usize,
+    is_verifying: bool,
+) -> bool {
+    if active_fg_requests > 0 || is_verifying {
+        return false;
+    }
+    incumbent_age_secs
+        .map(|age| age >= CF_NEAR_EXPIRY_SILENT_REFRESH_SECS)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1286,5 +1479,103 @@ mod tests {
         assert!(!is_transient_retryable_status(503, true));
         assert!(!is_transient_retryable_status(500, false));
         assert!(transient_backoff_ms(0, 0.5) >= 500 && transient_backoff_ms(0, 0.5) <= 600);
+    }
+
+    #[test]
+    fn verify_presentation_4_tier_monotonic_silent_pill_blocking_manual() {
+        let t0 = Instant::now();
+        let mut coord = VerifyCoordinator::default();
+        assert!(VerifyPresentation::Silent < VerifyPresentation::Pill);
+        assert!(VerifyPresentation::Pill < VerifyPresentation::Blocking);
+        assert!(VerifyPresentation::Blocking < VerifyPresentation::Manual);
+        assert!(!VerifyPresentation::Silent.allows_panel_ui());
+        assert!(!VerifyPresentation::Pill.allows_panel_ui());
+        assert!(VerifyPresentation::Pill.allows_pill_ui());
+        assert!(VerifyPresentation::Blocking.allows_panel_ui());
+        assert!(VerifyPresentation::Manual.allows_panel_ui());
+
+        let (r1, pres1, _) = match coord.join_or_start(VerifyPresentation::Silent, t0, false) {
+            VerifyJoin::Leader { round, presentation, escalate_notify } => (round, presentation, escalate_notify),
+            _ => panic!("expected leader"),
+        };
+        let _ = coord.join_or_start(VerifyPresentation::Pill, t0 + Duration::from_millis(20), false);
+        assert_eq!(VerifyPresentation::from_u8(pres1.load(Ordering::SeqCst)), VerifyPresentation::Pill);
+        // Joining with Silent must NEVER downgrade Pill
+        let _ = coord.join_or_start(VerifyPresentation::Silent, t0 + Duration::from_millis(30), false);
+        assert_eq!(VerifyPresentation::from_u8(pres1.load(Ordering::SeqCst)), VerifyPresentation::Pill);
+        let _ = coord.join_or_start(VerifyPresentation::Blocking, t0 + Duration::from_millis(40), false);
+        assert_eq!(VerifyPresentation::from_u8(pres1.load(Ordering::SeqCst)), VerifyPresentation::Blocking);
+        coord.finish_flight(r1, true, VerifyPresentation::Blocking, t0 + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn adaptive_cf_429_classifier_protects_healthy_incumbent_then_escalates() {
+        let mut cls = Cf429AdaptiveClassifier::default();
+        let t0 = Instant::now();
+        // Healthy incumbent + first 429 challenge -> short cooldown to protect healthy ticket
+        assert!(matches!(
+            cls.classify(true, t0),
+            Cf429Decision::ShortCooldown { cooldown_ms } if cooldown_ms >= 1200 && cooldown_ms <= 3000
+        ));
+        // Second consecutive 429 challenge within 12s -> escalate immediately to single-flight verify!
+        assert_eq!(
+            cls.classify(true, t0 + Duration::from_secs(3)),
+            Cf429Decision::EscalateVerify
+        );
+        // Healthy 2xx resets burst state
+        cls.note_healthy_2xx();
+        assert!(matches!(
+            cls.classify(true, t0 + Duration::from_secs(5)),
+            Cf429Decision::ShortCooldown { .. }
+        ));
+        // Without healthy incumbent -> escalate on first hit!
+        cls.note_healthy_2xx();
+        assert_eq!(
+            cls.classify(false, t0 + Duration::from_secs(6)),
+            Cf429Decision::EscalateVerify
+        );
+    }
+
+    #[test]
+    fn p1_call_deadline_pauses_during_cf_interaction_and_enforces_budget() {
+        let t0 = Instant::now();
+        let mut dl = CallDeadline::new(Duration::from_secs(28), t0);
+        assert!(!dl.is_expired(t0 + Duration::from_secs(10)));
+        assert_eq!(dl.remaining_ms(t0 + Duration::from_secs(10)), 18_000);
+
+        // User enters Cloudflare Turnstile checkbox for 25 seconds -> clock pauses!
+        dl.pause(t0 + Duration::from_secs(10));
+        assert!(!dl.is_expired(t0 + Duration::from_secs(35)));
+        dl.resume(t0 + Duration::from_secs(35));
+
+        // After resuming, the original 18s budget is still intact!
+        assert_eq!(dl.remaining_ms(t0 + Duration::from_secs(35)), 18_000);
+        assert!(!dl.is_expired(t0 + Duration::from_secs(50)));
+        assert!(dl.is_expired(t0 + Duration::from_secs(54)));
+    }
+
+    #[test]
+    fn p1_csrf_cooldown_logout_exemption_and_idle_near_expiry_refresh() {
+        let t0 = Instant::now();
+        let mut csrf = CsrfFailureCooldown::default();
+        assert!(!csrf.is_in_cooldown(t0));
+        csrf.record_failure(t0);
+        assert!(csrf.is_in_cooldown(t0 + Duration::from_secs(10)));
+        assert!(!csrf.is_in_cooldown(t0 + Duration::from_secs(31)));
+        csrf.record_failure(t0 + Duration::from_secs(40));
+        csrf.clear();
+        assert!(!csrf.is_in_cooldown(t0 + Duration::from_secs(41)));
+
+        // Logout DELETE /session/:u must be exempt from 401 session self-heal!
+        assert!(is_logout_exempt_from_session_recovery("DELETE", "https://linux.do/session/jedilus"));
+        assert!(is_logout_exempt_from_session_recovery("delete", "https://linux.do/session/alice.json"));
+        assert!(!is_logout_exempt_from_session_recovery("GET", "https://linux.do/session/current.json"));
+        assert!(!is_logout_exempt_from_session_recovery("POST", "https://linux.do/posts.json"));
+
+        // Zero-resident idle near-expiry silent refresh (>= 10.5h, idle fg == 0, not verifying)
+        assert!(!should_trigger_near_expiry_silent_refresh(Some(36_000), 0, false));
+        assert!(!should_trigger_near_expiry_silent_refresh(Some(38_500), 1, false));
+        assert!(!should_trigger_near_expiry_silent_refresh(Some(38_500), 0, true));
+        assert!(should_trigger_near_expiry_silent_refresh(Some(38_500), 0, false));
     }
 }

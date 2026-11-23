@@ -15,10 +15,39 @@ const BROWSER_WINDOW_LABEL: &str = "lindo-forum-browser";
 const CONNECT_PROBE_LABEL: &str = "lindo-connect-probe";
 
 static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
+static BRIDGE_LOADING: AtomicBool = AtomicBool::new(false);
+static BRIDGE_ORIGIN_404: AtomicBool = AtomicBool::new(false);
+static BRIDGE_INTERACTIVE: AtomicBool = AtomicBool::new(false);
+static BRIDGE_LAST_TEARDOWN_MS: AtomicU64 = AtomicU64::new(0);
 static EVAL_SEQ: AtomicU64 = AtomicU64::new(1);
 static RELOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
 static PROTOCOL_REGISTERED: OnceLock<()> = OnceLock::new();
 static CACHED_BRIDGE_UA: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
+
+const WEBVIEW2_TEARDOWN_COOLDOWN_MS: u64 = 1_200;
+
+fn now_wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn configure_forum_webview<'a, R: tauri::Runtime, M: Manager<R>>(
+    mut builder: WebviewWindowBuilder<'a, R, M>,
+    app: &AppHandle,
+) -> WebviewWindowBuilder<'a, R, M> {
+    let mode_pref = app
+        .try_state::<std::sync::Arc<crate::bridge::BridgeEngine>>()
+        .map(|e| e.state.lock().unwrap().preferences.ech_routing_mode.clone())
+        .unwrap_or_else(|| "smart_auto".to_string());
+    if let Some((args, data_dir)) = crate::ech_desktop::windows_webview_proxy_args(&mode_pref) {
+        builder = builder
+            .data_directory(data_dir)
+            .additional_browser_args(&args);
+    }
+    builder
+}
 
 fn cached_bridge_ua() -> &'static std::sync::Mutex<String> {
     CACHED_BRIDGE_UA.get_or_init(|| std::sync::Mutex::new(String::new()))
@@ -76,7 +105,10 @@ fn ensure_bridge_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .map_err(|e| format!("Invalid forum URL: {e}"))?;
 
     // Preserve genuine Edge WebView2 User-Agent and untouched document DOM (zero initialization scripts).
-    let wv = WebviewWindowBuilder::new(app, BRIDGE_WINDOW_LABEL, WebviewUrl::External(init_url))
+    let wv = configure_forum_webview(
+        WebviewWindowBuilder::new(app, BRIDGE_WINDOW_LABEL, WebviewUrl::External(init_url)),
+        app,
+    )
         .title("linux.do · 安全验证与登录")
         .inner_size(680.0, 560.0)
         .min_inner_size(380.0, 400.0)
@@ -111,10 +143,13 @@ fn open_or_reuse_browser_window(app: &AppHandle, target_url: Url, dark: bool) ->
         return Ok(());
     }
 
-    let browser = WebviewWindowBuilder::new(
+    let browser = configure_forum_webview(
+        WebviewWindowBuilder::new(
+            app,
+            BROWSER_WINDOW_LABEL,
+            WebviewUrl::External(target_url),
+        ),
         app,
-        BROWSER_WINDOW_LABEL,
-        WebviewUrl::External(target_url),
     )
     .title("linux.do")
     .inner_size(1120.0, 780.0)
@@ -337,26 +372,78 @@ pub async fn native_call(
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_default();
-            if ua.is_empty() {
-                if let Some(wv) = app.get_webview_window(BRIDGE_WINDOW_LABEL) {
-                    if let Ok(raw) = eval_single_sync(&wv, "navigator.userAgent || ''".to_string()).await {
-                        let parsed = serde_json::from_str::<String>(raw.trim())
-                            .unwrap_or_else(|_| raw.trim().trim_matches('"').to_string());
-                        if !parsed.is_empty() {
+            let mut loading = BRIDGE_LOADING.load(Ordering::Relaxed);
+            let mut origin_404 = BRIDGE_ORIGIN_404.load(Ordering::Relaxed);
+            let mut interactive_required = BRIDGE_INTERACTIVE.load(Ordering::Relaxed);
+
+            if let Some(wv) = app.get_webview_window(BRIDGE_WINDOW_LABEL) {
+                let probe_js = r#"(() => {
+  try {
+    if (!window.__lindoWinInteractiveHook) {
+      window.__lindoWinInteractiveHook = true;
+      window.__lindoWinInteractiveBegin = false;
+      window.addEventListener('message', function(ev) {
+        try {
+          var d = ev && ev.data;
+          var s = typeof d === 'string' ? d : (d && typeof d === 'object' ? JSON.stringify(d) : '');
+          if (s && (s.indexOf('interactiveBegin') !== -1 || s.indexOf('interactive-begin') !== -1)) {
+            window.__lindoWinInteractiveBegin = true;
+          }
+        } catch (_) {}
+      }, true);
+    }
+    var rs = document.readyState || '';
+    var loading = rs === 'loading';
+    var lower = ((document.title || '') + ' ' + (document.body ? (document.body.innerText || '').slice(0, 400) : '')).toLowerCase();
+    var origin404 = location.origin === 'https://linux.do' && (
+      !!document.querySelector('.page-not-found, .discourse-no-results, #main-outlet .not-found-container')
+      || lower.indexOf('该页面不存在') !== -1
+      || lower.indexOf('exist or is private') !== -1
+      || lower.indexOf('page you requested') !== -1
+    );
+    var iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], #turnstile-wrapper iframe, .cf-turnstile iframe');
+    var rect = iframe ? iframe.getBoundingClientRect() : null;
+    var hasInteractiveWidget = !!(rect && rect.width >= 80 && rect.height >= 30);
+    var interactive = !!window.__lindoWinInteractiveBegin || hasInteractiveWidget;
+    return JSON.stringify({ ua: navigator.userAgent || '', loading: loading, origin404: origin404, interactive: interactive });
+  } catch (_) {
+    return JSON.stringify({ ua: '', loading: false, origin404: false, interactive: false });
+  }
+})()"#.to_string();
+                if let Ok(raw) = eval_single_sync(&wv, probe_js).await {
+                    let trimmed = raw.trim();
+                    let inner: String = serde_json::from_str::<String>(trimmed)
+                        .unwrap_or_else(|_| trimmed.to_string());
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&inner) {
+                        if let Some(u) = parsed.get("ua").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
                             if let Ok(mut g) = cached_bridge_ua().lock() {
-                                *g = parsed.clone();
+                                *g = u.to_string();
                             }
-                            ua = parsed;
+                            ua = u.to_string();
+                        }
+                        if let Some(l) = parsed.get("loading").and_then(|v| v.as_bool()) {
+                            loading = l;
+                            BRIDGE_LOADING.store(l, Ordering::Relaxed);
+                        }
+                        if let Some(o) = parsed.get("origin404").and_then(|v| v.as_bool()) {
+                            origin_404 = o;
+                            BRIDGE_ORIGIN_404.store(o, Ordering::Relaxed);
+                        }
+                        if let Some(i) = parsed.get("interactive").and_then(|v| v.as_bool()) {
+                            interactive_required = i;
+                            if i {
+                                BRIDGE_INTERACTIVE.store(true, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
             }
             Ok(json!({
                 "cancelled": cancelled,
-                "loading": false,
+                "loading": loading,
                 "error": "",
-                "origin404": false,
-                "interactiveRequired": false,
+                "origin404": origin_404,
+                "interactiveRequired": interactive_required,
                 "userReloading": false,
                 "reloadEpoch": RELOAD_EPOCH.load(Ordering::Relaxed),
                 "maskVisible": false,
@@ -378,8 +465,19 @@ pub async fn native_call(
             Ok(json!({}))
         }
         "navigate" => {
+            // Respect 1200ms WebView2 teardown cooldown to prevent 0xc0000005 recreate crashes
+            let last_teardown = BRIDGE_LAST_TEARDOWN_MS.load(Ordering::Relaxed);
+            if last_teardown > 0 {
+                let elapsed = now_wall_ms().saturating_sub(last_teardown);
+                if elapsed < WEBVIEW2_TEARDOWN_COOLDOWN_MS {
+                    tokio::time::sleep(Duration::from_millis(WEBVIEW2_TEARDOWN_COOLDOWN_MS - elapsed)).await;
+                }
+            }
             let wv = ensure_bridge_window(&app)?;
             VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+            BRIDGE_LOADING.store(true, Ordering::Relaxed);
+            BRIDGE_ORIGIN_404.store(false, Ordering::Relaxed);
+            BRIDGE_INTERACTIVE.store(false, Ordering::Relaxed);
             let raw_url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
             let parsed: Url = raw_url
                 .parse()
@@ -630,10 +728,12 @@ pub async fn native_call(
                 let mut deleted: Vec<String> = Vec::new();
                 if let Ok(existing) = wv.cookies_for_url(forum_url) {
                     for c in existing {
-                        if c.name() == "cf_clearance" {
-                            let val = c.value().to_string();
-                            if !val.is_empty() && !deleted.contains(&val) {
-                                deleted.push(val);
+                        if c.name() == "cf_clearance" || c.name() == "__cf_bm" {
+                            if c.name() == "cf_clearance" {
+                                let val = c.value().to_string();
+                                if !val.is_empty() && !deleted.contains(&val) {
+                                    deleted.push(val);
+                                }
                             }
                             let _ = wv.delete_cookie(c);
                         }
@@ -643,29 +743,6 @@ pub async fn native_call(
             })
             .await
             .map_err(|e| format!("删除 cf_clearance 线程异常: {e}"))?
-        }
-        "restoreCfClearance" => {
-            let wv = ensure_bridge_window(&app)?;
-            let val = params
-                .get("value")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if val.is_empty() {
-                return Ok(json!({ "restored": false }));
-            }
-            tokio::task::spawn_blocking(move || {
-                let mut cb = tauri::webview::Cookie::build(("cf_clearance", val))
-                    .domain(".linux.do")
-                    .path("/")
-                    .secure(true)
-                    .http_only(true);
-                cb = cb.max_age(tauri::webview::cookie::time::Duration::hours(24));
-                let ok = wv.set_cookie(cb.build()).is_ok();
-                Ok(json!({ "restored": ok }))
-            })
-            .await
-            .map_err(|e| format!("恢复 cf_clearance 线程异常: {e}"))?
         }
         "clearCookies" | "deleteCookie" => {
             let wv = ensure_bridge_window(&app)?;
@@ -698,7 +775,10 @@ pub async fn native_call(
                 let _ = existing.navigate(connect_url);
                 existing
             } else {
-                WebviewWindowBuilder::new(&app, CONNECT_PROBE_LABEL, WebviewUrl::External(connect_url))
+                configure_forum_webview(
+                    WebviewWindowBuilder::new(&app, CONNECT_PROBE_LABEL, WebviewUrl::External(connect_url)),
+                    &app,
+                )
                     .title("Lindo Connect Probe")
                     .inner_size(960.0, 720.0)
                     .visible(false)

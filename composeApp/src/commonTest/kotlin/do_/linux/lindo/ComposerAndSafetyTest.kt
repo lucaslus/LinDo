@@ -20,8 +20,18 @@ class ComposerAndSafetyTest {
     private fun owner() = "test-${UUID.randomUUID()}"
     private suspend fun withTransport(handler: suspend (String, String, Map<String, String>?) -> Pair<Int, String>?, block: suspend () -> Unit) {
         val previous = UserApiKeyAuthManager.webViewHttpExecutor
-        try { UserApiKeyAuthManager.webViewHttpExecutor = { url, method, form, _ -> handler(url, method, form) }; block() }
-        finally { UserApiKeyAuthManager.webViewHttpExecutor = previous }
+        val prevRequireBrowserOnly = UserApiKeyAuthManager.requireBrowserTransportOnly
+        try {
+            UserApiKeyAuthManager.requireBrowserTransportOnly = true
+            NetworkPolicyEngine.resetForTesting()
+            UserApiKeyAuthManager.webViewHttpExecutor = { url, method, form, _ -> handler(url, method, form) }
+            block()
+        } finally {
+            UserApiKeyAuthManager.webViewHttpExecutor = previous
+            UserApiKeyAuthManager.requireBrowserTransportOnly = prevRequireBrowserOnly
+            LinuxDoRepository.clearChallengeCooldown()
+            LinuxDoRepository.clearTransientRateLimit()
+        }
     }
 
     @Test fun searchDistinguishesOfflineFromAValidEmptyResult() = runTest {

@@ -10,9 +10,11 @@ import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
+import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.SavedAccountSummary
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
 import do_.linux.lindo.core.network.UserAccountPreferencesSnapshot
+import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import java.io.File
 import javax.imageio.ImageIO
 import javax.swing.SwingUtilities
@@ -20,6 +22,24 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class AccountSettingsRegressionTest {
+    @BeforeTest
+    fun setUp() {
+        UserApiKeyAuthManager.requireBrowserTransportOnly = true
+        UserApiKeyAuthManager.webViewHttpExecutor = { _, _, _, _ -> 200 to "{}" }
+        LinuxDoRepository.clearAllLocalCaches()
+        LinuxDoRepository.clearChallengeCooldown()
+        LinuxDoRepository.clearTransientRateLimit()
+    }
+
+    @AfterTest
+    fun tearDown() {
+        UserApiKeyAuthManager.webViewHttpExecutor = null
+        UserApiKeyAuthManager.requireBrowserTransportOnly = false
+        LinuxDoRepository.clearAllLocalCaches()
+        LinuxDoRepository.clearChallengeCooldown()
+        LinuxDoRepository.clearTransientRateLimit()
+    }
+
     private fun <T> edt(block: () -> T): T {
         if (SwingUtilities.isEventDispatchThread()) return block()
         var result: Result<T>? = null

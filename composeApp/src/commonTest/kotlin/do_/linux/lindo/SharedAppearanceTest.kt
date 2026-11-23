@@ -24,8 +24,8 @@ class SharedAppearanceTest {
         val steps = ReaderFontScalePreset.entries.map { it.scale }
         old.forEachIndexed { i, value -> assertEquals(steps[i], AppAppearance.restoreFontScale(null, value, .92f)) }
         steps.forEach { assertEquals(it, AppAppearance.restoreFontScale(it, .90f, .85f)) }
-        steps.zipWithNext().forEach { (a, b) -> assertEquals(.1f, b-a, .0001f) }
-        assertEquals(.9f, AppAppearance.restoreFontScale(null, .95f, .92f))
+        assertEquals(listOf(.88f, .94f, 1f, 1.12f, 1.28f), steps)
+        assertEquals(.94f, AppAppearance.restoreFontScale(null, .95f, .92f))
     }
     @Test fun systemModeTracksSystemWhileExplicitChoiceStaysFixed() {
         for (system in listOf(false, true)) {
