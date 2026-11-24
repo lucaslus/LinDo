@@ -732,6 +732,178 @@ fn emit_diag(
     let _ = app.emit("lindo://diag-event", payload);
 }
 
+pub const QR_LOGIN_CURRENT_VERSION: u32 = 2;
+pub const QR_LOGIN_APPLICATION_NAME: &str = "Lindo QR Login";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QrLoginPayload {
+    pub version: u32,
+    pub api_key: String,
+    pub otp: String,
+    pub username: String,
+    pub expires_at_epoch_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QrLoginGrantDto {
+    pub uri: String,
+    pub username: String,
+    pub expires_at_epoch_ms: u64,
+}
+
+fn percent_encode_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for b in raw.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+fn percent_decode_query_val(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub fn encode_qr_login_uri(
+    api_key: &str,
+    otp: &str,
+    username: &str,
+    expires_at_epoch_ms: u64,
+) -> String {
+    format!(
+        "lindo://qr-login?v={}&k={}&o={}&u={}&exp={}",
+        QR_LOGIN_CURRENT_VERSION,
+        percent_encode_component(api_key),
+        percent_encode_component(otp),
+        percent_encode_component(username),
+        expires_at_epoch_ms
+    )
+}
+
+fn extract_qr_scheme_and_action(uri: &url::Url) -> (String, String) {
+    let scheme = uri.scheme().to_ascii_lowercase();
+    let host = uri.host_str().unwrap_or("").to_ascii_lowercase();
+    let action = if !host.is_empty() {
+        host
+    } else {
+        uri.path()
+            .trim_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    };
+    (scheme, action)
+}
+
+pub fn is_qr_login_uri(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let Ok(uri) = url::Url::parse(trimmed) else {
+        return false;
+    };
+    let (scheme, action) = extract_qr_scheme_and_action(&uri);
+    matches!(scheme.as_str(), "lindo" | "fluxdo") && action == "qr-login"
+}
+
+pub fn parse_qr_login_uri(raw: &str, now_ms: u64) -> Result<QrLoginPayload, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("无效的登录二维码".to_string());
+    }
+    let Ok(uri) = url::Url::parse(trimmed) else {
+        return Err("无效的登录二维码".to_string());
+    };
+    let (scheme, action) = extract_qr_scheme_and_action(&uri);
+    if !matches!(scheme.as_str(), "lindo" | "fluxdo") || action != "qr-login" {
+        return Err("不是 Lindo 登录二维码".to_string());
+    }
+    let mut params = HashMap::new();
+    if let Some(raw_query) = uri.query() {
+        for part in raw_query.split('&') {
+            if let Some((k, v)) = part.split_once('=') {
+                if !k.is_empty() {
+                    params.insert(percent_decode_query_val(k), percent_decode_query_val(v));
+                }
+            }
+        }
+    }
+    let Some(version) = params
+        .get("v")
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    else {
+        return Err("无效的登录二维码".to_string());
+    };
+    if version != QR_LOGIN_CURRENT_VERSION {
+        return Err("二维码版本不受支持，请升级客户端".to_string());
+    }
+    let api_key = params
+        .get("k")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let otp = params
+        .get("o")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let username = params
+        .get("u")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let exp_raw = params.get("exp").map(|s| s.trim()).unwrap_or("");
+    let exp_parsed = if exp_raw.is_empty() {
+        Some(0i64)
+    } else {
+        exp_raw.parse::<i64>().ok()
+    };
+    let Some(exp_val) = exp_parsed.filter(|&v| v >= 0) else {
+        return Err("无效的登录二维码".to_string());
+    };
+    if api_key.is_empty() || otp.is_empty() {
+        return Err("无效的登录二维码".to_string());
+    }
+    let exp_ms = exp_val as u64;
+    if exp_ms > 0 && now_ms > exp_ms {
+        return Err("登录二维码已过期，请重新生成".to_string());
+    }
+    Ok(QrLoginPayload {
+        version,
+        api_key,
+        otp,
+        username,
+        expires_at_epoch_ms: exp_ms,
+    })
+}
+
 struct BridgeRuntime {
     initialized: bool,
     origin_ready: bool,
@@ -5391,33 +5563,726 @@ impl BridgeEngine {
     }
 
     fn url_decode(raw: &str) -> String {
-        let bytes = raw.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'+' {
-                out.push(b' ');
-                i += 1;
-            } else if bytes[i] == b'%' && i + 2 < bytes.len() {
-                if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
-                    if let Ok(val) = u8::from_str_radix(hex_str, 16) {
-                        out.push(val);
-                        i += 3;
-                        continue;
+        percent_decode_query_val(raw)
+    }
+
+    pub async fn revoke_user_api_key_silently(&self, app: &AppHandle, api_key: &str) -> bool {
+        let clean = api_key.trim();
+        if clean.is_empty() {
+            return false;
+        }
+        let mut headers = HashMap::new();
+        headers.insert("User-Api-Key".to_string(), clean.to_string());
+        headers.insert("Discourse-Background".to_string(), "true".to_string());
+        let res = self
+            .request(
+                app,
+                "https://linux.do/user-api-key/revoke.json",
+                "POST",
+                Some(HashMap::new()),
+                Some(headers),
+            )
+            .await;
+        let ok = matches!(&res, Ok(r) if (200..300).contains(&r.status) && !r.is_challenge);
+        if ok {
+            emit_diag(
+                app,
+                "INFO",
+                "AUTH",
+                "QrLogin",
+                "跨设备临时登录 API Key 已自动销毁",
+                None,
+            );
+        } else {
+            let status = res.as_ref().map(|r| r.status).unwrap_or(0);
+            emit_diag(
+                app,
+                "WARN",
+                "AUTH",
+                "QrLogin",
+                &format!("跨设备临时登录 API Key 销毁未完成 (HTTP {status})"),
+                None,
+            );
+        }
+        ok
+    }
+
+    fn spawn_ephemeral_api_key_revoke(app: &AppHandle, api_key: Option<&str>) {
+        let Some(clean) = api_key.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let key_owned = clean.to_string();
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Some(eng) = app_clone.try_state::<Arc<BridgeEngine>>() {
+                let _ = eng.revoke_user_api_key_silently(&app_clone, &key_owned).await;
+            }
+        });
+    }
+
+    pub async fn create_qr_login(&self, app: &AppHandle) -> Result<QrLoginGrantDto, String> {
+        let (qr_client_id, current_username) = {
+            let mut st = self.state.lock().unwrap();
+            let uname = match st.current_user.as_ref() {
+                Some(user) => {
+                    if user.username.trim().is_empty() || user.username == "linuxdo_user" {
+                        String::new()
+                    } else {
+                        user.username.trim().to_string()
                     }
                 }
-                out.push(bytes[i]);
-                i += 1;
-            } else {
-                out.push(bytes[i]);
-                i += 1;
+                None => return Err("当前未登录，请先登录账号后再生成登录二维码".to_string()),
+            };
+            if st.qr_client_id.trim().is_empty() {
+                st.qr_client_id = format!("lindo-qr-{}", uuid::Uuid::new_v4());
+                save_state(&st);
+            }
+            (st.qr_client_id.clone(), uname)
+        };
+
+        let (public_pem, private_b64) = crate::crypto_rsa::generate_rsa_keypair()?;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+
+        let mut form = HashMap::new();
+        form.insert(
+            "application_name".to_string(),
+            QR_LOGIN_APPLICATION_NAME.to_string(),
+        );
+        form.insert("client_id".to_string(), qr_client_id);
+        form.insert("scopes".to_string(), "one_time_password".to_string());
+        form.insert("public_key".to_string(), public_pem);
+        form.insert("nonce".to_string(), nonce.clone());
+        form.insert(
+            "auth_redirect".to_string(),
+            "discourse://auth_redirect".to_string(),
+        );
+
+        let res = self
+            .request(
+                app,
+                "https://linux.do/user-api-key.json",
+                "POST",
+                Some(form),
+                None,
+            )
+            .await?;
+
+        if res.is_challenge {
+            return Err("需要先完成站点安全确认后才能生成登录二维码".to_string());
+        }
+        if res.rate_limited_ms.is_some() || res.status == 429 {
+            return Err("生成过于频繁，请稍后再试".to_string());
+        }
+        if res.is_unauthenticated || res.status == 401 || res.status == 403 {
+            if let Ok(err_json) = serde_json::from_str::<Value>(&res.body) {
+                if let Some(first_err) = err_json
+                    .get("errors")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    if !first_err.to_ascii_lowercase().contains("logged in") {
+                        return Err(first_err.trim().to_string());
+                    }
+                }
+            }
+            return Err("登录状态已失效，请重新登录后再试".to_string());
+        }
+        if !(200..300).contains(&res.status) {
+            if let Ok(err_json) = serde_json::from_str::<Value>(&res.body) {
+                if let Some(first_err) = err_json
+                    .get("errors")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    return Err(first_err.trim().to_string());
+                }
+            }
+            return Err(format!("生成登录二维码失败 (HTTP {})", res.status));
+        }
+
+        let root: Value = serde_json::from_str(&res.body)
+            .map_err(|_| "服务端授权响应格式异常，请稍后重试".to_string())?;
+        let redirect_url = root
+            .get("redirect_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "服务端未返回授权结果，请先确认登录状态".to_string())?;
+
+        let (_, query) = redirect_url
+            .split_once('?')
+            .ok_or_else(|| "授权响应缺少查询载荷".to_string())?;
+        let mut params = HashMap::new();
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                params.insert(k.to_string(), Self::url_decode(v));
             }
         }
-        String::from_utf8_lossy(&out).into_owned()
+
+        let normalize_b64 = |s: &str| -> String {
+            s.trim()
+                .replace(' ', "+")
+                .replace('-', "+")
+                .replace('_', "/")
+        };
+
+        let raw_payload = params
+            .get("payload")
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| "授权响应缺少加密载荷".to_string())?;
+        let plain_payload = crate::crypto_rsa::decrypt_rsa_pkcs1v15(
+            &private_b64,
+            &normalize_b64(raw_payload),
+        )
+        .map_err(|_| "授权载荷解密失败".to_string())?;
+        let payload_obj: Value = serde_json::from_str(&plain_payload)
+            .map_err(|_| "授权载荷解析失败".to_string())?;
+
+        let returned_nonce = payload_obj
+            .get("nonce")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if returned_nonce != nonce {
+            return Err("授权校验随机数不匹配".to_string());
+        }
+
+        let api_key = payload_obj
+            .get("key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "授权响应缺少 API Key".to_string())?;
+
+        let otp = if let Some(enc_otp) = params
+            .get("oneTimePassword")
+            .or_else(|| params.get("one_time_password"))
+            .filter(|s| !s.trim().is_empty())
+        {
+            crate::crypto_rsa::decrypt_rsa_pkcs1v15(&private_b64, &normalize_b64(enc_otp))
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            payload_obj
+                .get("one_time_password")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+        }
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "一次性登录令牌解密失败".to_string())?;
+
+        let uri = encode_qr_login_uri(&api_key, &otp, &current_username, 0);
+        emit_diag(
+            app,
+            "INFO",
+            "AUTH",
+            "QrLogin",
+            &format!(
+                "已生成跨设备一次性登录二维码 (user=@{})",
+                if current_username.is_empty() {
+                    "current"
+                } else {
+                    &current_username
+                }
+            ),
+            None,
+        );
+
+        Ok(QrLoginGrantDto {
+            uri,
+            username: current_username,
+            expires_at_epoch_ms: 0,
+        })
+    }
+
+    async fn redeem_otp_session(
+        &self,
+        app: &AppHandle,
+        otp_token: &str,
+        revoke_api_key: Option<&str>,
+        source_tag: &str,
+        emit_ui_notice: bool,
+    ) -> Result<bool, String> {
+        let had_active_account = { self.state.lock().unwrap().current_user.is_some() };
+        if had_active_account {
+            let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+        }
+        let backup = {
+            let st = self.state.lock().unwrap();
+            (st.current_user.clone(), st.raw_cookies.clone())
+        };
+
+        let result: Result<bool, String> = async {
+            // Hold `verify_lock` + `rt.verifying = true` across the ENTIRE OTP redemption & user commit sequence:
+            // guarantees background `silent_revalidate_challenge` or `seed_session` NEVER navigates `gHost.web`
+            // or calls `sweep_auth_cookies` on the newly redeemed `_t` before `commit_authenticated_user` finishes!
+            let _verify_guard = self.verify_lock.lock().await;
+            let _verifying_flag = VerifyingFlagGuard::enter(&self.inner);
+
+            let _ = app.emit("lindo://auth-completing", true);
+
+            // 1. 初始化桥接并清理任何历史残留的死 _t / _forum_session（100% 保留 cf_clearance），然后等待同源 `/about` 稳定就绪
+            if let Err(e) = native_call("init", json!({}), 10).await {
+                let _ = app.emit("lindo://auth-completing", false);
+                emit_diag(
+                    app,
+                    "ERROR",
+                    "AUTH",
+                    source_tag,
+                    "初始化本地安全桥接失败",
+                    Some(&e),
+                );
+                let msg = format!("初始化安全会话失败：{e}");
+                if emit_ui_notice {
+                    let _ = app.emit("lindo://auth-notice", &msg);
+                    return Ok(false);
+                }
+                return Err(msg);
+            }
+            self.inner.lock().unwrap().initialized = true;
+            self.sweep_auth_cookies(true, None).await;
+            {
+                let mut st = self.state.lock().unwrap();
+                let cf_only: Vec<String> = st
+                    .raw_cookies
+                    .split(';')
+                    .map(|s| s.trim())
+                    .filter(|s| {
+                        !s.is_empty() && !s.starts_with("_t=") && !s.starts_with("_forum_session=")
+                    })
+                    .map(|s| s.to_string())
+                    .collect();
+                st.raw_cookies = cf_only.join("; ");
+            }
+            self.inner.lock().unwrap().last_seeded_token = String::new();
+
+            // Helper closure: ensure `gHost.web` is settled on `https://linux.do` and NOT mid-navigation before running JS fetch!
+            let settle_origin = async {
+                let cur = native_call(
+                    "evaluate",
+                    json!({
+                        "isolated": true,
+                        "script": "({ origin: location.origin, ready: document.readyState === 'complete' || document.readyState === 'interactive' })"
+                    }),
+                    5,
+                )
+                .await
+                .ok();
+                let st_loading = native_call("status", json!({}), 4)
+                    .await
+                    .ok()
+                    .and_then(|s| s.get("loading")?.as_bool())
+                    .unwrap_or(false);
+                let already_settled = !st_loading
+                    && cur
+                        .as_ref()
+                        .map(|c| {
+                            c.get("origin").and_then(|v| v.as_str()) == Some("https://linux.do")
+                                && c.get("ready").and_then(|v| v.as_bool()) == Some(true)
+                        })
+                        .unwrap_or(false);
+                if !already_settled {
+                    let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 8).await;
+                    let wait_until = Instant::now() + Duration::from_secs(8);
+                    while Instant::now() < wait_until {
+                        tokio::time::sleep(Duration::from_millis(85)).await;
+                        let loading_now = native_call("status", json!({}), 4)
+                            .await
+                            .ok()
+                            .and_then(|s| s.get("loading")?.as_bool())
+                            .unwrap_or(false);
+                        let ok = native_call(
+                            "evaluate",
+                            json!({
+                                "isolated": true,
+                                "script": "location.origin === 'https://linux.do' && document.readyState === 'complete'"
+                            }),
+                            4,
+                        )
+                        .await
+                        .ok()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                        if ok && !loading_now {
+                            break;
+                        }
+                    }
+                }
+            };
+            settle_origin.await;
+
+            // 2. 单次 OTP 极其珍贵：兑换前用 `in_verification = true` 探测 `/session/csrf.json` 确认未被 Cloudflare 拦截；
+            //    若首次无 `cf_clearance` 遇到挑战，先完成站点验证放行并等待 `/about` 彻底落稳（绝不提前消耗或中途打断 OTP！）。
+            let is_dark = { self.state.lock().unwrap().preferences.appearance != "light" };
+            let csrf_probe = self
+                .request_unlocked(app, "https://linux.do/session/csrf.json", "GET", None, None, true)
+                .await;
+            let pre_challenged = match &csrf_probe {
+                Ok(r) => r.is_challenge || !(200..300).contains(&r.status),
+                Err(_) => true,
+            };
+            if pre_challenged {
+                emit_diag(
+                    app,
+                    "WARN",
+                    "AUTH",
+                    "AuthPending",
+                    "兑换登录令牌前需完成站点安全验证，正在打开安全验证面板",
+                    None,
+                );
+                let _ = app.emit("lindo://auth-completing", false);
+                let verified = self
+                    .run_verify_loop(app, false, is_dark, None)
+                    .await
+                    .unwrap_or(false);
+                let _ = native_call("hide", json!({}), 5).await;
+                if !verified {
+                    emit_diag(
+                        app,
+                        "WARN",
+                        "AUTH",
+                        source_tag,
+                        "站点安全验证未完成，已中止本次授权令牌兑换",
+                        None,
+                    );
+                    let msg = "请先完成站点验证后再完成授权登录";
+                    if emit_ui_notice {
+                        let _ = app.emit("lindo://auth-notice", msg);
+                        return Ok(false);
+                    }
+                    return Err(msg.to_string());
+                }
+                let _ = app.emit("lindo://auth-completing", true);
+                // Wait for `run_verify_loop`'s trailing `/about` navigation to finish completely before `otp_eval`!
+                let settle_deadline = Instant::now() + Duration::from_secs(6);
+                while Instant::now() < settle_deadline {
+                    let loading_now = native_call("status", json!({}), 4)
+                        .await
+                        .ok()
+                        .and_then(|s| s.get("loading")?.as_bool())
+                        .unwrap_or(false);
+                    let ok = native_call(
+                        "evaluate",
+                        json!({
+                            "isolated": true,
+                            "script": "location.origin === 'https://linux.do' && document.readyState === 'complete'"
+                        }),
+                        4,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                    if ok && !loading_now {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                }
+            }
+
+            // 3. 在同源 WebKit 内原子获取最新 CSRF 并以 redirect:'manual' 提交 POST /session/otp/{otp}（直接落盘 Set-Cookie: _t=...）
+            let otp_cfg = json!({ "otp": otp_token });
+            let otp_script = format!(
+                r#"(async () => {{
+                    try {{
+                        if (location.origin !== 'https://linux.do') return {{ status: 0, otpSent: false, err: 'origin_mismatch' }};
+                        const cfg = {otp_cfg};
+                        const cr = await fetch('/session/csrf.json', {{
+                            credentials: 'include',
+                            cache: 'no-store',
+                            headers: {{ 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }},
+                            signal: AbortSignal.timeout(12000)
+                        }});
+                        if (!cr.ok) {{
+                            return {{ status: cr.status, otpSent: false, challenge: cr.headers.get('cf-mitigated') || '' }};
+                        }}
+                        const csrf = (await cr.json()).csrf;
+                        if (!csrf) return {{ status: 422, otpSent: false, err: 'empty_csrf' }};
+                        window.__lindoCsrf = csrf;
+                        const r = await fetch('/session/otp/' + encodeURIComponent(cfg.otp), {{
+                            method: 'POST',
+                            credentials: 'include',
+                            redirect: 'manual',
+                            headers: {{
+                                'X-CSRF-Token': csrf,
+                                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                            }},
+                            body: '',
+                            signal: AbortSignal.timeout(15000)
+                        }});
+                        return {{
+                            status: r.type === 'opaqueredirect' ? 302 : r.status,
+                            otpSent: true,
+                            challenge: (r.headers && r.headers.get('cf-mitigated')) || ''
+                        }};
+                    }} catch (e) {{
+                        return {{ status: 0, otpSent: false, err: String((e && e.message) || e) }};
+                    }}
+                }})()"#
+            );
+
+            let otp_eval = native_call("evaluate", json!({ "script": otp_script }), 22)
+                .await
+                .unwrap_or_else(|e| json!({ "status": 0, "otpSent": false, "err": e }));
+            let otp_status = otp_eval.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let otp_sent = otp_eval.get("otpSent").and_then(|v| v.as_bool()).unwrap_or(false);
+            let otp_challenged =
+                otp_eval.get("challenge").and_then(|v| v.as_str()) == Some("challenge");
+
+            if !otp_sent && otp_challenged {
+                let _ = app.emit("lindo://auth-completing", false);
+                let ok = self
+                    .run_verify_loop(app, false, is_dark, Some(otp_token))
+                    .await
+                    .unwrap_or(false);
+                let _ = native_call("hide", json!({}), 5).await;
+                if ok {
+                    Self::spawn_ephemeral_api_key_revoke(app, revoke_api_key);
+                }
+                return Ok(ok);
+            }
+
+            if otp_sent && ((200..400).contains(&otp_status) || otp_status == 0) {
+                // Allow WKHTTPCookieStore 150ms to flush Set-Cookie: _t=... before reading `/session/current.json`
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                // 4A. 快速通道：直接通过 `request_unlocked(..., true)` 读取 `/session/current.json`（不触发 `seed_session` 删 Cookie，也不加载重型首页）
+                for attempt in 0..3 {
+                    if attempt > 0 {
+                        tokio::time::sleep(Duration::from_millis(450)).await;
+                    }
+                    if let Ok(me) = self
+                        .request_unlocked(
+                            app,
+                            "https://linux.do/session/current.json",
+                            "GET",
+                            None,
+                            None,
+                            true,
+                        )
+                        .await
+                    {
+                        if let Some(profile) = Self::extract_current_user(&me.body) {
+                            let _ = self.sync_cookies_from_webkit_verified(true, true).await;
+                            let _ = native_call(
+                                "evaluate",
+                                json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                                4,
+                            )
+                            .await;
+                            self.inner.lock().unwrap().origin_ready = true;
+                            self.commit_authenticated_user(app, profile);
+                            let _ = app.emit("lindo://auth-notice", "");
+                            Self::spawn_ephemeral_api_key_revoke(app, revoke_api_key);
+                            return Ok(true);
+                        }
+                    }
+                }
+
+                // 4B. 兜底通道：若 `/session/current.json` 偶发限流，从主站 HTML `data-preloaded` 提取当前用户并恢复 `/about`
+                let _ = native_call("navigate", json!({ "url": "https://linux.do/" }), 10).await;
+                let nav_deadline = Instant::now() + Duration::from_secs(8);
+                let mut preloaded_profile: Option<UserProfile> = None;
+                while Instant::now() < nav_deadline {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let dom_check = native_call(
+                        "evaluate",
+                        json!({
+                            "isolated": true,
+                            "script": r#"(() => {
+                                const domReady = document.readyState === 'interactive' || document.readyState === 'complete';
+                                if (location.origin !== 'https://linux.do' || !domReady) return null;
+                                const el = document.getElementById('data-preloaded');
+                                if (!el) return document.readyState === 'complete' ? { ready: true, userJson: null } : null;
+                                try {
+                                    const raw = el.getAttribute('data-preloaded') || el.textContent || '';
+                                    const outer = raw ? JSON.parse(raw) : null;
+                                    if (outer && typeof outer.currentUser === 'string' && outer.currentUser.length > 2) {
+                                        return { ready: true, userJson: JSON.stringify({ current_user: JSON.parse(outer.currentUser) }) };
+                                    } else if (outer && outer.currentUser && typeof outer.currentUser === 'object') {
+                                        return { ready: true, userJson: JSON.stringify({ current_user: outer.currentUser }) };
+                                    }
+                                } catch (_) {}
+                                return { ready: true, userJson: null };
+                            })()"#
+                        }),
+                        6,
+                    )
+                    .await
+                    .ok();
+                    if let Some(obj) = dom_check {
+                        if obj.get("ready").and_then(|v| v.as_bool()) == Some(true) {
+                            if let Some(ujson) = obj.get("userJson").and_then(|v| v.as_str()) {
+                                preloaded_profile = Self::extract_current_user(ujson);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                let _ = self.sync_cookies_from_webkit_verified(true, true).await;
+                let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
+                let _ = native_call(
+                    "evaluate",
+                    json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                    4,
+                )
+                .await;
+                self.inner.lock().unwrap().origin_ready = true;
+
+                if let Some(profile) = preloaded_profile {
+                    self.commit_authenticated_user(app, profile);
+                    let _ = app.emit("lindo://auth-notice", "");
+                    Self::spawn_ephemeral_api_key_revoke(app, revoke_api_key);
+                    return Ok(true);
+                }
+            }
+
+            // 兜底：仅当 fetch POST 尚未消耗单次 OTP 时，通过可视化表单确认完成兑换
+            let _ = app.emit("lindo://auth-completing", false);
+            let fallback_ok = if !otp_sent {
+                let ok = self
+                    .run_verify_loop(app, false, is_dark, Some(otp_token))
+                    .await
+                    .unwrap_or(false);
+                let _ = native_call("hide", json!({}), 5).await;
+                if ok {
+                    Self::spawn_ephemeral_api_key_revoke(app, revoke_api_key);
+                }
+                ok
+            } else {
+                false
+            };
+
+            if !fallback_ok {
+                let err_detail = otp_eval
+                    .get("err")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                emit_diag(
+                    app,
+                    "ERROR",
+                    "AUTH",
+                    source_tag,
+                    &format!("授权令牌兑换会话未成功 (HTTP {otp_status})"),
+                    if err_detail.is_empty() {
+                        None
+                    } else {
+                        Some(err_detail)
+                    },
+                );
+                if emit_ui_notice {
+                    let notice = if source_tag == "QrLogin" {
+                        "一次性登录码已失效或已被使用，请在已登录设备重新生成"
+                    } else {
+                        "浏览器授权回调未能完成会话兑换，请再试一次或使用内置登录"
+                    };
+                    let _ = app.emit("lindo://auth-notice", notice);
+                }
+            }
+            Ok(fallback_ok)
+        }
+        .await;
+
+        let succeeded = matches!(result, Ok(true));
+        if !succeeded {
+            if let (Some(prev_user), prev_cookies) = backup {
+                let _ = self.replace_account_cookies(&prev_cookies).await;
+                let mut st = self.state.lock().unwrap();
+                st.current_user = Some(prev_user);
+                st.raw_cookies = prev_cookies;
+                save_state(&st);
+                let _ = app.emit("lindo://state-updated", ());
+            }
+        }
+        result
+    }
+
+    pub async fn redeem_qr_login_uri(
+        &self,
+        app: &AppHandle,
+        raw_uri: &str,
+        emit_ui_notice: bool,
+    ) -> Result<bool, String> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let payload = match parse_qr_login_uri(raw_uri, now_ms) {
+            Ok(p) => p,
+            Err(msg) => {
+                if emit_ui_notice {
+                    let _ = app.emit("lindo://auth-notice", &msg);
+                }
+                return Err(msg);
+            }
+        };
+
+        let dedup_key = format!("qr:{}", payload.otp);
+        {
+            let rt = self.inner.lock().unwrap();
+            if rt.consumed_nonces.contains(&dedup_key) {
+                return Ok(true);
+            }
+        }
+
+        emit_diag(
+            app,
+            "INFO",
+            "AUTH",
+            "QrLogin",
+            &format!(
+                "收到跨设备登录凭证，正在兑换会话 (user=@{})",
+                if payload.username.is_empty() {
+                    "unknown"
+                } else {
+                    &payload.username
+                }
+            ),
+            None,
+        );
+
+        let ok = self
+            .redeem_otp_session(
+                app,
+                &payload.otp,
+                Some(&payload.api_key),
+                "QrLogin",
+                emit_ui_notice,
+            )
+            .await?;
+
+        if ok {
+            let mut rt = self.inner.lock().unwrap();
+            if !rt.consumed_nonces.contains(&dedup_key) {
+                rt.consumed_nonces.push(dedup_key);
+                if rt.consumed_nonces.len() > 16 {
+                    rt.consumed_nonces.remove(0);
+                }
+            }
+            return Ok(true);
+        }
+
+        if !emit_ui_notice {
+            return Err("一次性登录码已失效或已被使用，请在已登录设备重新生成".to_string());
+        }
+        Ok(false)
     }
 
     pub async fn handle_auth_redirect(&self, app: &AppHandle, uri_str: &str) -> Result<bool, String> {
         let trimmed_uri = uri_str.trim();
+        if is_qr_login_uri(trimmed_uri) {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            return self.redeem_qr_login_uri(app, trimmed_uri, true).await;
+        }
+
         let Some((prefix, query)) = trimmed_uri.split_once('?') else {
             return Ok(false);
         };
@@ -5608,347 +6473,8 @@ impl BridgeEngine {
         }
         clear_pending_rsa();
 
-        // Hold `verify_lock` + `rt.verifying = true` across the ENTIRE OTP redemption & user commit sequence:
-        // guarantees background `silent_revalidate_challenge` or `seed_session` NEVER navigates `gHost.web`
-        // or calls `sweep_auth_cookies` on the newly redeemed `_t` before `commit_authenticated_user` finishes!
-        let _verify_guard = self.verify_lock.lock().await;
-        let _verifying_flag = VerifyingFlagGuard::enter(&self.inner);
-
-        let _ = app.emit("lindo://auth-completing", true);
-
-        // 1. 初始化桥接并清理任何历史残留的死 _t / _forum_session（100% 保留 cf_clearance），然后等待同源 `/about` 稳定就绪
-        if let Err(e) = native_call("init", json!({}), 10).await {
-            let _ = app.emit("lindo://auth-completing", false);
-            emit_diag(
-                app,
-                "ERROR",
-                "AUTH",
-                "BrowserAuth",
-                "初始化本地安全桥接失败",
-                Some(&e),
-            );
-            let _ = app.emit("lindo://auth-notice", format!("初始化安全会话失败：{e}"));
-            return Ok(false);
-        }
-        self.inner.lock().unwrap().initialized = true;
-        self.sweep_auth_cookies(true, None).await;
-        {
-            let mut st = self.state.lock().unwrap();
-            let cf_only: Vec<String> = st
-                .raw_cookies
-                .split(';')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty() && !s.starts_with("_t=") && !s.starts_with("_forum_session="))
-                .map(|s| s.to_string())
-                .collect();
-            st.raw_cookies = cf_only.join("; ");
-        }
-        self.inner.lock().unwrap().last_seeded_token = String::new();
-
-        // Helper closure: ensure `gHost.web` is settled on `https://linux.do` and NOT mid-navigation before running JS fetch!
-        let settle_origin = async {
-            let cur = native_call(
-                "evaluate",
-                json!({
-                    "isolated": true,
-                    "script": "({ origin: location.origin, ready: document.readyState === 'complete' || document.readyState === 'interactive' })"
-                }),
-                5,
-            )
+        self.redeem_otp_session(app, &otp_token, None, "BrowserAuth", true)
             .await
-            .ok();
-            let st_loading = native_call("status", json!({}), 4)
-                .await
-                .ok()
-                .and_then(|s| s.get("loading")?.as_bool())
-                .unwrap_or(false);
-            let already_settled = !st_loading
-                && cur
-                    .as_ref()
-                    .map(|c| {
-                        c.get("origin").and_then(|v| v.as_str()) == Some("https://linux.do")
-                            && c.get("ready").and_then(|v| v.as_bool()) == Some(true)
-                    })
-                    .unwrap_or(false);
-            if !already_settled {
-                let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 8).await;
-                let wait_until = Instant::now() + Duration::from_secs(8);
-                while Instant::now() < wait_until {
-                    tokio::time::sleep(Duration::from_millis(85)).await;
-                    let loading_now = native_call("status", json!({}), 4)
-                        .await
-                        .ok()
-                        .and_then(|s| s.get("loading")?.as_bool())
-                        .unwrap_or(false);
-                    let ok = native_call(
-                        "evaluate",
-                        json!({
-                            "isolated": true,
-                            "script": "location.origin === 'https://linux.do' && document.readyState === 'complete'"
-                        }),
-                        4,
-                    )
-                    .await
-                    .ok()
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                    if ok && !loading_now {
-                        break;
-                    }
-                }
-            }
-        };
-        settle_origin.await;
-
-        // 2. 单次 OTP 极其珍贵：兑换前用 `in_verification = true` 探测 `/session/csrf.json` 确认未被 Cloudflare 拦截；
-        //    若首次无 `cf_clearance` 遇到挑战，先完成站点验证放行并等待 `/about` 彻底落稳（绝不提前消耗或中途打断 OTP！）。
-        let is_dark = { self.state.lock().unwrap().preferences.appearance != "light" };
-        let csrf_probe = self
-            .request_unlocked(app, "https://linux.do/session/csrf.json", "GET", None, None, true)
-            .await;
-        let pre_challenged = match &csrf_probe {
-            Ok(r) => r.is_challenge || !(200..300).contains(&r.status),
-            Err(_) => true,
-        };
-        if pre_challenged {
-            emit_diag(
-                app,
-                "WARN",
-                "AUTH",
-                "AuthPending",
-                "兑换登录令牌前需完成站点安全验证，正在打开安全验证面板",
-                None,
-            );
-            let _ = app.emit("lindo://auth-completing", false);
-            let verified = self
-                .run_verify_loop(app, false, is_dark, None)
-                .await
-                .unwrap_or(false);
-            let _ = native_call("hide", json!({}), 5).await;
-            if !verified {
-                emit_diag(
-                    app,
-                    "WARN",
-                    "AUTH",
-                    "BrowserAuth",
-                    "站点安全验证未完成，已中止本次授权令牌兑换",
-                    None,
-                );
-                let _ = app.emit("lindo://auth-notice", "请先完成站点验证后再完成授权登录");
-                return Ok(false);
-            }
-            let _ = app.emit("lindo://auth-completing", true);
-            // Wait for `run_verify_loop`'s trailing `/about` navigation to finish completely before `otp_eval`!
-            let settle_deadline = Instant::now() + Duration::from_secs(6);
-            while Instant::now() < settle_deadline {
-                let loading_now = native_call("status", json!({}), 4)
-                    .await
-                    .ok()
-                    .and_then(|s| s.get("loading")?.as_bool())
-                    .unwrap_or(false);
-                let ok = native_call(
-                    "evaluate",
-                    json!({
-                        "isolated": true,
-                        "script": "location.origin === 'https://linux.do' && document.readyState === 'complete'"
-                    }),
-                    4,
-                )
-                .await
-                .ok()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-                if ok && !loading_now {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(80)).await;
-            }
-        }
-
-        // 3. 在同源 WebKit 内原子获取最新 CSRF 并以 redirect:'manual' 提交 POST /session/otp/{otp}（直接落盘 Set-Cookie: _t=...）
-        let otp_cfg = json!({ "otp": otp_token });
-        let otp_script = format!(
-            r#"(async () => {{
-                try {{
-                    if (location.origin !== 'https://linux.do') return {{ status: 0, otpSent: false, err: 'origin_mismatch' }};
-                    const cfg = {otp_cfg};
-                    const cr = await fetch('/session/csrf.json', {{
-                        credentials: 'include',
-                        cache: 'no-store',
-                        headers: {{ 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }},
-                        signal: AbortSignal.timeout(12000)
-                    }});
-                    if (!cr.ok) {{
-                        return {{ status: cr.status, otpSent: false, challenge: cr.headers.get('cf-mitigated') || '' }};
-                    }}
-                    const csrf = (await cr.json()).csrf;
-                    if (!csrf) return {{ status: 422, otpSent: false, err: 'empty_csrf' }};
-                    window.__lindoCsrf = csrf;
-                    const r = await fetch('/session/otp/' + encodeURIComponent(cfg.otp), {{
-                        method: 'POST',
-                        credentials: 'include',
-                        redirect: 'manual',
-                        headers: {{
-                            'X-CSRF-Token': csrf,
-                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-                        }},
-                        body: '',
-                        signal: AbortSignal.timeout(15000)
-                    }});
-                    return {{
-                        status: r.type === 'opaqueredirect' ? 302 : r.status,
-                        otpSent: true,
-                        challenge: (r.headers && r.headers.get('cf-mitigated')) || ''
-                    }};
-                }} catch (e) {{
-                    return {{ status: 0, otpSent: false, err: String((e && e.message) || e) }};
-                }}
-            }})()"#
-        );
-
-        let otp_eval = native_call("evaluate", json!({ "script": otp_script }), 22)
-            .await
-            .unwrap_or_else(|e| json!({ "status": 0, "otpSent": false, "err": e }));
-        let otp_status = otp_eval.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-        let otp_sent = otp_eval.get("otpSent").and_then(|v| v.as_bool()).unwrap_or(false);
-        let otp_challenged = otp_eval.get("challenge").and_then(|v| v.as_str()) == Some("challenge");
-
-        if !otp_sent && otp_challenged {
-            let _ = app.emit("lindo://auth-completing", false);
-            let ok = self
-                .run_verify_loop(app, false, is_dark, Some(&otp_token))
-                .await
-                .unwrap_or(false);
-            let _ = native_call("hide", json!({}), 5).await;
-            return Ok(ok);
-        }
-
-        if otp_sent && ((200..400).contains(&otp_status) || otp_status == 0) {
-            // Allow WKHTTPCookieStore 150ms to flush Set-Cookie: _t=... before reading `/session/current.json`
-            tokio::time::sleep(Duration::from_millis(150)).await;
-
-            // 4A. 快速通道：直接通过 `request_unlocked(..., true)` 读取 `/session/current.json`（不触发 `seed_session` 删 Cookie，也不加载重型首页）
-            for attempt in 0..3 {
-                if attempt > 0 {
-                    tokio::time::sleep(Duration::from_millis(450)).await;
-                }
-                if let Ok(me) = self
-                    .request_unlocked(
-                        app,
-                        "https://linux.do/session/current.json",
-                        "GET",
-                        None,
-                        None,
-                        true,
-                    )
-                    .await
-                {
-                    if let Some(profile) = Self::extract_current_user(&me.body) {
-                        let _ = self.sync_cookies_from_webkit_verified(true, true).await;
-                        let _ = native_call(
-                            "evaluate",
-                            json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
-                            4,
-                        )
-                        .await;
-                        self.inner.lock().unwrap().origin_ready = true;
-                        self.commit_authenticated_user(app, profile);
-                        let _ = app.emit("lindo://auth-notice", "");
-                        return Ok(true);
-                    }
-                }
-            }
-
-            // 4B. 兜底通道：若 `/session/current.json` 偶发限流，从主站 HTML `data-preloaded` 提取当前用户并恢复 `/about`
-            let _ = native_call("navigate", json!({ "url": "https://linux.do/" }), 10).await;
-            let nav_deadline = Instant::now() + Duration::from_secs(8);
-            let mut preloaded_profile: Option<UserProfile> = None;
-            while Instant::now() < nav_deadline {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                let dom_check = native_call(
-                    "evaluate",
-                    json!({
-                        "isolated": true,
-                        "script": r#"(() => {
-                            const domReady = document.readyState === 'interactive' || document.readyState === 'complete';
-                            if (location.origin !== 'https://linux.do' || !domReady) return null;
-                            const el = document.getElementById('data-preloaded');
-                            if (!el) return document.readyState === 'complete' ? { ready: true, userJson: null } : null;
-                            try {
-                                const raw = el.getAttribute('data-preloaded') || el.textContent || '';
-                                const outer = raw ? JSON.parse(raw) : null;
-                                if (outer && typeof outer.currentUser === 'string' && outer.currentUser.length > 2) {
-                                    return { ready: true, userJson: JSON.stringify({ current_user: JSON.parse(outer.currentUser) }) };
-                                } else if (outer && outer.currentUser && typeof outer.currentUser === 'object') {
-                                    return { ready: true, userJson: JSON.stringify({ current_user: outer.currentUser }) };
-                                }
-                            } catch (_) {}
-                            return { ready: true, userJson: null };
-                        })()"#
-                    }),
-                    6,
-                )
-                .await
-                .ok();
-                if let Some(obj) = dom_check {
-                    if obj.get("ready").and_then(|v| v.as_bool()) == Some(true) {
-                        if let Some(ujson) = obj.get("userJson").and_then(|v| v.as_str()) {
-                            preloaded_profile = Self::extract_current_user(ujson);
-                        }
-                        break;
-                    }
-                }
-            }
-
-            let _ = self.sync_cookies_from_webkit_verified(true, true).await;
-            let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
-            let _ = native_call(
-                "evaluate",
-                json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
-                4,
-            )
-            .await;
-            self.inner.lock().unwrap().origin_ready = true;
-
-            if let Some(profile) = preloaded_profile {
-                self.commit_authenticated_user(app, profile);
-                let _ = app.emit("lindo://auth-notice", "");
-                return Ok(true);
-            }
-        }
-
-        // 兜底：仅当 fetch POST 尚未消耗单次 OTP 时，通过可视化表单确认完成兑换
-        let _ = app.emit("lindo://auth-completing", false);
-        let fallback_ok = if !otp_sent {
-            let ok = self
-                .run_verify_loop(app, false, is_dark, Some(&otp_token))
-                .await
-                .unwrap_or(false);
-            let _ = native_call("hide", json!({}), 5).await;
-            ok
-        } else {
-            false
-        };
-
-        if !fallback_ok {
-            let err_detail = otp_eval
-                .get("err")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            emit_diag(
-                app,
-                "ERROR",
-                "AUTH",
-                "BrowserAuth",
-                &format!("浏览器授权回调兑换会话未成功 (HTTP {otp_status})"),
-                if err_detail.is_empty() { None } else { Some(err_detail) },
-            );
-            let _ = app.emit(
-                "lindo://auth-notice",
-                "浏览器授权回调未能完成会话兑换，请再试一次或使用内置登录",
-            );
-        }
-        Ok(fallback_ok)
     }
 
     pub async fn replace_account_cookies(&self, raw_cookies: &str) -> Result<(), String> {
@@ -6143,10 +6669,19 @@ impl BridgeEngine {
     ) -> Result<bool, String> {
         let trimmed = raw_input.trim();
         if trimmed.is_empty() {
-            return Err("请输入授权回调链接、_t Cookie 或 cURL 命令".to_string());
+            return Err("请输入登录口令、授权回调链接、_t Cookie 或 cURL 命令".to_string());
         }
-        if trimmed.starts_with("discourse://auth_redirect")
-            || trimmed.starts_with("lindo://auth_redirect")
+        let lower_trimmed = trimmed.to_ascii_lowercase();
+        if is_qr_login_uri(trimmed)
+            || lower_trimmed.starts_with("lindo://qr-login")
+            || lower_trimmed.starts_with("fluxdo://qr-login")
+            || lower_trimmed.starts_with("lindo:///qr-login")
+            || lower_trimmed.starts_with("fluxdo:///qr-login")
+        {
+            return self.redeem_qr_login_uri(app, trimmed, false).await;
+        }
+        if lower_trimmed.starts_with("discourse://auth_redirect")
+            || lower_trimmed.starts_with("lindo://auth_redirect")
         {
             return self.handle_auth_redirect(app, trimmed).await;
         }
@@ -6398,5 +6933,53 @@ mod tests {
             404,
             r#"{"errors":["The requested URL or resource could not be found."],"error_type":"not_found"}"#
         ));
+    }
+
+    #[test]
+    fn qr_login_uri_codec_matches_mobile_and_fluxdo_v2_contract() {
+        let now = 1_795_436_436_560u64;
+        let uri = encode_qr_login_uri("api_key_abc123", "otp_xyz_789", "测试佬友_01", 0);
+        assert!(is_qr_login_uri(&uri));
+        let parsed = parse_qr_login_uri(&uri, now).expect("valid lindo qr-login URI");
+        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.api_key, "api_key_abc123");
+        assert_eq!(parsed.otp, "otp_xyz_789");
+        assert_eq!(parsed.username, "测试佬友_01");
+        assert_eq!(parsed.expires_at_epoch_ms, 0);
+
+        // Compatible with FluxDO v2 and triple-slash URIs
+        let flux_uri = "fluxdo://qr-login?v=2&k=fk_001&o=fo_002&u=flux_user&exp=1895436436560";
+        assert!(is_qr_login_uri(flux_uri));
+        let flux_parsed = parse_qr_login_uri(flux_uri, now).expect("valid fluxdo URI");
+        assert_eq!(flux_parsed.api_key, "fk_001");
+        assert_eq!(flux_parsed.otp, "fo_002");
+        assert_eq!(flux_parsed.username, "flux_user");
+        assert_eq!(flux_parsed.expires_at_epoch_ms, 1_895_436_436_560);
+
+        let triple_slash = "lindo:///qr-login?v=2&k=k3&o=o3&u=alice&exp=0";
+        assert!(is_qr_login_uri(triple_slash));
+        assert_eq!(parse_qr_login_uri(triple_slash, now).unwrap().username, "alice");
+
+        // Reject expired, unsupported version, missing fields, and unrelated URLs
+        let expired = "lindo://qr-login?v=2&k=k1&o=o1&u=bob&exp=1700000000000";
+        assert_eq!(
+            parse_qr_login_uri(expired, now).unwrap_err(),
+            "登录二维码已过期，请重新生成"
+        );
+        let bad_ver = "lindo://qr-login?v=3&k=k1&o=o1&u=bob&exp=0";
+        assert_eq!(
+            parse_qr_login_uri(bad_ver, now).unwrap_err(),
+            "二维码版本不受支持，请升级客户端"
+        );
+        let missing_otp = "lindo://qr-login?v=2&k=k1&u=bob&exp=0";
+        assert_eq!(
+            parse_qr_login_uri(missing_otp, now).unwrap_err(),
+            "无效的登录二维码"
+        );
+        assert!(!is_qr_login_uri("https://linux.do/latest"));
+        assert_eq!(
+            parse_qr_login_uri("https://linux.do/latest", now).unwrap_err(),
+            "不是 Lindo 登录二维码"
+        );
     }
 }

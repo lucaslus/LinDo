@@ -9,7 +9,7 @@ pub mod win_webview_bridge;
 use base64::{engine::general_purpose::STANDARD as BASE64_STD, Engine as _};
 use bridge::{
     BridgeEngine, ClipboardMediaItem, ClipboardMediaResult, DiagRuntimeSnapshot, ForumMediaPayload,
-    SiteHttpResponse,
+    QrLoginGrantDto, SiteHttpResponse,
 };
 use futures_util::StreamExt;
 use legacy::{
@@ -334,6 +334,14 @@ async fn import_manual_credential(
     engine
         .import_manual_credential(&app, &raw_input, is_dark)
         .await
+}
+
+#[tauri::command]
+async fn generate_qr_login(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+) -> Result<QrLoginGrantDto, String> {
+    engine.create_qr_login(&app).await
 }
 
 #[tauri::command]
@@ -1178,8 +1186,11 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             focus_main_window(app);
             for arg in argv {
-                if arg.starts_with("discourse://auth_redirect")
-                    || arg.starts_with("lindo://auth_redirect")
+                let lower = arg.to_ascii_lowercase();
+                if lower.starts_with("discourse://auth_redirect")
+                    || lower.starts_with("lindo://auth_redirect")
+                    || lower.starts_with("lindo://qr-login")
+                    || lower.starts_with("fluxdo://qr-login")
                 {
                     let app_clone = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -1274,7 +1285,11 @@ pub fn run() {
                     let unread = { eng.state.lock().unwrap().unread_notifications };
                     eng.set_dock_badge(unread).await;
                     for arg in startup_args {
-                        if arg.starts_with("discourse://") || arg.starts_with("lindo://") {
+                        let lower = arg.to_ascii_lowercase();
+                        if lower.starts_with("discourse://")
+                            || lower.starts_with("lindo://")
+                            || lower.starts_with("fluxdo://")
+                        {
                             let _ = eng.handle_auth_redirect(&handle, &arg).await;
                         }
                     }
@@ -1326,6 +1341,7 @@ pub fn run() {
             remove_saved_account,
             add_account_web_login,
             import_manual_credential,
+            generate_qr_login,
             open_in_app_forum_panel,
             fetch_connect_page_html,
             save_preferences,
@@ -1360,7 +1376,11 @@ pub fn run() {
             focus_main_window(app_handle);
             for u in urls {
                 let raw = u.to_string();
-                if raw.starts_with("discourse://") || raw.starts_with("lindo://") {
+                let lower = raw.to_ascii_lowercase();
+                if lower.starts_with("discourse://")
+                    || lower.starts_with("lindo://")
+                    || lower.starts_with("fluxdo://")
+                {
                     let app_clone = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Some(eng) = app_clone.try_state::<Arc<BridgeEngine>>() {

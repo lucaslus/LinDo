@@ -588,9 +588,12 @@ impl CsrfFailureCooldown {
     }
 }
 
-/// Logout endpoints (`DELETE /session/...`) must NEVER trigger 401 session self-heal loops.
+/// Logout (`DELETE /session/...`) and ephemeral key self-revocation (`POST /user-api-key/revoke`)
+/// must NEVER trigger 401/403 session self-heal loops on the current user session.
 pub fn is_logout_exempt_from_session_recovery(method: &str, url: &str) -> bool {
-    method.eq_ignore_ascii_case("DELETE") && url.to_ascii_lowercase().contains("/session/")
+    let lower_url = url.to_ascii_lowercase();
+    (method.eq_ignore_ascii_case("DELETE") && lower_url.contains("/session/"))
+        || (method.eq_ignore_ascii_case("POST") && lower_url.contains("/user-api-key/revoke"))
 }
 
 /// Zero-resident idle near-expiry silent refresh:
@@ -1750,9 +1753,11 @@ mod tests {
         csrf.clear();
         assert!(!csrf.is_in_cooldown(t0 + Duration::from_secs(41)));
 
-        // Logout DELETE /session/:u must be exempt from 401 session self-heal!
+        // Logout DELETE /session/:u and temporary QR key self-revoke must be exempt from 401/403 session self-heal!
         assert!(is_logout_exempt_from_session_recovery("DELETE", "https://linux.do/session/jedilus"));
         assert!(is_logout_exempt_from_session_recovery("delete", "https://linux.do/session/alice.json"));
+        assert!(is_logout_exempt_from_session_recovery("POST", "https://linux.do/user-api-key/revoke.json"));
+        assert!(!is_logout_exempt_from_session_recovery("POST", "https://linux.do/user-api-key.json"));
         assert!(!is_logout_exempt_from_session_recovery("GET", "https://linux.do/session/current.json"));
         assert!(!is_logout_exempt_from_session_recovery("POST", "https://linux.do/posts.json"));
 

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isImeComposingEvent } from "../lib/imeGuard";
 import { SearchResultLruCache, useImeSearchInput } from "../lib/imeSearch";
@@ -73,11 +74,15 @@ import {
   fetchUserBookmarks,
   fetchUserCardDetail,
   fetchUserFollowList,
+  generateQrLoginInRust,
   getLocalTopicHistory,
   handleTitlebarMouseDown,
   importManualCredentialInRust,
   markAllNotificationsRead,
   markSingleNotificationRead,
+  type QrLoginGrantDto,
+  readClipboardMediaInRust,
+  readDroppedFilesInRust,
   refreshCurrentUserSession,
   requestUserArchive,
   resolveAuthoritativeUnreadCount,
@@ -90,11 +95,20 @@ import {
 } from "../lib/api";
 import {
   buildUploadPlaceholder,
+  extractSyncClipboardFiles,
   fileToPreparedUpload,
   formatUploadedMarkdown,
   handleComposerTextareaPaste,
+  isImageMimeOrName,
   type PreparedUploadFile,
 } from "../lib/composerMedia";
+import {
+  decodeQrFromBase64Image,
+  decodeQrFromBlob,
+  encodeQrSvg,
+  isQrLoginUri,
+  parseQrLoginPayload,
+} from "../lib/qrLogin";
 import {
   FONT_SCALE_PRESETS,
   nearestFontPreset,
@@ -736,6 +750,7 @@ export const WelcomeLoginScreen: React.FC<{
   hasSavedAccounts?: boolean;
   onPrimaryWebLogin: () => void;
   onBrowserOneClickAuth: () => void;
+  onOpenQrLogin?: () => void;
   onImportAuthCallback?: (raw: string) => Promise<boolean>;
   onOpenSavedAccounts?: () => void;
   onGuestBrowse?: () => void;
@@ -748,6 +763,7 @@ export const WelcomeLoginScreen: React.FC<{
   hasSavedAccounts = false,
   onPrimaryWebLogin,
   onBrowserOneClickAuth,
+  onOpenQrLogin,
   onImportAuthCallback,
   onOpenSavedAccounts,
   onGuestBrowse,
@@ -846,6 +862,21 @@ export const WelcomeLoginScreen: React.FC<{
                 : "使用默认浏览器一键授权（推荐）"}
             </span>
           </button>
+
+          {onOpenQrLogin && (
+            <button
+              type="button"
+              onClick={onOpenQrLogin}
+              className="lindo-interactive flex min-h-[46px] w-full items-center justify-center gap-2 rounded-2xl px-5 py-2.5 text-[14px] font-medium"
+              style={{
+                border: "0.5px solid var(--hairline)",
+                color: "var(--ink-primary)",
+              }}
+            >
+              <LinDoIcons.QrCode size={16} style={{ color: "var(--ink-secondary)" }} />
+              <span>使用登录二维码 / 口令登录</span>
+            </button>
+          )}
 
           <p
             className="px-2 text-center text-[11.5px] leading-relaxed"
@@ -2902,6 +2933,7 @@ export const ProfileSettingsView: React.FC<{
   onToggleDark: () => void;
   onPrimaryWebLogin: () => void;
   onOpenAuthSheet: () => void;
+  onOpenQrLoginSheet: () => void;
   onRequestGuestLogin: (title: string, subtitle: string) => void;
   onOpenInAppUrl: (url: string) => void;
   onRequestLogout: () => void;
@@ -2932,6 +2964,7 @@ export const ProfileSettingsView: React.FC<{
   onToggleDark,
   onPrimaryWebLogin,
   onOpenAuthSheet,
+  onOpenQrLoginSheet,
   onRequestGuestLogin,
   onOpenInAppUrl,
   onRequestLogout,
@@ -3501,8 +3534,14 @@ export const ProfileSettingsView: React.FC<{
                     ? `已保存 ${savedAccounts.length} 个账号`
                     : "登录 / 切换账号"
               }
-              hideDivider
               onClick={onOpenAuthSheet}
+            />
+            <SettingRow
+              icon={<LinDoIcons.QrCode size={19} />}
+              title="登录二维码"
+              value={isAuthorized && currentUser ? "手机扫码登录" : "口令 / 二维码登录"}
+              hideDivider
+              onClick={onOpenQrLoginSheet}
             />
           </div>
 
@@ -5985,6 +6024,7 @@ export const AuthModal: React.FC<{
   onWebLogin: () => void;
   onAddAccountWebLogin: () => void;
   onBrowserOneClick: () => void;
+  onOpenQrLogin?: () => void;
   onSwitchAccount: (username: string) => void;
   onRemoveAccount: (username: string) => void;
   onManualImported: () => void;
@@ -6000,6 +6040,7 @@ export const AuthModal: React.FC<{
   onWebLogin,
   onAddAccountWebLogin,
   onBrowserOneClick,
+  onOpenQrLogin,
   onSwitchAccount,
   onRemoveAccount,
   onManualImported,
@@ -6106,6 +6147,14 @@ export const AuthModal: React.FC<{
                 onBrowserOneClickAuth={() => {
                   onBrowserOneClick();
                 }}
+                onOpenQrLogin={
+                  onOpenQrLogin
+                    ? () => {
+                        onClose();
+                        onOpenQrLogin();
+                      }
+                    : undefined
+                }
                 onImportAuthCallback={async (raw) => {
                   const ok = await importManualCredentialInRust(raw, isDark);
                   if (ok) {
@@ -6332,6 +6381,579 @@ export const AuthModal: React.FC<{
           }}
         />
       )}
+    </div>
+  );
+};
+
+/* ==================== 4B. 跨端登录二维码弹窗（生成登录码供手机扫码 / 识别手机二维码或口令） ==================== */
+export const QrLoginModal: React.FC<{
+  isAuthorized: boolean;
+  isDark: boolean;
+  currentUser: UserProfile | null;
+  initialMode?: "generate" | "redeem";
+  onImported: () => void;
+  onClose: () => void;
+}> = ({ isAuthorized, isDark, currentUser, initialMode, onImported, onClose }) => {
+  const defaultMode: "generate" | "redeem" =
+    initialMode ?? (isAuthorized && currentUser ? "generate" : "redeem");
+  const [mode, setMode] = useState<"generate" | "redeem">(defaultMode);
+
+  // Generate state (PC 已登录 -> 生成二维码供手机扫码)
+  const [generating, setGenerating] = useState(false);
+  const [grant, setGrant] = useState<QrLoginGrantDto | null>(null);
+  const [qrSvg, setQrSvg] = useState<{ size: number; path: string } | null>(null);
+  const [genError, setGenError] = useState<string | null>(null);
+  const [copiedToken, setCopiedToken] = useState(false);
+  const genSeqRef = useRef(0);
+
+  // Redeem state (手机已登录 -> 识别二维码图片或口令登录 PC)
+  const [manualToken, setManualToken] = useState("");
+  const [redeeming, setRedeeming] = useState(false);
+  const [decodingImage, setDecodingImage] = useState(false);
+  const [redeemError, setRedeemError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const redeemingRef = useRef(false);
+
+  const generateQr = async () => {
+    if (!isAuthorized) return;
+    const seq = ++genSeqRef.current;
+    setGenerating(true);
+    setGenError(null);
+    setCopiedToken(false);
+    try {
+      const dto = await generateQrLoginInRust();
+      if (seq !== genSeqRef.current) return;
+      const svg = encodeQrSvg(dto.uri, 2, "M");
+      setGrant(dto);
+      setQrSvg(svg);
+    } catch (err: any) {
+      if (seq !== genSeqRef.current) return;
+      setGenError(String(err?.message || err || "生成登录二维码失败，请稍后重试"));
+    } finally {
+      if (seq === genSeqRef.current) {
+        setGenerating(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (mode === "generate" && isAuthorized && !qrSvg && !generating) {
+      void generateQr();
+    }
+    return () => {
+      genSeqRef.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, isAuthorized]);
+
+  useEffect(() => {
+    if (!copiedToken) return;
+    const t = setTimeout(() => setCopiedToken(false), 2200);
+    return () => clearTimeout(t);
+  }, [copiedToken]);
+
+  const submitQrPayload = async (raw: string) => {
+    if (redeemingRef.current) return;
+    const trimmed = raw.trim();
+    const parsed = parseQrLoginPayload(trimmed);
+    if (!parsed.valid) {
+      setRedeemError(parsed.message);
+      return;
+    }
+    redeemingRef.current = true;
+    setRedeeming(true);
+    setRedeemError(null);
+    try {
+      const ok = await importManualCredentialInRust(trimmed, isDark);
+      if (ok) {
+        onImported();
+        onClose();
+      } else {
+        setRedeemError("一次性登录码已失效或已被使用，请在已登录设备重新生成");
+      }
+    } catch (err: any) {
+      setRedeemError(String(err?.message || err || "登录码兑换失败，请重新生成后再试"));
+    } finally {
+      redeemingRef.current = false;
+      setRedeeming(false);
+    }
+  };
+
+  const handleImageFile = async (file: File) => {
+    if (redeemingRef.current) return;
+    setDecodingImage(true);
+    setRedeemError(null);
+    try {
+      const decoded = await decodeQrFromBlob(file);
+      if (!decoded) {
+        setRedeemError("未能从图片中识别到二维码，请确认二维码清晰完整");
+        return;
+      }
+      await submitQrPayload(decoded);
+    } finally {
+      setDecodingImage(false);
+    }
+  };
+
+  // Native OS file drag-and-drop in redeem mode
+  useEffect(() => {
+    if (mode !== "redeem") return;
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const webview = getCurrentWebview();
+        const off = await webview.onDragDropEvent((event) => {
+          if (!active) return;
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") {
+            setDragActive(true);
+          } else if (payload.type === "leave") {
+            setDragActive(false);
+          } else if (payload.type === "drop") {
+            setDragActive(false);
+            const droppedPaths = payload.paths;
+            if (droppedPaths && droppedPaths.length > 0) {
+              void (async () => {
+                setDecodingImage(true);
+                setRedeemError(null);
+                try {
+                  const items = await readDroppedFilesInRust(droppedPaths);
+                  const imgItem = items.find((it) => isImageMimeOrName(it.mime, it.filename));
+                  if (!imgItem) {
+                    setRedeemError("请拖入包含登录二维码的图片文件");
+                    return;
+                  }
+                  const decoded = await decodeQrFromBase64Image(imgItem.dataBase64, imgItem.mime);
+                  if (!decoded) {
+                    setRedeemError("未能从图片中识别到二维码，请确认二维码清晰完整");
+                    return;
+                  }
+                  await submitQrPayload(decoded);
+                } finally {
+                  if (active) setDecodingImage(false);
+                }
+              })();
+            }
+          }
+        });
+        if (active) unlisten = off;
+        else off();
+      } catch {
+        // Ignore outside Tauri runtime (e.g. unit tests)
+      }
+    })();
+    return () => {
+      active = false;
+      if (unlisten) unlisten();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, isDark]);
+
+  // Global paste support (Ctrl+V / Cmd+V screenshot or QR URI) in redeem mode
+  useEffect(() => {
+    if (mode !== "redeem") return;
+    const onPaste = (e: ClipboardEvent) => {
+      if (redeemingRef.current) return;
+      const dt = e.clipboardData;
+      if (!dt) return;
+      const files = extractSyncClipboardFiles(dt).filter((f) => isImageMimeOrName(f.type, f.name));
+      if (files.length > 0) {
+        e.preventDefault();
+        void handleImageFile(files[0]);
+        return;
+      }
+      const plain = (dt.getData("text/plain") || "").trim();
+      if (plain && isQrLoginUri(plain)) {
+        const target = e.target as HTMLElement | null;
+        if (!target || target.tagName !== "INPUT") {
+          e.preventDefault();
+          setManualToken(plain);
+          void submitQrPayload(plain);
+        }
+        return;
+      }
+      if (!plain) {
+        void readClipboardMediaInRust(false).then(async (res) => {
+          const imgItem = res.items?.find((it) => isImageMimeOrName(it.mime, it.filename));
+          if (!imgItem) return;
+          setDecodingImage(true);
+          setRedeemError(null);
+          try {
+            const decoded = await decodeQrFromBase64Image(imgItem.dataBase64, imgItem.mime);
+            if (!decoded) {
+              setRedeemError("未能从剪贴板图片中识别到二维码");
+              return;
+            }
+            await submitQrPayload(decoded);
+          } finally {
+            setDecodingImage(false);
+          }
+        });
+      }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, isDark]);
+
+  const handlePasteFromClipboardButton = async () => {
+    if (redeemingRef.current) return;
+    setRedeemError(null);
+    try {
+      const clipText = (await navigator.clipboard.readText().catch(() => "")).trim();
+      if (clipText && isQrLoginUri(clipText)) {
+        setManualToken(clipText);
+        await submitQrPayload(clipText);
+        return;
+      }
+      const media = await readClipboardMediaInRust(false);
+      const imgItem = media.items?.find((it) => isImageMimeOrName(it.mime, it.filename));
+      if (imgItem) {
+        setDecodingImage(true);
+        try {
+          const decoded = await decodeQrFromBase64Image(imgItem.dataBase64, imgItem.mime);
+          if (decoded) {
+            await submitQrPayload(decoded);
+            return;
+          }
+          setRedeemError("未能从剪贴板图片中识别到有效登录二维码");
+          return;
+        } finally {
+          setDecodingImage(false);
+        }
+      }
+      if (clipText) {
+        setManualToken(clipText);
+        setRedeemError("剪贴板内容不是有效的 Lindo 登录口令，请确认后重试");
+      } else {
+        setRedeemError("剪贴板暂无登录口令或二维码截图，请先在已登录手机复制");
+      }
+    } catch {
+      setRedeemError("无法读取剪贴板，请在下方输入框按 Ctrl+V / ⌘V 手动粘贴");
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/62"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[86vh] w-[440px] flex-col rounded-2xl shadow-2xl overflow-hidden"
+        style={{
+          backgroundColor: "var(--card-surface)",
+          border: "0.5px solid var(--hairline)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* 顶栏 */}
+        <div className="lindo-hairline-b flex h-12 shrink-0 items-center justify-between px-3">
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="关闭登录二维码"
+              className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
+              style={{ color: "var(--ink-primary)" }}
+            >
+              <LinDoIcons.Close size={17} />
+            </button>
+            <span className="text-[16px] font-bold" style={{ color: "var(--ink-primary)" }}>
+              登录二维码
+            </span>
+          </div>
+
+          {isAuthorized && currentUser && (
+            <div
+              className="flex items-center rounded-lg p-0.5 text-[12px]"
+              style={{
+                backgroundColor: "var(--subtle-surface)",
+                border: "0.5px solid var(--hairline)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setRedeemError(null);
+                  setMode("generate");
+                }}
+                className="rounded-md px-2.5 py-1 font-medium transition-colors cursor-pointer"
+                style={{
+                  backgroundColor: mode === "generate" ? "var(--card-surface)" : "transparent",
+                  color: mode === "generate" ? "var(--ink-primary)" : "var(--ink-tertiary)",
+                }}
+              >
+                生成登录码
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRedeemError(null);
+                  setMode("redeem");
+                }}
+                className="rounded-md px-2.5 py-1 font-medium transition-colors cursor-pointer"
+                style={{
+                  backgroundColor: mode === "redeem" ? "var(--card-surface)" : "transparent",
+                  color: mode === "redeem" ? "var(--ink-primary)" : "var(--ink-tertiary)",
+                }}
+              >
+                口令 / 识图
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* 主体内容 */}
+        <div className="lindo-scroll flex-1 min-h-0 px-6 py-5">
+          {mode === "generate" && isAuthorized && currentUser ? (
+            <div className="flex flex-col items-center text-center">
+              <div className="flex items-center gap-2">
+                <AvatarWithFlair
+                  username={currentUser.username}
+                  avatarTemplate={currentUser.avatarTemplate}
+                  animatedAvatar={currentUser.animatedAvatar}
+                  sizePx={24}
+                />
+                <span className="text-[14.5px] font-semibold" style={{ color: "var(--ink-primary)" }}>
+                  @{grant?.username || currentUser.username}
+                </span>
+              </div>
+
+              <p
+                className="mt-2 max-w-[360px] text-[12.5px] leading-relaxed"
+                style={{ color: "var(--ink-secondary)" }}
+              >
+                仅供您本人的另一台设备扫码登录，请勿截图发给他人。扫码完成后该临时凭据会自动销毁。
+              </p>
+
+              <div
+                className="mt-5 flex h-[236px] w-[236px] items-center justify-center rounded-[20px] p-3.5 shadow-sm"
+                style={{
+                  backgroundColor: "#FFFFFF",
+                  border: "1px solid var(--hairline)",
+                }}
+              >
+                {qrSvg && !generating ? (
+                  <svg
+                    viewBox={`0 0 ${qrSvg.size} ${qrSvg.size}`}
+                    shapeRendering="crispEdges"
+                    className="h-full w-full"
+                    aria-label="Lindo 跨设备登录二维码"
+                  >
+                    <rect width={qrSvg.size} height={qrSvg.size} fill="#FFFFFF" />
+                    <path d={qrSvg.path} fill="#111827" />
+                  </svg>
+                ) : generating ? (
+                  <div className="flex flex-col items-center gap-2.5 text-[#4B5563]">
+                    <SmoothRefreshIcon spinning size={24} />
+                    <span className="text-[12.5px] font-medium">正在生成加密登录码…</span>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-2 px-4 text-[#6B7280]">
+                    <LinDoIcons.QrCode size={42} />
+                    <span className="text-[12px]">点击下方按钮生成二维码</span>
+                  </div>
+                )}
+              </div>
+
+              {qrSvg && !genError && (
+                <p className="mt-3 text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
+                  打开手机端 Lindo「扫码登录」对准上方二维码（约 10 分钟内有效）
+                </p>
+              )}
+
+              {genError && (
+                <p
+                  className="mt-3 max-w-[360px] text-[12.5px] leading-relaxed"
+                  style={{ color: "#EF4444" }}
+                >
+                  {genError}
+                </p>
+              )}
+
+              <div className="mt-5 flex w-full max-w-[340px] flex-col gap-2.5">
+                {grant?.uri && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard
+                        .writeText(grant.uri)
+                        .then(() => setCopiedToken(true))
+                        .catch(() => {});
+                    }}
+                    className="lindo-interactive flex h-[44px] w-full items-center justify-center gap-2 rounded-xl text-[13.5px] font-medium"
+                    style={{
+                      border: "0.5px solid var(--hairline)",
+                      color: copiedToken ? "var(--brand-gold)" : "var(--ink-primary)",
+                    }}
+                  >
+                    {copiedToken ? <LinDoIcons.Check size={15} /> : <LinDoIcons.Copy size={15} />}
+                    <span>{copiedToken ? "已复制登录口令" : "复制登录口令"}</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  disabled={generating}
+                  onClick={() => void generateQr()}
+                  className="flex h-[44px] w-full items-center justify-center gap-2 rounded-xl text-[13.5px] font-bold transition-opacity hover:opacity-92 cursor-pointer disabled:opacity-55"
+                  style={{
+                    backgroundColor: "var(--publish-btn-bg)",
+                    color: "var(--publish-btn-fg)",
+                  }}
+                >
+                  <SmoothRefreshIcon spinning={generating} size={15} />
+                  <span>
+                    {generating
+                      ? "正在生成…"
+                      : qrSvg
+                        ? "重新生成二维码"
+                        : "生成一次性登录二维码"}
+                  </span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col">
+              <p
+                className="text-center text-[12.5px] leading-relaxed"
+                style={{ color: "var(--ink-secondary)" }}
+              >
+                在已登录 Lindo / FluxDO 的手机进入「账号管理 → 扫码登录其他设备」，复制口令或将二维码截图发至电脑即可登录。
+              </p>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) void handleImageFile(file);
+                }}
+              />
+
+              {/* 二维码图片拖入 / 选择识别区 */}
+              <button
+                type="button"
+                disabled={redeeming || decodingImage}
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragActive(true);
+                }}
+                onDragLeave={() => setDragActive(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragActive(false);
+                  const files = extractSyncClipboardFiles(e.dataTransfer).filter((f) =>
+                    isImageMimeOrName(f.type, f.name)
+                  );
+                  if (files.length > 0) {
+                    void handleImageFile(files[0]);
+                  } else {
+                    setRedeemError("请拖入包含登录二维码的图片文件");
+                  }
+                }}
+                className="lindo-interactive mt-4 flex flex-col items-center justify-center rounded-2xl px-4 py-6 text-center transition-colors disabled:opacity-60"
+                style={{
+                  backgroundColor: "var(--subtle-surface)",
+                  border: dragActive
+                    ? "1.5px dashed var(--brand-gold)"
+                    : "1px dashed var(--hairline)",
+                }}
+              >
+                {decodingImage || redeeming ? (
+                  <>
+                    <SmoothRefreshIcon spinning size={26} />
+                    <span
+                      className="mt-2.5 text-[13.5px] font-semibold"
+                      style={{ color: "var(--ink-primary)" }}
+                    >
+                      {decodingImage ? "正在识别图片二维码…" : "正在验证并兑换登录会话…"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ color: "var(--brand-gold)" }}>
+                      <LinDoIcons.QrCode size={34} />
+                    </span>
+                    <span
+                      className="mt-2 text-[14px] font-semibold"
+                      style={{ color: "var(--ink-primary)" }}
+                    >
+                      从图片识别二维码
+                    </span>
+                    <span className="mt-1 text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
+                      点击选择截图、直接拖入图片，或按 Ctrl+V / ⌘V 粘贴截图
+                    </span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                disabled={redeeming || decodingImage}
+                onClick={() => void handlePasteFromClipboardButton()}
+                className="lindo-interactive mt-3 flex h-[44px] w-full items-center justify-center gap-2 rounded-xl text-[13.5px] font-medium disabled:opacity-55"
+                style={{
+                  border: "0.5px solid var(--hairline)",
+                  color: "var(--ink-primary)",
+                }}
+              >
+                <LinDoIcons.Copy size={15} style={{ color: "var(--ink-secondary)" }} />
+                <span>粘贴剪贴板口令或截图</span>
+              </button>
+
+              <div className="mt-3.5 space-y-2.5">
+                <input
+                  type="text"
+                  value={manualToken}
+                  onChange={(e) => {
+                    setManualToken(e.target.value);
+                    if (redeemError) setRedeemError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && manualToken.trim() && !redeeming) {
+                      void submitQrPayload(manualToken);
+                    }
+                  }}
+                  placeholder="粘贴 lindo://qr-login?... 或 fluxdo://qr-login?..."
+                  className="h-10 w-full rounded-xl bg-transparent px-3 text-[12.5px] outline-none"
+                  style={{
+                    border: redeemError
+                      ? "0.5px solid var(--error-border)"
+                      : "0.5px solid var(--hairline)",
+                    color: "var(--ink-primary)",
+                  }}
+                />
+
+                {redeemError && (
+                  <p className="text-[12px] leading-relaxed" style={{ color: "#EF4444" }}>
+                    {redeemError}
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  disabled={!manualToken.trim() || redeeming || decodingImage}
+                  onClick={() => void submitQrPayload(manualToken)}
+                  className="flex h-[44px] w-full items-center justify-center rounded-xl text-[13.5px] font-bold transition-opacity hover:opacity-92 cursor-pointer disabled:opacity-50"
+                  style={{
+                    backgroundColor: "var(--publish-btn-bg)",
+                    color: "var(--publish-btn-fg)",
+                  }}
+                >
+                  {redeeming ? "正在登录…" : "确认登录"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 };

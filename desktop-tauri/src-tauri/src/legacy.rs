@@ -130,6 +130,8 @@ pub struct PersistedState {
     #[serde(default)]
     pub client_id: String,
     #[serde(default)]
+    pub qr_client_id: String,
+    #[serde(default)]
     pub expired_username: Option<String>,
     #[serde(default)]
     pub unread_notifications: i32,
@@ -296,6 +298,7 @@ pub fn load_or_migrate_state() -> PersistedState {
     if state.is_none() {
         let mut fresh = PersistedState {
             client_id: format!("lindo-desktop-{}", uuid::Uuid::new_v4().simple()),
+            qr_client_id: format!("lindo-qr-{}", uuid::Uuid::new_v4()),
             ..Default::default()
         };
         if let Some(ref props) = legacy_props {
@@ -313,6 +316,9 @@ pub fn load_or_migrate_state() -> PersistedState {
             .and_then(|p| p.get("client_id").cloned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("lindo-desktop-{}", uuid::Uuid::new_v4().simple()));
+    }
+    if existing.qr_client_id.trim().is_empty() {
+        existing.qr_client_id = format!("lindo-qr-{}", uuid::Uuid::new_v4());
     }
     // Retire stale legacy session.properties once tauri_state.json already exists so expired sessions are NEVER resurrected on restart!
     if legacy_file.exists() {

@@ -79,6 +79,7 @@ import {
   MessagesView,
   ProfileSettingsView,
   PublicUserCardModal,
+  QrLoginModal,
   SiteBadgesModal,
   WelcomeLoginScreen,
 } from "./components/SecondaryScreens";
@@ -215,6 +216,10 @@ export const App: React.FC = () => {
   // Overlays & modals
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authModalStartAdding, setAuthModalStartAdding] = useState(false);
+  const [showQrLoginModal, setShowQrLoginModal] = useState(false);
+  const [qrLoginInitialMode, setQrLoginInitialMode] = useState<"generate" | "redeem" | undefined>(
+    undefined
+  );
   const [authStatusHint, setAuthStatusHint] = useState<string | null>(null);
   const [authCompleting, setAuthCompleting] = useState(false);
   const browserAuthWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1983,6 +1988,10 @@ export const App: React.FC = () => {
           hasSavedAccounts={savedAccounts.length > 0}
           onPrimaryWebLogin={handlePrimaryWebLogin}
           onBrowserOneClickAuth={handleBrowserOneClickAuth}
+          onOpenQrLogin={() => {
+            setQrLoginInitialMode("redeem");
+            setShowQrLoginModal(true);
+          }}
           onImportAuthCallback={async (raw) => {
             const ok = await importManualCredentialInRust(raw, isDark);
             if (ok) {
@@ -2098,6 +2107,10 @@ export const App: React.FC = () => {
                 onOpenAuthSheet={() => {
                   setAuthStatusHint(null);
                   setShowAuthModal(true);
+                }}
+                onOpenQrLoginSheet={() => {
+                  setQrLoginInitialMode(undefined);
+                  setShowQrLoginModal(true);
                 }}
                 onRequestGuestLogin={(title, subtitle) => setGuestPrompt({ title, subtitle })}
                 onOpenInAppUrl={(url) => {
@@ -2727,6 +2740,10 @@ export const App: React.FC = () => {
           onWebLogin={handlePrimaryWebLogin}
           onAddAccountWebLogin={handleAddAccountWebLogin}
           onBrowserOneClick={handleBrowserOneClickAuth}
+          onOpenQrLogin={() => {
+            setQrLoginInitialMode("redeem");
+            setShowQrLoginModal(true);
+          }}
           onSwitchAccount={handleSwitchSavedAccount}
           onRemoveAccount={async (uname) => {
             await removeSavedAccountInRust(uname);
@@ -2747,6 +2764,31 @@ export const App: React.FC = () => {
           onClose={() => {
             setAuthModalStartAdding(false);
             setShowAuthModal(false);
+          }}
+        />
+      )}
+
+      {/* 跨端登录二维码弹窗 */}
+      {showQrLoginModal && (
+        <QrLoginModal
+          isAuthorized={isAuthorized}
+          isDark={isDark}
+          currentUser={currentUser}
+          initialMode={qrLoginInitialMode}
+          onImported={async () => {
+            if (browserAuthWatchdogRef.current) {
+              clearTimeout(browserAuthWatchdogRef.current);
+              browserAuthWatchdogRef.current = null;
+            }
+            await syncFromRustState();
+            fetchSiteCategories(true)
+              .then(setCategories)
+              .catch(() => {});
+            loadFeed();
+          }}
+          onClose={() => {
+            setShowQrLoginModal(false);
+            setQrLoginInitialMode(undefined);
           }}
         />
       )}

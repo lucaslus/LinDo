@@ -486,6 +486,16 @@ export async function addAccountWebLoginInRust(isDark: boolean): Promise<boolean
   return invoke<boolean>("add_account_web_login", { isDark });
 }
 
+export interface QrLoginGrantDto {
+  uri: string;
+  username: string;
+  expiresAtEpochMs: number;
+}
+
+export async function generateQrLoginInRust(): Promise<QrLoginGrantDto> {
+  return invoke<QrLoginGrantDto>("generate_qr_login");
+}
+
 export async function importManualCredentialInRust(rawInput: string, isDark: boolean): Promise<boolean> {
   clearTopicDetailCache();
   resetNotificationReadState();
