@@ -30,6 +30,11 @@ use crate::net_bind;
 pub type BoxReqBody = BoxBody<Bytes, hyper::Error>;
 pub type BoxRespBody = BoxBody<Bytes, hyper::Error>;
 
+pub const H2_POOL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+pub const UPSTREAM_TCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(3500);
+pub const UPSTREAM_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(4000);
+pub const UPSTREAM_GET_HEADER_TIMEOUT: Duration = Duration::from_secs(8);
+
 fn empty_req_body() -> BoxReqBody {
     http_body_util::Empty::<Bytes>::new()
         .map_err(|never| match never {})
@@ -38,13 +43,14 @@ fn empty_req_body() -> BoxReqBody {
 
 /// Computes response-header wait timeout for upstream ECH HTTP/1.1 & HTTP/2 requests.
 /// Multipart `/uploads` streams full file bytes and waits for Discourse synchronous S3 processing before
-/// response headers arrive, so it MUST NOT be capped at 15s (which previously aborted >15s uploads with 502).
+/// response headers arrive, so it MUST NOT be capped at 8s; GET/HEAD/OPTIONS are converged to 8s
+/// so degraded upstream streams fail faster than the WebView JS bridge timeout (10s).
 pub fn upstream_send_timeout_for_path(method: &http::Method, path: &str) -> Duration {
     let lower_path = path.to_ascii_lowercase();
     if lower_path.contains("/uploads") {
         Duration::from_secs(95)
     } else if matches!(*method, http::Method::GET | http::Method::HEAD | http::Method::OPTIONS) {
-        Duration::from_secs(15)
+        UPSTREAM_GET_HEADER_TIMEOUT
     } else {
         Duration::from_secs(25)
     }
@@ -106,8 +112,12 @@ pub struct UpstreamPool {
     connector: Arc<SslConnector>,
     doh: Arc<DohResolver>,
     h2_pool: SyncMutex<HashMap<PoolKey, H2Sender>>,
-    connect_lock: AsyncMutex<()>,
+    connect_locks: SyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     test_override: Option<TestTargetOverride>,
+    #[cfg(test)]
+    test_ip_port_map: Option<HashMap<std::net::Ipv4Addr, SocketAddr>>,
+    #[cfg(test)]
+    test_tls_timeout: Option<Duration>,
 }
 
 impl UpstreamPool {
@@ -117,8 +127,12 @@ impl UpstreamPool {
             connector: Arc::new(builder.build()),
             doh,
             h2_pool: SyncMutex::new(HashMap::new()),
-            connect_lock: AsyncMutex::new(()),
+            connect_locks: SyncMutex::new(HashMap::new()),
             test_override: None,
+            #[cfg(test)]
+            test_ip_port_map: None,
+            #[cfg(test)]
+            test_tls_timeout: None,
         }))
     }
 
@@ -131,9 +145,51 @@ impl UpstreamPool {
             connector: Arc::new(builder.build()),
             doh,
             h2_pool: SyncMutex::new(HashMap::new()),
-            connect_lock: AsyncMutex::new(()),
+            connect_locks: SyncMutex::new(HashMap::new()),
             test_override: Some(override_cfg),
+            #[cfg(test)]
+            test_ip_port_map: None,
+            #[cfg(test)]
+            test_tls_timeout: None,
         }))
+    }
+
+    #[cfg(test)]
+    pub fn new_for_doh_rotation_test(
+        doh: Arc<DohResolver>,
+        ca_cert: &X509,
+        ip_port_map: HashMap<std::net::Ipv4Addr, SocketAddr>,
+        tls_timeout: Duration,
+    ) -> Result<Arc<Self>, String> {
+        let builder = build_chromium_connector_builder(Some(ca_cert))?;
+        Ok(Arc::new(Self {
+            connector: Arc::new(builder.build()),
+            doh,
+            h2_pool: SyncMutex::new(HashMap::new()),
+            connect_locks: SyncMutex::new(HashMap::new()),
+            test_override: None,
+            test_ip_port_map: Some(ip_port_map),
+            test_tls_timeout: Some(tls_timeout),
+        }))
+    }
+
+    fn host_connect_lock(&self, host: &str) -> Arc<AsyncMutex<()>> {
+        let key = crate::ca::normalize_host(host);
+        let mut guard = self.connect_locks.lock();
+        if guard.len() > 64 {
+            guard.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        Arc::clone(
+            guard
+                .entry(key)
+                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+        )
+    }
+
+    async fn rotate_sticky_on_failure(&self) {
+        if self.test_override.is_none() {
+            let _ = self.doh.rotate_current_sticky_ip().await;
+        }
     }
 
     /// Sends an HTTP request to `host` over BoringSSL TLS 1.3 + ECH + physical socket,
@@ -151,19 +207,28 @@ impl UpstreamPool {
         if is_bodyless {
             let (parts, _incoming) = req.into_parts();
             if let Some(mut sender) = self.take_ready_h2_sender(host) {
-                if !sender.is_closed() && sender.ready().await.is_ok() {
+                if !sender.is_closed() {
                     let mut pooled_req = Request::from_parts(parts.clone(), empty_req_body());
                     normalize_for_h2(host, &mut pooled_req);
-                    match timeout(Duration::from_secs(6), sender.send_request(pooled_req)).await {
+                    let probe_res = timeout(H2_POOL_PROBE_TIMEOUT, async {
+                        sender.ready().await?;
+                        sender.send_request(pooled_req).await
+                    })
+                    .await;
+                    match probe_res {
                         Ok(Ok(resp)) if !is_edge_restricted_403(&resp) => {
                             return Ok(resp.map(|b| b.boxed()));
                         }
                         Ok(Ok(_)) => {
                             self.evict_h2_sender(host);
-                            let _ = self.doh.rotate_current_sticky_ip().await;
+                            self.rotate_sticky_on_failure().await;
                         }
-                        Ok(Err(_)) | Err(_) => {
+                        Ok(Err(_)) => {
                             self.evict_h2_sender(host);
+                        }
+                        Err(_) => {
+                            self.evict_h2_sender(host);
+                            self.rotate_sticky_on_failure().await;
                         }
                     }
                 } else {
@@ -175,7 +240,7 @@ impl UpstreamPool {
                 .await?;
             if is_edge_restricted_403(&first) {
                 self.evict_h2_sender(host);
-                let _ = self.doh.rotate_current_sticky_ip().await;
+                self.rotate_sticky_on_failure().await;
                 return self
                     .connect_and_send(host, Request::from_parts(parts, empty_req_body()))
                     .await;
@@ -186,19 +251,31 @@ impl UpstreamPool {
         let mut boxed_req = req.map(|b| b.boxed());
         let send_timeout = upstream_send_timeout_for_path(boxed_req.method(), boxed_req.uri().path());
         if let Some(mut sender) = self.take_ready_h2_sender(host) {
-            if !sender.is_closed() && sender.ready().await.is_ok() {
-                normalize_for_h2(host, &mut boxed_req);
-                return match timeout(send_timeout, sender.send_request(boxed_req)).await {
-                    Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
-                    Ok(Err(e)) => {
+            if !sender.is_closed() {
+                match timeout(H2_POOL_PROBE_TIMEOUT, sender.ready()).await {
+                    Ok(Ok(())) => {
+                        normalize_for_h2(host, &mut boxed_req);
+                        return match timeout(send_timeout, sender.send_request(boxed_req)).await {
+                            Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
+                            Ok(Err(e)) => {
+                                self.evict_h2_sender(host);
+                                Err(format!("pooled h2 send failed: {e}"))
+                            }
+                            Err(_) => {
+                                self.evict_h2_sender(host);
+                                self.rotate_sticky_on_failure().await;
+                                Err("pooled h2 send timeout".to_string())
+                            }
+                        };
+                    }
+                    Ok(Err(_)) => {
                         self.evict_h2_sender(host);
-                        Err(format!("pooled h2 send failed: {e}"))
                     }
                     Err(_) => {
                         self.evict_h2_sender(host);
-                        Err("pooled h2 send timeout".to_string())
+                        self.rotate_sticky_on_failure().await;
                     }
-                };
+                }
             } else {
                 self.evict_h2_sender(host);
             }
@@ -245,24 +322,38 @@ impl UpstreamPool {
         mut req: Request<BoxReqBody>,
     ) -> Result<Response<BoxRespBody>, String> {
         let send_timeout = upstream_send_timeout_for_path(req.method(), req.uri().path());
+        let host_lock = self.host_connect_lock(host);
         let conn = {
-            let _guard = self.connect_lock.lock().await;
+            let _guard = host_lock.lock().await;
             if let Some(mut sender) = self.take_ready_h2_sender(host) {
-                if !sender.is_closed() && sender.ready().await.is_ok() {
-                    normalize_for_h2(host, &mut req);
-                    return match timeout(send_timeout, sender.send_request(req)).await {
-                        Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
-                        Ok(Err(e)) => {
+                if !sender.is_closed() {
+                    match timeout(H2_POOL_PROBE_TIMEOUT, sender.ready()).await {
+                        Ok(Ok(())) => {
+                            normalize_for_h2(host, &mut req);
+                            return match timeout(send_timeout, sender.send_request(req)).await {
+                                Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
+                                Ok(Err(e)) => {
+                                    self.evict_h2_sender(host);
+                                    Err(format!("h2 coalesced send error: {e}"))
+                                }
+                                Err(_) => {
+                                    self.evict_h2_sender(host);
+                                    self.rotate_sticky_on_failure().await;
+                                    Err("h2 coalesced send timeout".to_string())
+                                }
+                            };
+                        }
+                        Ok(Err(_)) => {
                             self.evict_h2_sender(host);
-                            Err(format!("h2 coalesced send error: {e}"))
                         }
                         Err(_) => {
                             self.evict_h2_sender(host);
-                            Err("h2 coalesced send timeout".to_string())
+                            self.rotate_sticky_on_failure().await;
                         }
-                    };
+                    }
+                } else {
+                    self.evict_h2_sender(host);
                 }
-                self.evict_h2_sender(host);
             }
             self.establish_tls_ech(host).await?
         };
@@ -312,6 +403,7 @@ impl UpstreamPool {
                 }
                 Err(_) => {
                     self.evict_h2_sender(&clean_host);
+                    self.rotate_sticky_on_failure().await;
                     Err("h2 send timeout".to_string())
                 }
             }
@@ -329,11 +421,14 @@ impl UpstreamPool {
                 .await
                 .map_err(|e| format!("http1 ready: {e}"))?;
             normalize_for_h1(host, &mut req);
-            let resp = timeout(send_timeout, sender.send_request(req))
-                .await
-                .map_err(|_| "http1 send timeout".to_string())?
-                .map_err(|e| format!("http1 send: {e}"))?;
-            Ok(resp.map(|b| b.boxed()))
+            match timeout(send_timeout, sender.send_request(req)).await {
+                Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
+                Ok(Err(e)) => Err(format!("http1 send: {e}")),
+                Err(_) => {
+                    self.rotate_sticky_on_failure().await;
+                    Err("http1 send timeout".to_string())
+                }
+            }
         }
     }
 
@@ -351,35 +446,75 @@ impl UpstreamPool {
                         SocketAddr::new(IpAddr::V4(sticky), 443),
                         list,
                     ),
-                    Err(_) => {
-                        // Fall back to standard OS DNS + TLS 1.3 if DoH IPs are blocked on the current network.
+                    Err(doh_err) => {
+                        if net_bind::bypass_vpn() {
+                            return Err(format!(
+                                "DoH unavailable under bypass_vpn for {host} (OS DNS fallback disabled): {doh_err}"
+                            ));
+                        }
+                        // Fall back to standard OS DNS + TLS 1.3 only when bypass_vpn is off,
+                        // filtering out Clash/Sing-box 198.18.0.0/15 FakeIPs.
                         let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, 443))
                             .await
                             .map_err(|e| format!("DoH unavailable and OS DNS failed for {host}: {e}"))?
+                            .filter(|addr| match addr.ip() {
+                                IpAddr::V4(v4) => {
+                                    v4.is_loopback() || crate::doh::is_valid_public_ipv4(v4)
+                                }
+                                IpAddr::V6(v6) => !v6.is_unspecified(),
+                            })
                             .collect();
                         let first = resolved
                             .first()
                             .copied()
-                            .ok_or_else(|| format!("OS DNS yielded no addresses for {host}"))?;
+                            .ok_or_else(|| format!("OS DNS yielded no clean public addresses for {host}"))?;
                         (resolved.into_iter().skip(1).collect(), first, Vec::new())
                     }
                 }
             };
 
+        let tls_handshake_timeout = {
+            #[cfg(test)]
+            {
+                self.test_tls_timeout.unwrap_or(UPSTREAM_TLS_HANDSHAKE_TIMEOUT)
+            }
+            #[cfg(not(test))]
+            {
+                UPSTREAM_TLS_HANDSHAKE_TIMEOUT
+            }
+        };
+
         for attempt in 0..2 {
             let net_gen = net_bind::network_gen();
-            let (tcp, _bound) = match net_bind::connect_tcp(target_addr, Duration::from_millis(5000)).await {
+            let dial_addr = {
+                #[cfg(test)]
+                {
+                    if let (Some(ref map), IpAddr::V4(v4)) = (&self.test_ip_port_map, target_addr.ip()) {
+                        map.get(&v4).copied().unwrap_or(target_addr)
+                    } else {
+                        target_addr
+                    }
+                }
+                #[cfg(not(test))]
+                {
+                    target_addr
+                }
+            };
+
+            let (tcp, _bound) = match net_bind::connect_tcp(dial_addr, UPSTREAM_TCP_CONNECT_TIMEOUT).await {
                 Ok(pair) => pair,
                 Err(err) => {
-                    if attempt == 0 && self.test_override.is_none() {
-                        if !os_fallback_addrs.is_empty() {
+                    if self.test_override.is_none() {
+                        if attempt == 0 && !os_fallback_addrs.is_empty() {
                             target_addr = os_fallback_addrs.remove(0);
                             continue;
                         }
                         if let IpAddr::V4(old_v4) = target_addr.ip() {
                             if let Some(next_ip) = self.doh.rotate_sticky_ip(old_v4).await {
-                                target_addr = SocketAddr::new(IpAddr::V4(next_ip), 443);
-                                continue;
+                                if attempt == 0 {
+                                    target_addr = SocketAddr::new(IpAddr::V4(next_ip), 443);
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -402,7 +537,7 @@ impl UpstreamPool {
                 .map_err(|e| format!("into_ssl({host}): {e}"))?;
             let mut tls = SslStream::new(ssl, tcp).map_err(|e| format!("ssl stream: {e}"))?;
 
-            match timeout(Duration::from_millis(6000), Pin::new(&mut tls).connect()).await {
+            match timeout(tls_handshake_timeout, Pin::new(&mut tls).connect()).await {
                 Ok(Ok(())) => {
                     let accepted = tls.ssl().ech_accepted();
                     LAST_ECH_ACCEPTED.store(accepted, Ordering::Relaxed);
@@ -424,9 +559,15 @@ impl UpstreamPool {
                             ech_list = retry_vec;
                             continue;
                         }
-                        if self.test_override.is_none() {
-                            if let IpAddr::V4(old_v4) = target_addr.ip() {
-                                if let Some(next_ip) = self.doh.rotate_sticky_ip(old_v4).await {
+                    }
+                    if self.test_override.is_none() {
+                        if attempt == 0 && !os_fallback_addrs.is_empty() {
+                            target_addr = os_fallback_addrs.remove(0);
+                            continue;
+                        }
+                        if let IpAddr::V4(old_v4) = target_addr.ip() {
+                            if let Some(next_ip) = self.doh.rotate_sticky_ip(old_v4).await {
+                                if attempt == 0 {
                                     target_addr = SocketAddr::new(IpAddr::V4(next_ip), 443);
                                     continue;
                                 }
@@ -436,6 +577,20 @@ impl UpstreamPool {
                     return Err(format!("upstream boringssl connect {host}: {err}"));
                 }
                 Err(_) => {
+                    if self.test_override.is_none() {
+                        if attempt == 0 && !os_fallback_addrs.is_empty() {
+                            target_addr = os_fallback_addrs.remove(0);
+                            continue;
+                        }
+                        if let IpAddr::V4(old_v4) = target_addr.ip() {
+                            if let Some(next_ip) = self.doh.rotate_sticky_ip(old_v4).await {
+                                if attempt == 0 {
+                                    target_addr = SocketAddr::new(IpAddr::V4(next_ip), 443);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     return Err(format!("upstream tls handshake timeout for {host}"));
                 }
             }

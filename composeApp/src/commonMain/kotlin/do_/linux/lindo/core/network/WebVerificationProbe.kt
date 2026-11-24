@@ -20,11 +20,14 @@ internal fun webVerificationProbeScript(): String = """
         lowerHtml.indexOf('404-body') !== -1 ||
         /exist or is private|page you requested|该页面不存在|页面不存在或为私密/i.test(bodyText);
     var hasWidget = !!document.querySelector('#challenge-stage,.cf-turnstile,#turnstile-wrapper,iframe[src*="challenges.cloudflare.com"]');
+    var hasInteractiveSignal = window.__lindoTurnstileInteractiveBegin === true;
     var hasChallenge = hasWidget ||
         /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(title) ||
         !!document.querySelector('#challenge-running,#challenge-form');
     if (hasChallenge && !isOrigin404Body) {
-        return result(hasWidget ? {challenge:true, widget:true} : {challenge:true});
+        return result(hasWidget
+            ? {challenge:true, widget:true, interactive:hasInteractiveSignal}
+            : {challenge:true, widget:false, interactive:hasInteractiveSignal});
     }
     var isCfErrorPage = /^(Something went wrong|Access denied)/i.test(title) ||
         /error code:\s*1034\b/i.test(bodyText);

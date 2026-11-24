@@ -12,18 +12,18 @@ enum class EchRoutingMode(
 ) {
     SMART_AUTO(
         prefValue = "smart_auto",
-        labelZh = "智能模式（推荐）",
-        descZh = "未开代理时自动启用 ECH 免代理直连；开启代理或 VPN 时自动切回代理通道，零冲突不卡盾"
+        labelZh = "智能推荐",
+        descZh = "无代理时自动启用 ECH 免代理直连，开启代理或 VPN 时自动让行；切换实时生效，无需重启"
     ),
     ECH_PRIORITY(
         prefValue = "ech_priority",
-        labelZh = "直连优先（穿透代理）",
-        descZh = "优先通过内置 ECH + 国内 DoH 物理直连以规避劣质代理弹盾；VPN 禁止绕过时自动回退"
+        labelZh = "直连优先",
+        descZh = "优先通过内置 ECH + 国内 DoH 物理直连规避劣质代理弹盾，VPN 禁止绕过时自动回退；切换实时生效，无需重启"
     ),
     SYSTEM_DEFAULT(
         prefValue = "system_default",
-        labelZh = "系统默认网络",
-        descZh = "关闭内置 ECH 直连，完全沿用系统默认 DNS 与网络栈"
+        labelZh = "系统默认",
+        descZh = "关闭内置 ECH 直连，完全沿用系统默认 DNS 与网络栈；切换实时生效，无需重启"
     );
 
     companion object {

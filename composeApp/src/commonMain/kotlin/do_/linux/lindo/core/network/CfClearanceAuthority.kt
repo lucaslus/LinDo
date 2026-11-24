@@ -85,18 +85,12 @@ object CfClearanceAuthority {
         }
     }
 
-    /** 切网 / VPN 出口变化时放开自然轮换窗口，但不拉黑当前值 */
-    @Synchronized
-    fun markRotationOpen() {
-        updatedAtEpochMs = 0L
-        challenged = null
-    }
-
     /**
      * 基于实测证据判定 `/challenge` 结束后的票据状态：
      * - 仅当 `freshClearance != previousClearance` 时才算真正换新（`ROTATED`）；
      * - 若旧票据此前已被真实 403/429 挑战证伪（`previousWasChallenged == true`），而 `/challenge` 因局部 WAF 规则未拦截直达源站 404，
-     *   必须返回 `STALE_UNCHALLENGED_404`，绝不能调用 `markRotationOpen()` 把刚被拒的死票据重新洗白为 `verified=true`！
+     *   必须返回 `STALE_UNCHALLENGED_404`，绝不能把刚被拒的死票据重新洗白为 `verified=true`；
+     * - 切网 / 路由栈翻转 / Profile 变更时统一调用 [reset]，杜绝残留旧 `incumbent` 造成假阳性。
      */
     fun evaluateVerifyOutcome(
         freshClearance: String?,

@@ -112,26 +112,19 @@ class EchRoutingAndVerifyFixTest {
         assertEquals(EchRoutingMode.SMART_AUTO, EchRoutingMode.fromPref("smart_bypass"))
         assertEquals(EchRoutingMode.ECH_PRIORITY, EchRoutingMode.fromPref("direct_only"))
         assertEquals(EchRoutingMode.SYSTEM_DEFAULT, EchRoutingMode.fromPref("system_default"))
+
+        assertTrue(EchRoutingMode.SMART_AUTO.labelZh in setOf("智能推荐", "智能模式（推荐）"))
+        assertTrue(EchRoutingMode.ECH_PRIORITY.labelZh in setOf("直连优先", "直连优先（穿透代理）"))
+        assertTrue(EchRoutingMode.SYSTEM_DEFAULT.labelZh in setOf("系统默认", "系统默认网络"))
     }
 
     @Test
-    fun existingClearanceIsPreservedAfterMarkRotationOpenAndSuppressesBackgroundPrewarmLoop() = runTest {
+    fun networkChangeResetsClearanceAuthorityWithoutWashingChallengedTicketAndHealthyClearanceSuppressesNoise() = runTest {
         val incumbent = "cf_incumbent_healthy_123"
         CookieSentinel.syncFromAuthoritativeBrowserCookieString("cf_clearance=$incumbent", verified = true)
-        CfClearanceAuthority.noteChallenged(incumbent)
-        assertTrue(CfClearanceAuthority.isChallenged(incumbent))
+        assertTrue(CfClearanceAuthority.hasHealthyIncumbent())
 
-        // When /challenge lands directly on origin 404 without minting a replacement,
-        // markRotationOpen restores incumbent trust instead of abandoning it as failed.
-        CfClearanceAuthority.markRotationOpen()
-        assertFalse(CfClearanceAuthority.isChallenged(incumbent))
-        CookieSentinel.syncFromAuthoritativeBrowserCookieString("cf_clearance=$incumbent", verified = true)
-        assertEquals(
-            incumbent,
-            CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
-        )
-
-        var prewarmReasons = mutableListOf<String>()
+        val prewarmReasons = mutableListOf<String>()
         UserApiKeyAuthManager.requireBrowserTransportOnly = true
         UserApiKeyAuthManager.onRequestClearancePrewarm = { reason ->
             prewarmReasons += reason
@@ -140,11 +133,22 @@ class EchRoutingAndVerifyFixTest {
             403 to "<html><title>Just a moment...</title><div id=\"challenge-running\"></div></html>"
         }
 
-        // Background excerpt challenge MUST NOT fire prewarm when cf_clearance already exists
+        // Single background excerpt challenge MUST NOT fire prewarm when healthy cf_clearance exists
         LinuxDoRepository.fetchTopicExcerpt(999111)
-        assertTrue(prewarmReasons.isEmpty(), "Expected no prewarm when cf_clearance exists, got $prewarmReasons")
+        assertTrue(prewarmReasons.isEmpty(), "Expected no prewarm on 1st hit when cf_clearance exists, got $prewarmReasons")
 
-        // When cf_clearance is genuinely absent, background challenge triggers prewarm
+        // Network/route/profile change MUST call CfClearanceAuthority.reset() rather than washing stale incumbent clean
+        CfClearanceAuthority.noteChallenged(incumbent)
+        assertTrue(CfClearanceAuthority.isChallenged(incumbent))
+        NetworkPolicyEngine.resetOnNetworkChange()
+        assertFalse(CfClearanceAuthority.hasHealthyIncumbent(), "Network reset must never resurrect stale incumbent")
+
+        // Browser cookie snapshot carrying _t without cf_clearance also resets CfClearanceAuthority.incumbent
+        CfClearanceAuthority.confirmHealthy("ghost_from_previous_profile")
+        CookieSentinel.syncFromAuthoritativeBrowserCookieString("_t=valid_session_token_abc")
+        assertFalse(CfClearanceAuthority.hasHealthyIncumbent(), "Missing cf_clearance in authoritative _t snapshot must clear incumbent")
+
+        // When cf_clearance is genuinely absent, background challenge triggers prewarm immediately
         CookieSentinel.clearAll()
         LinuxDoRepository.fetchTopicExcerpt(999112)
         assertTrue(prewarmReasons.isNotEmpty() && prewarmReasons.all { it == "background_challenge" })
@@ -194,6 +198,8 @@ class EchRoutingAndVerifyFixTest {
         assertTrue(challengeIdx >= 0, "Expected #challenge-stage selector in probe script")
         assertTrue(readyLoadingIdx > challengeIdx, "Expected #challenge-stage check before document.readyState === 'loading'")
         assertTrue(script.contains("cfErrorPage"), "Expected cfErrorPage detector for broken CF challenge pages")
+        assertTrue(script.contains("widget:false"), "Expected explicit widget:false on challenge title without rendered Turnstile")
+        assertTrue(script.contains("interactive:hasInteractiveSignal"), "Expected interactive signal reporting in probe script")
     }
 
     @Test

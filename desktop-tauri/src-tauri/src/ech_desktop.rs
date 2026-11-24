@@ -425,6 +425,11 @@ pub fn windows_webview_proxy_args(_initial_mode: &str) -> Option<(String, std::p
 
 pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
     let _guard = reconcile_mutex().lock().unwrap();
+    let prev_mode = last_snapshot_lock().lock().unwrap().mode.clone();
+    let mode_changed = !prev_mode.is_empty() && prev_mode != mode.as_str();
+    let prev_gw_route = lindo_ech::current_gateway_route_mode();
+    let had_running_gateway = lindo_ech::current_gateway_port() > 0;
+
     let env = detect_net_env();
     let supported = is_platform_supported();
     let (mut should_ech, vpn_yielded) = if supported {
@@ -434,6 +439,10 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
     };
 
     DESIRED_ECH.store(should_ech, Ordering::SeqCst);
+    if should_ech {
+        // Cancel any pending delayed gateway shutdown from a rapid `ech -> system_default -> ech` toggle.
+        STOP_SEQ.fetch_add(1, Ordering::AcqRel);
+    }
     let mut last_err = String::new();
 
     if cfg!(target_os = "macos") {
@@ -451,6 +460,12 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
             }
             if should_ech {
                 lindo_ech::set_gateway_route_mode(GatewayRouteMode::EchDirect);
+                if had_running_gateway
+                    && (mode_changed || prev_gw_route != Some(GatewayRouteMode::EchDirect))
+                {
+                    lindo_ech::rotate_sticky_ip();
+                    lindo_ech::notify_network_changed();
+                }
                 #[cfg(target_os = "macos")]
                 {
                     let port = lindo_ech::current_gateway_port();
@@ -464,6 +479,8 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
                 lindo_ech::set_gateway_route_mode(GatewayRouteMode::SystemPassThrough {
                     http_proxy: env.http_proxy,
                 });
+                lindo_ech::rotate_sticky_ip();
+                lindo_ech::notify_network_changed();
             }
             #[cfg(target_os = "macos")]
             unsafe {
@@ -495,12 +512,17 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
             }
         }
         if lindo_ech::current_gateway_port() > 0 {
-            if should_ech {
-                lindo_ech::set_gateway_route_mode(GatewayRouteMode::EchDirect);
+            let target_route = if should_ech {
+                GatewayRouteMode::EchDirect
             } else {
-                lindo_ech::set_gateway_route_mode(GatewayRouteMode::SystemPassThrough {
+                GatewayRouteMode::SystemPassThrough {
                     http_proxy: env.http_proxy,
-                });
+                }
+            };
+            lindo_ech::set_gateway_route_mode(target_route.clone());
+            if had_running_gateway && (mode_changed || prev_gw_route.as_ref() != Some(&target_route)) {
+                lindo_ech::rotate_sticky_ip();
+                lindo_ech::notify_network_changed();
             }
         }
     }

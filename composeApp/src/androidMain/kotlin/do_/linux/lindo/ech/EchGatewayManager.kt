@@ -86,6 +86,7 @@ object EchGatewayManager {
 
     private val physicalNetworks = LinkedHashMap<Long, PhysicalNetInfo>()
     private var currentMode: EchRoutingMode = EchRoutingMode.SMART_AUTO
+    private var lastAppliedMode: EchRoutingMode? = null
     private var vpnActive: Boolean = false
     private var vpnLockdownYielded: Boolean = false
     private var activeGatewayPort: Int = 0
@@ -96,6 +97,7 @@ object EchGatewayManager {
     private var proxyOverrideActive: Boolean = false
     private val initialReconcileDone = AtomicBoolean(false)
     private val routeStackFlipped = AtomicBoolean(false)
+    private val notifyRouteOnProxyComplete = AtomicBoolean(false)
     @Volatile
     private var pendingProxyDeferred: CompletableDeferred<Unit>? = null
     private var cachedCertPem: String = ""
@@ -172,9 +174,13 @@ object EchGatewayManager {
     fun hasPendingProxyOverride(): Boolean = pendingProxyDeferred?.isCompleted == false
 
     suspend fun awaitPendingProxyOverride(timeoutMs: Long = 1_500L) {
-        val pending = pendingProxyDeferred ?: return
-        if (!pending.isCompleted) {
-            withTimeoutOrNull(timeoutMs) { pending.await() }
+        if (pendingProxyDeferred == null) return
+        withTimeoutOrNull(timeoutMs) {
+            while (true) {
+                val pending = pendingProxyDeferred ?: break
+                if (pending.isCompleted) break
+                pending.await()
+            }
         }
     }
 
@@ -192,7 +198,11 @@ object EchGatewayManager {
                 }
             }
             reconcileDone.await()
-            pendingProxyDeferred?.await()
+            while (true) {
+                val pending = pendingProxyDeferred ?: break
+                if (pending.isCompleted) break
+                pending.await()
+            }
         }
     }
 
@@ -252,8 +262,8 @@ object EchGatewayManager {
             )
             reconcileExecutor.execute {
                 runCatching {
-                    reconcileInternal()
-                    routeChangedListener?.invoke()
+                    seedInitialNetworkSnapshot()
+                    reconcileInternal(forceModeRefresh = true)
                 }
             }
             scheduleDelayedStatusRefresh()
@@ -421,7 +431,7 @@ object EchGatewayManager {
         !System.getProperty("http.proxyHost").isNullOrBlank() ||
             !System.getProperty("https.proxyHost").isNullOrBlank()
 
-    private fun reconcileInternal() = synchronized(reconcileLock) {
+    private fun reconcileInternal(forceModeRefresh: Boolean = false) = synchronized(reconcileLock) {
         val (mode, vpnNow, bestPhys) = synchronized(stateLock) {
             Triple(currentMode, vpnActive, bestPhysicalLocked())
         }
@@ -442,12 +452,15 @@ object EchGatewayManager {
                 else -> Triple(false, false, true)
             }
         }
-        val prevYielded = synchronized(stateLock) {
-            val p = vpnLockdownYielded
+        val (prevYielded, prevMode) = synchronized(stateLock) {
+            val pYield = vpnLockdownYielded
+            val pMode = lastAppliedMode
             vpnLockdownYielded = yielded
-            p
+            lastAppliedMode = mode
+            pYield to pMode
         }
         val initDone = initialReconcileDone.get()
+        val modeChanged = forceModeRefresh || (initDone && prevMode != null && prevMode != mode)
 
         if (shouldRun) {
             val (certPem, keyPem) = ensureCaMaterial()
@@ -461,6 +474,7 @@ object EchGatewayManager {
                         lastAppliedBypass = bypassVpn
                         lastAppliedVpn = vpnNow
                     }
+                    publishStatusFromNative()
                     applyWebViewProxyOverride(port, notifyRouteChanged = initDone)
                     LinDoDiagnosticLogger.info(
                         DiagnosticCategory.NETWORK,
@@ -468,31 +482,52 @@ object EchGatewayManager {
                         "Started BoringSSL ECH gateway on 127.0.0.1:$port (mode=${mode.prefValue}, vpn=$vpnNow, bypass=$bypassVpn, iface=${bestPhys?.ifaceName.orEmpty().ifBlank { "default" }})"
                     )
                     scheduleDelayedStatusRefresh()
+                } else {
+                    publishStatusFromNative()
+                    if (initDone && modeChanged) {
+                        dispatchRouteChangedWhenProxySettled()
+                    }
                 }
             } else {
-                val needNetUpdate = synchronized(stateLock) {
+                val (needNetUpdate, bypassChanged) = synchronized(stateLock) {
+                    val bChanged = lastAppliedBypass != bypassVpn
                     if (lastAppliedHandle != physHandle ||
-                        lastAppliedBypass != bypassVpn ||
+                        bChanged ||
                         lastAppliedVpn != vpnNow
                     ) {
                         lastAppliedHandle = physHandle
                         lastAppliedBypass = bypassVpn
                         lastAppliedVpn = vpnNow
-                        true
+                        true to bChanged
                     } else {
-                        false
+                        false to false
                     }
+                }
+                if (bypassChanged) {
+                    routeStackFlipped.set(true)
                 }
                 if (needNetUpdate) {
                     NativeEchBridge.nativeUpdateNetwork(physHandle, bypassVpn)
-                    if (initDone) {
-                        routeChangedListener?.invoke()
-                    }
-                    scheduleDelayedStatusRefresh()
                 }
+                if (modeChanged) {
+                    NativeEchBridge.nativeRotateStickyIp()
+                }
+                publishStatusFromNative()
                 val portNow = synchronized(stateLock) { activeGatewayPort }
                 if (portNow > 0 && !proxyOverrideActive) {
                     applyWebViewProxyOverride(portNow, notifyRouteChanged = initDone)
+                } else if (initDone && (needNetUpdate || modeChanged)) {
+                    dispatchRouteChangedWhenProxySettled()
+                }
+                if (needNetUpdate || modeChanged) {
+                    if (modeChanged) {
+                        LinDoDiagnosticLogger.info(
+                            DiagnosticCategory.NETWORK,
+                            "EchGateway",
+                            "Refreshed BoringSSL ECH gateway on 127.0.0.1:$portNow (mode=${mode.prefValue}, vpn=$vpnNow, bypass=$bypassVpn, iface=${bestPhys?.ifaceName.orEmpty().ifBlank { "default" }})"
+                        )
+                    }
+                    scheduleDelayedStatusRefresh()
                 }
             }
         } else {
@@ -504,16 +539,8 @@ object EchGatewayManager {
                 lastAppliedVpn = vpnNow
                 r
             }
-            if (proxyOverrideActive) {
-                clearWebViewProxyOverride(
-                    stopGatewayAfterClear = wasRunning,
-                    notifyRouteChanged = initDone
-                )
-            } else if (wasRunning) {
-                NativeEchBridge.nativeStopGateway()
-                if (initDone) {
-                    routeChangedListener?.invoke()
-                }
+            if (wasRunning || modeChanged) {
+                NativeEchBridge.nativeRotateStickyIp()
             }
             if (yielded && (wasRunning || !prevYielded)) {
                 LinDoDiagnosticLogger.warn(
@@ -528,8 +555,22 @@ object EchGatewayManager {
                     "Stopped BoringSSL ECH gateway (mode=${mode.prefValue}, vpn=$vpnNow)"
                 )
             }
+            if (proxyOverrideActive) {
+                publishStatusFromNative()
+                clearWebViewProxyOverride(
+                    stopGatewayAfterClear = wasRunning,
+                    notifyRouteChanged = initDone
+                )
+            } else {
+                if (wasRunning) {
+                    NativeEchBridge.nativeStopGateway()
+                }
+                publishStatusFromNative()
+                if (initDone && (wasRunning || modeChanged)) {
+                    dispatchRouteChangedWhenProxySettled()
+                }
+            }
         }
-        publishStatusFromNative()
     }
 
     private fun ensureCaMaterial(): Pair<String, String> {
@@ -579,14 +620,40 @@ object EchGatewayManager {
         }
     }
 
+    private fun dispatchRouteChangedWhenProxySettled() {
+        val pending = pendingProxyDeferred
+        if (pending != null && !pending.isCompleted) {
+            notifyRouteOnProxyComplete.set(true)
+            if (pending.isCompleted && notifyRouteOnProxyComplete.getAndSet(false)) {
+                routeChangedListener?.invoke()
+            }
+        } else {
+            routeChangedListener?.invoke()
+        }
+    }
+
     private fun applyWebViewProxyOverride(port: Int, notifyRouteChanged: Boolean = false) {
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) return
-        if (lastAppliedPort == port && proxyOverrideActive) return
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            if (notifyRouteChanged) {
+                dispatchRouteChangedWhenProxySettled()
+            }
+            return
+        }
+        if (lastAppliedPort == port && proxyOverrideActive) {
+            if (notifyRouteChanged) {
+                dispatchRouteChangedWhenProxySettled()
+            }
+            return
+        }
         if (!proxyOverrideActive) {
             routeStackFlipped.set(true)
         }
         lastAppliedPort = port
         proxyOverrideActive = true
+        if (notifyRouteChanged) {
+            notifyRouteOnProxyComplete.set(true)
+        }
+        val prevDeferred = pendingProxyDeferred
         val deferred = CompletableDeferred<Unit>()
         pendingProxyDeferred = deferred
         val executor = ContextCompat.getMainExecutor(appContext)
@@ -598,18 +665,23 @@ object EchGatewayManager {
                     .build()
                 ProxyController.getInstance().setProxyOverride(cfg, executor) {
                     deferred.complete(Unit)
-                    if (notifyRouteChanged) {
+                    prevDeferred?.complete(Unit)
+                    if (pendingProxyDeferred === deferred && notifyRouteOnProxyComplete.getAndSet(false)) {
                         routeChangedListener?.invoke()
                     }
                 }
             }.onFailure { err ->
                 proxyOverrideActive = false
                 deferred.complete(Unit)
+                prevDeferred?.complete(Unit)
                 LinDoDiagnosticLogger.warn(
                     DiagnosticCategory.NETWORK,
                     "EchGateway",
                     "WebView ProxyController.setProxyOverride failed: ${err.message ?: err::class.java.simpleName}"
                 )
+                if (pendingProxyDeferred === deferred && notifyRouteOnProxyComplete.getAndSet(false)) {
+                    routeChangedListener?.invoke()
+                }
             }
         }
     }
@@ -621,9 +693,10 @@ object EchGatewayManager {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
             if (stopGatewayAfterClear) {
                 NativeEchBridge.nativeStopGateway()
+                publishStatusFromNative()
             }
             if (notifyRouteChanged) {
-                routeChangedListener?.invoke()
+                dispatchRouteChangedWhenProxySettled()
             }
             return
         }
@@ -632,6 +705,10 @@ object EchGatewayManager {
         }
         proxyOverrideActive = false
         lastAppliedPort = 0
+        if (notifyRouteChanged) {
+            notifyRouteOnProxyComplete.set(true)
+        }
+        val prevDeferred = pendingProxyDeferred
         val deferred = CompletableDeferred<Unit>()
         pendingProxyDeferred = deferred
         val executor = ContextCompat.getMainExecutor(appContext)
@@ -639,7 +716,8 @@ object EchGatewayManager {
             runCatching {
                 ProxyController.getInstance().clearProxyOverride(executor) {
                     deferred.complete(Unit)
-                    if (notifyRouteChanged) {
+                    prevDeferred?.complete(Unit)
+                    if (pendingProxyDeferred === deferred && notifyRouteOnProxyComplete.getAndSet(false)) {
                         routeChangedListener?.invoke()
                     }
                     if (stopGatewayAfterClear) {
@@ -655,6 +733,10 @@ object EchGatewayManager {
                 }
             }.onFailure {
                 deferred.complete(Unit)
+                prevDeferred?.complete(Unit)
+                if (pendingProxyDeferred === deferred && notifyRouteOnProxyComplete.getAndSet(false)) {
+                    routeChangedListener?.invoke()
+                }
                 if (stopGatewayAfterClear) {
                     reconcileExecutor.execute {
                         if (synchronized(stateLock) { activeGatewayPort == 0 }) {
@@ -673,15 +755,18 @@ object EchGatewayManager {
         val (mode, vpnNow, phys) = synchronized(stateLock) {
             Triple(currentMode, vpnActive, bestPhysicalLocked())
         }
-        val vpnYieldNow = synchronized(stateLock) { vpnLockdownYielded }
+        val (vpnYieldNow, desiredActive) = synchronized(stateLock) {
+            vpnLockdownYielded to (activeGatewayPort > 0)
+        }
+        val nativeActive = desiredActive && json.optBoolean("active", false)
         val snap = EchRuntimeSnapshot(
             supported = true,
-            active = json.optBoolean("active", false),
+            active = nativeActive,
             mode = mode,
-            listenPort = json.optInt("listenPort", 0),
-            stickyIp = json.optString("stickyIp", ""),
-            bypassVpnRequested = json.optBoolean("bypassVpnRequested", false),
-            bypassVpnBound = json.optBoolean("bypassVpnBound", false),
+            listenPort = if (nativeActive) json.optInt("listenPort", 0) else 0,
+            stickyIp = if (nativeActive) json.optString("stickyIp", "") else "",
+            bypassVpnRequested = nativeActive && json.optBoolean("bypassVpnRequested", false),
+            bypassVpnBound = nativeActive && json.optBoolean("bypassVpnBound", false),
             physicalIface = phys?.ifaceName.orEmpty(),
             vpnActive = vpnNow || isSystemHttpProxySet(),
             vpnLockdownYielded = vpnYieldNow,

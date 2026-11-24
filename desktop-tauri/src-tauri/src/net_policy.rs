@@ -15,6 +15,9 @@ pub const VERIFY_INEFFECTIVE_COOLDOWN_SECS: u64 = 60;
 pub const VERIFY_SILENT_BACKOFF_SECS: u64 = 45;
 pub const VERIFY_RECENT_PASS_COALESCE_SECS: u64 = 5;
 pub const VERIFY_INEFFECTIVE_WINDOW_SECS: u64 = 15;
+pub const VERIFY_USER_DISMISS_SNOOZE_SECS: u64 = 180;
+pub const VERIFY_PROACTIVE_WIDGET_PROMOTE_MS: u64 = 3_500;
+pub const VERIFY_TYPING_QUIET_GUARD_MS: u64 = 2_500;
 
 // ============================================================================
 // 1. CfClearanceAuthority v2 — Pure Incumbent Stickiness (No False Blacklist)
@@ -270,23 +273,28 @@ impl CfClearanceAuthority {
 // 2. Single-Flight VerifyCoordinator with Monotonic Escalation & Circuit Breaker
 // ============================================================================
 
-/// Monotonic 4-tier UI intrusiveness level for a Cloudflare verification round.
-/// `Silent(0) < Pill(1) < Blocking(2) < Manual(3)` — concurrent callers joining the same round
+/// Monotonic UI intrusiveness level for a Cloudflare verification round.
+/// `Silent(0) < Pill(1) < Proactive(2) < Blocking(3) < Manual(4)` — concurrent callers joining the same round
 /// atomically take `max(current, requested)`, never downgrading, and waking the leader immediately.
 pub const VERIFY_PILL_DELAY_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum VerifyPresentation {
-    /// Background prewarm / silent near-expiry refresh: never displays any UI; aborting never counts as failure.
+    /// Background / hidden-window prewarm: never displays any UI; aborting never counts as failure.
     Silent = 0,
     /// Non-intrusive delayed corner progress pill (shown after 2s if hidden check still running; click opens panel).
     Pill = 1,
+    /// Visible main-window proactive precheck (cold start, near-expiry, background `timings`/`notifications` escalation):
+    /// starts 100% silent (0 UI, 0 Pill); if browser auto-passes -> 0 UI seamless recovery;
+    /// once human interaction is confirmed (`native_interactive` or rendered widget >= 3.5s),
+    /// promotes straight to native panel when not in 180s dismiss snooze and not typing in `ComposerModal`.
+    Proactive = 2,
     /// Foreground user-waiting request: starts hidden on `/challenge`; if invisible JS passes -> 0 UI;
     /// >2s -> gentle corner Pill; if Turnstile triggers `interactiveBegin` -> promotes straight to panel on the SAME page!
-    Blocking = 2,
+    Blocking = 3,
     /// User explicitly clicked 「安全验证」: bypasses all cooldowns and displays the native sheet immediately.
-    Manual = 3,
+    Manual = 4,
 }
 
 impl VerifyPresentation {
@@ -294,13 +302,14 @@ impl VerifyPresentation {
         match v {
             0 => Self::Silent,
             1 => Self::Pill,
-            2 => Self::Blocking,
+            2 => Self::Proactive,
+            3 => Self::Blocking,
             _ => Self::Manual,
         }
     }
 
     pub fn allows_pill_ui(self) -> bool {
-        self >= Self::Pill
+        matches!(self, Self::Pill | Self::Blocking)
     }
 
     pub fn allows_panel_ui(self) -> bool {
@@ -459,8 +468,20 @@ pub struct BackgroundChallengeTracker {
 }
 
 impl BackgroundChallengeTracker {
-    /// Records a background CF challenge and returns `true` when silent verification / attention should trigger.
+    /// Records a background CF challenge and returns `true` when silent/proactive verification should trigger.
     pub fn note_background_challenge(&mut self, is_write: bool, now: Instant) -> bool {
+        self.note_background_challenge_with_health(is_write, true, now)
+    }
+
+    /// Context-aware variant: when no healthy `cf_clearance` incumbent exists (`has_healthy_incumbent == false`),
+    /// the very 1st background write challenge (`POST /topics/timings`, `POST /drafts.json`) escalates immediately
+    /// instead of waiting for a 2nd hit.
+    pub fn note_background_challenge_with_health(
+        &mut self,
+        is_write: bool,
+        has_healthy_incumbent: bool,
+        now: Instant,
+    ) -> bool {
         if is_write {
             self.consecutive_write_hits = self.consecutive_write_hits.saturating_add(1);
         } else {
@@ -473,8 +494,17 @@ impl BackgroundChallengeTracker {
                 self.read_waves = self.read_waves.saturating_add(1);
             }
         }
-        self.consecutive_write_hits >= BG_WRITE_ESCALATE_THRESHOLD
-            || self.read_waves >= BG_READ_WAVE_ESCALATE_THRESHOLD
+        let write_threshold = if has_healthy_incumbent {
+            BG_WRITE_ESCALATE_THRESHOLD
+        } else {
+            1
+        };
+        let read_threshold = if has_healthy_incumbent {
+            BG_READ_WAVE_ESCALATE_THRESHOLD
+        } else {
+            2
+        };
+        self.consecutive_write_hits >= write_threshold || self.read_waves >= read_threshold
     }
 
     pub fn note_healthy_response(&mut self, is_write: bool) {
@@ -619,14 +649,26 @@ pub struct VerifyOutcome {
     pub cooldown_remain_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IneffectiveClearanceDecision {
+    /// 1st ineffective clearance hit: execute clean-room network self-heal (preserving `_t` / `_forum_session`)
+    /// and re-pull `/challenge` once before tripping the 60s circuit breaker.
+    SelfHealAndReverify,
+    /// 2nd consecutive ineffective clearance hit (even after self-heal): trip 60s circuit breaker.
+    TripBreaker { cooldown_ms: u64 },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct VerifyHealthSnapshot {
     pub active: bool,
     pub round: u64,
     pub consecutive_failures: u32,
+    pub ineffective_strikes: u32,
     pub cooldown_remain_ms: u64,
     pub cooldown_is_ineffective: bool,
     pub silent_backoff_remain_ms: u64,
+    pub user_dismissed_remain_ms: u64,
+    pub unresolved_write_challenge: bool,
     pub last_passed_age_secs: Option<u64>,
 }
 
@@ -662,9 +704,14 @@ pub struct VerifyCoordinator {
     active: Option<ActiveVerifyFlight>,
     consecutive_failures: u32,
     failure_counted_round: Option<u64>,
+    ineffective_strikes: u32,
+    ineffective_counted_round: Option<u64>,
+    unresolved_write_challenge: bool,
     cooldown_until: Option<Instant>,
     cooldown_is_ineffective: bool,
     silent_backoff_until: Option<Instant>,
+    user_dismissed_until: Option<Instant>,
+    user_dismissed_net_sig: String,
     last_passed_round: u64,
     last_passed_at: Option<Instant>,
 }
@@ -682,12 +729,82 @@ impl VerifyCoordinator {
         self.last_passed_round
     }
 
+    pub fn note_write_challenge(&mut self) {
+        self.unresolved_write_challenge = true;
+    }
+
+    pub fn has_unresolved_write_challenge(&self) -> bool {
+        self.unresolved_write_challenge
+    }
+
+    pub fn ineffective_strikes(&self) -> u32 {
+        self.ineffective_strikes
+    }
+
+    pub fn needs_clean_heal_on_manual(&self, now: Instant) -> bool {
+        self.ineffective_strikes > 0
+            || (self.cooldown_is_ineffective
+                && self.cooldown_until.map(|u| now < u).unwrap_or(false))
+    }
+
+    pub fn record_user_dismiss(&mut self, net_sig: &str, now: Instant) -> u64 {
+        let until = now + Duration::from_secs(VERIFY_USER_DISMISS_SNOOZE_SECS);
+        self.user_dismissed_until = Some(until);
+        self.user_dismissed_net_sig = net_sig.to_string();
+        VERIFY_USER_DISMISS_SNOOZE_SECS * 1000
+    }
+
+    pub fn clear_user_dismiss(&mut self) {
+        self.user_dismissed_until = None;
+        self.user_dismissed_net_sig.clear();
+    }
+
+    pub fn is_user_dismiss_snoozed(&mut self, current_net_sig: &str, now: Instant) -> Option<u64> {
+        let until = self.user_dismissed_until?;
+        let sig_changed = !self.user_dismissed_net_sig.is_empty()
+            && !current_net_sig.is_empty()
+            && self.user_dismissed_net_sig != current_net_sig;
+        if now >= until || sig_changed {
+            self.clear_user_dismiss();
+            return None;
+        }
+        let remain_ms = until.saturating_duration_since(now).as_millis() as u64;
+        if remain_ms > 0 {
+            Some(remain_ms)
+        } else {
+            self.clear_user_dismiss();
+            None
+        }
+    }
+
     pub fn join_or_start(
         &mut self,
         requested: VerifyPresentation,
         now: Instant,
         is_post_pass_replay: bool,
     ) -> VerifyJoin {
+        self.join_or_start_with_context(requested, now, is_post_pass_replay, false, "")
+    }
+
+    pub fn join_or_start_with_context(
+        &mut self,
+        requested: VerifyPresentation,
+        now: Instant,
+        is_post_pass_replay: bool,
+        bypass_user_dismiss: bool,
+        current_net_sig: &str,
+    ) -> VerifyJoin {
+        if requested == VerifyPresentation::Manual {
+            self.clear_user_dismiss();
+        } else if !bypass_user_dismiss {
+            if let Some(remain_ms) = self.is_user_dismiss_snoozed(current_net_sig, now) {
+                return VerifyJoin::BlockedByCooldown {
+                    remain_ms,
+                    ineffective: false,
+                };
+            }
+        }
+
         // 1. If a verification round is already running, coalesce into it & escalate presentation monotonically!
         if let Some(ref flight) = self.active {
             let prev = flight.presentation.fetch_max(requested as u8, Ordering::SeqCst);
@@ -707,6 +824,8 @@ impl VerifyCoordinator {
                 self.cooldown_is_ineffective = false;
                 self.consecutive_failures = 0;
                 self.failure_counted_round = None;
+                self.ineffective_strikes = 0;
+                self.ineffective_counted_round = None;
             }
         }
         if let Some(until) = self.silent_backoff_until {
@@ -726,7 +845,7 @@ impl VerifyCoordinator {
                     };
                 }
             }
-            if requested == VerifyPresentation::Silent {
+            if matches!(requested, VerifyPresentation::Silent | VerifyPresentation::Proactive) {
                 if let Some(until) = self.silent_backoff_until {
                     let remain_ms = until.saturating_duration_since(now).as_millis() as u64;
                     if remain_ms > 0 {
@@ -785,6 +904,7 @@ impl VerifyCoordinator {
         };
 
         if passed {
+            self.clear_user_dismiss();
             self.consecutive_failures = 0;
             self.failure_counted_round = None;
             self.cooldown_until = None;
@@ -793,8 +913,11 @@ impl VerifyCoordinator {
             self.last_passed_round = round;
             self.last_passed_at = Some(now);
         } else if !abandoned {
-            if final_presentation == VerifyPresentation::Silent {
-                // Silent background probe hit interactive challenge: do NOT count as a user failure,
+            if matches!(
+                final_presentation,
+                VerifyPresentation::Silent | VerifyPresentation::Proactive
+            ) {
+                // Silent/Proactive background probe hit interactive challenge: do NOT count as a user failure,
                 // only apply a gentle silent backoff so background polls never spin `/challenge`.
                 self.silent_backoff_until = Some(now + Duration::from_secs(VERIFY_SILENT_BACKOFF_SECS));
             } else {
@@ -844,8 +967,53 @@ impl VerifyCoordinator {
         }
     }
 
-    /// Circuit breaker: verification round `round` succeeded, yet the immediate replay STILL got CF challenged!
-    /// Enter 60s ineffective-clearance cooldown immediately so the app NEVER enters an infinite popup loop.
+    /// Two-stage ineffective-clearance closed loop:
+    /// - 1st consecutive hit (`ineffective_strikes == 1`): returns `SelfHealAndReverify` so caller runs
+    ///   clean-room network self-heal (purging CF cookies + rotating sticky IP + reconciling ECH route,
+    ///   100% preserving `_t` / `_forum_session`) and re-pulls `/challenge` once.
+    /// - 2nd consecutive hit (`ineffective_strikes >= 2`): trips the 60s ineffective circuit breaker.
+    pub fn record_ineffective_clearance_step(
+        &mut self,
+        round: u64,
+        is_write: bool,
+        now: Instant,
+    ) -> IneffectiveClearanceDecision {
+        if is_write {
+            self.unresolved_write_challenge = true;
+        }
+        let within_window = self.last_passed_round == round
+            && self
+                .last_passed_at
+                .map(|t| {
+                    now.saturating_duration_since(t)
+                        <= Duration::from_secs(VERIFY_INEFFECTIVE_WINDOW_SECS)
+                })
+                .unwrap_or(true);
+        if (within_window || self.ineffective_counted_round != Some(round))
+            && self.ineffective_counted_round != Some(round)
+        {
+            self.ineffective_counted_round = Some(round);
+            self.ineffective_strikes = self.ineffective_strikes.saturating_add(1);
+            self.last_passed_at = None;
+        }
+        if self.ineffective_strikes <= 1 {
+            IneffectiveClearanceDecision::SelfHealAndReverify
+        } else {
+            let cooldown_ms = self.record_ineffective_clearance(round, now);
+            IneffectiveClearanceDecision::TripBreaker { cooldown_ms }
+        }
+    }
+
+    pub fn prepare_for_self_heal_reverify(&mut self) {
+        self.consecutive_failures = 0;
+        self.failure_counted_round = None;
+        self.cooldown_until = None;
+        self.cooldown_is_ineffective = false;
+        self.silent_backoff_until = None;
+        self.last_passed_at = None;
+    }
+
+    /// Immediate circuit breaker helper: enters 60s ineffective-clearance cooldown immediately.
     pub fn record_ineffective_clearance(&mut self, round: u64, now: Instant) -> u64 {
         let within_window = self.last_passed_round == round
             && self
@@ -855,6 +1023,8 @@ impl VerifyCoordinator {
         if within_window || self.failure_counted_round != Some(round) {
             self.failure_counted_round = Some(round);
             self.consecutive_failures = VERIFY_MAX_FAILURES_BEFORE_COOLDOWN;
+            self.ineffective_strikes = self.ineffective_strikes.max(2);
+            self.ineffective_counted_round = Some(round);
             self.cooldown_until = Some(now + Duration::from_secs(VERIFY_INEFFECTIVE_COOLDOWN_SECS));
             self.cooldown_is_ineffective = true;
             // Invalidate recent-pass coalescing so subsequent requests immediately observe the breaker.
@@ -866,15 +1036,39 @@ impl VerifyCoordinator {
             .unwrap_or(0)
     }
 
+    /// Guards against WAF read/write asymmetry: while ANY write challenge (foreground or background)
+    /// remains unresolved, an ordinary `GET 200` MUST NOT wipe `ineffective_strikes` or the 60s circuit breaker!
+    pub fn note_healthy_response(&mut self, is_write: bool, has_unresolved_bg_writes: bool) {
+        if !is_write && (self.unresolved_write_challenge || has_unresolved_bg_writes) {
+            return;
+        }
+        if is_write {
+            self.unresolved_write_challenge = false;
+        }
+        if !has_unresolved_bg_writes {
+            self.reset_on_healthy_response();
+        }
+    }
+
     pub fn reset_on_healthy_response(&mut self) {
         self.consecutive_failures = 0;
         self.failure_counted_round = None;
+        self.ineffective_strikes = 0;
+        self.ineffective_counted_round = None;
         self.cooldown_until = None;
         self.cooldown_is_ineffective = false;
         self.silent_backoff_until = None;
     }
 
+    pub fn reset_on_network_change(&mut self) {
+        self.unresolved_write_challenge = false;
+        self.clear_user_dismiss();
+        self.reset_on_healthy_response();
+    }
+
     pub fn reset_on_session_change(&mut self) {
+        self.unresolved_write_challenge = false;
+        self.clear_user_dismiss();
         self.reset_on_healthy_response();
         self.last_passed_at = None;
     }
@@ -884,6 +1078,7 @@ impl VerifyCoordinator {
             active: self.active.is_some(),
             round: self.round,
             consecutive_failures: self.consecutive_failures,
+            ineffective_strikes: self.ineffective_strikes,
             cooldown_remain_ms: self
                 .cooldown_until
                 .and_then(|u| u.checked_duration_since(now))
@@ -895,6 +1090,12 @@ impl VerifyCoordinator {
                 .and_then(|u| u.checked_duration_since(now))
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
+            user_dismissed_remain_ms: self
+                .user_dismissed_until
+                .and_then(|u| u.checked_duration_since(now))
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            unresolved_write_challenge: self.unresolved_write_challenge,
             last_passed_age_secs: self
                 .last_passed_at
                 .map(|t| now.saturating_duration_since(t).as_secs()),
@@ -1916,5 +2117,222 @@ mod tests {
         assert!(!snap2.active);
         assert_eq!(snap2.consecutive_failures, 0);
         assert_eq!(snap2.cooldown_remain_ms, 0);
+    }
+
+    #[test]
+    fn ineffective_clearance_closed_loop_self_heals_once_and_blocks_get_200_whitewash() {
+        let t0 = Instant::now();
+        let coord = Arc::new(StdMutex::new(VerifyCoordinator::default()));
+
+        // Round 1 passes initial verification
+        let (r1, p1) = match coord.lock().unwrap().join_or_start_with_context(
+            VerifyPresentation::Blocking,
+            t0,
+            false,
+            true,
+            "net_sig_v1",
+        ) {
+            VerifyJoin::Leader {
+                round,
+                presentation,
+                ..
+            } => (round, presentation),
+            _ => panic!("expected round 1 leader"),
+        };
+        let out1 = VerifyFlightGuard::new(Arc::clone(&coord), r1, p1)
+            .complete(true, t0 + Duration::from_secs(1));
+        assert!(out1.passed);
+
+        // 1st ineffective replay on a write MUST trigger clean-room SelfHealAndReverify (not 60s breaker yet)
+        let dec1 = coord.lock().unwrap().record_ineffective_clearance_step(
+            r1,
+            true,
+            t0 + Duration::from_secs(2),
+        );
+        assert_eq!(dec1, IneffectiveClearanceDecision::SelfHealAndReverify);
+        let snap_after_1st = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(2));
+        assert_eq!(snap_after_1st.ineffective_strikes, 1);
+        assert_eq!(snap_after_1st.cooldown_remain_ms, 0);
+        assert!(snap_after_1st.unresolved_write_challenge);
+
+        // Ordinary GET 200 MUST NOT clear `ineffective_strikes` while unresolved write challenge exists!
+        coord.lock().unwrap().note_healthy_response(false, false);
+        let snap_after_get = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(3));
+        assert_eq!(snap_after_get.ineffective_strikes, 1);
+        assert!(snap_after_get.unresolved_write_challenge);
+
+        // Clean-room self-heal prepares coordinator and runs Round 2 re-verification
+        coord.lock().unwrap().prepare_for_self_heal_reverify();
+        let (r2, p2) = match coord.lock().unwrap().join_or_start_with_context(
+            VerifyPresentation::Blocking,
+            t0 + Duration::from_secs(4),
+            true,
+            true,
+            "net_sig_v1_healed",
+        ) {
+            VerifyJoin::Leader {
+                round,
+                presentation,
+                ..
+            } => (round, presentation),
+            _ => panic!("expected round 2 leader after self-heal"),
+        };
+        let out2 = VerifyFlightGuard::new(Arc::clone(&coord), r2, p2)
+            .complete(true, t0 + Duration::from_secs(5));
+        assert!(out2.passed);
+
+        // 2nd consecutive ineffective replay MUST trip the 60s circuit breaker!
+        let dec2 = coord.lock().unwrap().record_ineffective_clearance_step(
+            r2,
+            true,
+            t0 + Duration::from_secs(6),
+        );
+        match dec2 {
+            IneffectiveClearanceDecision::TripBreaker { cooldown_ms } => {
+                assert!(cooldown_ms >= 59_000, "expected ~60s breaker, got {cooldown_ms}ms");
+            }
+            other => panic!("expected TripBreaker on 2nd strike, got {other:?}"),
+        }
+
+        // Another ordinary GET 200 during the breaker MUST NOT clear the 60s write breaker!
+        coord.lock().unwrap().note_healthy_response(false, false);
+        let snap_breaker = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(10));
+        assert!(snap_breaker.cooldown_is_ineffective);
+        assert!(snap_breaker.cooldown_remain_ms >= 55_000);
+        assert!(snap_breaker.unresolved_write_challenge);
+
+        // A genuine healthy write 2xx clears the unresolved write challenge and breaker cleanly
+        coord.lock().unwrap().note_healthy_response(true, false);
+        let snap_healed = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(11));
+        assert!(!snap_healed.unresolved_write_challenge);
+        assert_eq!(snap_healed.ineffective_strikes, 0);
+        assert_eq!(snap_healed.cooldown_remain_ms, 0);
+    }
+
+    #[test]
+    fn user_dismiss_180s_snooze_clears_on_network_switch_and_allows_writes_and_manual() {
+        let t0 = Instant::now();
+        let coord = Arc::new(StdMutex::new(VerifyCoordinator::default()));
+
+        coord.lock().unwrap().record_user_dismiss("wifi_office", t0);
+        assert!(
+            coord
+                .lock()
+                .unwrap()
+                .is_user_dismiss_snoozed("wifi_office", t0 + Duration::from_secs(30))
+                .unwrap_or(0)
+                >= 149_000
+        );
+
+        // Proactive background escalation and non-bypassed reads stay snoozed during 180s window
+        assert!(matches!(
+            coord.lock().unwrap().join_or_start_with_context(
+                VerifyPresentation::Proactive,
+                t0 + Duration::from_secs(30),
+                false,
+                false,
+                "wifi_office",
+            ),
+            VerifyJoin::BlockedByCooldown {
+                ineffective: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            coord.lock().unwrap().join_or_start_with_context(
+                VerifyPresentation::Blocking,
+                t0 + Duration::from_secs(31),
+                false,
+                false,
+                "wifi_office",
+            ),
+            VerifyJoin::BlockedByCooldown {
+                ineffective: false,
+                ..
+            }
+        ));
+
+        // Active foreground write (`bypass_user_dismiss = true`) bypasses snooze so user submission is never silently lost
+        let (rw, pw) = match coord.lock().unwrap().join_or_start_with_context(
+            VerifyPresentation::Blocking,
+            t0 + Duration::from_secs(32),
+            false,
+            true,
+            "wifi_office",
+        ) {
+            VerifyJoin::Leader {
+                round,
+                presentation,
+                ..
+            } => (round, presentation),
+            _ => panic!("foreground write must bypass user-dismiss snooze"),
+        };
+        let _ = VerifyFlightGuard::new(Arc::clone(&coord), rw, pw)
+            .abandon(t0 + Duration::from_secs(33));
+
+        // Manual verify click (`VerifyPresentation::Manual`) also bypasses snooze anytime
+        let (rm, pm) = match coord.lock().unwrap().join_or_start_with_context(
+            VerifyPresentation::Manual,
+            t0 + Duration::from_secs(34),
+            false,
+            false,
+            "wifi_office",
+        ) {
+            VerifyJoin::Leader {
+                round,
+                presentation,
+                ..
+            } => (round, presentation),
+            _ => panic!("manual verify click must bypass user-dismiss snooze"),
+        };
+        let _ = VerifyFlightGuard::new(Arc::clone(&coord), rm, pm)
+            .abandon(t0 + Duration::from_secs(35));
+
+        // Switching network route (`"hotspot_5g" != "wifi_office"`) automatically clears the 180s snooze!
+        assert!(coord
+            .lock()
+            .unwrap()
+            .is_user_dismiss_snoozed("hotspot_5g", t0 + Duration::from_secs(40))
+            .is_none());
+        let (rp, pp) = match coord.lock().unwrap().join_or_start_with_context(
+            VerifyPresentation::Proactive,
+            t0 + Duration::from_secs(40),
+            false,
+            false,
+            "hotspot_5g",
+        ) {
+            VerifyJoin::Leader {
+                round,
+                presentation,
+                ..
+            } => (round, presentation),
+            _ => panic!("proactive check must run immediately after network switch"),
+        };
+        let _ = VerifyFlightGuard::new(Arc::clone(&coord), rp, pp)
+            .abandon(t0 + Duration::from_secs(41));
+    }
+
+    #[test]
+    fn proactive_presentation_and_cold_background_write_immediate_escalation() {
+        assert!(VerifyPresentation::Silent < VerifyPresentation::Pill);
+        assert!(VerifyPresentation::Pill < VerifyPresentation::Proactive);
+        assert!(VerifyPresentation::Proactive < VerifyPresentation::Blocking);
+        assert!(VerifyPresentation::Blocking < VerifyPresentation::Manual);
+        assert!(!VerifyPresentation::Proactive.allows_pill_ui());
+        assert!(!VerifyPresentation::Proactive.allows_panel_ui());
+
+        let t0 = Instant::now();
+        let mut cold_tr = BackgroundChallengeTracker::default();
+        // When no healthy incumbent clearance exists, 1st background write challenge escalates immediately
+        assert!(cold_tr.note_background_challenge_with_health(true, false, t0));
+
+        let mut warm_tr = BackgroundChallengeTracker::default();
+        // When a healthy incumbent exists, 1st transient background write stays quiet, 2nd escalates
+        assert!(!warm_tr.note_background_challenge_with_health(true, true, t0));
+        assert!(warm_tr.note_background_challenge_with_health(
+            true,
+            true,
+            t0 + Duration::from_secs(3)
+        ));
     }
 }

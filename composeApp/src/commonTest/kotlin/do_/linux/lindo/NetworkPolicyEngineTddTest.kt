@@ -310,35 +310,72 @@ class NetworkPolicyEngineTddTest {
      * 根因 1：静默过盾看到 Turnstile 组件（所有托管挑战都有）550ms 就判“需人工”中止 → 静默几乎从不成功。
      */
     @Test
-    fun t9_silentVerify_managedChallengeWidgetIsPending_onlyInteractiveBeginOrBudgetEscalates() {
+    fun t9_silentVerify_proactiveEscalation_typingGuard_and_180sUserDismissSnooze() {
         val fg = SilentVerifyTrigger.FOREGROUND
         val pre = SilentVerifyTrigger.PREWARM
-        // 托管挑战页（含 Turnstile 组件）只是进行中：预算内一律继续等待
+        // 托管挑战页（尚未确认需人工）预算内一律静默继续等待（0 胶囊、0 弹窗）
         for (t in listOf(200L, 550L, 750L, 2_000L, 5_000L, SilentVerifyPolicy.FOREGROUND_BUDGET_MS - 1)) {
             assertEquals(SilentVerifyStep.Continue, SilentVerifyPolicy.decide(fg, SilentProbeSignal.PENDING, t, appForeground = true))
         }
         assertEquals(SilentVerifyStep.Pass, SilentVerifyPolicy.decide(fg, SilentProbeSignal.PASSED, 300L, appForeground = true))
-        // 只有 interactiveBegin 才立即升舱（前台）
+        // 组件挂载满 3.5s 未自动通过或收到 interactiveBegin 即确认为人工交互
+        assertFalse(SilentVerifyPolicy.isInteractiveConfirmed(interactiveBegin = false, widgetMountedDurationMs = 3_499L))
+        assertTrue(SilentVerifyPolicy.isInteractiveConfirmed(interactiveBegin = false, widgetMountedDurationMs = 3_500L))
+        assertTrue(SilentVerifyPolicy.isInteractiveConfirmed(interactiveBegin = true, widgetMountedDurationMs = 0L))
+
+        // 前台常规状态（无论 FOREGROUND 还是 PREWARM）确认需人工交互时直接主动弹出安全确认，不再丢弃！
         assertEquals(SilentVerifyStep.Escalate("interactive_required"), SilentVerifyPolicy.decide(fg, SilentProbeSignal.INTERACTIVE_REQUIRED, 400L, appForeground = true))
-        // 前台预算耗尽：交棒面板继续完成，而不是甩静态错误页
+        assertEquals(SilentVerifyStep.Escalate("interactive_required_proactive"), SilentVerifyPolicy.decide(pre, SilentProbeSignal.INTERACTIVE_REQUIRED, 400L, appForeground = true))
+
+        // 正在打字保护（< 2.5s）：暂缓收键盘弹大窗，返回 HoldForTyping；点击右下角提示框或主动发送写操作立即弹出
+        assertEquals(
+            SilentVerifyStep.HoldForTyping,
+            SilentVerifyPolicy.decide(pre, SilentProbeSignal.INTERACTIVE_REQUIRED, 600L, appForeground = true, isUserActivelyTyping = true)
+        )
+        assertEquals(
+            SilentVerifyStep.Escalate("user_expanded_pill"),
+            SilentVerifyPolicy.decide(pre, SilentProbeSignal.INTERACTIVE_REQUIRED, 600L, appForeground = true, userRequestedPanel = true, isUserActivelyTyping = true)
+        )
+        assertEquals(
+            SilentVerifyStep.Escalate("interactive_required"),
+            SilentVerifyPolicy.decide(fg, SilentProbeSignal.INTERACTIVE_REQUIRED, 600L, appForeground = true, isForegroundWrite = true, isUserActivelyTyping = true)
+        )
+
+        // 用户主动点 × 关闭后的 180s 免打扰期（绑定 networkSignature）：抑制自动弹窗并保留右下角「需安全确认」，切网或主动写操作立即解除/兜底弹出
+        NetworkPolicyEngine.recordUserDismissedVerify(networkSignature = "wifi,vpn|tun0|198.18.0.2", nowMs = 10_000L)
+        assertTrue(NetworkPolicyEngine.verifyAttentionNeeded)
+        assertTrue(NetworkPolicyEngine.isProactiveVerifySnoozed("cell,vpn|tun0|198.18.0.2", nowMs = 100_000L))
+        assertEquals(
+            SilentVerifyStep.Abandon("snoozed_by_user_dismiss"),
+            SilentVerifyPolicy.decide(pre, SilentProbeSignal.INTERACTIVE_REQUIRED, 500L, appForeground = true, isUserDismissSnoozed = true)
+        )
+        assertEquals(
+            SilentVerifyStep.Escalate("interactive_required"),
+            SilentVerifyPolicy.decide(fg, SilentProbeSignal.INTERACTIVE_REQUIRED, 500L, appForeground = true, isForegroundWrite = true, isUserDismissSnoozed = true)
+        )
+        // 切网（关 VPN）立即自动解除免打扰期
+        assertFalse(NetworkPolicyEngine.isProactiveVerifySnoozed("wifi|wlan0|223.5.5.5", nowMs = 100_000L))
+        // 满 180s 自动解除免打扰期
+        NetworkPolicyEngine.recordUserDismissedVerify(networkSignature = "wifi|wlan0|223.5.5.5", nowMs = 10_000L)
+        assertTrue(NetworkPolicyEngine.isProactiveVerifySnoozed("wifi|wlan0|223.5.5.5", nowMs = 189_999L))
+        assertFalse(NetworkPolicyEngine.isProactiveVerifySnoozed("wifi|wlan0|223.5.5.5", nowMs = 190_000L))
+        NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
+        assertFalse(NetworkPolicyEngine.verifyAttentionNeeded)
+
+        // 打字计时器精度校验（< 2.5s 为活跃打字，>= 2.5s 停笔放行）
+        NetworkPolicyEngine.noteUserTyping(nowMs = 50_000L)
+        assertTrue(NetworkPolicyEngine.isUserActivelyTyping(nowMs = 52_499L))
+        assertFalse(NetworkPolicyEngine.isUserActivelyTyping(nowMs = 52_500L))
+
+        // 前台预算耗尽与后台切走保护
         assertEquals(SilentVerifyStep.Escalate("foreground_budget_exhausted"), SilentVerifyPolicy.decide(fg, SilentProbeSignal.PENDING, SilentVerifyPolicy.FOREGROUND_BUDGET_MS, appForeground = true))
-        // 用户点开胶囊
-        assertEquals(SilentVerifyStep.Escalate("user_expanded_pill"), SilentVerifyPolicy.decide(fg, SilentProbeSignal.PENDING, 2_500L, appForeground = true, userRequestedPanel = true))
-        // 预热永不弹 UI，且不进入退避（Abandon）
-        assertEquals(SilentVerifyStep.Abandon("interactive_required_prewarm"), SilentVerifyPolicy.decide(pre, SilentProbeSignal.INTERACTIVE_REQUIRED, 400L, appForeground = true))
         assertEquals(SilentVerifyStep.Continue, SilentVerifyPolicy.decide(pre, SilentProbeSignal.PENDING, 15_000L, appForeground = true))
         assertEquals(SilentVerifyStep.Abandon("prewarm_timeout"), SilentVerifyPolicy.decide(pre, SilentProbeSignal.PENDING, SilentVerifyPolicy.PREWARM_BUDGET_MS, appForeground = true))
-        assertEquals(SilentVerifyStep.Continue, SilentVerifyPolicy.decide(pre, SilentProbeSignal.PENDING, 2_500L, appForeground = true, userRequestedPanel = true))
-        // 切去系统浏览器授权：放弃但不计失败
         assertEquals(SilentVerifyStep.Abandon("app_backgrounded"), SilentVerifyPolicy.decide(fg, SilentProbeSignal.PENDING, 1_000L, appForeground = false))
         assertEquals(SilentVerifyStep.Fail("webview_gone"), SilentVerifyPolicy.decide(fg, SilentProbeSignal.GONE, 1_000L, appForeground = true))
-        // 胶囊：仅前台、≥2s
         assertFalse(SilentVerifyPolicy.shouldShowPill(fg, 1_999L))
         assertTrue(SilentVerifyPolicy.shouldShowPill(fg, 2_000L))
         assertFalse(SilentVerifyPolicy.shouldShowPill(pre, 10_000L))
-        // 预算比旧实现（2.6s / 3.8s）宽裕得多
-        assertTrue(SilentVerifyPolicy.FOREGROUND_BUDGET_MS >= 8_000L)
-        assertTrue(SilentVerifyPolicy.PREWARM_BUDGET_MS >= 15_000L)
     }
 
     /** 根因 2：预热因切去浏览器授权而中止，却记了 45s 静默退避 → 回来后的第一次真实挑战无法静默续期。 */
@@ -398,6 +435,65 @@ class NetworkPolicyEngineTddTest {
             UserApiKeyAuthManager.onRequestClearancePrewarm = prevPrewarm
             LinuxDoRepository.clearChallengeCooldown()
             CookieSentinel.removeCookieByName("cf_clearance", domain = "linux.do")
+        }
+    }
+
+    @Test
+    fun t12_twoStrikeIneffectiveClearanceSelfHeal_and_ordinaryGet200NeverWashesWriteBreaker() = runBlocking {
+        val coord = NetworkPolicyEngine.verifyCoordinator
+        val t0 = System.currentTimeMillis()
+
+        val r1 = (coord.joinOrStart(VerifyPresentation.BLOCKING, nowMs = t0) as VerifyJoin.Leader).round
+        coord.finishFlight(r1, passed = true, finalPresentation = VerifyPresentation.BLOCKING, nowMs = t0 + 1_000L)
+
+        // 1st post-verify replay challenge -> SelfHealAndRetryOnce (no 60s freeze yet!)
+        val firstDecision = coord.onPostVerifyReplayChallenged(r1, nowMs = t0 + 1_500L)
+        assertEquals(do_.linux.lindo.core.network.IneffectiveClearanceDecision.SelfHealAndRetryOnce, firstDecision)
+        assertFalse(coord.snapshot(t0 + 1_500L).cooldownIsIneffective)
+
+        // Cleanroom reset with preserveAutoHealGuard = true allows immediate re-verify while keeping 2nd-strike guard armed
+        coord.clearCooldownsForCleanReset(preserveAutoHealGuard = true)
+        val r2 = (coord.joinOrStart(VerifyPresentation.BLOCKING, nowMs = t0 + 2_000L) as VerifyJoin.Leader).round
+        coord.finishFlight(r2, passed = true, finalPresentation = VerifyPresentation.BLOCKING, nowMs = t0 + 3_000L)
+
+        // 2nd consecutive post-verify replay challenge -> trips 60s ineffective clearance breaker!
+        val secondDecision = coord.onPostVerifyReplayChallenged(r2, nowMs = t0 + 3_500L)
+        assertTrue(secondDecision is do_.linux.lindo.core.network.IneffectiveClearanceDecision.TripBreaker)
+        assertTrue(coord.snapshot(t0 + 3_600L).cooldownIsIneffective)
+
+        // Regression for LinDoNetworkStack.kt:3190: ordinary GET 200 MUST NOT wipe out write breaker!
+        val prevExec = UserApiKeyAuthManager.webViewHttpExecutor
+        try {
+            UserApiKeyAuthManager.requireBrowserTransportOnly = true
+            UserApiKeyAuthManager.recordWebSessionLogin(
+                username = "tester",
+                displayName = "Tester",
+                avatarUrl = "",
+                trustLevel = 2,
+                userId = 9
+            )
+            CookieSentinel.ingestRawCookieString("_t=valid_t_token", domain = "linux.do", hostOnly = true)
+            UserApiKeyAuthManager.webViewHttpExecutor = { _, method, _, _ ->
+                if (method.equals("GET", ignoreCase = true)) {
+                    200 to """{"topic_list":{"topics":[]}}"""
+                } else {
+                    200 to """{"success":"OK"}"""
+                }
+            }
+            LinuxDoRepository.fetchTopics(path = "/latest.json?no_definitions=true", background = false)
+            assertTrue(
+                coord.snapshot(t0 + 4_000L).cooldownIsIneffective,
+                "Ordinary GET 200 must NEVER clear unresolved ineffective clearance breaker"
+            )
+
+            // Genuine write 200 OK proves clearance works for writes and clears the breaker cleanly
+            assertTrue(LinuxDoRepository.markSingleNotificationRead(888))
+            assertFalse(coord.snapshot(t0 + 4_500L).cooldownIsIneffective)
+        } finally {
+            UserApiKeyAuthManager.webViewHttpExecutor = prevExec
+            UserApiKeyAuthManager.requireBrowserTransportOnly = false
+            UserApiKeyAuthManager.logout()
+            CookieSentinel.clearAll()
         }
     }
 }

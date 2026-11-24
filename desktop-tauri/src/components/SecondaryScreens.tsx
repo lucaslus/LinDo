@@ -3699,13 +3699,13 @@ export const ProfileSettingsView: React.FC<{
                     ? "直连优先"
                     : normalizedEchMode === "system_default"
                       ? "系统默认"
-                      : "智能模式";
+                      : "智能推荐";
                 const echModeDesc =
                   normalizedEchMode === "ech_priority"
-                    ? "优先使用内置 DoH + TLS 1.3 ECH 直连绕过系统代理；若遇到全局 TUN 接管默认路由则自动安全回退至 VPN 通道。"
+                    ? "优先使用内置 DoH + TLS 1.3 ECH 直连绕过系统代理；若遇到全局 TUN 接管默认路由则自动安全回退至 VPN 通道。切换后立即生效，无需重启应用。"
                     : normalizedEchMode === "system_default"
-                      ? "完全关闭内置 ECH 网关，所有请求交由操作系统默认网络或代理处理。"
-                      : "未开代理/VPN 时自动启用原生 DoH + TLS 1.3 ECH 直连；检测到系统代理或 VPN 时自动无缝让行代理通道，零冲突免手动切换。";
+                      ? "完全关闭内置 ECH 网关，所有请求交由操作系统默认网络或代理处理。切换后立即生效，无需重启应用。"
+                      : "未开代理/VPN 时自动启用原生 DoH + TLS 1.3 ECH 直连；检测到系统代理或 VPN 时自动无缝让行代理通道，切换后立即生效，无需重启应用。";
                 return (
                   <ExpandableSetting
                     icon={<LinDoIcons.Globe size={19} />}
@@ -3720,7 +3720,7 @@ export const ProfileSettingsView: React.FC<{
                   >
                     <SettingsSegmentedChoices
                       options={[
-                        { key: "smart_auto" as const, label: "智能模式（推荐）" },
+                        { key: "smart_auto" as const, label: "智能推荐" },
                         { key: "ech_priority" as const, label: "直连优先" },
                         { key: "system_default" as const, label: "系统默认" },
                       ]}

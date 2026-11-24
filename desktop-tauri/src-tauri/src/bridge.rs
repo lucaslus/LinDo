@@ -6,9 +6,10 @@ use crate::net_policy::{
     compute_bridge_timeouts, is_logout_exempt_from_session_recovery, is_transient_retryable_status,
     parse_retry_after_secs, should_trigger_near_expiry_silent_refresh, transient_backoff_ms,
     AdaptiveTokenBucket, AttemptBudget, BackgroundChallengeTracker, BridgeTimeoutSpec,
-    CallDeadline, Cf429AdaptiveClassifier, Cf429Decision, CfClearanceAuthority, PriorityGate,
-    RequestPriority, VerifyCoordinator, VerifyFlightGuard, VerifyJoin, VerifyOutcome,
-    VerifyPresentation, VerifyTicketOutcome, VERIFY_PILL_DELAY_MS,
+    CallDeadline, Cf429AdaptiveClassifier, Cf429Decision, CfClearanceAuthority,
+    IneffectiveClearanceDecision, PriorityGate, RequestPriority, VerifyCoordinator,
+    VerifyFlightGuard, VerifyJoin, VerifyOutcome, VerifyPresentation, VerifyTicketOutcome,
+    VERIFY_PILL_DELAY_MS, VERIFY_PROACTIVE_WIDGET_PROMOTE_MS, VERIFY_TYPING_QUIET_GUARD_MS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,7 +23,7 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 #[cfg(target_os = "macos")]
 use tokio::sync::oneshot;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
@@ -37,6 +38,16 @@ enum UnifiedVerifyDisposition {
     Passed,
     Failed,
     Abandoned,
+    UserDismissed,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiActivityEventPayload {
+    pub composer_open: Option<bool>,
+    pub typing_active: Option<bool>,
+    pub ime_composing: Option<bool>,
+    pub window_visible: Option<bool>,
 }
 
 /// Standalone, VM-testable Desktop WebView HTTP bridge script template (`__LINDO_CFG_JSON__` placeholder).
@@ -655,6 +666,7 @@ pub struct BridgeEngine {
     bootstrap_lock: Mutex<()>,
     cookie_lock: Mutex<()>,
     verify_lock: Mutex<()>,
+    self_heal_lock: Mutex<()>,
     account_lock: RwLock<()>,
     nav_lock: RwLock<()>,
     priority_gate: PriorityGate,
@@ -908,6 +920,12 @@ struct BridgeRuntime {
     initialized: bool,
     origin_ready: bool,
     bootstrap_challenged: bool,
+    pending_interactive_challenge: bool,
+    last_self_healed_round: u64,
+    ui_composer_open: bool,
+    ui_ime_composing: bool,
+    ui_last_typing_at_ms: u64,
+    ui_document_visible: bool,
     bridge_ua: String,
     last_seeded_token: String,
     last_challenge_url: Option<String>,
@@ -951,6 +969,7 @@ impl BridgeEngine {
             bootstrap_lock: Mutex::new(()),
             cookie_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
+            self_heal_lock: Mutex::new(()),
             account_lock: RwLock::new(()),
             nav_lock: RwLock::new(()),
             priority_gate: PriorityGate::new(3, 1),
@@ -968,6 +987,12 @@ impl BridgeEngine {
                 initialized: false,
                 origin_ready: false,
                 bootstrap_challenged: false,
+                pending_interactive_challenge: false,
+                last_self_healed_round: 0,
+                ui_composer_open: false,
+                ui_ime_composing: false,
+                ui_last_typing_at_ms: 0,
+                ui_document_visible: true,
                 bridge_ua: saved_ua,
                 last_seeded_token: "__unseeded__".to_string(),
                 last_challenge_url: None,
@@ -1001,9 +1026,20 @@ impl BridgeEngine {
         let eng = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             let _ = eng.ensure_ready(false).await;
+            let cold_challenged = eng
+                .inner
+                .lock()
+                .map(|rt| rt.bootstrap_challenged && !rt.verifying)
+                .unwrap_or(false);
+            if cold_challenged {
+                if let Some(app) = GLOBAL_APP_HANDLE.get().cloned() {
+                    let _ = eng.trigger_proactive_cf_check(&app, "cold_start").await;
+                }
+            }
 
-            // Zero-resident idle near-expiry silent refresh: wake every 15m; ONLY if incumbent age >= 10.5h
-            // and app is idle (`active_fg_requests == 0 && !verifying`), silently refresh once with 0 UI.
+            // Idle near-expiry proactive refresh: wake every 15m; ONLY if incumbent age >= 10.5h
+            // and app is idle (`active_fg_requests == 0 && !verifying`), precheck silently first (0 UI if auto-passed)
+            // and promote to panel ONLY when human interaction is genuinely required & guards allow.
             loop {
                 tokio::time::sleep(Duration::from_secs(15 * 60)).await;
                 let age_secs = eng
@@ -1015,10 +1051,7 @@ impl BridgeEngine {
                 let is_verifying = eng.inner.lock().map(|rt| rt.verifying).unwrap_or(true);
                 if should_trigger_near_expiry_silent_refresh(age_secs, active_fg, is_verifying) {
                     if let Some(app) = GLOBAL_APP_HANDLE.get().cloned() {
-                        let is_dark = eng.current_is_dark();
-                        let _ = eng
-                            .coordinate_cf_verification(&app, VerifyPresentation::Silent, is_dark, false)
-                            .await;
+                        let _ = eng.trigger_proactive_cf_check(&app, "near_expiry").await;
                     }
                 }
             }
@@ -1046,6 +1079,7 @@ impl BridgeEngine {
                             .clone();
                         let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
                         crate::ech_desktop::notify_network_route_changed();
+                        crate::ech_desktop::rotate_sticky_ip();
                         let _ = crate::ech_desktop::reconcile_with_mode(mode);
                     }
                 }
@@ -1053,7 +1087,7 @@ impl BridgeEngine {
         });
     }
 
-    fn reset_network_route_state(&self) {
+    fn reset_network_route_state(&self, reset_cf_incumbent: bool) {
         {
             let mut rt = self.inner.lock().unwrap();
             rt.rate_limit_until = None;
@@ -1061,21 +1095,34 @@ impl BridgeEngine {
             rt.bg_challenge_until = None;
             rt.media_cooldown_until = None;
             rt.challenge_429_streak = 0;
+            rt.pending_interactive_challenge = false;
         }
-        self.verify_coord.lock().unwrap().reset_on_healthy_response();
+        self.verify_coord.lock().unwrap().reset_on_network_change();
         self.cf_429_classifier.lock().unwrap().reset();
         self.bg_challenge_tracker.lock().unwrap().reset();
         {
             let mut auth = self.cf_authority.lock().unwrap();
-            auth.updated_at_ms = 0;
-            auth.last_challenged = None;
+            if reset_cf_incumbent {
+                auth.reset();
+            } else {
+                auth.mark_rotation_open();
+            }
         }
     }
 
-    /// 切网 / VPN / 系统代理切换实时自愈（由 macOS NWPathMonitor 或 Windows 代理监听驱动）：
-    /// 立即清空过时的限流/挑战冷却，解除死连接并放开 `cf_clearance` 平滑轮换窗口（绝不拉黑票据）。
-    pub async fn on_network_changed(&self, app: &AppHandle, signature: &str) {
-        let prev_ech_active = crate::ech_desktop::current_snapshot().active;
+    /// Clean-room network & verification self-heal (100% preserving `_t` / `_forum_session` login state):
+    /// 1. Purges stale `cf_clearance` / `__cf_bm` / `_cfuvid` from WebView & persisted cookies and resets `CfClearanceAuthority`.
+    /// 2. Notifies ECH gateway of route change (clears `h2_pool`), rotates `sticky_ip`, and reconciles WebKit/WebView2 proxy mode.
+    /// 3. Resets transient rate-limit / CSRF / background challenge state.
+    pub(crate) async fn perform_clean_network_and_verify_reset(
+        &self,
+        app: &AppHandle,
+        reason: &str,
+        preserve_ineffective_strikes: bool,
+    ) {
+        let _ = self.purge_cf_clearance_for_reverify().await;
+        self.cf_authority.lock().unwrap().reset();
+
         let mode_pref = self
             .state
             .lock()
@@ -1085,12 +1132,67 @@ impl BridgeEngine {
             .clone();
         let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
         crate::ech_desktop::notify_network_route_changed();
+        crate::ech_desktop::rotate_sticky_ip();
         let ech_snap = crate::ech_desktop::reconcile_with_mode(mode);
         crate::ech_desktop::notify_ui_ech_updated(app, &ech_snap);
-        if prev_ech_active != ech_snap.active {
+
+        {
+            let mut rt = self.inner.lock().unwrap();
+            rt.rate_limit_until = None;
+            rt.fg_challenge_until = None;
+            rt.bg_challenge_until = None;
+            rt.media_cooldown_until = None;
+            rt.challenge_429_streak = 0;
+        }
+        self.cf_429_classifier.lock().unwrap().reset();
+        self.bg_challenge_tracker.lock().unwrap().reset();
+        {
+            let mut coord = self.verify_coord.lock().unwrap();
+            if preserve_ineffective_strikes {
+                coord.prepare_for_self_heal_reverify();
+            } else {
+                coord.reset_on_network_change();
+            }
+        }
+        let _ = native_call(
+            "evaluate",
+            json!({
+                "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; window.__lindoCsrfCooldownUntil = 0; return true; })()"
+            }),
+            3,
+        )
+        .await;
+        emit_diag(
+            app,
+            "INFO",
+            "NET",
+            "NetSelfHeal",
+            "已执行净室网络通道自愈重置（保留登录态，清理旧验证票据并刷新边缘路由）",
+            Some(&format!("reason={reason} | {}", ech_snap.diag_line)),
+        );
+    }
+
+    /// 切网 / VPN / 系统代理切换实时自愈（由 macOS NWPathMonitor 或 Windows 代理监听驱动）：
+    /// 立即清空过时的限流/挑战冷却与 180s 免打扰期，清理死连接并同步 ECH 路由。
+    pub async fn on_network_changed(&self, app: &AppHandle, signature: &str) {
+        let prev_snap = crate::ech_desktop::current_snapshot();
+        let mode_pref = self
+            .state
+            .lock()
+            .unwrap()
+            .preferences
+            .ech_routing_mode
+            .clone();
+        let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
+        crate::ech_desktop::notify_network_route_changed();
+        crate::ech_desktop::rotate_sticky_ip();
+        let ech_snap = crate::ech_desktop::reconcile_with_mode(mode);
+        crate::ech_desktop::notify_ui_ech_updated(app, &ech_snap);
+        let route_flipped = prev_snap.active != ech_snap.active;
+        if route_flipped {
             let _ = self.purge_cf_clearance_for_reverify().await;
         }
-        self.reset_network_route_state();
+        self.reset_network_route_state(route_flipped);
         emit_diag(
             app,
             "INFO",
@@ -1105,16 +1207,19 @@ impl BridgeEngine {
         if idle {
             let _ = native_call(
                 "evaluate",
-                json!({ "script": "(() => { window.__lindoCsrfCooldownUntil = 0; return true; })()" }),
+                json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; window.__lindoCsrfCooldownUntil = 0; return true; })()" }),
                 3,
             )
             .await;
-            let _ = self.ensure_ready(false).await;
+            let _ = self.ensure_ready(true).await;
+            if self.inner.lock().map(|rt| rt.bootstrap_challenged && !rt.verifying).unwrap_or(false) {
+                let _ = self.trigger_proactive_cf_check(app, "network_changed").await;
+            }
         }
     }
 
     pub async fn on_ech_mode_switched(&self, app: &AppHandle) {
-        let prev_ech_active = crate::ech_desktop::current_snapshot().active;
+        let prev_snap = crate::ech_desktop::current_snapshot();
         let mode_pref = self
             .state
             .lock()
@@ -1123,24 +1228,152 @@ impl BridgeEngine {
             .ech_routing_mode
             .clone();
         let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
+        crate::ech_desktop::notify_network_route_changed();
+        crate::ech_desktop::rotate_sticky_ip();
         let ech_snap = crate::ech_desktop::reconcile_with_mode(mode);
         crate::ech_desktop::notify_ui_ech_updated(app, &ech_snap);
-        if prev_ech_active != ech_snap.active {
+        let exit_changed = prev_snap.active != ech_snap.active
+            || (!prev_snap.sticky_ip.is_empty() && prev_snap.sticky_ip != ech_snap.sticky_ip);
+        if exit_changed {
             let _ = self.purge_cf_clearance_for_reverify().await;
         }
-        self.reset_network_route_state();
+        self.reset_network_route_state(exit_changed);
         emit_diag(
             app,
             "INFO",
             "NET",
             "EchModeSwitched",
-            "网络加速模式已切换，已同步通道路由策略",
+            "网络加速模式已实时生效，已清理连接池并重绑代理通道",
             Some(&ech_snap.diag_line),
         );
         let idle = self.active_fg_requests.load(Ordering::Relaxed) == 0
             && !self.inner.lock().map(|rt| rt.verifying).unwrap_or(true);
         if idle {
-            let _ = self.ensure_ready(false).await;
+            let _ = native_call(
+                "evaluate",
+                json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; window.__lindoCsrfCooldownUntil = 0; return true; })()" }),
+                3,
+            )
+            .await;
+            let _ = self.ensure_ready(true).await;
+            if self.inner.lock().map(|rt| rt.bootstrap_challenged && !rt.verifying).unwrap_or(false) {
+                let _ = self.trigger_proactive_cf_check(app, "ech_mode_switched").await;
+            }
+        }
+    }
+
+    fn is_main_window_visible(&self, app: &AppHandle) -> bool {
+        let doc_vis = self
+            .inner
+            .lock()
+            .map(|rt| rt.ui_document_visible)
+            .unwrap_or(true);
+        let win_vis = app
+            .get_webview_window("main")
+            .map(|w| w.is_visible().unwrap_or(true) && !w.is_minimized().unwrap_or(false))
+            .unwrap_or(true);
+        doc_vis && win_vis
+    }
+
+    fn ui_typing_guard_state(&self, now_ms: u64) -> (bool, bool) {
+        let (composer_open, ime_composing, last_typing_ms) = self
+            .inner
+            .lock()
+            .map(|rt| {
+                (
+                    rt.ui_composer_open,
+                    rt.ui_ime_composing,
+                    rt.ui_last_typing_at_ms,
+                )
+            })
+            .unwrap_or((false, false, 0));
+        let recent_draft_ms = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|st| st.drafts.values().map(|d| d.updated_at.max(0) as u64).max())
+            .unwrap_or(0);
+        let latest_typing_ms = last_typing_ms.max(recent_draft_ms);
+        let actively_typing = ime_composing
+            || (latest_typing_ms > 0
+                && now_ms.saturating_sub(latest_typing_ms) < VERIFY_TYPING_QUIET_GUARD_MS);
+        (composer_open, actively_typing)
+    }
+
+    fn handle_ui_activity_event(&self, app: &AppHandle, payload: UiActivityEventPayload) {
+        let now_ms = now_epoch_ms();
+        let (
+            composer_just_opened,
+            composer_just_closed,
+            window_just_became_visible,
+            has_pending_interactive,
+            already_notified_attention,
+            is_verifying,
+            boot_challenged,
+        ) = {
+            let mut rt = self.inner.lock().unwrap();
+            let prev_composer = rt.ui_composer_open;
+            let prev_visible = rt.ui_document_visible;
+            if let Some(co) = payload.composer_open {
+                rt.ui_composer_open = co;
+            }
+            if let Some(ime) = payload.ime_composing {
+                rt.ui_ime_composing = ime;
+            }
+            if payload.typing_active == Some(true) {
+                rt.ui_last_typing_at_ms = now_ms;
+            }
+            if let Some(vis) = payload.window_visible {
+                rt.ui_document_visible = vis;
+            }
+            (
+                !prev_composer && rt.ui_composer_open,
+                prev_composer && !rt.ui_composer_open,
+                !prev_visible && rt.ui_document_visible,
+                rt.pending_interactive_challenge,
+                rt.cf_attention_notified,
+                rt.verifying,
+                rt.bootstrap_challenged,
+            )
+        };
+
+        if composer_just_opened {
+            if has_pending_interactive || already_notified_attention {
+                self.inner.lock().unwrap().cf_attention_notified = true;
+                let _ = app.emit("lindo://cf-attention-needed", true);
+            } else if !is_verifying {
+                let needs_precheck = boot_challenged
+                    || self
+                        .bg_challenge_tracker
+                        .lock()
+                        .unwrap()
+                        .has_unresolved_write_challenges()
+                    || !self.cf_authority.lock().unwrap().has_healthy_incumbent();
+                if needs_precheck {
+                    if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
+                        let eng_clone = Arc::clone(&eng);
+                        let app_clone = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = eng_clone
+                                .trigger_proactive_cf_check(&app_clone, "composer_open")
+                                .await;
+                        });
+                    }
+                }
+            }
+        } else if (composer_just_closed || window_just_became_visible)
+            && has_pending_interactive
+            && !is_verifying
+        {
+            if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
+                let eng_clone = Arc::clone(&eng);
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = eng_clone
+                        .trigger_proactive_cf_check(&app_clone, "deferred_interactive")
+                        .await;
+                });
+            }
         }
     }
 
@@ -1157,7 +1390,16 @@ impl BridgeEngine {
     }
 
     pub fn bind_app_handle(app: &AppHandle) {
-        let _ = GLOBAL_APP_HANDLE.set(app.clone());
+        if GLOBAL_APP_HANDLE.set(app.clone()).is_ok() {
+            let app_for_evt = app.clone();
+            let _ = app.listen("lindo://ui-activity", move |event| {
+                if let Ok(payload) = serde_json::from_str::<UiActivityEventPayload>(event.payload()) {
+                    if let Some(eng) = app_for_evt.try_state::<Arc<BridgeEngine>>() {
+                        eng.handle_ui_activity_event(&app_for_evt, payload);
+                    }
+                }
+            });
+        }
         #[cfg(target_os = "macos")]
         unsafe {
             lindo_bridge_set_event_callback(on_native_bridge_reply);
@@ -1253,6 +1495,8 @@ impl BridgeEngine {
                     !s.is_empty()
                         && !s.starts_with("cf_clearance=")
                         && !s.starts_with("__cf_bm=")
+                        && !s.starts_with("_cfuvid=")
+                        && !s.starts_with("cf_chl_rc_")
                 })
                 .map(|s| s.to_string())
                 .collect();
@@ -1451,11 +1695,65 @@ impl BridgeEngine {
         }
     }
 
+    /// Proactive Cloudflare precheck for cold-start, near-expiry, route changes, and background challenges:
+    /// - When main window is visible and user is not in `ComposerModal`, runs `VerifyPresentation::Proactive`:
+    ///   0 UI if browser auto-passes; promotes straight to native panel once `native_interactive` or rendered widget >= 3.5s
+    ///   is confirmed (unless in 180s dismiss snooze or typing in `ComposerModal`).
+    /// - When main window is hidden/minimized or user is typing in `ComposerModal`, runs `VerifyPresentation::Silent`
+    ///   so invisible JS still auto-heals with 0 UI while interactive challenges defer focus-stealing and surface PC's existing prompt.
+    pub(crate) async fn trigger_proactive_cf_check(
+        &self,
+        app: &AppHandle,
+        reason: &str,
+    ) -> VerifyOutcome {
+        let visible = self.is_main_window_visible(app);
+        let (composer_open, _) = self.ui_typing_guard_state(now_epoch_ms());
+        let pres = if visible && !composer_open {
+            VerifyPresentation::Proactive
+        } else {
+            VerifyPresentation::Silent
+        };
+        let is_dark = self.current_is_dark();
+        let outcome = self
+            .coordinate_cf_verification_ext(app, pres, is_dark, false, false)
+            .await;
+        if outcome.passed {
+            self.bg_challenge_tracker.lock().unwrap().reset();
+            let mut rt = self.inner.lock().unwrap();
+            rt.pending_interactive_challenge = false;
+            if rt.cf_attention_notified {
+                rt.cf_attention_notified = false;
+                drop(rt);
+                let _ = app.emit("lindo://cf-attention-needed", false);
+            }
+        } else {
+            let should_keep_banner = {
+                let rt = self.inner.lock().unwrap();
+                !rt.verifying
+                    && (rt.cf_attention_notified
+                        || rt.pending_interactive_challenge
+                        || rt.bootstrap_challenged
+                        || self
+                            .bg_challenge_tracker
+                            .lock()
+                            .unwrap()
+                            .has_unresolved_write_challenges()
+                        || (reason != "near_expiry"
+                            && !self.cf_authority.lock().unwrap().has_healthy_incumbent()))
+            };
+            if should_keep_banner {
+                self.inner.lock().unwrap().cf_attention_notified = true;
+                let _ = app.emit("lindo://cf-attention-needed", true);
+            }
+        }
+        outcome
+    }
+
     /// Unified single-flight Cloudflare verification coordinator:
     /// - Coalesces all concurrent callers into ONE active `/challenge` round via `tokio::sync::watch`.
-    /// - Monotonically escalates presentation (`Silent -> Blocking -> Manual`) mid-flight without reloading `/challenge`.
-    /// - Enforces round-deduplicated failure cooldown (3 failed rounds -> 30s) and 60s ineffective-clearance circuit breaker.
-    /// - Explicit `Manual` clicks always bypass auto-cooldowns.
+    /// - Monotonically escalates presentation (`Silent -> Proactive -> Blocking -> Manual`) mid-flight without reloading `/challenge`.
+    /// - Enforces round-deduplicated failure cooldown (3 failed rounds -> 30s), 180s user-dismiss snooze, and 2-step 60s circuit breaker.
+    /// - Explicit `Manual` clicks always bypass auto-cooldowns (and self-heal dirty channels when needed).
     pub async fn coordinate_cf_verification(
         &self,
         app: &AppHandle,
@@ -1463,9 +1761,64 @@ impl BridgeEngine {
         is_dark: bool,
         is_post_pass_replay: bool,
     ) -> VerifyOutcome {
+        self.coordinate_cf_verification_ext(app, requested, is_dark, is_post_pass_replay, false)
+            .await
+    }
+
+    fn has_unresolved_challenge_hint(&self) -> bool {
+        let rt_flag = self
+            .inner
+            .lock()
+            .map(|rt| {
+                rt.cf_attention_notified
+                    || rt.pending_interactive_challenge
+                    || rt.bootstrap_challenged
+            })
+            .unwrap_or(false);
+        rt_flag
+            || self
+                .bg_challenge_tracker
+                .lock()
+                .map(|tr| tr.has_unresolved_write_challenges())
+                .unwrap_or(false)
+            || self
+                .verify_coord
+                .lock()
+                .map(|c| c.has_unresolved_write_challenge())
+                .unwrap_or(false)
+    }
+
+    pub async fn coordinate_cf_verification_ext(
+        &self,
+        app: &AppHandle,
+        requested: VerifyPresentation,
+        is_dark: bool,
+        is_post_pass_replay: bool,
+        bypass_user_dismiss: bool,
+    ) -> VerifyOutcome {
+        if requested == VerifyPresentation::Manual {
+            let need_manual_heal = self
+                .verify_coord
+                .lock()
+                .unwrap()
+                .needs_clean_heal_on_manual(Instant::now())
+                && !self.inner.lock().unwrap().verifying;
+            if need_manual_heal {
+                self.perform_clean_network_and_verify_reset(app, "manual_verify_heal", false)
+                    .await;
+            }
+        }
+
+        let net_sig = crate::ech_desktop::detect_net_env().signature();
         let join = {
             let mut coord = self.verify_coord.lock().unwrap();
-            coord.join_or_start(requested, Instant::now(), is_post_pass_replay)
+            coord.join_or_start_with_context(
+                requested,
+                Instant::now(),
+                is_post_pass_replay,
+                bypass_user_dismiss,
+                &net_sig,
+            )
         };
 
         match join {
@@ -1486,6 +1839,25 @@ impl BridgeEngine {
                         "verify_cooldown_active",
                         Some(&format!("remainMs={remain_ms} ineffective={ineffective}")),
                     );
+                }
+                let keep_banner = {
+                    let mut rt = self.inner.lock().unwrap();
+                    let unresolved = rt.cf_attention_notified
+                        || rt.pending_interactive_challenge
+                        || rt.bootstrap_challenged
+                        || ineffective
+                        || self
+                            .bg_challenge_tracker
+                            .lock()
+                            .unwrap()
+                            .has_unresolved_write_challenges();
+                    if unresolved {
+                        rt.cf_attention_notified = true;
+                    }
+                    unresolved
+                };
+                if keep_banner {
+                    let _ = app.emit("lindo://cf-attention-needed", true);
                 }
                 VerifyOutcome {
                     passed: false,
@@ -1520,10 +1892,17 @@ impl BridgeEngine {
                     Arc::clone(&presentation),
                 );
                 let _verify_guard = self.verify_lock.lock().await;
+                let mut saw_interactive_or_challenge = self.has_unresolved_challenge_hint();
                 let _verifying_flag = VerifyingFlagGuard::enter(&self.inner);
-
                 let disposition = self
-                    .run_unified_cf_verify(app, is_dark, round, &presentation, &escalate_notify)
+                    .run_unified_cf_verify(
+                        app,
+                        is_dark,
+                        round,
+                        &presentation,
+                        &escalate_notify,
+                        &mut saw_interactive_or_challenge,
+                    )
                     .await
                     .unwrap_or(UnifiedVerifyDisposition::Failed);
 
@@ -1537,15 +1916,32 @@ impl BridgeEngine {
                     self.bg_challenge_tracker.lock().unwrap().reset();
                     let mut rt = self.inner.lock().unwrap();
                     rt.bootstrap_challenged = false;
+                    rt.pending_interactive_challenge = false;
                     rt.last_challenge_url = None;
                     rt.fg_challenge_until = None;
                     rt.bg_challenge_until = None;
                     rt.rate_limit_until = None;
                     rt.challenge_429_streak = 0;
                     rt.cf_attention_notified = false;
+                } else if disposition == UnifiedVerifyDisposition::UserDismissed {
+                    // User closed the verification window without completing:
+                    // 1) Arm 180s auto-popup snooze bound to current network signature (clears on network change; foreground writes still pop).
+                    // 2) Preserve PC's existing `连接需安全确认 · 去验证 ›` banner intact!
+                    let cur_sig = crate::ech_desktop::detect_net_env().signature();
+                    self.verify_coord
+                        .lock()
+                        .unwrap()
+                        .record_user_dismiss(&cur_sig, Instant::now());
+                    self.inner.lock().unwrap().cf_attention_notified = true;
+                } else if saw_interactive_or_challenge {
+                    self.inner.lock().unwrap().cf_attention_notified = true;
                 }
+
                 let outcome = match disposition {
-                    UnifiedVerifyDisposition::Abandoned => flight_guard.abandon(Instant::now()),
+                    UnifiedVerifyDisposition::Abandoned
+                    | UnifiedVerifyDisposition::UserDismissed => {
+                        flight_guard.abandon(Instant::now())
+                    }
                     _ => flight_guard.complete(passed, Instant::now()),
                 };
                 let _ = app.emit(
@@ -1555,6 +1951,10 @@ impl BridgeEngine {
                 if passed {
                     let _ = app.emit("lindo://cf-attention-needed", false);
                     let _ = app.emit("lindo://verified", ());
+                } else if disposition == UnifiedVerifyDisposition::UserDismissed
+                    || saw_interactive_or_challenge
+                {
+                    let _ = app.emit("lindo://cf-attention-needed", true);
                 }
                 outcome
             }
@@ -1568,6 +1968,7 @@ impl BridgeEngine {
         round: u64,
         presentation: &Arc<AtomicU8>,
         escalate_notify: &Arc<Notify>,
+        saw_interactive_or_challenge: &mut bool,
     ) -> Result<UnifiedVerifyDisposition, String> {
         native_call("init", json!({}), 10).await?;
         self.inner.lock().unwrap().initialized = true;
@@ -1578,6 +1979,9 @@ impl BridgeEngine {
             .lock()
             .map(|a| a.last_challenged.is_some())
             .unwrap_or(false);
+        if had_challenged_before_verify {
+            *saw_interactive_or_challenge = true;
+        }
         // Snapshot incumbent clearance (NEVER purge valid cf_clearance before loading /challenge!)
         let mut stale_cf: std::collections::HashSet<String> =
             self.browser_cf_clearances().await.into_iter().collect();
@@ -1608,6 +2012,8 @@ impl BridgeEngine {
         let mut oops_reloaded = false;
         let mut cf_err_reloads = 0u32;
         let mut challenge_ticks = 0u32;
+        let mut widget_mounted_since: Option<Instant> = None;
+        let mut blank_healed_once = false;
         let mut quiet_rounds = 0u32;
         let mut last_reload_epoch: Option<u64> = None;
         let mut pass_mask_stuck_ticks = 0u32;
@@ -1621,23 +2027,28 @@ impl BridgeEngine {
             let cur_pres = VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst));
             let max_dur = if cur_pres == VerifyPresentation::Silent {
                 Duration::from_millis(3800)
-            } else if cur_pres == VerifyPresentation::Pill {
+            } else if cur_pres == VerifyPresentation::Proactive && !panel_shown {
+                Duration::from_secs(12)
+            } else if cur_pres == VerifyPresentation::Pill && !panel_shown {
                 Duration::from_secs(20)
             } else {
                 Duration::from_secs(180)
             };
             if loop_started.elapsed() >= max_dur {
+                if cur_pres == VerifyPresentation::Proactive && !panel_shown {
+                    disposition = UnifiedVerifyDisposition::Abandoned;
+                }
                 break;
             }
 
-            // Sleep 220ms OR wake up instantaneously if a foreground caller escalates `Silent -> Pill/Blocking/Manual`!
+            // Sleep 220ms OR wake up instantaneously if a foreground caller escalates `Silent -> Proactive/Blocking/Manual`!
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(220)) => {}
                 _ = escalate_notify.notified() => {}
             }
 
             let cur_pres = VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst));
-            // 4-tier progressive disclosure: after 2s hidden check, show subtle non-intrusive Pill before any modal panel!
+            // Progressive disclosure: after 2s hidden check on foreground requests, show subtle corner Pill before any modal panel!
             if cur_pres.allows_pill_ui()
                 && !panel_shown
                 && !pill_emitted
@@ -1709,28 +2120,38 @@ impl BridgeEngine {
                 Some(prev) if prev != native_reload_epoch => {
                     last_reload_epoch = Some(native_reload_epoch);
                     challenge_ticks = 0;
+                    widget_mounted_since = None;
                     quiet_rounds = 0;
                     pass_mask_stuck_ticks = 0;
                     stuck_reloaded = false;
+                    crate::ech_desktop::notify_network_route_changed();
+                    crate::ech_desktop::rotate_sticky_ip();
+                    let purged = self.purge_cf_clearance_for_reverify().await;
+                    for p in purged {
+                        stale_cf.insert(p);
+                    }
                     emit_diag(
                         app,
                         "INFO",
                         "AUTH",
                         "VerifyReload",
-                        "安全确认弹窗已手动刷新，重新加载验证",
+                        "安全确认弹窗已手动刷新，已刷新网络通道并重新加载验证",
                         Some(&format!("round={round}")),
                     );
                 }
                 _ => {}
             }
 
-            if cur_pres.allows_ui() && user_cancelled && (native_user_reloading || native_terminated) {
+            if (cur_pres.allows_ui() || panel_shown) && user_cancelled && (native_user_reloading || native_terminated) {
+                *saw_interactive_or_challenge = true;
+                disposition = UnifiedVerifyDisposition::UserDismissed;
                 break;
             }
 
             if native_terminated && !terminated_reloaded {
                 terminated_reloaded = true;
                 challenge_ticks = 0;
+                widget_mounted_since = None;
                 quiet_rounds = 0;
                 pass_mask_stuck_ticks = 0;
                 emit_diag(
@@ -1741,7 +2162,7 @@ impl BridgeEngine {
                     "安全确认 WebView 进程异常中断，自动重新加载",
                     Some(&format!("round={round}")),
                 );
-                if cur_pres.allows_ui() {
+                if cur_pres.allows_ui() || panel_shown {
                     mask_visible = true;
                     let _ = native_call(
                         "setVerifyMask",
@@ -1756,6 +2177,7 @@ impl BridgeEngine {
 
             if native_user_reloading {
                 challenge_ticks = 0;
+                widget_mounted_since = None;
                 quiet_rounds = 0;
                 pass_mask_stuck_ticks = 0;
                 if cur_pres.allows_ui() && !panel_shown && loop_started.elapsed() >= Duration::from_millis(1200) {
@@ -1765,8 +2187,10 @@ impl BridgeEngine {
                 continue;
             }
 
-            // Silent probe bails immediately on `interactiveBegin` unless escalated to Blocking/Manual!
+            // Silent probe bails immediately on `interactiveBegin` unless escalated!
             if cur_pres == VerifyPresentation::Silent && native_interactive {
+                *saw_interactive_or_challenge = true;
+                self.inner.lock().unwrap().pending_interactive_challenge = true;
                 break;
             }
 
@@ -1878,8 +2302,10 @@ impl BridgeEngine {
                 .unwrap_or(false);
 
             if is_cf_error_page {
+                *saw_interactive_or_challenge = true;
                 if cf_err_reloads < 2 {
                     cf_err_reloads += 1;
+                    crate::ech_desktop::notify_network_route_changed();
                     crate::ech_desktop::rotate_sticky_ip();
                     let _ = self.purge_cf_clearance_for_reverify().await;
                     let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
@@ -1913,24 +2339,126 @@ impl BridgeEngine {
                 break;
             }
 
-            if cur_pres.allows_ui() && user_cancelled {
+            if (cur_pres.allows_ui() || panel_shown) && user_cancelled {
                 if (ready || is_origin_404) && !in_challenge {
                     // User closed right as verification finished
                 } else {
+                    *saw_interactive_or_challenge = true;
+                    disposition = UnifiedVerifyDisposition::UserDismissed;
                     break;
                 }
             }
 
             if in_challenge {
+                *saw_interactive_or_challenge = true;
                 quiet_rounds = 0;
                 pass_mask_stuck_ticks = 0;
                 challenge_ticks += 1;
+                if has_rendered_widget {
+                    let _ = widget_mounted_since.get_or_insert_with(Instant::now);
+                } else {
+                    widget_mounted_since = None;
+                }
 
-                if !cur_pres.allows_panel_ui() {
-                    // Silent or Pill-only check: never pop modal on its own; if interactive is required in Silent mode, bail cleanly.
+                if cur_pres == VerifyPresentation::Proactive && !panel_shown {
+                    let interactive_confirmed = native_interactive
+                        || widget_mounted_since
+                            .map(|t| {
+                                t.elapsed()
+                                    >= Duration::from_millis(VERIFY_PROACTIVE_WIDGET_PROMOTE_MS)
+                            })
+                            .unwrap_or(false);
+                    if interactive_confirmed {
+                        if !self.is_main_window_visible(app) {
+                            self.inner.lock().unwrap().pending_interactive_challenge = true;
+                            disposition = UnifiedVerifyDisposition::Abandoned;
+                            break;
+                        }
+                        let cur_sig = crate::ech_desktop::detect_net_env().signature();
+                        if self
+                            .verify_coord
+                            .lock()
+                            .unwrap()
+                            .is_user_dismiss_snoozed(&cur_sig, Instant::now())
+                            .is_some()
+                        {
+                            disposition = UnifiedVerifyDisposition::Abandoned;
+                            break;
+                        }
+                        let (composer_open, actively_typing) =
+                            self.ui_typing_guard_state(now_epoch_ms());
+                        if composer_open {
+                            // User is editing/typing in `ComposerModal`: never steal input focus!
+                            // Keep PC's existing verification prompt intact and wait for click on Verify or Send.
+                            self.inner.lock().unwrap().pending_interactive_challenge = true;
+                            disposition = UnifiedVerifyDisposition::Abandoned;
+                            break;
+                        }
+                        if actively_typing {
+                            // Momentary typing outside ComposerModal (e.g. search input): hold `/challenge` warm quietly.
+                            continue;
+                        }
+                        presentation.fetch_max(VerifyPresentation::Blocking as u8, Ordering::SeqCst);
+                        if mask_visible {
+                            mask_visible = false;
+                            let _ = native_call(
+                                "setVerifyMask",
+                                json!({ "visible": false, "dark": is_dark }),
+                                4,
+                            )
+                            .await;
+                        }
+                        panel_shown = true;
+                        let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
+                        emit_diag(
+                            app,
+                            "INFO",
+                            "AUTH",
+                            "ProactiveVerifyShown",
+                            "检测到连接需人工安全确认，已主动展开安全确认面板",
+                            Some(&format!("round={round}")),
+                        );
+                    }
+                    continue;
+                }
+
+                if !cur_pres.allows_panel_ui() && !panel_shown {
+                    // Silent or Pill-only check: never pop modal on its own; if interactive is required in Silent mode, record & bail cleanly.
                     if cur_pres == VerifyPresentation::Silent && has_rendered_widget && challenge_ticks >= 5 {
+                        self.inner.lock().unwrap().pending_interactive_challenge = true;
                         break;
                     }
+                    continue;
+                }
+
+                // Blank challenge watchdog when panel is open: if `/challenge` stays blank without mounting Turnstile for >= 6.2s,
+                // heal channel once and re-pull `/challenge` cleanly.
+                if panel_shown
+                    && !has_rendered_widget
+                    && !native_interactive
+                    && challenge_ticks >= 28
+                    && !blank_healed_once
+                {
+                    blank_healed_once = true;
+                    challenge_ticks = 0;
+                    crate::ech_desktop::notify_network_route_changed();
+                    crate::ech_desktop::rotate_sticky_ip();
+                    let purged = self.purge_cf_clearance_for_reverify().await;
+                    for p in purged {
+                        stale_cf.insert(p);
+                    }
+                    mask_visible = true;
+                    let _ = native_call(
+                        "setVerifyMask",
+                        json!({
+                            "visible": true,
+                            "dark": is_dark,
+                            "message": "通道已重置，正在重新加载验证…"
+                        }),
+                        4,
+                    )
+                    .await;
+                    let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
                     continue;
                 }
 
@@ -1975,8 +2503,9 @@ impl BridgeEngine {
                 continue;
             }
             challenge_ticks = 0;
+            widget_mounted_since = None;
 
-            if cur_pres.allows_ui() && !mask_visible && (is_origin_404 || ready) {
+            if (cur_pres.allows_ui() || panel_shown) && !mask_visible && (is_origin_404 || ready) {
                 mask_visible = true;
                 let _ = native_call(
                     "setVerifyMask",
@@ -2010,7 +2539,7 @@ impl BridgeEngine {
                     panel_shown = true;
                     let _ = native_call("show", json!({ "dark": is_dark, "login": false }), 8).await;
                 }
-                if cur_pres.allows_ui() && mask_visible && native_mask_message == "已通过，正在继续…" {
+                if (cur_pres.allows_ui() || panel_shown) && mask_visible && native_mask_message == "已通过，正在继续…" {
                     pass_mask_stuck_ticks += 1;
                     if pass_mask_stuck_ticks >= 18 {
                         let detail = format!(
@@ -2088,7 +2617,9 @@ impl BridgeEngine {
                     // Already purged once, yet stale challenged cookie is still present without rotation:
                     // NEVER wash `last_challenged` clean with `mark_rotation_open()`!
                     let _ = self.sync_cookies_from_webkit_verified(false, false).await;
-                    disposition = if cur_pres == VerifyPresentation::Silent && !had_challenged_before_verify {
+                    disposition = if matches!(cur_pres, VerifyPresentation::Silent | VerifyPresentation::Proactive)
+                        && !had_challenged_before_verify
+                    {
                         UnifiedVerifyDisposition::Abandoned
                     } else {
                         UnifiedVerifyDisposition::Failed
@@ -2109,7 +2640,9 @@ impl BridgeEngine {
                     // No `cf_clearance` in browser and `/challenge` reached origin without challenge:
                     // keep `last_challenged` intact (`verified = false` — zero false whitewashing!).
                     let _ = self.sync_cookies_from_webkit_verified(false, false).await;
-                    if cur_pres == VerifyPresentation::Silent && !stale_purged_once {
+                    if matches!(cur_pres, VerifyPresentation::Silent | VerifyPresentation::Proactive)
+                        && !stale_purged_once
+                    {
                         disposition = UnifiedVerifyDisposition::Abandoned;
                         break;
                     }
@@ -2959,12 +3492,24 @@ impl BridgeEngine {
             }
         }
 
+        // Foreground writes (and explicit manual retry clicks) ALWAYS bypass the 180s user-dismiss auto-popup snooze!
+        let bypass_user_dismiss = !is_background && (is_write || force_retry);
+
         // Foreground request arrived while another round is verifying: join the single-flight round
-        // (monotonically escalating Silent -> Blocking if needed) instead of failing immediately!
+        // (monotonically escalating Silent/Proactive -> Blocking if needed) instead of failing immediately!
         if joined_active_verify {
+            if is_write {
+                self.verify_coord.lock().unwrap().note_write_challenge();
+            }
             let is_dark = self.current_is_dark();
             let outcome = self
-                .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
+                .coordinate_cf_verification_ext(
+                    app,
+                    VerifyPresentation::Blocking,
+                    is_dark,
+                    false,
+                    bypass_user_dismiss,
+                )
                 .await;
             verify_attempted = true;
             if outcome.round > 0 {
@@ -3041,6 +3586,7 @@ impl BridgeEngine {
         let mut call_deadline = CallDeadline::for_request(idempotent, is_background, Instant::now());
         let mut auth_replayed = false;
         let mut force_no_store_replay = false;
+        let mut self_healed_once = false;
 
         // Execute fetch inside scoped `account_lock.read()` + `PriorityGate` (always released before verification!)
         let eval_res: Value = loop {
@@ -3095,6 +3641,9 @@ impl BridgeEngine {
                         }
                     }
                     if !is_background && !is_timings_req && !url.contains("/session/otp/") && budget.try_consume_cf() {
+                        if is_write {
+                            self.verify_coord.lock().unwrap().note_write_challenge();
+                        }
                         // Drop concurrency permit & account lock before coordinating verification!
                         drop(_fg_guard);
                         drop(_permit);
@@ -3108,7 +3657,13 @@ impl BridgeEngine {
                         );
                         call_deadline.pause(Instant::now());
                         let outcome = self
-                            .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
+                            .coordinate_cf_verification_ext(
+                                app,
+                                VerifyPresentation::Blocking,
+                                is_dark,
+                                false,
+                                bypass_user_dismiss,
+                            )
                             .await;
                         call_deadline.resume(Instant::now());
                         verify_attempted = true;
@@ -3136,6 +3691,17 @@ impl BridgeEngine {
                                 ..Default::default()
                             }),
                         });
+                    }
+                    if (is_background || is_timings_req) && boot_challenged && !verifying_now {
+                        if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
+                            let eng_clone = Arc::clone(&eng);
+                            let app_clone = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let _ = eng_clone
+                                    .trigger_proactive_cf_check(&app_clone, "bg_boot_challenged")
+                                    .await;
+                            });
+                        }
                     }
                     return Ok(SiteHttpResponse {
                         status: 403,
@@ -3251,6 +3817,9 @@ impl BridgeEngine {
                 let ct = val.get("contentType").and_then(|v| v.as_str()).unwrap_or("");
                 let bd = val.get("body").and_then(|v| v.as_str()).unwrap_or("");
                 if Self::is_cf_challenge_response(st, cf, ct, bd) {
+                    if is_write {
+                        self.verify_coord.lock().unwrap().note_write_challenge();
+                    }
                     let carried_cf = {
                         let raw = self.state.lock().unwrap().raw_cookies.clone();
                         Self::parse_cookie_map(&raw).remove("cf_clearance")
@@ -3275,7 +3844,13 @@ impl BridgeEngine {
                         let is_dark = self.current_is_dark();
                         call_deadline.pause(Instant::now());
                         let outcome = self
-                            .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
+                            .coordinate_cf_verification_ext(
+                                app,
+                                VerifyPresentation::Blocking,
+                                is_dark,
+                                false,
+                                bypass_user_dismiss,
+                            )
                             .await;
                         call_deadline.resume(Instant::now());
                         verify_attempted = true;
@@ -3301,23 +3876,91 @@ impl BridgeEngine {
                             break val;
                         }
                     } else if let Some(passed_round) = verify_round {
-                        // Verification just passed for `passed_round`, yet the immediate replay STILL hit CF challenge!
-                        // Trip 60s ineffective-clearance circuit breaker to eliminate infinite popup loops!
-                        let breaker_ms = self
+                        // Two-stage ineffective-clearance closed loop:
+                        // - 1st hit: run clean-room network self-heal once (100% preserving `_t` / `_forum_session`) and re-pull `/challenge`!
+                        // - 2nd consecutive hit: trip 60s circuit breaker cleanly.
+                        let decision = self
                             .verify_coord
                             .lock()
                             .unwrap()
-                            .record_ineffective_clearance(passed_round, Instant::now());
-                        verify_cooldown_ms = breaker_ms;
-                        ineffective_clearance = true;
-                        self.emit_net_health_diag(
-                            app,
-                            "WARN",
-                            "ineffective_clearance_breaker",
-                            Some(&format!(
-                                "round={passed_round} method={method_upper} url={url} status={st} breakerMs={breaker_ms}"
-                            )),
-                        );
+                            .record_ineffective_clearance_step(passed_round, is_write, Instant::now());
+                        if !self_healed_once
+                            && matches!(decision, IneffectiveClearanceDecision::SelfHealAndReverify)
+                        {
+                            self_healed_once = true;
+                            drop(_fg_guard);
+                            drop(_permit);
+                            drop(_acct);
+                            call_deadline.pause(Instant::now());
+                            {
+                                let _heal_guard = self.self_heal_lock.lock().await;
+                                let already_healed = self
+                                    .inner
+                                    .lock()
+                                    .map(|rt| rt.last_self_healed_round >= passed_round)
+                                    .unwrap_or(false);
+                                if !already_healed {
+                                    self.inner.lock().unwrap().last_self_healed_round = passed_round;
+                                    self.perform_clean_network_and_verify_reset(
+                                        app,
+                                        "auto_ineffective_heal",
+                                        true,
+                                    )
+                                    .await;
+                                }
+                            }
+                            let is_dark = self.current_is_dark();
+                            let heal_outcome = self
+                                .coordinate_cf_verification_ext(
+                                    app,
+                                    VerifyPresentation::Blocking,
+                                    is_dark,
+                                    true,
+                                    bypass_user_dismiss,
+                                )
+                                .await;
+                            call_deadline.resume(Instant::now());
+                            if heal_outcome.round > 0 {
+                                verify_round = Some(heal_outcome.round);
+                            }
+                            if heal_outcome.passed {
+                                silent_cf_revalidated = true;
+                                force_no_store_replay = true;
+                                if self.session_generation.load(Ordering::Acquire) != session_gen {
+                                    return Err("账号会话已切换，请求已取消".to_string());
+                                }
+                                let _ = native_call(
+                                    "evaluate",
+                                    json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                                    4,
+                                )
+                                .await;
+                                continue;
+                            } else {
+                                verify_cooldown_ms = heal_outcome.cooldown_remain_ms;
+                                ineffective_clearance = heal_outcome.ineffective_blocked;
+                                break val;
+                            }
+                        } else {
+                            let breaker_ms = match decision {
+                                IneffectiveClearanceDecision::TripBreaker { cooldown_ms } => cooldown_ms,
+                                IneffectiveClearanceDecision::SelfHealAndReverify => self
+                                    .verify_coord
+                                    .lock()
+                                    .unwrap()
+                                    .record_ineffective_clearance(passed_round, Instant::now()),
+                            };
+                            verify_cooldown_ms = breaker_ms;
+                            ineffective_clearance = true;
+                            self.emit_net_health_diag(
+                                app,
+                                "WARN",
+                                "ineffective_clearance_breaker",
+                                Some(&format!(
+                                    "round={passed_round} method={method_upper} url={url} status={st} breakerMs={breaker_ms}"
+                                )),
+                            );
+                        }
                     }
                 }
             }
@@ -3478,11 +4121,15 @@ impl BridgeEngine {
 
         let mut rate_limited_ms = None;
         if is_challenge {
+            if is_write {
+                self.verify_coord.lock().unwrap().note_write_challenge();
+            }
             let lower_body = body.to_ascii_lowercase();
             if lower_body.contains("<title>something went wrong</title>") || lower_body.contains("error code: 1034") {
                 crate::ech_desktop::rotate_sticky_ip();
                 let _ = self.purge_cf_clearance_for_reverify().await;
             }
+            let had_healthy_cf = self.cf_authority.lock().unwrap().has_healthy_incumbent();
             let carried_cf = {
                 let raw = self.state.lock().unwrap().raw_cookies.clone();
                 Self::parse_cookie_map(&raw).remove("cf_clearance")
@@ -3493,16 +4140,20 @@ impl BridgeEngine {
                 .note_challenged(carried_cf.as_deref());
             let should_probe_bg = {
                 let now = Instant::now();
-                let bg_escalated = if is_background {
-                    self.bg_challenge_tracker
-                        .lock()
-                        .unwrap()
-                        .note_background_challenge(is_write, now)
+                let (bg_escalated, bg_write_streak) = if is_background {
+                    let mut tr = self.bg_challenge_tracker.lock().unwrap();
+                    let esc = tr.note_background_challenge_with_health(is_write, had_healthy_cf, now);
+                    (esc, tr.consecutive_write_hits())
                 } else {
-                    false
+                    (false, 0)
                 };
                 let mut rt = self.inner.lock().unwrap();
-                rt.bg_challenge_until = Some(now + Duration::from_secs(30));
+                let bg_cool_secs = if is_background && is_write && bg_write_streak == 1 && !bg_escalated {
+                    10
+                } else {
+                    30
+                };
+                rt.bg_challenge_until = Some(now + Duration::from_secs(bg_cool_secs));
                 if !is_background {
                     rt.fg_challenge_until = Some(now + Duration::from_millis(1200));
                     false
@@ -3510,35 +4161,18 @@ impl BridgeEngine {
                     bg_escalated && !rt.verifying
                 }
             };
-            // Background challenge: once threshold (`>= 2` write hits or `>= 3` read waves) is reached,
-            // run silent probe through unified `VerifyCoordinator`; ONLY if human click is needed,
-            // surface the non-intrusive 32px hairline bar (`lindo://cf-attention-needed`) without interrupting reading!
+            // Background challenge (`timings`/`notifications`/`drafts`): once escalated, run proactive precheck!
+            // - Browser auto-passes -> 0 UI seamless recovery;
+            // - Human interaction required -> promotes straight to panel when main window is visible, not in 180s dismiss snooze,
+            //   and not typing in `ComposerModal`; otherwise preserves PC's existing `连接需安全确认 · 去验证 ›` banner!
             if should_probe_bg {
                 if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
                     let eng_clone = Arc::clone(&eng);
                     let app_clone = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let is_dark = eng_clone.current_is_dark();
-                        let outcome = eng_clone
-                            .coordinate_cf_verification(&app_clone, VerifyPresentation::Silent, is_dark, false)
+                        let _ = eng_clone
+                            .trigger_proactive_cf_check(&app_clone, "background_challenge")
                             .await;
-                        let mut emit_attention = None;
-                        {
-                            let mut rt = eng_clone.inner.lock().unwrap();
-                            if outcome.passed {
-                                eng_clone.bg_challenge_tracker.lock().unwrap().reset();
-                                if rt.cf_attention_notified {
-                                    rt.cf_attention_notified = false;
-                                    emit_attention = Some(false);
-                                }
-                            } else if !rt.verifying && !rt.cf_attention_notified {
-                                rt.cf_attention_notified = true;
-                                emit_attention = Some(true);
-                            }
-                        }
-                        if let Some(flag) = emit_attention {
-                            let _ = app_clone.emit("lindo://cf-attention-needed", flag);
-                        }
                     });
                 }
             }
@@ -3551,9 +4185,24 @@ impl BridgeEngine {
                 tr.note_healthy_response(is_write);
                 tr.has_unresolved_write_challenges()
             };
-            if !is_background && !has_unresolved_bg_writes {
-                self.verify_coord.lock().unwrap().reset_on_healthy_response();
-            }
+            let has_any_unresolved_writes = if !is_background {
+                let mut coord = self.verify_coord.lock().unwrap();
+                coord.note_healthy_response(is_write, has_unresolved_bg_writes);
+                has_unresolved_bg_writes || coord.has_unresolved_write_challenge()
+            } else {
+                if is_write && !has_unresolved_bg_writes {
+                    self.verify_coord
+                        .lock()
+                        .unwrap()
+                        .note_healthy_response(true, false);
+                }
+                has_unresolved_bg_writes
+                    || self
+                        .verify_coord
+                        .lock()
+                        .unwrap()
+                        .has_unresolved_write_challenge()
+            };
             let clear_banner = {
                 let mut rt = self.inner.lock().unwrap();
                 rt.rate_limit_until = None;
@@ -3562,9 +4211,10 @@ impl BridgeEngine {
                     rt.fg_challenge_until = None;
                     rt.bootstrap_challenged = false;
                     // Never clear `bg_challenge_until` or hide `cf-attention-needed` on a foreground GET 200
-                    // while background mutations (`POST /topics/timings`, `PUT /notifications/mark-read.json`) remain blocked!
-                    if !has_unresolved_bg_writes {
+                    // while ANY write challenge (foreground or background) remains unresolved!
+                    if !has_any_unresolved_writes {
                         rt.bg_challenge_until = None;
+                        rt.pending_interactive_challenge = false;
                         if rt.cf_attention_notified {
                             rt.cf_attention_notified = false;
                             true
@@ -3574,8 +4224,9 @@ impl BridgeEngine {
                     } else {
                         false
                     }
-                } else if is_write && !has_unresolved_bg_writes {
+                } else if is_write && !has_any_unresolved_writes {
                     rt.bg_challenge_until = None;
+                    rt.pending_interactive_challenge = false;
                     if rt.cf_attention_notified {
                         rt.cf_attention_notified = false;
                         true
@@ -3589,7 +4240,7 @@ impl BridgeEngine {
             if clear_banner {
                 let _ = app.emit("lindo://cf-attention-needed", false);
             }
-            if !is_background && !has_unresolved_bg_writes {
+            if !is_background && !has_any_unresolved_writes {
                 let live_cf = {
                     let raw = self.state.lock().unwrap().raw_cookies.clone();
                     Self::parse_cookie_map(&raw).remove("cf_clearance")
@@ -4082,6 +4733,7 @@ impl BridgeEngine {
         let mut ineffective_clearance = false;
         let mut silent_cf_revalidated = false;
         let mut origin_reloaded_once = false;
+        let mut self_healed_once = false;
 
         let res: Value = loop {
             let _acct = self.account_lock.read().await;
@@ -4115,6 +4767,7 @@ impl BridgeEngine {
             let is_cf = Self::is_cf_challenge_response(st, cf, ct, bd);
 
             if is_cf {
+                self.verify_coord.lock().unwrap().note_write_challenge();
                 let carried_cf = {
                     let raw = self.state.lock().unwrap().raw_cookies.clone();
                     Self::parse_cookie_map(&raw).remove("cf_clearance")
@@ -4135,7 +4788,13 @@ impl BridgeEngine {
                     );
                     let is_dark = self.current_is_dark();
                     let outcome = self
-                        .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
+                        .coordinate_cf_verification_ext(
+                            app,
+                            VerifyPresentation::Blocking,
+                            is_dark,
+                            false,
+                            true,
+                        )
                         .await;
                     verify_attempted = true;
                     if outcome.round > 0 {
@@ -4149,19 +4808,73 @@ impl BridgeEngine {
                     ineffective_clearance = outcome.ineffective_blocked;
                     break eval_val;
                 } else if let Some(passed_round) = verify_round {
-                    let breaker_ms = self
+                    let decision = self
                         .verify_coord
                         .lock()
                         .unwrap()
-                        .record_ineffective_clearance(passed_round, Instant::now());
-                    verify_cooldown_ms = breaker_ms;
-                    ineffective_clearance = true;
-                    self.emit_net_health_diag(
-                        app,
-                        "WARN",
-                        "ineffective_clearance_breaker",
-                        Some(&format!("round={passed_round} method=POST url=/uploads.json breakerMs={breaker_ms}")),
-                    );
+                        .record_ineffective_clearance_step(passed_round, true, Instant::now());
+                    if !self_healed_once
+                        && matches!(decision, IneffectiveClearanceDecision::SelfHealAndReverify)
+                    {
+                        self_healed_once = true;
+                        drop(_fg);
+                        drop(_permit);
+                        drop(_acct);
+                        {
+                            let _heal_guard = self.self_heal_lock.lock().await;
+                            let already_healed = self
+                                .inner
+                                .lock()
+                                .map(|rt| rt.last_self_healed_round >= passed_round)
+                                .unwrap_or(false);
+                            if !already_healed {
+                                self.inner.lock().unwrap().last_self_healed_round = passed_round;
+                                self.perform_clean_network_and_verify_reset(
+                                    app,
+                                    "auto_ineffective_heal_upload",
+                                    true,
+                                )
+                                .await;
+                            }
+                        }
+                        let is_dark = self.current_is_dark();
+                        let heal_outcome = self
+                            .coordinate_cf_verification_ext(
+                                app,
+                                VerifyPresentation::Blocking,
+                                is_dark,
+                                true,
+                                true,
+                            )
+                            .await;
+                        if heal_outcome.round > 0 {
+                            verify_round = Some(heal_outcome.round);
+                        }
+                        if heal_outcome.passed {
+                            silent_cf_revalidated = true;
+                            continue;
+                        }
+                        verify_cooldown_ms = heal_outcome.cooldown_remain_ms;
+                        ineffective_clearance = heal_outcome.ineffective_blocked;
+                        break eval_val;
+                    } else {
+                        let actual_ms = match decision {
+                            IneffectiveClearanceDecision::TripBreaker { cooldown_ms } => cooldown_ms,
+                            IneffectiveClearanceDecision::SelfHealAndReverify => self
+                                .verify_coord
+                                .lock()
+                                .unwrap()
+                                .record_ineffective_clearance(passed_round, Instant::now()),
+                        };
+                        verify_cooldown_ms = actual_ms;
+                        ineffective_clearance = true;
+                        self.emit_net_health_diag(
+                            app,
+                            "WARN",
+                            "ineffective_clearance_breaker",
+                            Some(&format!("round={passed_round} method=POST url=/uploads.json breakerMs={actual_ms}")),
+                        );
+                    }
                 }
             }
             break eval_val;
@@ -4175,7 +4888,15 @@ impl BridgeEngine {
         let is_unauthenticated = Self::is_unauthenticated_response(status, &body);
         if (200..300).contains(&status) && !is_challenge {
             self.api_pacer.lock().unwrap().on_success(Instant::now());
-            self.verify_coord.lock().unwrap().reset_on_healthy_response();
+            let has_bg_writes = {
+                let mut tr = self.bg_challenge_tracker.lock().unwrap();
+                tr.note_healthy_response(true);
+                tr.has_unresolved_write_challenges()
+            };
+            self.verify_coord
+                .lock()
+                .unwrap()
+                .note_healthy_response(true, has_bg_writes);
         }
         let body_bytes = body.len();
         Ok(SiteHttpResponse {

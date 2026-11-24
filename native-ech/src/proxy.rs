@@ -390,9 +390,19 @@ async fn connect_tunnel_target(
     host: &str,
     port: u16,
 ) -> Result<Result<TcpStream, String>, String> {
+    let bypass = net_bind::bypass_vpn();
     if let Ok(ip) = host.parse::<IpAddr>() {
+        if bypass && !ip.is_loopback() {
+            if let IpAddr::V4(v4) = ip {
+                if !crate::doh::is_valid_public_ipv4(v4) {
+                    return Ok(Err(format!(
+                        "refusing non-public tunnel target {ip}:{port} under bypass_vpn"
+                    )));
+                }
+            }
+        }
         let addr = SocketAddr::new(ip, port);
-        return Ok(net_bind::connect_tcp(addr, Duration::from_millis(5000))
+        return Ok(net_bind::connect_tcp(addr, Duration::from_millis(3500))
             .await
             .map(|(s, _)| s)
             .map_err(|e| format!("tunnel connect {addr}: {e}")));
@@ -404,24 +414,39 @@ async fn connect_tunnel_target(
             addrs.push(SocketAddr::new(IpAddr::V4(ip), port));
         }
     }
-    if addrs.is_empty() {
+    // When bypass_vpn is enabled, NEVER fall back to OS DNS (which yields Clash 198.18.x.x FakeIPs
+    // or VPN-polluted routes, causing physical-interface blackholes and cross-NIC IP split).
+    if addrs.is_empty() && !bypass {
         if let Ok(resolved) = tokio::net::lookup_host((host, port)).await {
             for a in resolved {
-                if !addrs.contains(&a) {
+                let usable = match a.ip() {
+                    IpAddr::V4(v4) => v4.is_loopback() || crate::doh::is_valid_public_ipv4(v4),
+                    IpAddr::V6(v6) => !v6.is_unspecified(),
+                };
+                if usable && !addrs.contains(&a) {
                     addrs.push(a);
                 }
             }
         }
     }
     if addrs.is_empty() {
-        return Ok(Err(format!("dns resolution failed for tunnel {host}:{port}")));
+        return Ok(Err(if bypass {
+            format!(
+                "DoH resolution failed for tunnel {host}:{port} (OS DNS fallback disabled under bypass_vpn)"
+            )
+        } else {
+            format!("dns resolution failed for tunnel {host}:{port}")
+        }));
     }
 
     let mut last_err = String::from("tunnel connect failed");
     for addr in addrs.into_iter().take(4) {
-        match net_bind::connect_tcp(addr, Duration::from_millis(4500)).await {
+        match net_bind::connect_tcp(addr, Duration::from_millis(3000)).await {
             Ok((stream, _)) => return Ok(Ok(stream)),
             Err(e) => {
+                if let IpAddr::V4(failed_v4) = addr.ip() {
+                    doh.rotate_host_cache_ip(host, failed_v4);
+                }
                 last_err = format!("tunnel connect {addr}: {e}");
             }
         }

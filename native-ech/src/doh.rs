@@ -102,6 +102,7 @@ pub struct DohResolver {
     ech_cache: Arc<tokio::sync::Mutex<Option<EchBootstrap>>>,
     host_cache: Mutex<HashMap<String, HostCacheEntry>>,
     last_sticky_ip: Mutex<Option<(u64, Ipv4Addr)>>,
+    avoid_sticky_ip: Mutex<Option<Ipv4Addr>>,
 }
 
 impl DohResolver {
@@ -124,6 +125,7 @@ impl DohResolver {
             ech_cache: Arc::new(tokio::sync::Mutex::new(None)),
             host_cache: Mutex::new(HashMap::new()),
             last_sticky_ip: Mutex::new(None),
+            avoid_sticky_ip: Mutex::new(None),
         }))
     }
 
@@ -196,6 +198,15 @@ impl DohResolver {
                 candidates.push(ip);
             }
         }
+        let avoided = *self.avoid_sticky_ip.lock();
+        if let Some(bad_ip) = avoided {
+            if candidates.len() > 1 {
+                if let Some(pos) = candidates.iter().position(|&ip| ip == bad_ip) {
+                    let removed = candidates.remove(pos);
+                    candidates.push(removed);
+                }
+            }
+        }
 
         let sticky_ip = race_fastest_cf_ip(&candidates).await.unwrap_or(candidates[0]);
         *self.last_sticky_ip.lock() = Some((cur_gen, sticky_ip));
@@ -230,6 +241,81 @@ impl DohResolver {
         self.cached_sticky_ip_sync()
     }
 
+    /// Marks the currently active sticky IP (if any) as degraded so subsequent rotations or DoH
+    /// races deprioritize it behind fresh candidates.
+    pub fn note_degraded_current_sticky_ip(&self) -> Option<Ipv4Addr> {
+        let prev = self.last_sticky_ip.lock().map(|(_, ip)| ip);
+        if let Some(ip) = prev {
+            *self.avoid_sticky_ip.lock() = Some(ip);
+        }
+        prev
+    }
+
+    /// Synchronously advances cached sticky IP onto `new_gen` if a valid bootstrap cache is unlocked,
+    /// allowing immediate status inspection right after `nativeRotateStickyIp` / mode switches.
+    pub fn try_advance_sticky_ip_for_gen_sync(&self, new_gen: u64) -> Option<Ipv4Addr> {
+        let mut guard = self.ech_cache.try_lock().ok()?;
+        let cached = guard.as_mut()?;
+        if cached.ech_config_list.is_empty() || cached.fetched_at.elapsed() >= cached.ttl {
+            return None;
+        }
+        let prev = cached.sticky_ip;
+        *self.avoid_sticky_ip.lock() = Some(prev);
+        let next = rotate_cached_sticky_ip(cached)?;
+        cached.network_gen = new_gen;
+        *self.last_sticky_ip.lock() = Some((new_gen, next));
+        Some(next)
+    }
+
+    /// Re-races candidate Cloudflare Anycast IPs (deprioritizing the degraded IP) or re-bootstraps
+    /// DoH ECH config for the current `network_gen`.
+    pub async fn refresh_sticky_ip_after_rotation(&self) {
+        let target_gen = net_bind::network_gen();
+        let avoided = *self.avoid_sticky_ip.lock();
+        let race_candidates = {
+            let mut guard = self.ech_cache.lock().await;
+            if let Some(ref mut cached) = *guard {
+                if !cached.ech_config_list.is_empty() && cached.fetched_at.elapsed() < cached.ttl {
+                    if cached.network_gen != target_gen {
+                        let _ = rotate_cached_sticky_ip(cached);
+                        cached.network_gen = target_gen;
+                        *self.last_sticky_ip.lock() = Some((target_gen, cached.sticky_ip));
+                    }
+                    let mut ordered: Vec<Ipv4Addr> = cached
+                        .candidates
+                        .iter()
+                        .copied()
+                        .filter(|ip| Some(*ip) != avoided)
+                        .collect();
+                    if let Some(bad) = avoided {
+                        if cached.candidates.contains(&bad) {
+                            ordered.push(bad);
+                        }
+                    }
+                    Some(ordered)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(ordered) = race_candidates {
+            if let Some(fastest) = race_fastest_cf_ip(&ordered).await {
+                let mut guard = self.ech_cache.lock().await;
+                if let Some(ref mut cached) = *guard {
+                    if cached.network_gen == target_gen && net_bind::network_gen() == target_gen {
+                        cached.sticky_ip = fastest;
+                        *self.last_sticky_ip.lock() = Some((target_gen, fastest));
+                    }
+                }
+            }
+        } else {
+            let _ = self.get_ech_and_sticky_ip().await;
+        }
+    }
+
     /// Updates cached `ech_config_list` after an ECH retry-config response or rotates sticky IP
     /// if the current sticky Cloudflare IP failed TCP/TLS handshake or returned Edge 1034.
     pub async fn update_ech_retry_configs(&self, retry_configs: Vec<u8>) {
@@ -244,6 +330,7 @@ impl DohResolver {
     }
 
     pub async fn rotate_sticky_ip(&self, failed_ip: Ipv4Addr) -> Option<Ipv4Addr> {
+        *self.avoid_sticky_ip.lock() = Some(failed_ip);
         let mut guard = self.ech_cache.lock().await;
         let cached = guard.as_mut()?;
         if cached.sticky_ip != failed_ip {
@@ -257,6 +344,7 @@ impl DohResolver {
     pub async fn rotate_current_sticky_ip(&self) -> Option<Ipv4Addr> {
         let mut guard = self.ech_cache.lock().await;
         let cached = guard.as_mut()?;
+        *self.avoid_sticky_ip.lock() = Some(cached.sticky_ip);
         let next = rotate_cached_sticky_ip(cached)?;
         *self.last_sticky_ip.lock() = Some((cached.network_gen, next));
         Some(next)
@@ -265,18 +353,38 @@ impl DohResolver {
     pub fn try_rotate_current_sticky_ip_sync(&self) -> Option<Ipv4Addr> {
         let mut guard = self.ech_cache.try_lock().ok()?;
         let cached = guard.as_mut()?;
+        *self.avoid_sticky_ip.lock() = Some(cached.sticky_ip);
         let next = rotate_cached_sticky_ip(cached)?;
         *self.last_sticky_ip.lock() = Some((cached.network_gen, next));
         Some(next)
     }
 
-    /// Clean DoH `A` resolution for transparent pass-through hosts (such as `challenges.cloudflare.com`).
+    /// Rotates a failed IPv4 address to the back of `host_cache` so subsequent transparent tunnel
+    /// connections (e.g., `challenges.cloudflare.com`) immediately try a healthy candidate first.
+    pub fn rotate_host_cache_ip(&self, host: &str, failed_ip: Ipv4Addr) {
+        let clean = crate::ca::normalize_host(host);
+        let mut guard = self.host_cache.lock();
+        if let Some(entry) = guard.get_mut(&clean) {
+            if entry.ips.len() > 1 && entry.ips.first() == Some(&failed_ip) {
+                let first = entry.ips.remove(0);
+                entry.ips.push(first);
+            }
+        }
+    }
+
+    /// Clean DoH `A` + `HTTPS ipv4hint` resolution with concurrent fast-TCP candidate ordering
+    /// for transparent pass-through hosts (such as `challenges.cloudflare.com`, never MITM'd).
     pub async fn resolve_clean_a(&self, host: &str) -> Result<Vec<Ipv4Addr>, String> {
         let clean = crate::ca::normalize_host(host);
         if clean.is_empty() {
             return Err("empty host".to_string());
         }
         if let Ok(ip) = clean.parse::<Ipv4Addr>() {
+            if net_bind::bypass_vpn() && !ip.is_loopback() && !is_valid_public_ipv4(ip) {
+                return Err(format!(
+                    "refusing non-public IPv4 literal {ip} under bypass_vpn"
+                ));
+            }
             return Ok(vec![ip]);
         }
         let cur_gen = net_bind::network_gen();
@@ -292,25 +400,102 @@ impl DohResolver {
             }
         }
 
-        let parsed = self.query_first(&clean, QTYPE_A).await?;
-        let valid: Vec<Ipv4Addr> = parsed
-            .ipv4
-            .into_iter()
-            .filter(|ip| is_valid_public_ipv4(*ip))
-            .collect();
-        if valid.is_empty() {
-            return Err(format!("DoH A for {clean} yielded no public IPv4"));
+        let cf_zone = is_cloudflare_zone_host(&clean);
+        let (a_res, https_res) = tokio::join!(
+            self.query_first(&clean, QTYPE_A),
+            self.query_first(&clean, QTYPE_HTTPS)
+        );
+        if a_res.is_err() && https_res.is_err() {
+            return Err(a_res.err().unwrap_or_else(|| format!("DoH failed for {clean}")));
         }
-        let ttl = Duration::from_secs(parsed.min_ttl_secs.clamp(60, 600) as u64);
+
+        let accept_ip = |ip: Ipv4Addr| -> bool {
+            if cf_zone {
+                is_cloudflare_anycast_ipv4(ip)
+            } else {
+                is_valid_public_ipv4(ip)
+            }
+        };
+
+        let mut candidates: Vec<Ipv4Addr> = Vec::new();
+        let mut min_ttl_secs: u32 = 180;
+        if let Ok(ref parsed_a) = a_res {
+            min_ttl_secs = min_ttl_secs.min(parsed_a.min_ttl_secs);
+            for &ip in &parsed_a.ipv4 {
+                if accept_ip(ip) && !candidates.contains(&ip) {
+                    candidates.push(ip);
+                }
+            }
+        }
+        if let Ok(ref parsed_h) = https_res {
+            min_ttl_secs = min_ttl_secs.min(parsed_h.min_ttl_secs);
+            for &ip in &parsed_h.ipv4_hints {
+                if accept_ip(ip) && !candidates.contains(&ip) {
+                    candidates.push(ip);
+                }
+            }
+            for &ip in &parsed_h.ipv4 {
+                if accept_ip(ip) && !candidates.contains(&ip) {
+                    candidates.push(ip);
+                }
+            }
+        }
+
+        // Supplement from an alternate DoH provider if a Cloudflare zone yielded fewer than 2 IPs.
+        if cf_zone && candidates.len() < 2 {
+            let query = build_dns_query(&clean, QTYPE_A);
+            for upstream in DOH_UPSTREAMS.iter().skip(2).take(3) {
+                if let Ok(extra) = self
+                    .query_single_upstream(*upstream, &query, &clean, QTYPE_A)
+                    .await
+                {
+                    for ip in extra.ipv4 {
+                        if accept_ip(ip) && !candidates.contains(&ip) {
+                            candidates.push(ip);
+                        }
+                    }
+                    if candidates.len() >= 3 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return Err(format!("DoH A/HTTPS for {clean} yielded no clean public IPv4"));
+        }
+
+        let ordered = order_candidates_by_fast_tcp(&candidates, 443).await;
+        let ttl = Duration::from_secs(min_ttl_secs.clamp(60, 600) as u64);
         self.host_cache.lock().insert(
             clean,
             HostCacheEntry {
-                ips: valid.clone(),
+                ips: ordered.clone(),
                 network_gen: cur_gen,
                 expires_at: Instant::now() + ttl,
             },
         );
-        Ok(valid)
+        Ok(ordered)
+    }
+
+    #[cfg(test)]
+    pub async fn seed_ech_cache_for_test(
+        &self,
+        ech_config_list: Vec<u8>,
+        candidates: Vec<Ipv4Addr>,
+    ) {
+        let cur_gen = net_bind::network_gen();
+        let sticky_ip = candidates[0];
+        *self.avoid_sticky_ip.lock() = None;
+        *self.last_sticky_ip.lock() = Some((cur_gen, sticky_ip));
+        *self.ech_cache.lock().await = Some(EchBootstrap {
+            ech_config_list,
+            sticky_ip,
+            candidates,
+            network_gen: cur_gen,
+            fetched_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+        });
     }
 
     async fn query_first(&self, domain: &str, qtype: u16) -> Result<ParsedDnsResponse, String> {
@@ -428,6 +613,110 @@ async fn race_fastest_cf_ip(candidates: &[Ipv4Addr]) -> Option<Ipv4Addr> {
         }
     }
     None
+}
+
+/// Concurrent TCP-connect preference ordering for transparent tunnel candidate addresses.
+/// Probes up to 6 candidates in parallel over the active `net_bind` interface and moves the
+/// fastest reachable candidate to position `0`, pushing early-failed candidates to the back.
+pub async fn order_socket_addrs_by_fast_tcp(
+    addrs: &[SocketAddr],
+    probe_timeout: Duration,
+) -> Vec<SocketAddr> {
+    if addrs.len() <= 1 {
+        return addrs.to_vec();
+    }
+    let probe_limit = addrs.len().min(6);
+    let mut failed_early = vec![false; addrs.len()];
+    let mut set = JoinSet::new();
+    for (idx, &addr) in addrs.iter().enumerate().take(probe_limit) {
+        set.spawn(async move {
+            let ok = net_bind::connect_tcp(addr, probe_timeout).await.is_ok();
+            (idx, addr, ok)
+        });
+    }
+
+    let mut winner: Option<(usize, SocketAddr)> = None;
+    while let Some(res) = set.join_next().await {
+        if let Ok((idx, addr, ok)) = res {
+            if ok {
+                winner = Some((idx, addr));
+                set.abort_all();
+                break;
+            } else {
+                failed_early[idx] = true;
+            }
+        }
+    }
+
+    let Some((win_idx, win_addr)) = winner else {
+        return addrs.to_vec();
+    };
+
+    let mut ordered = Vec::with_capacity(addrs.len());
+    ordered.push(win_addr);
+    for (idx, &addr) in addrs.iter().enumerate() {
+        if idx != win_idx && !failed_early[idx] {
+            ordered.push(addr);
+        }
+    }
+    for (idx, &addr) in addrs.iter().enumerate() {
+        if idx != win_idx && failed_early[idx] {
+            ordered.push(addr);
+        }
+    }
+    ordered
+}
+
+pub async fn order_candidates_by_fast_tcp(candidates: &[Ipv4Addr], port: u16) -> Vec<Ipv4Addr> {
+    if candidates.len() <= 1 {
+        return candidates.to_vec();
+    }
+    let sock_addrs: Vec<SocketAddr> = candidates
+        .iter()
+        .map(|&ip| SocketAddr::new(IpAddr::V4(ip), port))
+        .collect();
+    order_socket_addrs_by_fast_tcp(&sock_addrs, Duration::from_millis(1800))
+        .await
+        .into_iter()
+        .filter_map(|sa| match sa.ip() {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        })
+        .collect()
+}
+
+fn is_cloudflare_zone_host(clean_host: &str) -> bool {
+    clean_host == "challenges.cloudflare.com"
+        || clean_host == "cloudflare.com"
+        || clean_host.ends_with(".cloudflare.com")
+        || clean_host == "cloudflareinsights.com"
+        || clean_host.ends_with(".cloudflareinsights.com")
+}
+
+/// Validates that an IPv4 address belongs to any official Cloudflare public Anycast range
+/// (including `104.16.0.0/15`, which legitimately serves `challenges.cloudflare.com`).
+pub fn is_cloudflare_anycast_ipv4(ip: Ipv4Addr) -> bool {
+    if !is_valid_public_ipv4(ip) {
+        return false;
+    }
+    let v = u32::from(ip);
+    in_cidr(v, 104, 16, 0, 0, 15)
+        || in_cidr(v, 173, 245, 48, 0, 20)
+        || in_cidr(v, 103, 21, 244, 0, 22)
+        || in_cidr(v, 103, 22, 200, 0, 22)
+        || in_cidr(v, 103, 31, 4, 0, 22)
+        || in_cidr(v, 141, 101, 64, 0, 18)
+        || in_cidr(v, 108, 162, 192, 0, 18)
+        || in_cidr(v, 190, 93, 240, 0, 20)
+        || in_cidr(v, 188, 114, 96, 0, 20)
+        || in_cidr(v, 197, 234, 240, 0, 22)
+        || in_cidr(v, 198, 41, 128, 0, 17)
+        || in_cidr(v, 162, 158, 0, 0, 15)
+        || in_cidr(v, 104, 18, 0, 0, 15)
+        || in_cidr(v, 104, 20, 0, 0, 14)
+        || in_cidr(v, 104, 24, 0, 0, 14)
+        || in_cidr(v, 172, 64, 0, 0, 13)
+        || in_cidr(v, 131, 0, 72, 0, 22)
 }
 
 pub fn is_valid_public_ipv4(ip: Ipv4Addr) -> bool {

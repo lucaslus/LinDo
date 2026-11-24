@@ -196,6 +196,7 @@ pub fn notify_network_changed() {
             .map(|g| (g.net_handle, g.bypass_vpn, Arc::clone(&g.doh), Arc::clone(&g.upstream)))
     };
     if let Some((handle, bypass, doh, upstream)) = meta {
+        doh.note_degraded_current_sticky_ip();
         net_bind::update_network(handle, bypass);
         upstream.clear_h2_pool();
         if let Ok(rt) = runtime() {
@@ -263,20 +264,35 @@ pub fn current_gateway_route_mode() -> Option<proxy::GatewayRouteMode> {
         .map(|g| g.server.route_mode())
 }
 
+/// Clears dead/pooled HTTP/2 sessions, bumps `NETWORK_GEN` (invalidating stale host/tunnel caches),
+/// and rotates `sticky_ip` away from the degraded Cloudflare edge IP while re-racing candidates in
+/// background (providing full `notify_network_changed` + `rotate_sticky_ip` semantics behind the
+/// existing `nativeRotateStickyIp` JNI entry point).
 pub fn rotate_sticky_ip() {
-    let pair = gateway_lock()
-        .lock()
-        .as_ref()
-        .map(|g| (Arc::clone(&g.doh), Arc::clone(&g.upstream)));
-    if let Some((doh, upstream)) = pair {
+    let meta = {
+        let guard = gateway_lock().lock();
+        guard.as_ref().map(|g| {
+            (
+                g.net_handle,
+                g.bypass_vpn,
+                Arc::clone(&g.doh),
+                Arc::clone(&g.upstream),
+            )
+        })
+    };
+    if let Some((handle, bypass, doh, upstream)) = meta {
+        doh.note_degraded_current_sticky_ip();
+        net_bind::update_network(handle, bypass);
+        let new_gen = net_bind::network_gen();
         upstream.clear_h2_pool();
-        if doh.try_rotate_current_sticky_ip_sync().is_none() {
-            if let Ok(rt) = runtime() {
-                rt.spawn(async move {
-                    let _ = doh.rotate_current_sticky_ip().await;
-                });
-            }
+        let _ = doh.try_advance_sticky_ip_for_gen_sync(new_gen);
+        if let Ok(rt) = runtime() {
+            rt.spawn(async move {
+                doh.refresh_sticky_ip_after_rotation().await;
+            });
         }
+    } else {
+        net_bind::update_network(net_bind::physical_handle(), net_bind::bypass_vpn());
     }
 }
 
@@ -553,8 +569,14 @@ mod tests {
         assert!(!proxy::should_mitm_host("github.com"));
     }
 
+    fn global_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     #[tokio::test]
     async fn test_loopback_ech_gateway_and_tunnel_end_to_end() {
+        let _serial = global_test_lock().lock().await;
         let ech_cfg = base64::engine::general_purpose::STANDARD
             .decode("/g0AOgAAIAAguy8p4+MFfgQZ1S/F9EEYd2+NthzqT992B5uTYGxaYkgACAABAAEAAQADAAdlY2guY29tAAA=")
             .unwrap();
@@ -719,6 +741,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_loopback_h2_over_ech_gateway_and_pooled_reuse() {
+        let _serial = global_test_lock().lock().await;
         let ech_cfg = base64::engine::general_purpose::STANDARD
             .decode("/g0AOgAAIAAguy8p4+MFfgQZ1S/F9EEYd2+NthzqT992B5uTYGxaYkgACAABAAEAAQADAAdlY2guY29tAAA=")
             .unwrap();
@@ -899,6 +922,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dead_pooled_h2_evicts_and_transparently_reconnects() {
+        let _serial = global_test_lock().lock().await;
         let ech_cfg = base64::engine::general_purpose::STANDARD
             .decode("/g0AOgAAIAAguy8p4+MFfgQZ1S/F9EEYd2+NthzqT992B5uTYGxaYkgACAABAAEAAQADAAdlY2guY29tAAA=")
             .unwrap();
@@ -1078,6 +1102,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_system_passthrough_mode_bypasses_mitm_and_chains_http_proxy() {
+        let _serial = global_test_lock().lock().await;
         let (gw_ca_pem, gw_ca_key) = ca::generate_root_ca_pem().unwrap();
         let gw_ca = CaAuthority::from_pem(&gw_ca_pem, &gw_ca_key).unwrap();
         assert!(!gw_ca.spki_sha256_base64().unwrap().is_empty());
@@ -1136,8 +1161,13 @@ mod tests {
         server.stop();
     }
 
-    #[test]
-    fn test_upstream_send_timeout_and_notify_network_changed_bump_gen() {
+    #[tokio::test]
+    async fn test_upstream_send_timeout_and_notify_network_changed_bump_gen() {
+        let _serial = global_test_lock().lock().await;
+        assert_eq!(tls_upstream::H2_POOL_PROBE_TIMEOUT, std::time::Duration::from_secs(3));
+        assert_eq!(tls_upstream::UPSTREAM_TCP_CONNECT_TIMEOUT, std::time::Duration::from_millis(3500));
+        assert_eq!(tls_upstream::UPSTREAM_TLS_HANDSHAKE_TIMEOUT, std::time::Duration::from_millis(4000));
+        assert_eq!(tls_upstream::UPSTREAM_GET_HEADER_TIMEOUT, std::time::Duration::from_secs(8));
         assert_eq!(
             tls_upstream::upstream_send_timeout_for_path(&http::Method::POST, "/uploads.json"),
             std::time::Duration::from_secs(95)
@@ -1148,11 +1178,639 @@ mod tests {
         );
         assert_eq!(
             tls_upstream::upstream_send_timeout_for_path(&http::Method::GET, "/latest.json"),
-            std::time::Duration::from_secs(15)
+            std::time::Duration::from_secs(8)
         );
 
         let before_gen = net_bind::network_gen();
         notify_network_changed();
         assert!(net_bind::network_gen() > before_gen);
+    }
+
+    #[tokio::test]
+    async fn test_tls_handshake_timeout_rotates_sticky_ip_and_recovers() {
+        let _serial = global_test_lock().lock().await;
+        net_bind::update_network(0, false);
+
+        let ech_cfg = base64::engine::general_purpose::STANDARD
+            .decode("/g0AOgAAIAAguy8p4+MFfgQZ1S/F9EEYd2+NthzqT992B5uTYGxaYkgACAABAAEAAQADAAdlY2guY29tAAA=")
+            .unwrap();
+        let ech_key = base64::engine::general_purpose::STANDARD
+            .decode("nx3rjPVWNbMfaatuM+8AnorXKBktqxI3lEvHfD+pH4I=")
+            .unwrap();
+        let ech_list = base64::engine::general_purpose::STANDARD
+            .decode("AD7+DQA6AAAgACC7Lynj4wV+BBnVL8X0QRh3b422HOpP33YHm5NgbFpiSAAIAAEAAQABAAMAB2VjaC5jb20AAA==")
+            .unwrap();
+
+        // Listener 1 accepts TCP immediately but stalls TLS ServerHello to trigger TLS handshake timeout.
+        let stalled_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_addr = stalled_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((_tcp, _)) = stalled_listener.accept().await {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+
+        // Listener 2 completes BoringSSL ECH + H2 cleanly.
+        let (up_ca_pem, up_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let up_ca = CaAuthority::from_pem(&up_ca_pem, &up_ca_key).unwrap();
+        let up_leaf = up_ca.leaf_for_host("linux.do").unwrap();
+        let mut up_acc_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).unwrap();
+        up_acc_builder.set_certificate(&up_leaf.cert).unwrap();
+        up_acc_builder.set_private_key(&up_leaf.key).unwrap();
+        up_acc_builder.set_alpn_select_callback(|_, protos| {
+            let mut p = 0usize;
+            while p < protos.len() {
+                let l = protos[p] as usize;
+                p += 1;
+                if p + l <= protos.len() && &protos[p..p + l] == b"h2" {
+                    return Ok(&protos[p..p + l]);
+                }
+                p += l;
+            }
+            Err(boring2::ssl::AlpnError::NOACK)
+        });
+        let up_acceptor = Arc::new(up_acc_builder.build());
+        unsafe {
+            boring_sys2::init();
+            let hpke_key = boring_sys2::EVP_HPKE_KEY_new();
+            assert_eq!(
+                boring_sys2::EVP_HPKE_KEY_init(
+                    hpke_key,
+                    boring_sys2::EVP_hpke_x25519_hkdf_sha256(),
+                    ech_key.as_ptr(),
+                    ech_key.len(),
+                ),
+                1
+            );
+            let ech_keys = boring_sys2::SSL_ECH_KEYS_new();
+            assert_eq!(
+                boring_sys2::SSL_ECH_KEYS_add(ech_keys, 1, ech_cfg.as_ptr(), ech_cfg.len(), hpke_key),
+                1
+            );
+            assert_eq!(
+                boring_sys2::SSL_CTX_set1_ech_keys(up_acceptor.context().as_ptr() as *mut _, ech_keys),
+                1
+            );
+            boring_sys2::SSL_ECH_KEYS_free(ech_keys);
+            boring_sys2::EVP_HPKE_KEY_free(hpke_key);
+        }
+
+        let healthy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let healthy_addr = healthy_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((tcp, _)) = healthy_listener.accept().await {
+                let ssl = Ssl::new(up_acceptor.context()).unwrap();
+                let mut tls = SslStream::new(ssl, tcp).unwrap();
+                Pin::new(&mut tls).accept().await.unwrap();
+                assert!(tls.ssl().ech_accepted());
+                let svc = hyper::service::service_fn(|_req: hyper::Request<hyper::body::Incoming>| async move {
+                    Ok::<_, std::convert::Infallible>(hyper::Response::new(
+                        http_body_util::Full::new(bytes::Bytes::from_static(b"recovered-after-tls-timeout")),
+                    ))
+                });
+                let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), svc)
+                    .await;
+            }
+        });
+
+        let ip1 = Ipv4Addr::new(104, 18, 10, 118);
+        let ip2 = Ipv4Addr::new(104, 18, 11, 118);
+        let doh = DohResolver::new().unwrap();
+        doh.seed_ech_cache_for_test(ech_list, vec![ip1, ip2]).await;
+        assert_eq!(doh.cached_sticky_ip_sync(), Some(ip1));
+
+        let mut ip_map = std::collections::HashMap::new();
+        ip_map.insert(ip1, stalled_addr);
+        ip_map.insert(ip2, healthy_addr);
+
+        let up_ca_x509 = boring2::x509::X509::from_pem(up_ca_pem.as_bytes()).unwrap();
+        let upstream = UpstreamPool::new_for_doh_rotation_test(
+            Arc::clone(&doh),
+            &up_ca_x509,
+            ip_map,
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+
+        let (gw_ca_pem, gw_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let gw_ca = CaAuthority::from_pem(&gw_ca_pem, &gw_ca_key).unwrap();
+        let gw_ca_cert = boring2::x509::X509::from_pem(gw_ca_pem.as_bytes()).unwrap();
+        let mut server = GatewayServer::start(Arc::clone(&gw_ca), Arc::clone(&doh), upstream)
+            .await
+            .unwrap();
+        let proxy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server.listen_port);
+
+        let mut client_tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        client_tcp
+            .write_all(b"CONNECT linux.do:443 HTTP/1.1\r\nHost: linux.do:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut conn_resp = [0u8; 64];
+        let n = client_tcp.read(&mut conn_resp).await.unwrap();
+        assert!(std::str::from_utf8(&conn_resp[..n]).unwrap().contains("200 Connection Established"));
+
+        let mut cli_builder = SslConnector::builder(SslMethod::tls_client()).unwrap();
+        cli_builder.set_verify(SslVerifyMode::PEER);
+        let mut cli_store = X509StoreBuilder::new().unwrap();
+        cli_store.add_cert(gw_ca_cert).unwrap();
+        cli_builder.set_verify_cert_store(cli_store.build()).unwrap();
+        let _ = cli_builder.set_alpn_protos(b"\x08http/1.1");
+        let ssl = cli_builder.build().configure().unwrap().into_ssl("linux.do").unwrap();
+        let mut cli_tls = SslStream::new(ssl, client_tcp).unwrap();
+        Pin::new(&mut cli_tls).connect().await.unwrap();
+
+        cli_tls
+            .write_all(b"GET /latest.json HTTP/1.1\r\nHost: linux.do\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        cli_tls.read_to_end(&mut buf).await.unwrap();
+        let resp_text = String::from_utf8_lossy(&buf);
+        assert!(
+            resp_text.contains("200 OK") && resp_text.contains("recovered-after-tls-timeout"),
+            "expected retry onto healthy sticky IP after TLS timeout, got: {resp_text}"
+        );
+        assert_eq!(
+            doh.cached_sticky_ip_sync(),
+            Some(ip2),
+            "expected TLS handshake timeout on ip1 to rotate sticky_ip to ip2"
+        );
+
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn test_per_host_sharded_connect_lock_does_not_block_other_hosts() {
+        let _serial = global_test_lock().lock().await;
+        net_bind::update_network(0, false);
+
+        let ech_cfg = base64::engine::general_purpose::STANDARD
+            .decode("/g0AOgAAIAAguy8p4+MFfgQZ1S/F9EEYd2+NthzqT992B5uTYGxaYkgACAABAAEAAQADAAdlY2guY29tAAA=")
+            .unwrap();
+        let ech_key = base64::engine::general_purpose::STANDARD
+            .decode("nx3rjPVWNbMfaatuM+8AnorXKBktqxI3lEvHfD+pH4I=")
+            .unwrap();
+        let ech_list = base64::engine::general_purpose::STANDARD
+            .decode("AD7+DQA6AAAgACC7Lynj4wV+BBnVL8X0QRh3b422HOpP33YHm5NgbFpiSAAIAAEAAQABAAMAB2VjaC5jb20AAA==")
+            .unwrap();
+
+        let (up_ca_pem, up_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let up_ca = CaAuthority::from_pem(&up_ca_pem, &up_ca_key).unwrap();
+        let leaf_main = up_ca.leaf_for_host("linux.do").unwrap();
+
+        let mut up_acc_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).unwrap();
+        up_acc_builder.set_certificate(&leaf_main.cert).unwrap();
+        up_acc_builder.set_private_key(&leaf_main.key).unwrap();
+        up_acc_builder.set_alpn_select_callback(|_, protos| {
+            let mut p = 0usize;
+            while p < protos.len() {
+                let l = protos[p] as usize;
+                p += 1;
+                if p + l <= protos.len() && &protos[p..p + l] == b"h2" {
+                    return Ok(&protos[p..p + l]);
+                }
+                p += l;
+            }
+            Err(boring2::ssl::AlpnError::NOACK)
+        });
+        let up_acceptor = Arc::new(up_acc_builder.build());
+        unsafe {
+            boring_sys2::init();
+            let hpke_key = boring_sys2::EVP_HPKE_KEY_new();
+            assert_eq!(
+                boring_sys2::EVP_HPKE_KEY_init(
+                    hpke_key,
+                    boring_sys2::EVP_hpke_x25519_hkdf_sha256(),
+                    ech_key.as_ptr(),
+                    ech_key.len(),
+                ),
+                1
+            );
+            let ech_keys = boring_sys2::SSL_ECH_KEYS_new();
+            assert_eq!(
+                boring_sys2::SSL_ECH_KEYS_add(ech_keys, 1, ech_cfg.as_ptr(), ech_cfg.len(), hpke_key),
+                1
+            );
+            assert_eq!(
+                boring_sys2::SSL_CTX_set1_ech_keys(up_acceptor.context().as_ptr() as *mut _, ech_keys),
+                1
+            );
+            boring_sys2::SSL_ECH_KEYS_free(ech_keys);
+            boring_sys2::EVP_HPKE_KEY_free(hpke_key);
+        }
+
+        // Connection 1 (cdn.ldstatic.com) stalls handshake for 650ms; Connection 2 (linux.do) responds immediately.
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let conn_seq = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let conn_seq_srv = Arc::clone(&conn_seq);
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = upstream_listener.accept().await {
+                let idx = conn_seq_srv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let acc = Arc::clone(&up_acceptor);
+                tokio::spawn(async move {
+                    if idx == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+                        return;
+                    }
+                    let ssl = Ssl::new(acc.context()).unwrap();
+                    let mut tls = SslStream::new(ssl, tcp).unwrap();
+                    Pin::new(&mut tls).accept().await.unwrap();
+                    let svc = hyper::service::service_fn(|_req: hyper::Request<hyper::body::Incoming>| async move {
+                        Ok::<_, std::convert::Infallible>(hyper::Response::new(
+                            http_body_util::Full::new(bytes::Bytes::from_static(b"fast-linuxdo")),
+                        ))
+                    });
+                    let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                        .serve_connection(hyper_util::rt::TokioIo::new(tls), svc)
+                        .await;
+                });
+            }
+        });
+
+        let (gw_ca_pem, gw_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let gw_ca = CaAuthority::from_pem(&gw_ca_pem, &gw_ca_key).unwrap();
+        let gw_ca_cert = boring2::x509::X509::from_pem(gw_ca_pem.as_bytes()).unwrap();
+        let doh = DohResolver::new().unwrap();
+        let up_ca_x509 = boring2::x509::X509::from_pem(up_ca_pem.as_bytes()).unwrap();
+        let upstream = UpstreamPool::new_with_test_override(
+            Arc::clone(&doh),
+            tls_upstream::TestTargetOverride {
+                addr: upstream_addr,
+                ech_config_list: ech_list,
+                ca_cert: up_ca_x509,
+            },
+        )
+        .unwrap();
+
+        let mut server = GatewayServer::start(Arc::clone(&gw_ca), doh, upstream)
+            .await
+            .unwrap();
+        let proxy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server.listen_port);
+
+        let gw_ca_cdn = gw_ca_cert.clone();
+        let slow_cdn_task = tokio::spawn(async move {
+            let mut tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+            tcp.write_all(b"CONNECT cdn.ldstatic.com:443 HTTP/1.1\r\nHost: cdn.ldstatic.com:443\r\n\r\n")
+                .await
+                .unwrap();
+            let mut resp = [0u8; 64];
+            let _ = tcp.read(&mut resp).await.unwrap();
+            let mut b = SslConnector::builder(SslMethod::tls_client()).unwrap();
+            b.set_verify(SslVerifyMode::PEER);
+            let mut s = X509StoreBuilder::new().unwrap();
+            s.add_cert(gw_ca_cdn).unwrap();
+            b.set_verify_cert_store(s.build()).unwrap();
+            let _ = b.set_alpn_protos(b"\x08http/1.1");
+            let ssl = b.build().configure().unwrap().into_ssl("cdn.ldstatic.com").unwrap();
+            let mut tls = SslStream::new(ssl, tcp).unwrap();
+            Pin::new(&mut tls).connect().await.unwrap();
+            let _ = tls
+                .write_all(b"GET /asset.js HTTP/1.1\r\nHost: cdn.ldstatic.com\r\nConnection: close\r\n\r\n")
+                .await;
+            let mut out = Vec::new();
+            let _ = tls.read_to_end(&mut out).await;
+        });
+
+        // Wait until `cdn.ldstatic.com` has accepted TCP on upstream (holding its per-host connect_lock).
+        while conn_seq.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let start = std::time::Instant::now();
+        let mut fast_tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        fast_tcp
+            .write_all(b"CONNECT linux.do:443 HTTP/1.1\r\nHost: linux.do:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = [0u8; 64];
+        let _ = fast_tcp.read(&mut resp).await.unwrap();
+        let mut b = SslConnector::builder(SslMethod::tls_client()).unwrap();
+        b.set_verify(SslVerifyMode::PEER);
+        let mut s = X509StoreBuilder::new().unwrap();
+        s.add_cert(gw_ca_cert).unwrap();
+        b.set_verify_cert_store(s.build()).unwrap();
+        let _ = b.set_alpn_protos(b"\x08http/1.1");
+        let ssl = b.build().configure().unwrap().into_ssl("linux.do").unwrap();
+        let mut fast_tls = SslStream::new(ssl, fast_tcp).unwrap();
+        Pin::new(&mut fast_tls).connect().await.unwrap();
+        fast_tls
+            .write_all(b"GET /latest.json HTTP/1.1\r\nHost: linux.do\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        fast_tls.read_to_end(&mut out).await.unwrap();
+        let elapsed = start.elapsed();
+        let body = String::from_utf8_lossy(&out);
+        assert!(body.contains("fast-linuxdo"), "unexpected body: {body}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(450),
+            "expected per-host sharded connect_lock not to wait 650ms for cdn.ldstatic.com, took {elapsed:?}"
+        );
+
+        slow_cdn_task.abort();
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn test_bypass_vpn_never_falls_back_to_unbound_tun_or_fakeip() {
+        let _serial = global_test_lock().lock().await;
+        net_bind::reset_test_unbound_connect_count();
+        net_bind::set_test_force_bind_errno(1); // EPERM on physical interface
+        net_bind::update_network(777, true);
+
+        let pub_addr: SocketAddr = "104.18.10.118:443".parse().unwrap();
+        let res = net_bind::connect_tcp(pub_addr, std::time::Duration::from_millis(300)).await;
+        assert!(res.is_err(), "expected bound socket failure to propagate directly without tun0 fallback");
+        assert_eq!(
+            net_bind::test_unbound_connect_count(),
+            0,
+            "MUST NOT fall back to unbound connect_with_handle(..., None) when bypass_vpn == true"
+        );
+        assert!(!net_bind::last_bound_physical());
+        assert_eq!(net_bind::last_bind_errno(), 1);
+
+        // Missing physical handle under bypass_vpn == true must also reject without unbound fallback.
+        net_bind::update_network(0, true);
+        let res_no_handle = net_bind::connect_tcp(pub_addr, std::time::Duration::from_millis(300)).await;
+        assert!(res_no_handle.is_err());
+        assert_eq!(net_bind::test_unbound_connect_count(), 0);
+
+        // FakeIP literal must be rejected immediately under bypass_vpn == true.
+        net_bind::update_network(777, true);
+        let doh = DohResolver::new().unwrap();
+        assert!(doh.resolve_clean_a("198.18.0.2").await.is_err());
+
+        let (gw_ca_pem, gw_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let gw_ca = CaAuthority::from_pem(&gw_ca_pem, &gw_ca_key).unwrap();
+        let upstream = UpstreamPool::new(Arc::clone(&doh)).unwrap();
+        let mut server = GatewayServer::start(gw_ca, doh, upstream).await.unwrap();
+        let proxy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server.listen_port);
+        let mut tun = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        tun.write_all(b"CONNECT 198.18.0.2:443 HTTP/1.1\r\nHost: 198.18.0.2:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = [0u8; 64];
+        let n = tun.read(&mut resp).await.unwrap();
+        assert!(
+            std::str::from_utf8(&resp[..n]).unwrap().contains("502 Bad Gateway"),
+            "expected FakeIP tunnel target to fail fast with 502 under bypass_vpn"
+        );
+        assert_eq!(net_bind::test_unbound_connect_count(), 0);
+
+        server.stop();
+        net_bind::set_test_force_bind_errno(0);
+        net_bind::update_network(0, false);
+    }
+
+    #[tokio::test]
+    async fn test_fast_tcp_candidate_ordering_and_rotate_sticky_ip_clears_pool() {
+        let _serial = global_test_lock().lock().await;
+        net_bind::set_test_force_bind_errno(0);
+        net_bind::update_network(0, false);
+
+        // Verify Cloudflare Anycast filter accepts 104.16.x.x for Turnstile while rejecting FakeIP/poison.
+        assert!(doh::is_cloudflare_anycast_ipv4(Ipv4Addr::new(104, 16, 132, 229)));
+        assert!(doh::is_cloudflare_anycast_ipv4(Ipv4Addr::new(104, 18, 10, 118)));
+        assert!(!doh::is_cloudflare_anycast_ipv4(Ipv4Addr::new(198, 18, 0, 2)));
+        assert!(!doh::is_cloudflare_anycast_ipv4(Ipv4Addr::new(199, 96, 59, 95)));
+
+        // Candidate 0 is a closed port (immediate ECONNREFUSED); Candidate 1 is a live TCP listener.
+        let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+
+        let live_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_addr = live_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = live_listener.accept().await;
+        });
+
+        let ordered = doh::order_socket_addrs_by_fast_tcp(
+            &[dead_addr, live_addr],
+            std::time::Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(ordered, vec![live_addr, dead_addr]);
+
+        // Verify `rotate_sticky_ip()` (JNI `nativeRotateStickyIp`) bumps NETWORK_GEN and rotates sticky IP.
+        let (ca_pem, key_pem) = ca::generate_root_ca_pem().unwrap();
+        let port = tokio::task::spawn_blocking(move || start_gateway(&ca_pem, &key_pem, 0, false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(port > 0);
+
+        let ip1 = Ipv4Addr::new(104, 18, 10, 118);
+        let ip2 = Ipv4Addr::new(104, 18, 11, 118);
+        let gw_doh = gateway_lock()
+            .lock()
+            .as_ref()
+            .map(|g| Arc::clone(&g.doh))
+            .unwrap();
+        gw_doh
+            .seed_ech_cache_for_test(vec![0xAA, 0xBB], vec![ip1, ip2])
+            .await;
+
+        let gen_before = net_bind::network_gen();
+        rotate_sticky_ip();
+        let gen_after = net_bind::network_gen();
+        assert!(gen_after > gen_before, "expected rotate_sticky_ip to bump NETWORK_GEN");
+
+        let status = get_status_json();
+        assert!(
+            status.contains(&format!("\"stickyIp\":\"{ip2}\"")),
+            "expected rotate_sticky_ip to rotate stickyIp from {ip1} to {ip2}, got: {status}"
+        );
+
+        stop_gateway();
+    }
+
+    #[tokio::test]
+    async fn test_blackholed_h2_pool_probe_timeout_rotates_sticky_ip_and_reconnects() {
+        let _serial = global_test_lock().lock().await;
+        net_bind::set_test_force_bind_errno(0);
+        net_bind::update_network(0, false);
+
+        let ech_cfg = base64::engine::general_purpose::STANDARD
+            .decode("/g0AOgAAIAAguy8p4+MFfgQZ1S/F9EEYd2+NthzqT992B5uTYGxaYkgACAABAAEAAQADAAdlY2guY29tAAA=")
+            .unwrap();
+        let ech_key = base64::engine::general_purpose::STANDARD
+            .decode("nx3rjPVWNbMfaatuM+8AnorXKBktqxI3lEvHfD+pH4I=")
+            .unwrap();
+        let ech_list = base64::engine::general_purpose::STANDARD
+            .decode("AD7+DQA6AAAgACC7Lynj4wV+BBnVL8X0QRh3b422HOpP33YHm5NgbFpiSAAIAAEAAQABAAMAB2VjaC5jb20AAA==")
+            .unwrap();
+
+        let (up_ca_pem, up_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let up_ca = CaAuthority::from_pem(&up_ca_pem, &up_ca_key).unwrap();
+        let up_leaf = up_ca.leaf_for_host("linux.do").unwrap();
+        let mut up_acc_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).unwrap();
+        up_acc_builder.set_certificate(&up_leaf.cert).unwrap();
+        up_acc_builder.set_private_key(&up_leaf.key).unwrap();
+        up_acc_builder.set_alpn_select_callback(|_, protos| {
+            let mut p = 0usize;
+            while p < protos.len() {
+                let l = protos[p] as usize;
+                p += 1;
+                if p + l <= protos.len() && &protos[p..p + l] == b"h2" {
+                    return Ok(&protos[p..p + l]);
+                }
+                p += l;
+            }
+            Err(boring2::ssl::AlpnError::NOACK)
+        });
+        let up_acceptor = Arc::new(up_acc_builder.build());
+        unsafe {
+            boring_sys2::init();
+            let hpke_key = boring_sys2::EVP_HPKE_KEY_new();
+            assert_eq!(
+                boring_sys2::EVP_HPKE_KEY_init(
+                    hpke_key,
+                    boring_sys2::EVP_hpke_x25519_hkdf_sha256(),
+                    ech_key.as_ptr(),
+                    ech_key.len(),
+                ),
+                1
+            );
+            let ech_keys = boring_sys2::SSL_ECH_KEYS_new();
+            assert_eq!(
+                boring_sys2::SSL_ECH_KEYS_add(ech_keys, 1, ech_cfg.as_ptr(), ech_cfg.len(), hpke_key),
+                1
+            );
+            assert_eq!(
+                boring_sys2::SSL_CTX_set1_ech_keys(up_acceptor.context().as_ptr() as *mut _, ech_keys),
+                1
+            );
+            boring_sys2::SSL_ECH_KEYS_free(ech_keys);
+            boring_sys2::EVP_HPKE_KEY_free(hpke_key);
+        }
+
+        // Listener 1 (ip1): serves /req1, then blackholes /req2 for 10s (simulating NAT/edge silent drop).
+        let l1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let l1_addr = l1.local_addr().unwrap();
+        let acc1 = Arc::clone(&up_acceptor);
+        tokio::spawn(async move {
+            if let Ok((tcp, _)) = l1.accept().await {
+                let ssl = Ssl::new(acc1.context()).unwrap();
+                let mut tls = SslStream::new(ssl, tcp).unwrap();
+                Pin::new(&mut tls).accept().await.unwrap();
+                let svc = hyper::service::service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                    if req.uri().path() == "/req2" {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
+                    Ok::<_, std::convert::Infallible>(hyper::Response::new(
+                        http_body_util::Full::new(bytes::Bytes::from_static(b"ip1-ok")),
+                    ))
+                });
+                let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), svc)
+                    .await;
+            }
+        });
+
+        // Listener 2 (ip2): responds immediately.
+        let l2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let l2_addr = l2.local_addr().unwrap();
+        let acc2 = Arc::clone(&up_acceptor);
+        tokio::spawn(async move {
+            if let Ok((tcp, _)) = l2.accept().await {
+                let ssl = Ssl::new(acc2.context()).unwrap();
+                let mut tls = SslStream::new(ssl, tcp).unwrap();
+                Pin::new(&mut tls).accept().await.unwrap();
+                let svc = hyper::service::service_fn(|_req: hyper::Request<hyper::body::Incoming>| async move {
+                    Ok::<_, std::convert::Infallible>(hyper::Response::new(
+                        http_body_util::Full::new(bytes::Bytes::from_static(b"ip2-recovered")),
+                    ))
+                });
+                let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), svc)
+                    .await;
+            }
+        });
+
+        let ip1 = Ipv4Addr::new(104, 18, 10, 118);
+        let ip2 = Ipv4Addr::new(104, 18, 11, 118);
+        let doh = DohResolver::new().unwrap();
+        doh.seed_ech_cache_for_test(ech_list, vec![ip1, ip2]).await;
+
+        let mut ip_map = std::collections::HashMap::new();
+        ip_map.insert(ip1, l1_addr);
+        ip_map.insert(ip2, l2_addr);
+
+        let up_ca_x509 = boring2::x509::X509::from_pem(up_ca_pem.as_bytes()).unwrap();
+        let upstream = UpstreamPool::new_for_doh_rotation_test(
+            Arc::clone(&doh),
+            &up_ca_x509,
+            ip_map,
+            std::time::Duration::from_secs(4),
+        )
+        .unwrap();
+
+        let (gw_ca_pem, gw_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let gw_ca = CaAuthority::from_pem(&gw_ca_pem, &gw_ca_key).unwrap();
+        let gw_ca_cert = boring2::x509::X509::from_pem(gw_ca_pem.as_bytes()).unwrap();
+        let mut server = GatewayServer::start(gw_ca, Arc::clone(&doh), upstream)
+            .await
+            .unwrap();
+        let proxy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server.listen_port);
+
+        let mut cli_tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        cli_tcp
+            .write_all(b"CONNECT linux.do:443 HTTP/1.1\r\nHost: linux.do:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut conn_resp = [0u8; 64];
+        let _ = cli_tcp.read(&mut conn_resp).await.unwrap();
+
+        let mut b = SslConnector::builder(SslMethod::tls_client()).unwrap();
+        b.set_verify(SslVerifyMode::PEER);
+        let mut s = X509StoreBuilder::new().unwrap();
+        s.add_cert(gw_ca_cert).unwrap();
+        b.set_verify_cert_store(s.build()).unwrap();
+        let _ = b.set_alpn_protos(b"\x08http/1.1");
+        let ssl = b.build().configure().unwrap().into_ssl("linux.do").unwrap();
+        let mut cli_tls = SslStream::new(ssl, cli_tcp).unwrap();
+        Pin::new(&mut cli_tls).connect().await.unwrap();
+
+        // Request 1 warms h2_pool on ip1.
+        cli_tls
+            .write_all(b"GET /req1 HTTP/1.1\r\nHost: linux.do\r\nProxy-Connection: keep-alive\r\n\r\n")
+            .await
+            .unwrap();
+        let mut r1 = Vec::new();
+        let mut tmp = [0u8; 256];
+        loop {
+            let n = cli_tls.read(&mut tmp).await.unwrap();
+            assert!(n > 0);
+            r1.extend_from_slice(&tmp[..n]);
+            if String::from_utf8_lossy(&r1).contains("ip1-ok") {
+                break;
+            }
+        }
+        assert_eq!(doh.cached_sticky_ip_sync(), Some(ip1));
+
+        // Request 2 hits 3s H2_POOL_PROBE_TIMEOUT on ip1, rotates sticky_ip -> ip2, and succeeds.
+        let t0 = std::time::Instant::now();
+        cli_tls
+            .write_all(b"GET /req2 HTTP/1.1\r\nHost: linux.do\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut r2 = Vec::new();
+        cli_tls.read_to_end(&mut r2).await.unwrap();
+        let elapsed = t0.elapsed();
+        let r2_text = String::from_utf8_lossy(&r2);
+        assert!(
+            r2_text.contains("200 OK") && r2_text.contains("ip2-recovered"),
+            "expected pooled H2 probe timeout to failover onto ip2, got: {r2_text}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(4500),
+            "expected H2 pool probe timeout ~3s + reconnect well below 7.5s JS timeout, took {elapsed:?}"
+        );
+        assert_eq!(doh.cached_sticky_ip_sync(), Some(ip2));
+
+        server.stop();
     }
 }

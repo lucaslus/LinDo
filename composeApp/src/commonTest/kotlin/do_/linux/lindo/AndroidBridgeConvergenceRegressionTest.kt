@@ -201,4 +201,39 @@ class AndroidBridgeConvergenceRegressionTest {
         // Only 4s of active network time was consumed; 24s budget remains for replay!
         assertEquals(24_000L, deadline.remainingMs(nowMs = 41_214L))
     }
+
+    @Test
+    fun explicitForegroundWriteReachesBridgeDuringSnoozePauseWhileReadsStayPaused() = runTest {
+        do_.linux.lindo.core.network.NetworkRecoveryPolicy.androidEnabled = true
+        UserApiKeyAuthManager.requireBrowserTransportOnly = true
+        try {
+            var getCalls = 0
+            var postCalls = 0
+            UserApiKeyAuthManager.webViewHttpExecutor = { _, method, _, _ ->
+                if (method.equals("GET", ignoreCase = true)) {
+                    getCalls += 1
+                    403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>challenge</html>"
+                } else {
+                    postCalls += 1
+                    200 to """{"id":1001,"post_number":2,"username":"tester","cooked":"<p>sent</p>","created_at":"2026-11-25T01:00:00Z"}"""
+                }
+            }
+            // Foreground GET hits challenge -> arms 12s challenge pause
+            runCatching { LinuxDoRepository.fetchTopics(path = "/latest.json", background = false) }
+            assertEquals(1, getCalls)
+            assertTrue(LinuxDoRepository.isChallengeCooldownActive())
+
+            // Subsequent GET stays paused
+            runCatching { LinuxDoRepository.fetchTopics(path = "/latest.json", background = false) }
+            assertEquals(1, getCalls)
+
+            // Explicit foreground POST (user clicked Publish/Reply during snooze) reaches bridge executor!
+            val pub = LinuxDoRepository.createPost(topicId = 42, raw = "test reply during snooze")
+            assertTrue(pub is do_.linux.lindo.core.network.PostSubmission.Published)
+            assertEquals(1, postCalls)
+        } finally {
+            do_.linux.lindo.core.network.NetworkRecoveryPolicy.androidEnabled = false
+            do_.linux.lindo.core.network.NetworkRecoveryPolicy.androidVerifying = false
+        }
+    }
 }

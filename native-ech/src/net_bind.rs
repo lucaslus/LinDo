@@ -19,10 +19,30 @@ extern "C" {
 }
 
 static PHYSICAL_NET_HANDLE: AtomicU64 = AtomicU64::new(0);
-static BYPASS_VPN: AtomicBool = AtomicBool::new(true);
+static BYPASS_VPN: AtomicBool = AtomicBool::new(false);
 static NETWORK_GEN: AtomicU64 = AtomicU64::new(1);
 static LAST_BOUND_PHYSICAL: AtomicBool = AtomicBool::new(false);
 static LAST_BIND_ERRNO: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(test)]
+static TEST_FORCE_BIND_ERRNO: AtomicI32 = AtomicI32::new(0);
+#[cfg(test)]
+static TEST_UNBOUND_CONNECT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub fn set_test_force_bind_errno(errno: i32) {
+    TEST_FORCE_BIND_ERRNO.store(errno, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub fn reset_test_unbound_connect_count() {
+    TEST_UNBOUND_CONNECT_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub fn test_unbound_connect_count() -> u64 {
+    TEST_UNBOUND_CONNECT_COUNT.load(Ordering::SeqCst)
+}
 
 pub fn physical_handle() -> u64 {
     PHYSICAL_NET_HANDLE.load(Ordering::Acquire)
@@ -92,27 +112,30 @@ pub fn update_network(net_handle: u64, bypass: bool) -> bool {
     true
 }
 
-/// Opens a TCP connection to `addr`. When Android VPN bypass is enabled and a
-/// physical non-VPN `net_handle_t` is known, binds the non-loopback socket to
-/// the physical interface via `android_setsocknetwork`, falling back cleanly once
-/// to the system default route if the bound path fails.
+/// Opens a TCP connection to `addr`. When Android VPN bypass is enabled,
+/// non-loopback sockets MUST bind to the physical non-VPN `net_handle_t` via
+/// `android_setsocknetwork` and NEVER silently fall back to the default `tun0` VPN
+/// route on failure (preventing cross-NIC exit IP split between `linux.do` and Turnstile).
 pub async fn connect_tcp(addr: SocketAddr, timeout_dur: Duration) -> io::Result<(TcpStream, bool)> {
-    let handle = physical_handle();
-    let should_bind = !addr.ip().is_loopback() && bypass_vpn() && handle != 0;
-
-    if should_bind {
-        match connect_with_handle(addr, timeout_dur, Some(handle)).await {
+    if !addr.ip().is_loopback() && bypass_vpn() {
+        let handle = physical_handle();
+        if handle == 0 {
+            LAST_BOUND_PHYSICAL.store(false, Ordering::Relaxed);
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "physical network handle unavailable while bypass_vpn is enabled",
+            ));
+        }
+        return match connect_with_handle(addr, timeout_dur, Some(handle)).await {
             Ok((stream, bound)) => {
                 LAST_BOUND_PHYSICAL.store(bound, Ordering::Relaxed);
-                return Ok((stream, bound));
+                Ok((stream, bound))
             }
-            Err(_bound_err) => {
-                // Fall back once to system routing (e.g., lockdown VPN or interface transition).
-                let (stream, _) = connect_with_handle(addr, timeout_dur, None).await?;
+            Err(bound_err) => {
                 LAST_BOUND_PHYSICAL.store(false, Ordering::Relaxed);
-                return Ok((stream, false));
+                Err(bound_err)
             }
-        }
+        };
     }
 
     let (stream, _) = connect_with_handle(addr, timeout_dur, None).await?;
@@ -125,6 +148,19 @@ async fn connect_with_handle(
     timeout_dur: Duration,
     #[allow(unused_variables)] net_handle: Option<u64>,
 ) -> io::Result<(TcpStream, bool)> {
+    #[cfg(test)]
+    if !addr.ip().is_loopback() {
+        if net_handle.is_some() {
+            let forced_errno = TEST_FORCE_BIND_ERRNO.load(Ordering::SeqCst);
+            if forced_errno != 0 {
+                LAST_BIND_ERRNO.store(forced_errno, Ordering::Relaxed);
+                return Err(io::Error::from_raw_os_error(forced_errno));
+            }
+        } else {
+            TEST_UNBOUND_CONNECT_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     let sock = if addr.is_ipv4() {
         TcpSocket::new_v4()?
     } else {

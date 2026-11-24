@@ -315,6 +315,7 @@ object CookieSentinel {
             if (winnerCf != null) {
                 if (verified) {
                     NetworkPolicyEngine.backgroundChallengeTracker.reset()
+                    NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
                 }
                 removeCookieByName("cf_clearance", domain = domain)
                 putCookie(
@@ -341,6 +342,9 @@ object CookieSentinel {
             for (cfName in cfTrustCookieNames) {
                 if (cfName !in presentCookies) {
                     removeCookieByName(cfName, domain = domain)
+                    if (cfName == "cf_clearance") {
+                        CfClearanceAuthority.reset()
+                    }
                 }
             }
         }
@@ -2977,13 +2981,16 @@ object LinuxDoRepository {
         explicitAuthExchange: Boolean = false,
         onPreSendFailure: ((String) -> Unit)? = null
     ): Pair<Int, String>? = withContext(Dispatchers.IO) {
-        // A fresh user-authorized OTP gets one attempt; all other traffic remains paused.
-        // The rate-limit gate below still applies, and an actual challenge re-arms the pause.
-        if (!explicitAuthExchange && shouldPauseForSiteVerification(url)) {
+        // A fresh user-authorized OTP gets one attempt; explicit foreground writes (publish/reply/boost)
+        // when no verification modal is open also proceed so they can trigger interactive verification on demand.
+        val isReadMethod = method.equals("GET", true) || method.equals("HEAD", true)
+        val isExplicitForegroundWrite = !isReadMethod &&
+            extraHeaders["Discourse-Background"] != "true" &&
+            !NetworkRecoveryPolicy.verifying
+        if (!explicitAuthExchange && !isExplicitForegroundWrite && shouldPauseForSiteVerification(url)) {
             return@withContext if (preserveFailure) 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>cf-browser-verification</html>" else null
         }
         if (NetworkRecoveryPolicy.enabled && isRateLimitedNow()) return@withContext if (preserveFailure) 429 to "{\"errors\":[\"请求较频繁，请稍后再试\"]}" else null
-        val isReadMethod = method.equals("GET", true) || method.equals("HEAD", true)
         val winningCookies = CookieSentinel.resolveWinningCookies()
         val rawT = winningCookies["_t"]?.value.orEmpty()
         val hasWebCookie = rawT.isNotBlank() && rawT != "demo_session_token"
@@ -3141,6 +3148,7 @@ object LinuxDoRepository {
                     NetworkPolicyEngine.timeoutBlackholeDetector.noteHealthyResponse()
                     NetworkPolicyEngine.verifyCoordinator.resetOnHealthyResponse()
                     NetworkPolicyEngine.backgroundChallengeTracker.noteHealthyResponse(isWrite = true)
+                    NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
                     CfClearanceAuthority.confirmHealthy(
                         CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                     )
@@ -3187,11 +3195,19 @@ object LinuxDoRepository {
                     if (candidate != null && isExpectedResponse(candidate.first, candidate.second)) {
                         challenge429Streak.set(0)
                         NetworkPolicyEngine.timeoutBlackholeDetector.noteHealthyResponse()
-                        NetworkPolicyEngine.verifyCoordinator.resetOnHealthyResponse()
+                        val hasUnresolvedWriteOrIneffective =
+                            NetworkPolicyEngine.backgroundChallengeTracker.hasUnresolvedWriteChallenges() ||
+                                NetworkPolicyEngine.verifyCoordinator.hasUnresolvedIneffectiveClearance()
+                        if (!hasUnresolvedWriteOrIneffective) {
+                            NetworkPolicyEngine.verifyCoordinator.resetOnHealthyResponse()
+                            CfClearanceAuthority.confirmHealthy(
+                                CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
+                            )
+                            if (CfClearanceAuthority.hasHealthyIncumbent()) {
+                                NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
+                            }
+                        }
                         NetworkPolicyEngine.backgroundChallengeTracker.noteHealthyResponse(isWrite = false)
-                        CfClearanceAuthority.confirmHealthy(
-                            CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
-                        )
                         if (isForegroundRequest) {
                             if (!NetworkRecoveryPolicy.enabled) rateLimitedUntilMs.set(0L)
                             UserPresenceService.recordSuccessfulForegroundRequest()

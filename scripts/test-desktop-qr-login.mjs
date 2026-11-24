@@ -468,3 +468,35 @@ test("Pending feed banner state machine matches Mobile PendingFeedStateMachine.k
     "fetch_live"
   );
 });
+
+test("Desktop ECH 4-char labels, macOS challenge tunnel, and CF dismiss/typing UX contracts", () => {
+  const repoRoot = path.resolve(__dirname, "..");
+  const secondarySrc = fs.readFileSync(
+    path.join(repoRoot, "desktop-tauri/src/components/SecondaryScreens.tsx"),
+    "utf8"
+  );
+  assert.ok(secondarySrc.includes('{ key: "smart_auto" as const, label: "智能推荐" }'));
+  assert.ok(secondarySrc.includes('{ key: "ech_priority" as const, label: "直连优先" }'));
+  assert.ok(secondarySrc.includes('{ key: "system_default" as const, label: "系统默认" }'));
+  assert.equal(secondarySrc.includes("智能模式（推荐）"), false);
+  assert.ok(secondarySrc.includes("切换后立即生效，无需重启应用。"));
+
+  const macWebkitSrc = fs.readFileSync(
+    path.join(repoRoot, "desktop-tauri/src-tauri/native/macos_webkit_bridge.m"),
+    "utf8"
+  );
+  assert.ok(
+    macWebkitSrc.includes('nw_proxy_config_add_match_domain(cfg, "challenges.cloudflare.com")'),
+    "macOS WebKit proxy must route challenges.cloudflare.com through local ECH transparent TCP tunnel"
+  );
+  assert.equal(
+    macWebkitSrc.includes('nw_proxy_config_add_excluded_domain(cfg, "challenges.cloudflare.com")'),
+    false,
+    "macOS WebKit proxy must not exclude challenges.cloudflare.com onto split exit IP"
+  );
+  assert.ok(macWebkitSrc.includes("isCloudflareDomainCookieName(cookie.name)"));
+
+  const appSrc = fs.readFileSync(path.join(repoRoot, "desktop-tauri/src/App.tsx"), "utf8");
+  assert.ok(appSrc.includes('emit("lindo://ui-activity"'));
+  assert.ok(appSrc.includes("连接需安全确认 · 去验证"));
+});

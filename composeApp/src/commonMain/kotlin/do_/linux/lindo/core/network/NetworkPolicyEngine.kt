@@ -1,5 +1,9 @@
 package do_.linux.lindo.core.network
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import do_.linux.lindo.core.runUiSafeStateWrite
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.time.ZonedDateTime
@@ -72,12 +76,19 @@ sealed interface VerifyJoin {
     ) : VerifyJoin
 }
 
+sealed interface IneffectiveClearanceDecision {
+    /** 第 1 次命中无效票据：触发一次进程内净室网络自愈重置并干净重拉验证页，不立即冷冻 60s */
+    data object SelfHealAndRetryOnce : IneffectiveClearanceDecision
+    /** 净室重置重验后第 2 次仍撞盾：拉起 60s 无效票据熔断器阻断死循环 */
+    data class TripBreaker(val cooldownRemainMs: Long) : IneffectiveClearanceDecision
+}
+
 /**
  * 权威单飞过盾协调器（对齐 PC Rust `VerifyCoordinator`）：
  * - 单飞合流 + 4 档单调升舱；
  * - 轮次号（round）去重记失败（并发 N 个请求同轮失败仅记 1 次）；
  * - 连续 3 轮失败进入 30s 冷却；
- * - 过盾后 15s 内立即复撞触发 60s 无效票据熔断；
+ * - 过盾后 15s 内立即复撞：第 1 次触发进程内净室自愈重验，连续第 2 次触发 60s 无效票据熔断；
  * - 静默验证失败仅 45s 静默退避，绝不计入用户失败；
  * - `MANUAL` 手动点击绕过所有自动冷却。
  */
@@ -108,6 +119,8 @@ class VerifyCoordinator {
     private var silentBackoffUntilMs: Long = 0L
     private var lastPassedRound: Long = 0L
     private var lastPassedAtMs: Long = 0L
+    private var ineffectiveHealUsedSinceHealthy: Boolean = false
+    private var unresolvedIneffectiveClearance: Boolean = false
 
     @Synchronized
     fun isActive(): Boolean = active != null
@@ -117,6 +130,18 @@ class VerifyCoordinator {
 
     @Synchronized
     fun lastPassedRound(): Long = lastPassedRound
+
+    @Synchronized
+    fun hasUnresolvedIneffectiveClearance(nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (cooldownUntilMs > 0L && nowMs >= cooldownUntilMs) {
+            cooldownUntilMs = 0L
+            cooldownIsIneffective = false
+            unresolvedIneffectiveClearance = false
+            consecutiveFailures = 0
+            failureCountedRound = null
+        }
+        return unresolvedIneffectiveClearance || (cooldownIsIneffective && cooldownUntilMs > nowMs)
+    }
 
     @Synchronized
     fun joinOrStart(
@@ -137,6 +162,7 @@ class VerifyCoordinator {
         if (cooldownUntilMs > 0L && nowMs >= cooldownUntilMs) {
             cooldownUntilMs = 0L
             cooldownIsIneffective = false
+            unresolvedIneffectiveClearance = false
             consecutiveFailures = 0
             failureCountedRound = null
         }
@@ -228,7 +254,24 @@ class VerifyCoordinator {
     }
 
     @Synchronized
+    fun onPostVerifyReplayChallenged(
+        round: Long,
+        nowMs: Long = System.currentTimeMillis()
+    ): IneffectiveClearanceDecision {
+        unresolvedIneffectiveClearance = true
+        return if (!ineffectiveHealUsedSinceHealthy) {
+            ineffectiveHealUsedSinceHealthy = true
+            lastPassedAtMs = 0L
+            IneffectiveClearanceDecision.SelfHealAndRetryOnce
+        } else {
+            val remain = recordIneffectiveClearance(round, nowMs)
+            IneffectiveClearanceDecision.TripBreaker(remain)
+        }
+    }
+
+    @Synchronized
     fun recordIneffectiveClearance(round: Long, nowMs: Long = System.currentTimeMillis()): Long {
+        unresolvedIneffectiveClearance = true
         val withinWindow = lastPassedRound == round &&
             (lastPassedAtMs <= 0L || (nowMs - lastPassedAtMs) <= INEFFECTIVE_WINDOW_MS)
         if (withinWindow || failureCountedRound != round) {
@@ -242,12 +285,28 @@ class VerifyCoordinator {
     }
 
     @Synchronized
+    fun clearCooldownsForCleanReset(preserveAutoHealGuard: Boolean = false) {
+        consecutiveFailures = 0
+        failureCountedRound = null
+        cooldownUntilMs = 0L
+        cooldownIsIneffective = false
+        silentBackoffUntilMs = 0L
+        lastPassedAtMs = 0L
+        if (!preserveAutoHealGuard) {
+            ineffectiveHealUsedSinceHealthy = false
+            unresolvedIneffectiveClearance = false
+        }
+    }
+
+    @Synchronized
     fun resetOnHealthyResponse() {
         consecutiveFailures = 0
         failureCountedRound = null
         cooldownUntilMs = 0L
         cooldownIsIneffective = false
         silentBackoffUntilMs = 0L
+        ineffectiveHealUsedSinceHealthy = false
+        unresolvedIneffectiveClearance = false
     }
 
     @Synchronized
@@ -657,6 +716,9 @@ class BackgroundChallengeTracker(
     }
 
     @Synchronized
+    fun hasUnresolvedWriteChallenges(): Boolean = consecutiveWriteHits > 0
+
+    @Synchronized
     fun reset() {
         readWaves = 0
         lastReadWaveAtMs = 0L
@@ -774,6 +836,8 @@ enum class SilentProbeSignal {
 sealed interface SilentVerifyStep {
     data object Continue : SilentVerifyStep
     data object Pass : SilentVerifyStep
+    /** 用户正在连续打字（距上次输入 `< 2.5s`）：暂缓收起键盘弹模态窗，先展示右下角安全确认小提示框并保活 WebView */
+    data object HoldForTyping : SilentVerifyStep
     /** 原位交棒同一 WebView 给前台验证面板（零二次加载）。 */
     data class Escalate(val reason: String) : SilentVerifyStep
     /** 放弃但不计失败（不进入静默退避）。 */
@@ -783,22 +847,28 @@ sealed interface SilentVerifyStep {
 }
 
 /**
- * 静默过盾决策（参考 Mihon/Tachiyomi `CloudflareInterceptor` 的成熟做法：
- * 等待 `cf_clearance` 真正变化，而不是看到挑战组件就判失败）。
- *
- * 旧实现的致命缺陷：页面上只要出现 `#challenge-stage` / Turnstile iframe（**所有**托管挑战都会出现，
- * 包括 1~5s 后自动通过的非交互挑战）550ms 就判定“需人工”并中止，导致静默续期几乎从不成功、频繁弹盾。
- * 新规则：只有 Turnstile 明确发出 `interactiveBegin` 才升舱；其余一律耐心等待到预算耗尽。
+ * 静默过盾与前台主动优雅升舱策略：
+ * - 非交互挑战自动放行：全程 0 胶囊、0 弹窗；
+ * - 一旦确认需要人工交互（`interactiveBegin` 或 `widget == true` 满 3.5s 未自动通过）：
+ *   1. 若用户在 180s 点 `×` 免打扰期内且非主动写操作：不自动硬弹大窗，保留右下角「需安全确认」小提示框；
+ *   2. 若用户正在输入栏连续打字（`< 2.5s`）且尚未点击发送：暂不抢键盘，先展示右下角小提示框，停笔 `>= 2.5s` 或点击小提示框 / 发送立即弹出；
+ *   3. 其余前台常规状态（冷启动、唤醒恢复、切网、刷帖、后台 `timings`/`notifications` 实测撞盾）：直接原位升舱主动弹出「安全确认」！
  */
 object SilentVerifyPolicy {
     const val FOREGROUND_BUDGET_MS = 9_000L
     const val PREWARM_BUDGET_MS = 20_000L
     const val PILL_AFTER_MS = 2_000L
+    const val WIDGET_INTERACTIVE_CONFIRM_MS = 3_500L
+    const val USER_DISMISS_SNOOZE_MS = 180_000L
+    const val ACTIVE_TYPING_GUARD_MS = 2_500L
 
     fun budgetMs(trigger: SilentVerifyTrigger): Long = when (trigger) {
         SilentVerifyTrigger.FOREGROUND -> FOREGROUND_BUDGET_MS
         SilentVerifyTrigger.PREWARM -> PREWARM_BUDGET_MS
     }
+
+    fun isInteractiveConfirmed(interactiveBegin: Boolean, widgetMountedDurationMs: Long): Boolean =
+        interactiveBegin || widgetMountedDurationMs >= WIDGET_INTERACTIVE_CONFIRM_MS
 
     fun shouldShowPill(trigger: SilentVerifyTrigger, elapsedMs: Long): Boolean =
         trigger == SilentVerifyTrigger.FOREGROUND && elapsedMs >= PILL_AFTER_MS
@@ -808,26 +878,40 @@ object SilentVerifyPolicy {
         signal: SilentProbeSignal,
         elapsedMs: Long,
         appForeground: Boolean,
-        userRequestedPanel: Boolean = false
+        userRequestedPanel: Boolean = false,
+        isForegroundWrite: Boolean = false,
+        isUserDismissSnoozed: Boolean = false,
+        isUserActivelyTyping: Boolean = false
     ): SilentVerifyStep {
         if (signal == SilentProbeSignal.PASSED) return SilentVerifyStep.Pass
         if (signal == SilentProbeSignal.GONE) return SilentVerifyStep.Fail("webview_gone")
         if (!appForeground) return SilentVerifyStep.Abandon("app_backgrounded")
-        if (signal == SilentProbeSignal.INTERACTIVE_REQUIRED) {
-            return if (trigger == SilentVerifyTrigger.FOREGROUND) {
-                SilentVerifyStep.Escalate("interactive_required")
-            } else {
-                // 预热永不弹 UI；也不进入静默退避——紧随其后的前台请求仍可立即走「静默 → 原位展开面板」
-                SilentVerifyStep.Abandon("interactive_required_prewarm")
-            }
-        }
-        if (userRequestedPanel && trigger == SilentVerifyTrigger.FOREGROUND) {
+        if (userRequestedPanel) {
             return SilentVerifyStep.Escalate("user_expanded_pill")
+        }
+        if (signal == SilentProbeSignal.INTERACTIVE_REQUIRED) {
+            if (isForegroundWrite) {
+                return SilentVerifyStep.Escalate("interactive_required")
+            }
+            if (isUserDismissSnoozed) {
+                return SilentVerifyStep.Abandon("snoozed_by_user_dismiss")
+            }
+            if (isUserActivelyTyping) {
+                return SilentVerifyStep.HoldForTyping
+            }
+            return SilentVerifyStep.Escalate(
+                if (trigger == SilentVerifyTrigger.FOREGROUND) "interactive_required" else "interactive_required_proactive"
+            )
         }
         if (elapsedMs >= budgetMs(trigger)) {
             return if (trigger == SilentVerifyTrigger.FOREGROUND) {
-                // 挑战仍在跑：交棒给面板继续可见地完成，而不是销毁后把用户甩到静态错误页
-                SilentVerifyStep.Escalate("foreground_budget_exhausted")
+                if (!isForegroundWrite && isUserDismissSnoozed) {
+                    SilentVerifyStep.Abandon("snoozed_by_user_dismiss")
+                } else if (!isForegroundWrite && isUserActivelyTyping) {
+                    SilentVerifyStep.HoldForTyping
+                } else {
+                    SilentVerifyStep.Escalate("foreground_budget_exhausted")
+                }
             } else {
                 SilentVerifyStep.Abandon("prewarm_timeout")
             }
@@ -857,6 +941,114 @@ object NetworkPolicyEngine {
     /** 由平台层（如 MainActivity）挂载的只读实时运行态元数据提供器：(profileName, webViewGen, netSignature) */
     @Volatile
     var liveRuntimeMetaProvider: (() -> Triple<String, Int, String>)? = null
+
+    /** 右下角常驻轻量提醒（「需安全确认」）：在打字保护期或用户点 `×` 关闭后的免打扰期展示，点击立即打开验证面板 */
+    var verifyAttentionNeeded by mutableStateOf(false)
+        private set
+
+    private val snoozeLock = Any()
+    private var userDismissedUntilMs: Long = 0L
+    private var userDismissedNetSig: String = ""
+
+    @Volatile
+    private var lastUserTypingAtMs: Long = 0L
+    @Volatile
+    private var imeComposingActive: Boolean = false
+    @Volatile
+    private var activeComposerOpenedAtMs: Long = 0L
+    @Volatile
+    var pendingInteractiveVerifyFromBackground: Boolean = false
+
+    fun updateVerifyAttentionNeeded(needed: Boolean) {
+        runUiSafeStateWrite {
+            verifyAttentionNeeded = needed
+        }
+    }
+
+    fun currentEffectiveNetworkSignature(): String =
+        normalizeEffectiveNetworkSignature(liveRuntimeMetaProvider?.invoke()?.third.orEmpty()).ifBlank { "default" }
+
+    fun recordUserDismissedVerify(
+        networkSignature: String = currentEffectiveNetworkSignature(),
+        nowMs: Long = System.currentTimeMillis()
+    ) {
+        val normSig = normalizeEffectiveNetworkSignature(networkSignature).ifBlank { "default" }
+        synchronized(snoozeLock) {
+            userDismissedUntilMs = nowMs + SilentVerifyPolicy.USER_DISMISS_SNOOZE_MS
+            userDismissedNetSig = normSig
+        }
+        updateVerifyAttentionNeeded(true)
+    }
+
+    fun isProactiveVerifySnoozed(
+        networkSignature: String = currentEffectiveNetworkSignature(),
+        nowMs: Long = System.currentTimeMillis()
+    ): Boolean {
+        val normSig = normalizeEffectiveNetworkSignature(networkSignature).ifBlank { "default" }
+        synchronized(snoozeLock) {
+            if (userDismissedUntilMs <= 0L) return false
+            if (nowMs >= userDismissedUntilMs || normSig != userDismissedNetSig) {
+                userDismissedUntilMs = 0L
+                userDismissedNetSig = ""
+                return false
+            }
+            return true
+        }
+    }
+
+    fun clearUserDismissedVerify() {
+        synchronized(snoozeLock) {
+            userDismissedUntilMs = 0L
+            userDismissedNetSig = ""
+        }
+    }
+
+    fun clearVerifyAttentionAndSnooze() {
+        clearUserDismissedVerify()
+        pendingInteractiveVerifyFromBackground = false
+        updateVerifyAttentionNeeded(false)
+    }
+
+    fun noteUserTyping(nowMs: Long = System.currentTimeMillis(), imeComposing: Boolean = false) {
+        lastUserTypingAtMs = nowMs
+        imeComposingActive = imeComposing
+    }
+
+    fun setComposerOpenState(open: Boolean, nowMs: Long = System.currentTimeMillis()) {
+        if (open) {
+            if (activeComposerOpenedAtMs <= 0L) activeComposerOpenedAtMs = nowMs
+        } else {
+            activeComposerOpenedAtMs = 0L
+            imeComposingActive = false
+        }
+    }
+
+    fun isUserActivelyTyping(
+        nowMs: Long = System.currentTimeMillis(),
+        latestDraftUpdatedAtMs: Long = 0L
+    ): Boolean {
+        val lastDirect = lastUserTypingAtMs
+        if (lastDirect > 0L && (nowMs - lastDirect).coerceAtLeast(0L) < SilentVerifyPolicy.ACTIVE_TYPING_GUARD_MS) {
+            return true
+        }
+        if (imeComposingActive && lastDirect > 0L && (nowMs - lastDirect).coerceAtLeast(0L) < 8_000L) {
+            return true
+        }
+        val openedAt = activeComposerOpenedAtMs
+        if (openedAt > 0L &&
+            latestDraftUpdatedAtMs > openedAt + 250L &&
+            (nowMs - latestDraftUpdatedAtMs).coerceAtLeast(0L) < SilentVerifyPolicy.ACTIVE_TYPING_GUARD_MS
+        ) {
+            return true
+        }
+        return false
+    }
+
+    fun consumePendingInteractiveVerify(): Boolean {
+        val had = pendingInteractiveVerifyFromBackground
+        pendingInteractiveVerifyFromBackground = false
+        return had
+    }
 
     private val profileMigratedSessionCookies = setOf("_t", "_forum_session", "authentication_data")
 
@@ -1033,7 +1225,8 @@ object NetworkPolicyEngine {
         timeoutBlackholeDetector.noteHealthyResponse()
         backgroundChallengeTracker.reset()
         clearCsrfCooldown()
-        CfClearanceAuthority.markRotationOpen()
+        clearVerifyAttentionAndSnooze()
+        CfClearanceAuthority.reset()
     }
 
     fun resetForTesting() {
@@ -1045,5 +1238,10 @@ object NetworkPolicyEngine {
         timeoutBlackholeDetector.resetForTesting()
         backgroundChallengeTracker.reset()
         clearCsrfCooldown()
+        clearVerifyAttentionAndSnooze()
+        lastUserTypingAtMs = 0L
+        imeComposingActive = false
+        activeComposerOpenedAtMs = 0L
+        pendingInteractiveVerifyFromBackground = false
     }
 }

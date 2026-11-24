@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LinDoIcons } from "./components/LinDoIcons";
 import { ensureGlobalImeTracking, isImeComposingEvent } from "./lib/imeGuard";
@@ -1309,6 +1309,60 @@ export const App: React.FC = () => {
         browserAuthWatchdogRef.current = null;
       }
       unsubs.forEach((u) => u());
+    };
+  }, []);
+
+  // Sync composer / typing / visibility activity to Rust bridge so proactive CF security confirmation
+  // never steals focus while user is typing in ComposerModal or composing IME text.
+  useEffect(() => {
+    emit("lindo://ui-activity", {
+      composerOpen: Boolean(composerReq),
+      windowVisible: typeof document !== "undefined" ? !document.hidden : true,
+    }).catch(() => {});
+  }, [composerReq]);
+
+  useEffect(() => {
+    let lastTypingEmitAt = 0;
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      const el = target as HTMLElement | null;
+      if (!el || typeof el.closest !== "function") return false;
+      return Boolean(el.closest('textarea, input, [contenteditable="true"]'));
+    };
+    const noteTyping = (ev: Event) => {
+      if (!isEditableTarget(ev.target)) return;
+      const now = Date.now();
+      if (now - lastTypingEmitAt < 600) return;
+      lastTypingEmitAt = now;
+      emit("lindo://ui-activity", { typingActive: true }).catch(() => {});
+    };
+    const onCompStart = (ev: CompositionEvent) => {
+      if (!isEditableTarget(ev.target)) return;
+      lastTypingEmitAt = Date.now();
+      emit("lindo://ui-activity", { imeComposing: true, typingActive: true }).catch(() => {});
+    };
+    const onCompEnd = (ev: CompositionEvent) => {
+      if (!isEditableTarget(ev.target)) return;
+      lastTypingEmitAt = Date.now();
+      emit("lindo://ui-activity", { imeComposing: false, typingActive: true }).catch(() => {});
+    };
+    const onVisibilityOrFocus = () => {
+      emit("lindo://ui-activity", {
+        windowVisible: typeof document !== "undefined" ? !document.hidden : true,
+      }).catch(() => {});
+    };
+    window.addEventListener("keydown", noteTyping, true);
+    window.addEventListener("input", noteTyping, true);
+    window.addEventListener("compositionstart", onCompStart, true);
+    window.addEventListener("compositionend", onCompEnd, true);
+    document.addEventListener("visibilitychange", onVisibilityOrFocus);
+    window.addEventListener("focus", onVisibilityOrFocus);
+    return () => {
+      window.removeEventListener("keydown", noteTyping, true);
+      window.removeEventListener("input", noteTyping, true);
+      window.removeEventListener("compositionstart", onCompStart, true);
+      window.removeEventListener("compositionend", onCompEnd, true);
+      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
+      window.removeEventListener("focus", onVisibilityOrFocus);
     };
   }, []);
 
@@ -2996,38 +3050,57 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* 4 档渐进式安全校验轻胶囊（后台校验超过 2 秒未完时静默浮现，点击可随时展开，通过自动淡出） */}
-      {verifyPill?.visible && !authCompleting && !switchingBusy && (
-        <button
-          type="button"
-          onClick={() => {
-            setVerifyPill(null);
-            handleTriggerVerify();
-          }}
-          title="点击展开安全确认面板"
-          className="lindo-interactive group fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-full px-3.5 py-1.5 shadow-lg transition-all duration-200 cursor-pointer"
-          style={{
-            backgroundColor: "color-mix(in srgb, var(--card-surface) 92%, transparent)",
-            backdropFilter: "blur(12px)",
-            WebkitBackdropFilter: "blur(12px)",
-            border: "0.5px solid var(--hairline)",
-            color: "var(--ink-primary)",
-          }}
-        >
-          <span
-            className="h-2 w-2 rounded-full animate-pulse shrink-0"
-            style={{ backgroundColor: "var(--brand-gold)" }}
-          />
-          <span className="text-[12px] font-medium" style={{ color: "var(--ink-primary)" }}>
-            安全校验中…
-          </span>
-          <LinDoIcons.ChevronRight
-            size={12.5}
-            className="opacity-65 group-hover:opacity-100 transition-opacity"
-            style={{ color: "var(--ink-tertiary)" }}
-          />
-        </button>
-      )}
+      {/* 4 档渐进式安全校验轻胶囊 / 跨视图安全确认入口（打字或未挂载阅读器时保持可见、不抢输入焦点，关闭验证窗保留原样） */}
+      {(verifyPill?.visible ||
+        (inMainApp &&
+          cfAttentionNeeded &&
+          !cfAttentionDismissed &&
+          (Boolean(composerReq) ||
+            currentTab === "DISCOVER" ||
+            currentTab === "PROFILE" ||
+            (!isWideLayout &&
+              (currentTab === "MESSAGES" || !narrowShowingReader || !activeSummary))))) &&
+        !authCompleting &&
+        !switchingBusy && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              if (verifyPill?.visible) setVerifyPill(null);
+              handleTriggerVerify();
+            }}
+            title="点击展开安全确认面板"
+            className="lindo-interactive group fixed bottom-5 right-5 z-[45] flex items-center gap-2 rounded-full px-3.5 py-1.5 shadow-lg transition-all duration-200 cursor-pointer"
+            style={{
+              backgroundColor: "color-mix(in srgb, var(--card-surface) 92%, transparent)",
+              backdropFilter: "blur(12px)",
+              WebkitBackdropFilter: "blur(12px)",
+              border: "0.5px solid var(--hairline)",
+              color: "var(--ink-primary)",
+            }}
+          >
+            {verifyPill?.visible ? (
+              <span
+                className="h-2 w-2 rounded-full animate-pulse shrink-0"
+                style={{ backgroundColor: "var(--brand-gold)" }}
+              />
+            ) : (
+              <LinDoIcons.ShieldCheck
+                size={13.5}
+                className="shrink-0"
+                style={{ color: "var(--brand-gold)" }}
+              />
+            )}
+            <span className="text-[12px] font-medium" style={{ color: "var(--ink-primary)" }}>
+              {verifyPill?.visible ? "安全校验中…" : "连接需安全确认 · 去验证"}
+            </span>
+            <LinDoIcons.ChevronRight
+              size={12.5}
+              className="opacity-65 group-hover:opacity-100 transition-opacity"
+              style={{ color: "var(--ink-tertiary)" }}
+            />
+          </button>
+        )}
 
       {/* 全局通知 Toast */}
       {globalNotice && (

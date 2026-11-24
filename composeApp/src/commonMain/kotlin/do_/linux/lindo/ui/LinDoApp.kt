@@ -2664,10 +2664,9 @@ internal fun LinDoApp(
             }
         }
         PlatformSessionRecovery.onSilentVerifyPassed = {
-            val hasVerifyError = feedError.isSiteVerificationError() ||
-                activeTopicDetail?.loadError.isSiteVerificationError() ||
-                (loadMoreError && loadMoreErrorMessage.isSiteVerificationError())
-            if (hasVerifyError) siteVerificationRestoreVersion++
+            do_.linux.lindo.core.network.NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
+            PlatformSessionRecovery.verifyPillVisible = false
+            siteVerificationRestoreVersion++
         }
         onDispose {
             val cb = pendingVerifyModalCallback
@@ -3080,8 +3079,14 @@ internal fun LinDoApp(
             pendingVerifyModalCallback = null
             cb?.invoke(passed)
             if (passed) {
+                do_.linux.lindo.core.network.NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
+                PlatformSessionRecovery.verifyPillVisible = false
                 siteVerificationRestoreVersion++
                 networkRestoreVersion++
+            } else {
+                // 用户主动点 × 关闭安全确认：在当前 networkSignature 下进入 180s 自动免打扰期，并在右下角保留「需安全确认」小提示框
+                do_.linux.lindo.core.network.NetworkPolicyEngine.recordUserDismissedVerify()
+                PlatformSessionRecovery.verifyPillVisible = true
             }
             return
         }
@@ -4766,6 +4771,7 @@ internal fun LinDoApp(
                 }
 
                 pendingEditDraft?.let { draft ->
+                    TrackComposerVerifyGuard()
                     val matchingDetail = activeTopicDetail?.takeIf { it.id == draft.topicId }
                     val matchingSummary = activeTopicSummary?.takeIf { it.id == draft.topicId }
                         ?: topics.firstOrNull { it.id == draft.topicId }
@@ -4965,6 +4971,8 @@ internal fun LinDoApp(
                         onRetryVerified = {
                             showSiteVerifySheet = false
                             PlatformSessionRecovery.verifying = false
+                            PlatformSessionRecovery.verifyPillVisible = false
+                            do_.linux.lindo.core.network.NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
                             verificationFeedbackNotice = null
                             if (UserApiKeyAuthManager.isAuthorized()) {
                                 showAuthSheet = false
@@ -4990,6 +4998,8 @@ internal fun LinDoApp(
                         onDismiss = {
                             showSiteVerifySheet = false
                             PlatformSessionRecovery.verifying = false
+                            do_.linux.lindo.core.network.NetworkPolicyEngine.recordUserDismissedVerify()
+                            PlatformSessionRecovery.verifyPillVisible = true
                             verificationFeedbackNotice = PlatformSessionRecovery.verificationMessage?.takeIf { it.isNotBlank() }
                         }
                     )
@@ -5004,7 +5014,8 @@ internal fun LinDoApp(
                         delayedVerifyPill = false
                     }
                 }
-                if ((delayedVerifyPill || PlatformSessionRecovery.verifyPillVisible) && !showSiteVerifySheet && activeWebLoginUrl == null && !authCompleting) {
+                val showVerifyAttentionPill = do_.linux.lindo.core.network.NetworkPolicyEngine.verifyAttentionNeeded
+                if ((delayedVerifyPill || PlatformSessionRecovery.verifyPillVisible || showVerifyAttentionPill) && !showSiteVerifySheet && activeWebLoginUrl == null && !authCompleting) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -5026,11 +5037,15 @@ internal fun LinDoApp(
                                 .background(palette.cardSurface.copy(alpha = 0.94f), CircleShape)
                                 .border(0.5.dp, palette.hairline, CircleShape)
                                 .clickable {
+                                    do_.linux.lindo.core.network.NetworkPolicyEngine.clearUserDismissedVerify()
+                                    do_.linux.lindo.core.network.NetworkPolicyEngine.updateVerifyAttentionNeeded(false)
                                     PlatformSessionRecovery.verifyPillVisible = false
                                     delayedVerifyPill = false
                                     val customExpand = PlatformSessionRecovery.onExpandVerifyPill
                                     if (customExpand != null) {
                                         customExpand()
+                                    } else if (hasEmbeddedWebLogin) {
+                                        activeWebLoginUrl = "https://linux.do/challenge#lindo-verify"
                                     } else {
                                         showSiteVerifySheet = true
                                     }
@@ -5046,14 +5061,16 @@ internal fun LinDoApp(
                                     .background(palette.brandGold)
                             )
                             Text(
-                                text = "安全校验中…",
+                                text = if (showVerifyAttentionPill) "需安全确认" else "安全校验中…",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium,
-                                color = palette.inkPrimary
+                                color = palette.inkPrimary,
+                                maxLines = 1,
+                                softWrap = false
                             )
                             Icon(
                                 imageVector = LinDoIcons.ChevronRight,
-                                contentDescription = "展开安全校验",
+                                contentDescription = if (showVerifyAttentionPill) "打开安全确认" else "展开安全校验",
                                 modifier = Modifier.size(13.dp),
                                 tint = palette.inkTertiary
                             )
@@ -5281,6 +5298,8 @@ internal fun LinDoApp(
                                 val wasAlreadyAuth = wasAuthorized
                                 val completingLogin = do_.linux.lindo.core.network.webPagePurpose(loginUrl) == do_.linux.lindo.core.network.WebPagePurpose.LOGIN
                                 activeWebLoginUrl = null
+                                do_.linux.lindo.core.network.NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
+                                PlatformSessionRecovery.verifyPillVisible = false
                                 val cb = pendingVerifyModalCallback
                                 pendingVerifyModalCallback = null
                                 cb?.invoke(true)
@@ -9450,7 +9469,10 @@ internal fun CommunityTopicReaderPane(
                 Icon(LinDoIcons.Search, null, Modifier.size(14.dp), tint = palette.inkTertiary)
                 BasicTextField(
                     value = inTopicFindQuery,
-                    onValueChange = { inTopicFindQuery = it },
+                    onValueChange = {
+                        do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping()
+                        inTopicFindQuery = it
+                    },
                     singleLine = true,
                     textStyle = TextStyle(color = palette.inkPrimary, fontSize = 13.sp),
                     cursorBrush = SolidColor(palette.brandGold),
@@ -10414,6 +10436,7 @@ internal fun CommunityTopicReaderPane(
     }
 
     editingPost?.let { target ->
+        TrackComposerVerifyGuard()
         val curUser = UserApiKeyAuthManager.currentUser
         val isTargetYours = (curUser != null && curUser.userId > 0 && target.userId == curUser.userId) ||
             (curUser != null && curUser.username.isNotBlank() && target.username.equals(curUser.username, ignoreCase = true))
@@ -11513,6 +11536,12 @@ internal fun CommunityPostFloor(
             val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
 
             LaunchedEffect(Unit) {
+                if (UserApiKeyAuthManager.isAuthorized() &&
+                    (!do_.linux.lindo.core.network.CfClearanceAuthority.hasHealthyIncumbent() ||
+                        do_.linux.lindo.core.network.NetworkPolicyEngine.backgroundChallengeTracker.hasUnresolvedWriteChallenges())
+                ) {
+                    runCatching { UserApiKeyAuthManager.onRequestClearancePrewarm?.invoke("composer_open") }
+                }
                 if (!floorActionError.isSiteVerificationError() && !PlatformSessionRecovery.verifying) {
                     delay(60L)
                     runCatching { boostFocusRequester.requestFocus() }
@@ -11595,6 +11624,9 @@ internal fun CommunityPostFloor(
                     BasicTextField(
                         value = syncedBoostFieldValue,
                         onValueChange = { next ->
+                            do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping(
+                                imeComposing = next.composition != null
+                            )
                             val normalizedValue = ImeInputGuard.normalizeSingleLine(next)
                             boostFieldValue = normalizedValue
                             boostInputText = normalizedValue.text
@@ -14265,6 +14297,7 @@ internal fun CommunityProfileScreen(
                                 options = do_.linux.lindo.core.network.EchRoutingMode.entries,
                                 selected = currentEchMode,
                                 label = { it.labelZh },
+                                maxLines = 1,
                                 onSelect = { selectedMode ->
                                     do_.linux.lindo.core.network.EchRoutingPolicy.selectMode(selectedMode)
                                 }
@@ -15544,6 +15577,85 @@ private fun GoogleWelcomeLoginScreen(
  * 官方功能 1：话题回复与楼层引用全屏级编辑器抽屉 (`POST /posts.json`)
  * 移动端优先设计：默认 94% 视口高度 (`skipPartiallyExpanded = true`)、大画布编辑区置顶、拇指区矢量图标工具栏置底
  */
+@Composable
+private fun TrackComposerVerifyGuard() {
+    DisposableEffect(Unit) {
+        do_.linux.lindo.core.network.NetworkPolicyEngine.setComposerOpenState(true)
+        if (UserApiKeyAuthManager.isAuthorized() &&
+            (!do_.linux.lindo.core.network.CfClearanceAuthority.hasHealthyIncumbent() ||
+                do_.linux.lindo.core.network.NetworkPolicyEngine.backgroundChallengeTracker.hasUnresolvedWriteChallenges())
+        ) {
+            runCatching { UserApiKeyAuthManager.onRequestClearancePrewarm?.invoke("composer_open") }
+        }
+        onDispose {
+            do_.linux.lindo.core.network.NetworkPolicyEngine.setComposerOpenState(false)
+        }
+    }
+}
+
+@Composable
+private fun <T> SettingsChoices(
+    options: List<T>,
+    selected: T,
+    label: (T) -> String,
+    maxLines: Int,
+    onSelect: (T) -> Unit
+) {
+    val palette = LocalPalette.current
+    BoxWithConstraints(
+        Modifier
+            .widthIn(max = (options.size * 112 * LocalDensity.current.fontScale).dp)
+            .fillMaxWidth()
+            .selectableGroup()
+    ) {
+        Row(Modifier.fillMaxWidth().height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
+            options.forEach { option ->
+                val active = option == selected
+                val interaction = remember { MutableInteractionSource() }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .heightIn(min = 48.dp)
+                        .selectable(
+                            selected = active,
+                            interactionSource = interaction,
+                            indication = null,
+                            role = androidx.compose.ui.semantics.Role.RadioButton,
+                            onClick = { onSelect(option) }
+                        )
+                        .padding(horizontal = 2.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val tint = if (active) palette.activeChipText else palette.inkSecondary
+                    Row(
+                        Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(if (active) palette.activeChipBg else palette.subtleSurface.copy(alpha = 0.65f))
+                            .rowStateLayer(interaction, radius = 7.dp)
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = label(option),
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                            fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+                            color = tint,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            maxLines = maxLines,
+                            softWrap = maxLines > 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TopicReplyComposerSheet(
@@ -15560,22 +15672,25 @@ private fun TopicReplyComposerSheet(
     exitInterceptor: ComposerExitInterceptor? = null,
     onDismiss: () -> Unit,
     onPostCreated: (PostItemModel) -> Unit
-) = ComposerSheet(
-    ComposerAction.REPLY,
-    topicId = topicId,
-    topicTitle = topicTitle,
-    replyToPostNumber = replyToPostNumber,
-    replyToUsername = replyToUsername,
-    replyToDisplayName = replyToDisplayName,
-    replyToAvatarUrl = replyToAvatarUrl,
-    replyToAnimatedAvatar = replyToAnimatedAvatar,
-    replyToContentSnippet = replyToContentSnippet,
-    initialRaw = initialRaw,
-    initialDraft = initialDraft,
-    exitInterceptor = exitInterceptor,
-    onDismiss = onDismiss,
-    onPublished = { it.post?.let(onPostCreated) }
-)
+) {
+    TrackComposerVerifyGuard()
+    ComposerSheet(
+        ComposerAction.REPLY,
+        topicId = topicId,
+        topicTitle = topicTitle,
+        replyToPostNumber = replyToPostNumber,
+        replyToUsername = replyToUsername,
+        replyToDisplayName = replyToDisplayName,
+        replyToAvatarUrl = replyToAvatarUrl,
+        replyToAnimatedAvatar = replyToAnimatedAvatar,
+        replyToContentSnippet = replyToContentSnippet,
+        initialRaw = initialRaw,
+        initialDraft = initialDraft,
+        exitInterceptor = exitInterceptor,
+        onDismiss = onDismiss,
+        onPublished = { it.post?.let(onPostCreated) }
+    )
+}
 
 /**
  * 官方功能 2：发布全新话题全屏级工作台抽屉 (`POST /posts.json`)
@@ -15589,9 +15704,16 @@ private fun TopicReplyComposerSheet(
 private fun CreateTopicModalSheet(
     initialCategoryId: Int, initialDraft: CloudDraftItem? = null,
     onDismiss: () -> Unit, onTopicCreated: (Int, String) -> Unit
-) = ComposerSheet(ComposerAction.NEW_TOPIC, initialCategoryId = initialCategoryId,
-    initialDraft = initialDraft, onDismiss = onDismiss,
-    onPublished = { onTopicCreated(it.topicId ?: 0, it.title.orEmpty()) })
+) {
+    TrackComposerVerifyGuard()
+    ComposerSheet(
+        ComposerAction.NEW_TOPIC,
+        initialCategoryId = initialCategoryId,
+        initialDraft = initialDraft,
+        onDismiss = onDismiss,
+        onPublished = { onTopicCreated(it.topicId ?: 0, it.title.orEmpty()) }
+    )
+}
 
 /**
  * ============================================================================
@@ -16222,7 +16344,12 @@ private fun WorkbenchSourceEditorBox(
     BasicTextField(
         value = tfv,
         enabled = enabled,
-        onValueChange = onValueChange,
+        onValueChange = { next ->
+            do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping(
+                imeComposing = next.composition != null
+            )
+            onValueChange(next)
+        },
         textStyle = editorTextStyle,
         cursorBrush = SolidColor(if (isError) errorColor else palette.brandGold),
         decorationBox = { innerTextField ->
@@ -17257,7 +17384,10 @@ internal fun WorkbenchDrawerContent(
                             Box(modifier = Modifier.fillMaxWidth()) {
                                 BasicTextField(
                                     value = pollOptionsText,
-                                    onValueChange = { pollOptionsText = it },
+                                    onValueChange = {
+                                        do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping()
+                                        pollOptionsText = it
+                                    },
                                     textStyle = optionsStyle,
                                     cursorBrush = SolidColor(if (showOptionsError) optionsErrorColor else palette.brandGold),
                                     modifier = Modifier
@@ -17681,6 +17811,9 @@ private fun WorkbenchCompactInputBox(
         BasicTextField(
             value = syncedFieldValue,
             onValueChange = { next ->
+                do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping(
+                    imeComposing = next.composition != null
+                )
                 val normalized = ImeInputGuard.normalizeSingleLine(next)
                 fieldValue = normalized
                 onValueChange(normalized.text)
@@ -18021,6 +18154,9 @@ internal fun GlobalSearchModalSheet(
                         BasicTextField(
                             value = syncedSearchFieldValue,
                             onValueChange = { next ->
+                                do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping(
+                                    imeComposing = next.composition != null
+                                )
                                 val normalized = ImeInputGuard.normalizeSingleLine(next)
                                 searchFieldValue = normalized
                                 query = normalized.text
@@ -20706,6 +20842,9 @@ private fun UserReadHistorySheet(
                 BasicTextField(
                     value = searchFieldValue,
                     onValueChange = { next ->
+                        do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping(
+                            imeComposing = next.composition != null
+                        )
                         val normalized = ImeInputGuard.normalizeSingleLine(next)
                         searchFieldValue = normalized
                         committedSearchQuery = ImeInputGuard.resolveCommittedQuery(committedSearchQuery, normalized)
@@ -21209,7 +21348,10 @@ private fun EditProfileModalSheet(
                     )
                     BasicTextField(
                         value = bioRaw,
-                        onValueChange = { bioRaw = it },
+                        onValueChange = {
+                            do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping()
+                            bioRaw = it
+                        },
                         enabled = !isSaving,
                         minLines = 4,
                         maxLines = 8,
@@ -21273,7 +21415,10 @@ private fun NativeProfileInputRow(
         )
         BasicTextField(
             value = value,
-            onValueChange = { next -> onValueChange(next.replace(Regex("[\\r\\n]+"), " ")) },
+            onValueChange = { next ->
+                do_.linux.lindo.core.network.NetworkPolicyEngine.noteUserTyping()
+                onValueChange(next.replace(Regex("[\\r\\n]+"), " "))
+            },
             enabled = enabled,
             singleLine = true,
             maxLines = 1,

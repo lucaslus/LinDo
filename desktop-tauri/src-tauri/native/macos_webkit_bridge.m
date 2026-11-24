@@ -85,8 +85,9 @@ __attribute__((visibility("default"))) void lindo_macos_set_webkit_proxy(uint16_
                     nw_proxy_config_add_match_domain(cfg, "linux.do");
                     nw_proxy_config_add_match_domain(cfg, "ldstatic.com");
                     nw_proxy_config_add_match_domain(cfg, "idcflare.com");
-                    nw_proxy_config_add_excluded_domain(cfg, "challenges.cloudflare.com");
+                    nw_proxy_config_add_match_domain(cfg, "challenges.cloudflare.com");
                     nw_proxy_config_add_excluded_domain(cfg, "localhost");
+                    store.proxyConfigurations = @[];
                     store.proxyConfigurations = @[cfg];
                 }
             } else {
@@ -1953,7 +1954,7 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                 dispatch_group_t group = dispatch_group_create();
                 for (NSHTTPCookie *cookie in cookies) {
                     NSString *domain = [cookie.domain hasPrefix:@"."] ? [cookie.domain substringFromIndex:1] : cookie.domain;
-                    if (isForumHost(domain) && ([cookie.name isEqualToString:@"cf_clearance"] || [cookie.name isEqualToString:@"__cf_bm"])) {
+                    if (isForumHost(domain) && isCloudflareDomainCookieName(cookie.name)) {
                         if ([cookie.name isEqualToString:@"cf_clearance"] && cookie.value.length > 0 && ![deletedValues containsObject:cookie.value]) {
                             [deletedValues addObject:cookie.value];
                         }
@@ -1961,11 +1962,11 @@ __attribute__((visibility("default"))) void lindo_bridge_command(long long reque
                         [store deleteCookie:cookie completionHandler:^{ dispatch_group_leave(group); }];
                     }
                 }
-                // Also purge any stray cf_clearance/__cf_bm in shared NSHTTPCookieStorage
+                // Also purge any stray Cloudflare challenge cookies in shared NSHTTPCookieStorage (100% preserving _t / _forum_session)
                 NSHTTPCookieStorage *shared = [NSHTTPCookieStorage sharedHTTPCookieStorage];
                 for (NSHTTPCookie *cookie in [shared.cookies copy]) {
                     NSString *domain = [cookie.domain hasPrefix:@"."] ? [cookie.domain substringFromIndex:1] : cookie.domain;
-                    if (isForumHost(domain) && ([cookie.name isEqualToString:@"cf_clearance"] || [cookie.name isEqualToString:@"__cf_bm"])) {
+                    if (isForumHost(domain) && isCloudflareDomainCookieName(cookie.name)) {
                         [shared deleteCookie:cookie];
                     }
                 }
