@@ -2052,6 +2052,10 @@ export async function fetchTopicDetail(
     archived: Boolean(data.archived),
     notificationLevel: Number(data?.details?.notification_level ?? 1),
     acceptedAnswerPostNumber: acceptedNum,
+    highestPostNumber:
+      data.highest_post_number != null
+        ? Number(data.highest_post_number)
+        : Number(data.posts_count || posts.length || 1),
     lastReadPostNumber: lastReadPostNum,
     opUsername,
     streamIds,

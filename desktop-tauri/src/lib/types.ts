@@ -416,6 +416,7 @@ export interface TopicDetailModel {
   archived: boolean;
   notificationLevel: number;
   acceptedAnswerPostNumber?: number | null;
+  highestPostNumber?: number | null;
   lastReadPostNumber?: number | null;
   opUsername: string;
   streamIds: number[];
