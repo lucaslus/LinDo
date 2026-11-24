@@ -270,10 +270,36 @@ jobs:
           mkdir -p dist-android
           APK_SRC=$(find composeApp/build/outputs/apk/release -name "*.apk" | head -n1)
           if [ -n "${LINDO_KEYSTORE_PATH:-}" ]; then
-            SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-            APKSIGNER_BIN=$(ls -1 "$SDK_ROOT"/build-tools/*/apksigner | sort -V | tail -n1)
             EXPECTED_SHA=$(keytool -list -v -keystore "$LINDO_KEYSTORE_PATH" -storepass android -alias androiddebugkey | grep -E 'SHA256:' | head -n1 | awk '{print $2}' | tr -d ':' | tr 'A-F' 'a-f')
-            ACTUAL_SHA=$("$APKSIGNER_BIN" verify --print-certs "$APK_SRC" | grep -E 'Signer #1 certificate SHA-256 digest:' | head -n1 | awk -F': ' '{print $2}' | tr -d '[:space:]' | tr 'A-F' 'a-f')
+            ACTUAL_SHA=$(python3 - "$APK_SRC" << 'PYEOF'
+          import hashlib, struct, sys
+          data = open(sys.argv[1], "rb").read()
+          eocd = data.rfind(b"\x50\x4b\x05\x06")
+          if eocd < 0:
+              sys.exit("Missing ZIP EOCD")
+          cd_offset = struct.unpack_from("<I", data, eocd + 16)[0]
+          if data[cd_offset - 16 : cd_offset] != b"APK Sig Block 42":
+              sys.exit("Missing APK Sig Block 42")
+          block_size = struct.unpack_from("<Q", data, cd_offset - 24)[0]
+          pos = cd_offset - 8 - block_size + 8
+          end = cd_offset - 24
+          found = ""
+          while pos < end:
+              pair_len = struct.unpack_from("<Q", data, pos)[0]
+              pair_id = struct.unpack_from("<I", data, pos + 8)[0]
+              if pair_id in (0x7109871A, 0xF05368C0):
+                  buf = data[pos + 12 : pos + 8 + pair_len]
+                  digests_len = struct.unpack_from("<I", buf, 12)[0]
+                  certs_off = 16 + digests_len
+                  cert_len = struct.unpack_from("<I", buf, certs_off + 4)[0]
+                  cert_der = buf[certs_off + 8 : certs_off + 8 + cert_len]
+                  found = hashlib.sha256(cert_der).hexdigest().lower()
+                  if pair_id == 0x7109871A:
+                      break
+              pos += 8 + pair_len
+          print(found)
+          PYEOF
+            )
             echo "APK v2 signing SHA256: actual=$ACTUAL_SHA expected=$EXPECTED_SHA"
             if [ -z "$ACTUAL_SHA" ] || [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
               echo "ERROR: APK certificate SHA256 ($ACTUAL_SHA) does not match keystore ($EXPECTED_SHA)!" >&2
