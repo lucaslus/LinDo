@@ -472,6 +472,48 @@ class MainActivity : ComponentActivity() {
     private var pendingWebFileChooserCallback: ValueCallback<Array<Uri>>? = null
     private var pendingLogExportContent: String? = null
     private var pendingLogExportCallback: ((Boolean, String) -> Unit)? = null
+    private var pendingApkInstallFile: java.io.File? = null
+
+    private fun launchApkViewInstaller(apkFile: java.io.File) {
+        val apkUri = androidx.core.content.FileProvider.getUriForFile(
+            applicationContext,
+            "${applicationContext.packageName}.fileprovider",
+            apkFile
+        )
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val host = activeInstance
+        if (host != null && !host.isFinishing && !host.isDestroyed) {
+            host.startActivity(installIntent)
+        } else {
+            applicationContext.startActivity(installIntent)
+        }
+    }
+
+    private fun tryResumePendingApkInstall() {
+        val pendingApk = pendingApkInstallFile ?: return
+        if (!pendingApk.exists()) {
+            pendingApkInstallFile = null
+            return
+        }
+        val allowed = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            packageManager.canRequestPackageInstalls()
+        } else {
+            true
+        }
+        if (allowed) {
+            pendingApkInstallFile = null
+            runCatching { launchApkViewInstaller(pendingApk) }
+        }
+    }
+
+    private val unknownAppSourcesLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        tryResumePendingApkInstall()
+    }
 
     private val logExportDocumentLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain")
@@ -801,6 +843,16 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = initialBarStyle
         )
         super.onCreate(savedInstanceState)
+        runCatching {
+            val pkgInfo = packageManager.getPackageInfo(packageName, 0)
+            val installedCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                pkgInfo.longVersionCode.toInt()
+            } else {
+                @Suppress("DEPRECATION")
+                pkgInfo.versionCode
+            }
+            LinDoDiagnosticLogger.bindInstalledVersion(pkgInfo.versionName, installedCode)
+        }
         LinDoDiagnosticLogger.configurePersistence(
             directory = java.io.File(filesDir, "logs"),
             platformInfo = "Android SDK ${android.os.Build.VERSION.SDK_INT} (${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL})"
@@ -832,20 +884,31 @@ class MainActivity : ComponentActivity() {
         }
         AppUpdateManager.apkInstaller = { apkFile ->
             runCatching {
-                val apkUri = androidx.core.content.FileProvider.getUriForFile(
-                    applicationContext,
-                    "${applicationContext.packageName}.fileprovider",
-                    apkFile
-                )
-                val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(apkUri, "application/vnd.android.package-archive")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                val host = activeInstance
-                if (host != null && !host.isFinishing && !host.isDestroyed) {
-                    host.startActivity(installIntent)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+                    !packageManager.canRequestPackageInstalls()
+                ) {
+                    pendingApkInstallFile = apkFile
+                    runOnUiThread {
+                        android.widget.Toast.makeText(
+                            applicationContext,
+                            "请先允许安装未知应用，授权后将自动继续升级",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                        val settingsIntent = Intent(
+                            android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:$packageName")
+                        )
+                        val host = activeInstance
+                        if (host != null && !host.isFinishing && !host.isDestroyed) {
+                            host.unknownAppSourcesLauncher.launch(settingsIntent)
+                        } else {
+                            settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            applicationContext.startActivity(settingsIntent)
+                        }
+                    }
                 } else {
-                    applicationContext.startActivity(installIntent)
+                    pendingApkInstallFile = null
+                    launchApkViewInstaller(apkFile)
                 }
             }
         }
@@ -4153,6 +4216,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        tryResumePendingApkInstall()
         pauseWebViewJob?.cancel()
         pauseWebViewJob = null
         val pausedAt = lastPausedAtEpochMs

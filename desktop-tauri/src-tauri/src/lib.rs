@@ -519,9 +519,69 @@ fn extract_release_notes_from_markdown(body: &str) -> Vec<String> {
     notes
 }
 
+fn extract_sha256_from_sums(sums_raw: &str, asset_url_or_name: &str) -> Option<String> {
+    let target_raw = asset_url_or_name
+        .trim()
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if target_raw.is_empty() {
+        return None;
+    }
+    for raw_line in sums_raw.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(ws_idx) = line.find(char::is_whitespace) else {
+            continue;
+        };
+        if ws_idx != 64 {
+            continue;
+        }
+        let hash = &line[..64];
+        if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let file_token = line[ws_idx..]
+            .trim()
+            .trim_start_matches('*')
+            .trim_start_matches("./")
+            .rsplit('/')
+            .next()
+            .unwrap_or("");
+        if file_token.eq_ignore_ascii_case(target_raw) {
+            return Some(hash.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
 fn parse_github_release_for_desktop(
     release: &serde_json::Value,
     manifest_override: Option<&serde_json::Value>,
+    current_version: &str,
+    target_os: &str,
+    arch: &str,
+) -> DesktopUpdateInfo {
+    parse_github_release_for_desktop_with_sums(
+        release,
+        manifest_override,
+        None,
+        current_version,
+        target_os,
+        arch,
+    )
+}
+
+fn parse_github_release_for_desktop_with_sums(
+    release: &serde_json::Value,
+    manifest_override: Option<&serde_json::Value>,
+    sha256_sums_raw: Option<&str>,
     current_version: &str,
     target_os: &str,
     arch: &str,
@@ -626,8 +686,10 @@ fn parse_github_release_for_desktop(
 
     if is_windows && zip_url.is_empty() && !dmg_url.is_empty() {
         zip_url = dmg_url.clone();
-    }
-    if sha256.is_empty() && !fallback_sha256.is_empty() {
+        if sha256.is_empty() && !fallback_sha256.is_empty() {
+            sha256 = fallback_sha256;
+        }
+    } else if !is_windows && zip_url.is_empty() && !fallback_sha256.is_empty() {
         sha256 = fallback_sha256;
     }
 
@@ -681,6 +743,19 @@ fn parse_github_release_for_desktop(
         {
             if !d.trim().is_empty() {
                 updated_at = d.trim().to_string();
+            }
+        }
+    }
+
+    if sha256.is_empty() {
+        if let Some(sums) = sha256_sums_raw {
+            let primary_target = if !zip_url.is_empty() {
+                zip_url.as_str()
+            } else {
+                dmg_url.as_str()
+            };
+            if let Some(found_sha) = extract_sha256_from_sums(sums, primary_target) {
+                sha256 = found_sha;
             }
         }
     }
@@ -871,13 +946,51 @@ async fn check_app_update() -> Result<DesktopUpdateInfo, String> {
         }
     }
 
-    Ok(parse_github_release_for_desktop(
+    let mut parsed = parse_github_release_for_desktop(
         &release,
         manifest_json.as_ref(),
         &current_version,
         target_os,
         arch,
-    ))
+    );
+
+    if parsed.sha256.is_empty() && (!parsed.zip_url.is_empty() || !parsed.dmg_url.is_empty()) {
+        if let Some(assets) = release.get("assets").and_then(|v| v.as_array()) {
+            if let Some(sums_asset) = assets.iter().find(|a| {
+                a.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.eq_ignore_ascii_case("SHA256SUMS.txt"))
+                    .unwrap_or(false)
+            }) {
+                if let Some(dl_url) = sums_asset
+                    .get("browser_download_url")
+                    .and_then(|u| u.as_str())
+                {
+                    if let Ok(s_resp) = client
+                        .get(dl_url)
+                        .header("Cache-Control", "no-cache")
+                        .send()
+                        .await
+                    {
+                        if s_resp.status().is_success() {
+                            if let Ok(sums_raw) = s_resp.text().await {
+                                parsed = parse_github_release_for_desktop_with_sums(
+                                    &release,
+                                    manifest_json.as_ref(),
+                                    Some(&sums_raw),
+                                    &current_version,
+                                    target_os,
+                                    arch,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(parsed)
 }
 
 #[tauri::command]
@@ -1460,6 +1573,65 @@ mod tests {
         assert_eq!(
             win.sha256,
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_sha256sums_txt_without_mismatched_dmg_digest() {
+        let rel = serde_json::json!({
+            "tag_name": "v1.1.1",
+            "published_at": "2026-11-24T12:00:00Z",
+            "body": "- SHA256SUMS fallback verification",
+            "assets": [
+                {
+                    "name": "Lindo-1.1.1-macos-arm64.zip",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.1/Lindo-1.1.1-macos-arm64.zip"
+                },
+                {
+                    "name": "Lindo-1.1.1-macos-arm64.dmg",
+                    "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.1/Lindo-1.1.1-macos-arm64.dmg"
+                },
+                {
+                    "name": "Lindo-1.1.1-windows-x64-setup.exe",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.1/Lindo-1.1.1-windows-x64-setup.exe"
+                }
+            ]
+        });
+        let sums = "\
+            ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789  Lindo-1.1.1-macos-arm64.zip\n\
+            1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef  *Lindo-1.1.1-windows-x64-setup.exe\n\
+        ";
+
+        // Without SHA256SUMS, zip_url must NOT inherit dmg's unrelated digest
+        let arm_no_sums = parse_github_release_for_desktop(&rel, None, "1.1.0", "macos", "arm64");
+        assert!(arm_no_sums.has_update);
+        assert_eq!(arm_no_sums.sha256, "");
+
+        let arm_with_sums = parse_github_release_for_desktop_with_sums(
+            &rel,
+            None,
+            Some(sums),
+            "1.1.0",
+            "macos",
+            "arm64",
+        );
+        assert_eq!(
+            arm_with_sums.sha256,
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        );
+
+        let win_with_sums = parse_github_release_for_desktop_with_sums(
+            &rel,
+            None,
+            Some(sums),
+            "1.1.0",
+            "windows",
+            "x64",
+        );
+        assert_eq!(
+            win_with_sums.sha256,
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         );
     }
 

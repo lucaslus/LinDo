@@ -147,16 +147,32 @@ object AppUpdateManager {
                     val releaseObj = json.parseToJsonElement(releaseRaw).jsonObject
 
                     // Optional `latest.json` asset inside GitHub Release assets
-                    val manifestUrl = releaseObj["assets"]?.jsonArray
+                    val assetsArr = releaseObj["assets"]?.jsonArray
                         ?.mapNotNull { it as? JsonObject }
-                        ?.firstOrNull {
+                        .orEmpty()
+
+                    val manifestUrl = assetsArr
+                        .firstOrNull {
                             it["name"]?.jsonPrimitive?.content.equals("latest.json", ignoreCase = true)
                         }
                         ?.get("browser_download_url")?.jsonPrimitive?.content
                         ?.takeIf { it.isNotBlank() }
 
                     val manifestRaw = manifestUrl?.let { fetchOptionalText(it) }
-                    parseGithubRelease(releaseRaw, manifestRaw)
+                    var parsed = parseGithubRelease(releaseRaw, manifestRaw)
+                    if (parsed.apkUrl.isNotBlank() && parsed.sha256.isBlank()) {
+                        val sumsUrl = assetsArr
+                            .firstOrNull {
+                                it["name"]?.jsonPrimitive?.content.equals("SHA256SUMS.txt", ignoreCase = true)
+                            }
+                            ?.get("browser_download_url")?.jsonPrimitive?.content
+                            ?.takeIf { it.isNotBlank() }
+                        val sumsRaw = sumsUrl?.let { fetchOptionalText(it) }
+                        if (!sumsRaw.isNullOrBlank()) {
+                            parsed = parseGithubRelease(releaseRaw, manifestRaw, sumsRaw)
+                        }
+                    }
+                    parsed
                 } finally {
                     conn.disconnect()
                 }
@@ -379,7 +395,8 @@ object AppUpdateManager {
 
     internal fun parseGithubRelease(
         releaseRawJson: String,
-        manifestRawJson: String? = null
+        manifestRawJson: String? = null,
+        sha256SumsRaw: String? = null
     ): MobileUpdateInfo {
         val root = json.parseToJsonElement(releaseRawJson).jsonObject
         val tagName = root["tag_name"]?.jsonPrimitive?.content.orEmpty().trim()
@@ -443,6 +460,10 @@ object AppUpdateManager {
             }
         }
 
+        if (sha256.isBlank() && apkName.isNotBlank() && !sha256SumsRaw.isNullOrBlank()) {
+            sha256 = extractSha256FromSums(sha256SumsRaw, apkName)
+        }
+
         val isNewerByCode = latestVersionCode > LinDoDiagnosticLogger.APP_BUILD
         val isNewerBySemver = buildInAssetName == null && manifestRawJson.isNullOrBlank() &&
             compareSemver(latestVersionName, LinDoDiagnosticLogger.APP_VERSION_NAME) > 0
@@ -465,6 +486,28 @@ object AppUpdateManager {
             notes = notes,
             updatedAt = updatedAt
         )
+    }
+
+    internal fun extractSha256FromSums(sumsRaw: String, assetFileName: String): String {
+        val target = assetFileName.trim().substringAfterLast('/')
+        if (target.isEmpty()) return ""
+        for (rawLine in sumsRaw.lineSequence()) {
+            val line = rawLine.trim()
+            if (line.isEmpty() || line.startsWith("#")) continue
+            val wsIdx = line.indexOfFirst { it.isWhitespace() }
+            if (wsIdx != 64) continue
+            val hash = line.substring(0, 64)
+            if (!hash.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) continue
+            val fileToken = line.substring(wsIdx)
+                .trim()
+                .removePrefix("*")
+                .removePrefix("./")
+                .substringAfterLast('/')
+            if (fileToken.equals(target, ignoreCase = true)) {
+                return hash.lowercase()
+            }
+        }
+        return ""
     }
 
     private fun extractNotesFromMarkdown(body: String): List<String> =

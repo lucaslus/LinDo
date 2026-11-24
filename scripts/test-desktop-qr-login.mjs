@@ -172,3 +172,48 @@ test("Settings home order & strict 2-state cursor policy guard hold across deskt
     });
   }
 });
+
+test("All Desktop and Mobile release version manifests stay unified at >= 1.1.0", () => {
+  const repoRoot = path.resolve(__dirname, "..");
+  const pkgJson = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "desktop-tauri/package.json"), "utf8")
+  );
+  const tauriConf = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "desktop-tauri/src-tauri/tauri.conf.json"), "utf8")
+  );
+  const cargoToml = fs.readFileSync(
+    path.join(repoRoot, "desktop-tauri/src-tauri/Cargo.toml"),
+    "utf8"
+  );
+  const diagTs = fs.readFileSync(
+    path.join(repoRoot, "desktop-tauri/src/lib/diagnostics.ts"),
+    "utf8"
+  );
+  const gradleKts = fs.readFileSync(
+    path.join(repoRoot, "composeApp/build.gradle.kts"),
+    "utf8"
+  );
+  const ktDiag = fs.readFileSync(
+    path.join(
+      repoRoot,
+      "composeApp/src/commonMain/kotlin/do_/linux/lindo/core/diagnostics/LinDoDiagnosticLogger.kt"
+    ),
+    "utf8"
+  );
+
+  const cargoVer = /^version\s*=\s*"([^"]+)"/m.exec(cargoToml)?.[1];
+  const diagVer = /DESKTOP_APP_VERSION\s*=\s*"([^"]+)"/.exec(diagTs)?.[1];
+  const gradleVer = /versionName\s*=\s*"([^"]+)"/.exec(gradleKts)?.[1];
+  const gradleCode = Number(/versionCode\s*=\s*(\d+)/.exec(gradleKts)?.[1]);
+  const ktVer = /DEFAULT_APP_VERSION_NAME:\s*String\s*=\s*"([^"]+)"/.exec(ktDiag)?.[1];
+  const ktCode = Number(/DEFAULT_APP_BUILD:\s*Int\s*=\s*(\d+)/.exec(ktDiag)?.[1]);
+
+  assert.equal(pkgJson.version, "1.1.0");
+  assert.equal(tauriConf.version, pkgJson.version);
+  assert.equal(cargoVer, pkgJson.version);
+  assert.equal(diagVer, pkgJson.version);
+  assert.equal(gradleVer, pkgJson.version);
+  assert.equal(ktVer, pkgJson.version);
+  assert.equal(gradleCode, 100);
+  assert.equal(ktCode, gradleCode);
+});

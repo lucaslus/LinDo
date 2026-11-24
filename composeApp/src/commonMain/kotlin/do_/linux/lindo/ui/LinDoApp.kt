@@ -3788,6 +3788,7 @@ internal fun LinDoApp(
                                 currentTab = currentTab,
                                 isDarkTheme = isDarkTheme,
                                 unreadCount = effectiveUnreadCount,
+                                hasUpdate = AppUpdateManager.latestInfo?.hasUpdate == true,
                                 compactWidth = isCompactWideRail,
                                 topWindowInset = macTitleBarInset,
                                 showFeedToggle = currentTab == MainTab.HOME,
@@ -3819,10 +3820,12 @@ internal fun LinDoApp(
                                             .only(if (mobileWideNav) WindowInsetsSides.Horizontal else WindowInsetsSides.End)
                                     )
                             ) {
+                            val mobileHasUpdate = AppUpdateManager.latestInfo?.hasUpdate == true
                             val mobileWideNavBar: @Composable (Modifier) -> Unit = { navModifier ->
                                 GoogleM3NavigationBar(
                                     currentTab = currentTab,
                                     unreadCount = effectiveUnreadCount,
+                                    hasUpdate = mobileHasUpdate,
                                     onSelectTab = ::switchMainTabSafely,
                                     onPublishClick = {
                                         if (isAuthorized) {
@@ -4403,6 +4406,7 @@ internal fun LinDoApp(
                                 GoogleM3NavigationBar(
                                     currentTab = currentTab,
                                     unreadCount = effectiveUnreadCount,
+                                    hasUpdate = AppUpdateManager.latestInfo?.hasUpdate == true,
                                     onSelectTab = {
                                         mobileShowingDetail = false
                                         currentTab = it
@@ -5447,6 +5451,7 @@ private fun DesktopSideRail(
     currentTab: MainTab,
     isDarkTheme: Boolean,
     unreadCount: Int = 0,
+    hasUpdate: Boolean = false,
     compactWidth: Boolean = false,
     topWindowInset: Dp = 0.dp,
     showFeedToggle: Boolean = false,
@@ -5567,6 +5572,17 @@ private fun DesktopSideRail(
                                         softWrap = false
                                     )
                                 }
+                            }
+                            if (tab == MainTab.PROFILE && hasUpdate) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = (-2).dp, y = 0.dp)
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(palette.brandGold)
+                                        .testTag("nav_profile_update_dot")
+                                )
                             }
                         }
                         Spacer(modifier = Modifier.height(3.dp))
@@ -5841,6 +5857,7 @@ private fun OrganicFeedCollapseEar(
 internal fun GoogleM3NavigationBar(
     currentTab: MainTab,
     unreadCount: Int = 0,
+    hasUpdate: Boolean = false,
     onSelectTab: (MainTab) -> Unit,
     onPublishClick: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -6131,6 +6148,17 @@ internal fun GoogleM3NavigationBar(
                                         softWrap = false
                                     )
                                 }
+                            }
+                            if (tab == MainTab.PROFILE && hasUpdate) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = (-2).dp, y = 0.dp)
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(palette.brandGold)
+                                        .testTag("nav_profile_update_dot")
+                                )
                             }
                         }
                         Spacer(modifier = Modifier.height(3.dp))

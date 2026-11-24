@@ -51,9 +51,29 @@ data class DiagnosticLogEntry(
  * 3. 本地双文件滚动持久化（上限约 1.5 MB），支持跨重启保留上次崩溃现场，并支持一键导出 `.log` 或在清理缓存时一并清空。
  */
 object LinDoDiagnosticLogger {
-    const val APP_VERSION_NAME: String = "0.2.53"
-    const val APP_BUILD: Int = 87
-    const val APP_VERSION_DISPLAY: String = "Lindo v$APP_VERSION_NAME · build $APP_BUILD"
+    const val DEFAULT_APP_VERSION_NAME: String = "1.1.0"
+    const val DEFAULT_APP_BUILD: Int = 100
+
+    @Volatile
+    var APP_VERSION_NAME: String = DEFAULT_APP_VERSION_NAME
+        private set
+
+    @Volatile
+    var APP_BUILD: Int = DEFAULT_APP_BUILD
+        private set
+
+    val APP_VERSION_DISPLAY: String
+        get() = "Lindo v$APP_VERSION_NAME · build $APP_BUILD"
+
+    fun bindInstalledVersion(versionName: String?, versionCode: Int) {
+        val cleanName = versionName?.trim()?.takeIf { it.isNotEmpty() }
+        if (cleanName != null) {
+            APP_VERSION_NAME = cleanName
+        }
+        if (versionCode > 0) {
+            APP_BUILD = versionCode
+        }
+    }
 
     private const val MAX_MEMORY_ENTRIES = 320
     private const val MAX_SINGLE_LOG_FILE_BYTES = 768L * 1024L

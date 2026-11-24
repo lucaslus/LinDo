@@ -94,7 +94,7 @@ class EchRoutingAndVerifyFixTest {
         assertEquals(1, verifierCalls)
 
         val diag = LinDoDiagnosticLogger.buildExportReport()
-        assertTrue(diag.contains("Version: Lindo v0.2.53 · build 87"))
+        assertTrue(diag.contains("Version: ${LinDoDiagnosticLogger.APP_VERSION_DISPLAY}"))
         assertTrue(diag.contains("ECH State    : mode=smart_auto active=true port=18443 stickyIp=104.16.132.229"))
         assertTrue(EchRoutingPolicy.statusSubtitle().contains("104.16.132.229"))
     }

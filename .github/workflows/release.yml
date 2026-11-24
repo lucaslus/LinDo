@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Target GitHub Release tag (e.g. v1.0.39). Leave empty for dry-run artifact build only."
+        description: "Target GitHub Release tag (e.g. v1.1.0). Leave empty for dry-run artifact build only."
         required: false
         type: string
       prerelease:
@@ -176,19 +176,86 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify cross-platform version manifest consistency
+        env:
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          REF_FULL: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          PKG_VER=$(python3 -c "import json; print(json.load(open('desktop-tauri/package.json'))['version'])")
+          TAURI_VER=$(python3 -c "import json; print(json.load(open('desktop-tauri/src-tauri/tauri.conf.json'))['version'])")
+          CARGO_VER=$(grep -E '^version = "' desktop-tauri/src-tauri/Cargo.toml | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          DIAG_VER=$(grep -E 'DESKTOP_APP_VERSION = "' desktop-tauri/src/lib/diagnostics.ts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          GRADLE_VER=$(grep -E 'versionName = "' composeApp/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          GRADLE_CODE=$(grep -E 'versionCode = ' composeApp/build.gradle.kts | head -n1 | sed -E 's/.*= *([0-9]+).*/\1/')
+          KT_VER=$(grep -E 'DEFAULT_APP_VERSION_NAME: String = "' composeApp/src/commonMain/kotlin/do_/linux/lindo/core/diagnostics/LinDoDiagnosticLogger.kt | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          KT_CODE=$(grep -E 'DEFAULT_APP_BUILD: Int = ' composeApp/src/commonMain/kotlin/do_/linux/lindo/core/diagnostics/LinDoDiagnosticLogger.kt | head -n1 | sed -E 's/.*= *([0-9]+).*/\1/')
+
+          echo "Manifest versions: pkg=$PKG_VER tauri=$TAURI_VER cargo=$CARGO_VER diag=$DIAG_VER gradle=$GRADLE_VER(code=$GRADLE_CODE) kt=$KT_VER(code=$KT_CODE)"
+          for v in "$TAURI_VER" "$CARGO_VER" "$DIAG_VER" "$GRADLE_VER" "$KT_VER"; do
+            if [ "$v" != "$PKG_VER" ]; then
+              echo "ERROR: Version mismatch detected across manifests ($v != $PKG_VER)" >&2
+              exit 1
+            fi
+          done
+          if [ "$GRADLE_CODE" != "$KT_CODE" ]; then
+            echo "ERROR: Android versionCode ($GRADLE_CODE) != DEFAULT_APP_BUILD ($KT_CODE)" >&2
+            exit 1
+          fi
+
+          EXPECTED_TAG=""
+          if [ -n "$INPUT_TAG" ]; then
+            EXPECTED_TAG="$INPUT_TAG"
+          elif [[ "$REF_FULL" == refs/tags/v* ]]; then
+            EXPECTED_TAG="$REF_NAME"
+          fi
+          if [ -n "$EXPECTED_TAG" ]; then
+            CLEAN_TAG="${EXPECTED_TAG#v}"
+            CLEAN_TAG="${CLEAN_TAG#V}"
+            if [ "$CLEAN_TAG" != "$PKG_VER" ]; then
+              echo "ERROR: Release tag ($EXPECTED_TAG -> $CLEAN_TAG) does not match manifest version ($PKG_VER)" >&2
+              exit 1
+            fi
+          fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
           cache: gradle
 
-      - name: Restore consistent debug/release keystore if secret is configured
+      - name: Ensure Ninja & CMake for BoringSSL Android NDK build
+        run: |
+          if ! command -v ninja >/dev/null 2>&1 || ! command -v cmake >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y ninja-build cmake
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "native-ech -> target"
+          key: android-ech-arm64
+
+      - name: Build Android ECH native library (arm64-v8a) from Rust source
+        run: ./scripts/build_android_ech.sh --arm64-only
+
+      - name: Restore consistent debug/release keystore
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          REF_FULL: ${{ github.ref }}
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
             mkdir -p "$HOME/.android"
             echo "$KEYSTORE_B64" | base64 -d > "$HOME/.android/debug.keystore"
+            chmod 600 "$HOME/.android/debug.keystore"
+            keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+          elif [[ "$REF_FULL" == refs/tags/v* ]] || [ -n "$INPUT_TAG" ]; then
+            echo "ERROR: ANDROID_DEBUG_KEYSTORE_BASE64 secret is required for official Release builds so future in-app updates preserve APK signature compatibility." >&2
+            exit 1
           fi
 
       - name: Build Android Release APK
@@ -227,7 +294,8 @@ jobs:
           IS_PRE: ${{ github.event.inputs.prerelease }}
         run: |
           cd release-assets
-          sha256sum * > SHA256SUMS.txt
+          sha256sum * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt ./SHA256SUMS.txt
           cat SHA256SUMS.txt
 
           TARGET_TAG="${INPUT_TAG:-$REF_NAME}"
