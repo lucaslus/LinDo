@@ -197,6 +197,8 @@ import do_.linux.lindo.core.model.middleGapStreamIdsBetween
 import do_.linux.lindo.core.model.previousUnloadedStreamIds
 import do_.linux.lindo.core.model.remainingUnloadedStreamIds
 import do_.linux.lindo.core.model.resolveJumpPostIndex
+import do_.linux.lindo.core.model.PendingFeedApplyDecision
+import do_.linux.lindo.core.model.PendingFeedSnapshot
 import do_.linux.lindo.core.model.PostBoostItem
 import do_.linux.lindo.core.model.PostItemModel
 import do_.linux.lindo.core.model.PostReactionItem
@@ -207,6 +209,10 @@ import do_.linux.lindo.core.model.TopicUser
 import do_.linux.lindo.core.model.UserActivityItem
 import do_.linux.lindo.core.model.UserFullProfileSummary
 import do_.linux.lindo.core.model.UserNotificationItem
+import do_.linux.lindo.core.model.countEffectivePendingTopics
+import do_.linux.lindo.core.model.evaluatePendingFeedPoll
+import do_.linux.lindo.core.model.formatPendingNewCount
+import do_.linux.lindo.core.model.resolvePendingFeedApply
 import do_.linux.lindo.core.network.ApiFailureKind
 import do_.linux.lindo.core.network.ApiReadException
 import do_.linux.lindo.core.network.AuthenticatedUserProfile
@@ -1858,8 +1864,10 @@ internal fun LinDoApp(
     var searchQuery by remember { mutableStateOf("") }
 
     var topics by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
-    var pendingNewTopics by remember { mutableStateOf<List<TopicSummary>>(emptyList()) }
-    var pendingNewCount by remember { mutableStateOf(0) }
+    var pendingFeedSnapshot by remember { mutableStateOf(PendingFeedSnapshot()) }
+    val pendingNewCount by remember {
+        derivedStateOf { countEffectivePendingTopics(pendingFeedSnapshot, topics) }
+    }
     var currentPage by remember { mutableStateOf(0) }
     var hasMoreTopics by remember { mutableStateOf(true) }
     var isLoadingTopics by remember { mutableStateOf(UserApiKeyAuthManager.isAuthorized()) }
@@ -2147,7 +2155,7 @@ internal fun LinDoApp(
                 discoverHotTopics = discoverHotTopics.map {
                     if (it.id == topicId) applyConfirmedFloorToSummary(it, updatedFloor) else it
                 }
-                pendingNewTopics = pendingNewTopics.map {
+                pendingFeedSnapshot = pendingFeedSnapshot.mapTopics {
                     if (it.id == topicId) applyConfirmedFloorToSummary(it, updatedFloor) else it
                 }
                 activeTopicSummary?.takeIf { it.id == topicId }?.let { current ->
@@ -2183,8 +2191,7 @@ internal fun LinDoApp(
         loadMoreError = false
         currentPage = 0
         hasMoreTopics = true
-        pendingNewTopics = emptyList()
-        pendingNewCount = 0
+        pendingFeedSnapshot = PendingFeedSnapshot()
         fullUserProfile = null
         liveUnreadNotificationCount = 0
         lastProfileSyncedAtMs = 0L
@@ -2257,28 +2264,14 @@ internal fun LinDoApp(
         }
     }
 
-    fun applyPendingNewTopics() {
-        if (pendingNewTopics.isNotEmpty()) {
-            feedGeneration++
-            topics = normalizeReadTopics(pendingNewTopics)
-            pendingNewTopics = emptyList()
-            pendingNewCount = 0
-            lastTopicsSyncedAtMs = System.currentTimeMillis()
-            if (currentPage < 0) currentPage = 0
-            hasMoreTopics = true
-            scope.launch {
-                feedListState.animateScrollToItem(0)
-            }
-        }
-    }
-
     fun loadTopics(
         sort: FeedSortFilter = currentSort,
         categoryId: Int? = selectedCategoryId,
         tag: String? = selectedTag,
         topPeriod: TopPeriodFilter = currentTopPeriod,
         isManualRefresh: Boolean = false,
-        excludedTopicId: Int? = null
+        excludedTopicId: Int? = null,
+        suppressUpToDateNotice: Boolean = false
     ) {
         loadMoreJob?.cancel()
         loadTopicsJob?.cancel()
@@ -2295,8 +2288,7 @@ internal fun LinDoApp(
             if (!isManualRefresh) {
                 refreshUpToDateNotice = false
             }
-            pendingNewTopics = emptyList()
-            pendingNewCount = 0
+            pendingFeedSnapshot = PendingFeedSnapshot()
             if (topics.isEmpty() || !isManualRefresh) {
                 currentPage = 0
                 hasMoreTopics = true
@@ -2317,6 +2309,7 @@ internal fun LinDoApp(
                 currentPage = 0
                 if (fetched.isNotEmpty()) {
                     val isUnchanged = isManualRefresh &&
+                        !suppressUpToDateNotice &&
                         previousTopId != null &&
                         fetched.first().id == previousTopId &&
                         fetched.first().postsCount == previousTopPostsCount
@@ -2355,6 +2348,32 @@ internal fun LinDoApp(
                 }
             } finally {
                 if (isActive) isLoadingTopics = false
+            }
+        }
+    }
+
+    fun applyPendingNewTopics() {
+        val nowMs = System.currentTimeMillis()
+        val snapshot = pendingFeedSnapshot
+        pendingFeedSnapshot = PendingFeedSnapshot()
+        when (val decision = resolvePendingFeedApply(snapshot, topics, nowMs)) {
+            PendingFeedApplyDecision.FetchLivePageZero -> {
+                scope.launch {
+                    feedListState.animateScrollToItem(0)
+                }
+                loadTopics(isManualRefresh = true, suppressUpToDateNotice = true)
+            }
+            is PendingFeedApplyDecision.ApplyInstant -> {
+                feedGeneration++
+                topics = normalizeReadTopics(decision.nextTopics)
+                lastTopicsSyncedAtMs = nowMs
+                if (decision.resetPageToZero || currentPage < 0) {
+                    currentPage = 0
+                }
+                hasMoreTopics = true
+                scope.launch {
+                    feedListState.animateScrollToItem(0)
+                }
             }
         }
     }
@@ -2565,9 +2584,14 @@ internal fun LinDoApp(
                         loaded.highestPostNumber ?: 0,
                         loaded.postsCount
                     )
-                    if (refreshedHighest > topic.highestPostNumber) {
+                    if (refreshedHighest > topic.highestPostNumber || loaded.postsCount > topic.postsCount) {
                         topics = topics.map {
-                            if (it.id == topic.id) it.copy(postsCount = maxOf(it.postsCount, loaded.postsCount), highestPostNumber = refreshedHighest) else it
+                            if (it.id == topic.id) {
+                                it.copy(
+                                    postsCount = maxOf(it.postsCount, loaded.postsCount),
+                                    highestPostNumber = maxOf(it.highestPostNumber, refreshedHighest)
+                                )
+                            } else it
                         }
                     }
                 }
@@ -3442,6 +3466,7 @@ internal fun LinDoApp(
     suspend fun checkPendingNewTopicsOnce() {
         if (!do_.linux.lindo.core.connect.UserPresenceService.isForeground) return
         if (currentTab != MainTab.HOME || (mobileShowingDetail && !isWideLayout)) return
+        if (currentSort == FeedSortFilter.TOP || currentSort == FeedSortFilter.FOLLOW) return
         if (activeWebLoginUrl != null ||
             feedError.isSiteVerificationError() ||
             LinuxDoRepository.isChallengeCooldownActive() ||
@@ -3455,30 +3480,27 @@ internal fun LinDoApp(
                     categoryId = selectedCategoryId,
                     page = 0,
                     tag = selectedTag,
-                    topPeriod = if (currentSort == FeedSortFilter.TOP) currentTopPeriod.apiPeriod else null,
+                    topPeriod = null,
                     background = true
                 )
             } catch (_: Throwable) {
                 emptyList()
             }
-            if (fresh.isNotEmpty() && genBefore == feedGeneration && !isLoadingTopics) {
-                lastTopicsSyncedAtMs = System.currentTimeMillis()
-                val currentMap = topics.associateBy { it.id }
-                val changedCount = fresh.filterNot { it.pinned }.count { item ->
-                    val prev = currentMap[item.id]
-                    prev == null || item.postsCount > prev.postsCount || item.highestPostNumber > prev.highestPostNumber
-                }
-                if (changedCount > 0) {
-                    val freshIds = fresh.map { it.id }.toSet()
-                    val merged = normalizeReadTopics(fresh + topics.filterNot { it.id in freshIds })
-                    pendingNewTopics = merged
-                    pendingNewCount = changedCount
-                }
+            if (fresh.isNotEmpty() && genBefore == feedGeneration && !isLoadingTopics && !isLoadingMoreTopics) {
+                val nowMs = System.currentTimeMillis()
+                lastTopicsSyncedAtMs = nowMs
+                val normalizedFresh = normalizeReadTopics(fresh)
+                pendingFeedSnapshot = evaluatePendingFeedPoll(
+                    prev = pendingFeedSnapshot,
+                    currentTopics = topics,
+                    freshPage0 = normalizedFresh,
+                    nowMs = nowMs
+                )
             }
         }
     }
 
-    // 实时新帖子推送检测（LIST-024：75s 稳定定时器，不因进出详情页或上滑分页重置；从详情返回首页超过 65s 时温和补检一次）
+    // 实时新帖子推送检测（LIST-024：75s 稳定定时器，不因进出详情页或上滑分页重置；从详情或后台返回首页超过 65s 时温和补检一次）
     LaunchedEffect(isAuthorized, isGuestMode, currentSort, selectedCategoryId, selectedTag, currentTopPeriod) {
         if (!isAuthorized && !isGuestMode) return@LaunchedEffect
         while (true) {
@@ -3486,9 +3508,12 @@ internal fun LinDoApp(
             checkPendingNewTopicsOnce()
         }
     }
-    LaunchedEffect(currentTab, mobileShowingDetail, isWideLayout) {
-        if (currentTab == MainTab.HOME && (!mobileShowingDetail || isWideLayout) &&
-            pendingNewCount == 0 && System.currentTimeMillis() - lastTopicsSyncedAtMs >= 65_000L
+    LaunchedEffect(currentTab, mobileShowingDetail, isWideLayout, isAppForeground) {
+        val latestSyncOrPollMs = maxOf(lastTopicsSyncedAtMs, pendingFeedSnapshot.fetchedAtMs)
+        if (isAppForeground &&
+            currentTab == MainTab.HOME &&
+            (!mobileShowingDetail || isWideLayout) &&
+            System.currentTimeMillis() - latestSyncOrPollMs >= 65_000L
         ) {
             delay(600L)
             checkPendingNewTopicsOnce()
@@ -7353,7 +7378,7 @@ internal fun CommunityHomeFeedPane(
                             )
                             Text(
                                 text = LinDoFeedCopy.NEW_ACTIVITY_BANNER.format(
-                                    if (pendingNewCount >= 25) "20+" else pendingNewCount
+                                    formatPendingNewCount(pendingNewCount)
                                 ),
                                 color = palette.brandGold,
                                 fontSize = 12.sp,

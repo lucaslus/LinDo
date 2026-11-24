@@ -16,6 +16,15 @@ import {
   resolveDiscourseTopicUnread,
   resolveEffectiveViewedFloor,
 } from "../desktop-tauri/src/lib/topicReadState.ts";
+import {
+  MAX_TRACKED_PENDING_TOPICS,
+  STALE_PENDING_SNAPSHOT_MS,
+  countEffectivePendingTopics,
+  createEmptyPendingFeedSnapshot,
+  evaluatePendingFeedPoll,
+  formatPendingNewCount,
+  resolvePendingFeedApply,
+} from "../desktop-tauri/src/lib/pendingFeedState.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC_ROOT = path.resolve(__dirname, "../desktop-tauri/src");
@@ -293,4 +302,169 @@ test("Discourse topic unread & trailing deleted floor resolution match Mobile 1:
   });
   assert.equal(cleared.isUnread, false);
   assert.equal(cleared.isReadDimmed, true);
+});
+
+function makeMockTopic(id, opts = {}) {
+  const postsCount = opts.postsCount ?? 1;
+  const highestPostNumber = opts.highestPostNumber ?? postsCount;
+  return {
+    id,
+    pinned: Boolean(opts.pinned),
+    postsCount,
+    highestPostNumber,
+    replyCount: Math.max(0, postsCount - 1),
+    views: opts.views ?? 10,
+    likeCount: opts.likeCount ?? 0,
+    unseen: Boolean(opts.unseen),
+    unreadPosts: opts.unreadPosts ?? 0,
+    ...(opts.lastReadPostNumber !== undefined
+      ? { lastReadPostNumber: opts.lastReadPostNumber }
+      : {}),
+  };
+}
+
+function makeRangeTopics(startDesc, endDesc, opts = {}) {
+  const list = [];
+  for (let id = startDesc; id >= endDesc; id -= 1) {
+    list.push(makeMockTopic(id, opts));
+  }
+  return list;
+}
+
+test("Pending feed banner state machine matches Mobile PendingFeedStateMachine.kt 1:1", () => {
+  // 1. Exact count formatting (eliminates 24 -> 20+ inversion and caps cleanly at 99+)
+  assert.equal(formatPendingNewCount(0), "");
+  assert.equal(formatPendingNewCount(-2), "");
+  assert.equal(formatPendingNewCount(1), "1");
+  assert.equal(formatPendingNewCount(24), "24");
+  assert.equal(formatPendingNewCount(25), "25");
+  assert.equal(formatPendingNewCount(52), "52");
+  assert.equal(formatPendingNewCount(99), "99");
+  assert.equal(formatPendingNewCount(100), "99+");
+
+  // 2. Multi-poll cumulative count across 75s intervals (15 -> 35 -> ... -> 99+)
+  const baseTopics = makeRangeTopics(100, 71, { postsCount: 3 });
+  let snapshot = createEmptyPendingFeedSnapshot();
+
+  const poll1 = [
+    ...makeRangeTopics(115, 101, { postsCount: 1 }),
+    ...makeRangeTopics(100, 86, { postsCount: 3 }),
+  ];
+  snapshot = evaluatePendingFeedPoll(snapshot, baseTopics, poll1, 75_000);
+  assert.equal(countEffectivePendingTopics(snapshot, baseTopics), 15);
+
+  const poll2 = makeRangeTopics(135, 106, { postsCount: 1 });
+  snapshot = evaluatePendingFeedPoll(snapshot, baseTopics, poll2, 150_000);
+  assert.equal(countEffectivePendingTopics(snapshot, baseTopics), 35);
+
+  for (let round = 0; round < 5; round += 1) {
+    const topId = 165 + round * 30;
+    const page0 = makeRangeTopics(topId, topId - 29, { postsCount: 1 });
+    snapshot = evaluatePendingFeedPoll(snapshot, baseTopics, page0, 225_000 + round * 75_000);
+  }
+  const capped = countEffectivePendingTopics(snapshot, baseTopics);
+  assert.equal(capped, MAX_TRACKED_PENDING_TOPICS);
+  assert.equal(formatPendingNewCount(capped), "99+");
+
+  // 3. Deduplicates repeated bumps of the same topic & ignores pinned topics
+  const pinned = makeMockTopic(9999, { postsCount: 10, pinned: true });
+  const regular = makeRangeTopics(100, 72, { postsCount: 2 });
+  const currentWithPinned = [pinned, ...regular];
+  let bumpSnap = evaluatePendingFeedPoll(
+    createEmptyPendingFeedSnapshot(),
+    currentWithPinned,
+    [makeMockTopic(9999, { postsCount: 30, pinned: true }), ...regular],
+    75_000
+  );
+  assert.equal(countEffectivePendingTopics(bumpSnap, currentWithPinned), 0);
+
+  for (let step = 1; step <= 4; step += 1) {
+    const bumped88 = makeMockTopic(88, { postsCount: 2 + step * 3 });
+    const fresh = [pinned, bumped88, ...regular.filter((t) => t.id !== 88)];
+    bumpSnap = evaluatePendingFeedPoll(bumpSnap, currentWithPinned, fresh, 75_000 * step);
+    assert.equal(countEffectivePendingTopics(bumpSnap, currentWithPinned), 1);
+  }
+
+  // 4. Direct topic open in split-view deducts count in real time and vanishes when 0
+  const syncedTopics = currentWithPinned.map((t) =>
+    t.id === 88 ? { ...t, postsCount: 14, highestPostNumber: 14 } : t
+  );
+  assert.equal(countEffectivePendingTopics(bumpSnap, syncedTopics), 0);
+
+  // 5. Fresh (< 90s) overlapping snapshot merges seamlessly & never regresses visited read state
+  const currentTwoPages = makeRangeTopics(100, 41, { postsCount: 3 }).map((t) =>
+    t.id === 98
+      ? makeMockTopic(98, {
+          postsCount: 10,
+          highestPostNumber: 10,
+          unseen: false,
+          unreadPosts: 0,
+          lastReadPostNumber: 10,
+        })
+      : t
+  );
+  const freshOverlapping = [
+    makeMockTopic(102, { postsCount: 1, unseen: true }),
+    makeMockTopic(101, { postsCount: 1, unseen: true }),
+    makeMockTopic(100, { postsCount: 3 }),
+    makeMockTopic(99, { postsCount: 3 }),
+    makeMockTopic(98, {
+      postsCount: 10,
+      highestPostNumber: 10,
+      unseen: true,
+      unreadPosts: 2,
+      lastReadPostNumber: 8,
+    }),
+    ...makeRangeTopics(97, 73, { postsCount: 3 }),
+  ];
+  const overlapSnap = evaluatePendingFeedPoll(
+    createEmptyPendingFeedSnapshot(),
+    makeRangeTopics(100, 41, { postsCount: 3 }).map((t) =>
+      t.id === 98 ? makeMockTopic(98, { postsCount: 10 }) : t
+    ),
+    freshOverlapping,
+    100_000
+  );
+  const overlapDecision = resolvePendingFeedApply(overlapSnap, currentTwoPages, 120_000);
+  assert.equal(overlapDecision.kind, "apply_instant");
+  assert.equal(overlapDecision.resetPageToZero, false);
+  assert.equal(overlapDecision.nextTopics.length, 62);
+  const merged98 = overlapDecision.nextTopics.find((t) => t.id === 98);
+  assert.equal(merged98.unseen, false);
+  assert.equal(merged98.unreadPosts, 0);
+  assert.equal(merged98.lastReadPostNumber, 10);
+
+  // 6. Fresh (< 90s) disjoint page turnover replaces cleanly & sets resetPageToZero=true (no middle hole)
+  const freshDisjointWithBumpedOld = [
+    ...makeRangeTopics(145, 117, { postsCount: 1 }),
+    makeMockTopic(55, { postsCount: 9 }),
+  ];
+  const disjointSnap = evaluatePendingFeedPoll(
+    createEmptyPendingFeedSnapshot(),
+    currentTwoPages,
+    freshDisjointWithBumpedOld,
+    200_000
+  );
+  const disjointDecision = resolvePendingFeedApply(disjointSnap, currentTwoPages, 215_000);
+  assert.equal(disjointDecision.kind, "apply_instant");
+  assert.equal(disjointDecision.resetPageToZero, true);
+  assert.equal(disjointDecision.nextTopics.length, 30);
+  assert.equal(disjointDecision.nextTopics[0].id, 145);
+  assert.equal(disjointDecision.nextTopics[29].id, 55);
+
+  // 7. Stale snapshot (>= 90s, e.g. waiting 1 hour) forces live network fetch instead of applying stale list
+  assert.equal(
+    resolvePendingFeedApply(overlapSnap, currentTwoPages, 100_000 + STALE_PENDING_SNAPSHOT_MS - 1)
+      .kind,
+    "apply_instant"
+  );
+  assert.equal(
+    resolvePendingFeedApply(overlapSnap, currentTwoPages, 100_000 + STALE_PENDING_SNAPSHOT_MS)
+      .kind,
+    "fetch_live"
+  );
+  assert.equal(
+    resolvePendingFeedApply(overlapSnap, currentTwoPages, 100_000 + 3_600_000).kind,
+    "fetch_live"
+  );
 });

@@ -1372,8 +1372,10 @@ export async function fetchTopicFeed(params: {
     const cursorKeyPrefix = `${uname.toLowerCase()}:`;
     let cursorParam = "";
     if (page === 0) {
-      for (const k of Array.from(followFeedCursors.keys())) {
-        if (k.startsWith(cursorKeyPrefix)) followFeedCursors.delete(k);
+      if (!params.background) {
+        for (const k of Array.from(followFeedCursors.keys())) {
+          if (k.startsWith(cursorKeyPrefix)) followFeedCursors.delete(k);
+        }
       }
     } else {
       const cursor = followFeedCursors.get(`${cursorKeyPrefix}${page}`);
@@ -1392,7 +1394,7 @@ export async function fetchTopicFeed(params: {
     if (postsArr) {
       const hasMore = Boolean(data?.extras?.has_more);
       const lastIso = postsArr.length > 0 ? String(postsArr[postsArr.length - 1]?.created_at || "") : "";
-      if (hasMore && lastIso) {
+      if (!params.background && hasMore && lastIso) {
         followFeedCursors.set(`${cursorKeyPrefix}${page + 1}`, lastIso);
       }
       const mapped: TopicSummary[] = postsArr

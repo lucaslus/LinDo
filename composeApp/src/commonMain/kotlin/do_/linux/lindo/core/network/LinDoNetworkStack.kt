@@ -3860,7 +3860,9 @@ object LinuxDoRepository {
             val cleanPage = page.coerceAtLeast(0)
             val cursorPrefix = "${uname.trim().lowercase()}:"
             val cursorQuery = if (cleanPage == 0) {
-                followFeedCursors.keys.removeIf { it.startsWith(cursorPrefix) }
+                if (!background) {
+                    followFeedCursors.keys.removeIf { it.startsWith(cursorPrefix) }
+                }
                 ""
             } else {
                 val cursor = followFeedCursors["$cursorPrefix$cleanPage"]?.takeIf { it.isNotBlank() }
@@ -3901,10 +3903,12 @@ object LinuxDoRepository {
                 val lastCreatedAt = (postsArr.lastOrNull() as? JsonObject)
                     ?.get("created_at")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 val nextKey = "$cursorPrefix${cleanPage + 1}"
-                if (hasMore && lastCreatedAt != null) {
-                    followFeedCursors[nextKey] = lastCreatedAt
-                } else {
-                    followFeedCursors.remove(nextKey)
+                if (!background) {
+                    if (hasMore && lastCreatedAt != null) {
+                        followFeedCursors[nextKey] = lastCreatedAt
+                    } else {
+                        followFeedCursors.remove(nextKey)
+                    }
                 }
                 return@withContext parseFollowPostsIntoTopicSummaries(
                     postsArr = postsArr,

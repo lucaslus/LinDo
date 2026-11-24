@@ -59,6 +59,13 @@ import {
 import { applyPaletteToDocument, performSmoothThemeSwitch } from "./lib/palette";
 import { parseInternalTopicLink } from "./lib/cooked";
 import { applyTopicFilterResult } from "./lib/topicTransition";
+import {
+  type PendingFeedSnapshot,
+  countEffectivePendingTopics,
+  createEmptyPendingFeedSnapshot,
+  evaluatePendingFeedPoll,
+  resolvePendingFeedApply,
+} from "./lib/pendingFeedState";
 import { DESKTOP_APP_VERSION, diagLog, installGlobalDiagHooks } from "./lib/diagnostics";
 import { installSmoothWheelAndScrollOptimizer } from "./lib/smoothWheel";
 import { discourseMessageBus } from "./lib/messageBus";
@@ -174,7 +181,16 @@ export const App: React.FC = () => {
   const [loadingMoreTopics, setLoadingMoreTopics] = useState(false);
   const [feedError, setFeedError] = useState<string | null>(null);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
-  const [pendingNewTopics, setPendingNewTopics] = useState<TopicSummary[] | null>(null);
+  const [pendingFeed, setPendingFeed] = useState<PendingFeedSnapshot<TopicSummary>>(() =>
+    createEmptyPendingFeedSnapshot()
+  );
+  const pendingFeedRef = useRef(pendingFeed);
+  pendingFeedRef.current = pendingFeed;
+  const feedGenerationRef = useRef(0);
+  const pendingNewCount = useMemo(
+    () => countEffectivePendingTopics(pendingFeed, topics),
+    [pendingFeed, topics]
+  );
 
   // Home topic reader state
   const [activeSummary, setActiveSummary] = useState<TopicSummary | null>(null);
@@ -350,6 +366,7 @@ export const App: React.FC = () => {
       tag?: string | null;
       silent?: boolean;
     }) => {
+      const reqGen = ++feedGenerationRef.current;
       const sort = opts?.sort ?? currentSort;
       const period = opts?.period ?? topPeriod;
       const catId = opts?.categoryId !== undefined ? opts.categoryId : selectedCategoryId;
@@ -360,7 +377,7 @@ export const App: React.FC = () => {
       }
       setFeedError(null);
       setLoadMoreError(null);
-      setPendingNewTopics(null);
+      setPendingFeed(createEmptyPendingFeedSnapshot());
 
       try {
         const res = await fetchTopicFeed({
@@ -371,14 +388,18 @@ export const App: React.FC = () => {
           topPeriod: period,
           username: currentUser?.username,
         });
+        if (reqGen !== feedGenerationRef.current) return;
         setTopics(res.topics);
         setFeedPage(0);
         setHasMoreTopics(res.hasMore);
         lastFeedSyncedAtRef.current = Date.now();
       } catch (err: any) {
+        if (reqGen !== feedGenerationRef.current) return;
         setFeedError(err?.message || "加载动态失败，请重试");
       } finally {
-        setFeedLoading(false);
+        if (reqGen === feedGenerationRef.current) {
+          setFeedLoading(false);
+        }
       }
     },
     [currentSort, topPeriod, selectedCategoryId, selectedTag, currentUser?.username]
@@ -630,7 +651,12 @@ export const App: React.FC = () => {
               t.id === detail.id
                 ? {
                     ...t,
-                    postsCount: detail.postsCount,
+                    postsCount: Math.max(t.postsCount, detail.postsCount),
+                    highestPostNumber: Math.max(
+                      t.highestPostNumber,
+                      detail.highestPostNumber ?? 0,
+                      detail.postsCount
+                    ),
                     replyCount: Math.max(0, detail.postsCount - 1),
                     views: Math.max(t.views, detail.views),
                     likeCount: Math.max(t.likeCount, detail.likeCount),
@@ -1325,6 +1351,7 @@ export const App: React.FC = () => {
     feedError,
     readerError,
     feedLoading,
+    loadingMoreTopics,
   });
   feedPollCtxRef.current = {
     currentTab,
@@ -1336,17 +1363,30 @@ export const App: React.FC = () => {
     feedError,
     readerError,
     feedLoading,
+    loadingMoreTopics,
   };
 
   const checkPendingNewFeedSilently = useCallback(async () => {
     if (document.hidden || backgroundPollInFlightRef.current) return;
     const ctx = feedPollCtxRef.current;
-    if (ctx.currentTab !== "HOME" || (ctx.currentSort !== "latest" && ctx.currentSort !== "new")) {
+    if (
+      ctx.currentTab !== "HOME" ||
+      (ctx.currentSort !== "latest" &&
+        ctx.currentSort !== "new" &&
+        ctx.currentSort !== "unread")
+    ) {
       return;
     }
-    if (ctx.feedLoading || ctx.feedError || ctx.readerError || ctx.topics.length === 0) {
+    if (
+      ctx.feedLoading ||
+      ctx.loadingMoreTopics ||
+      ctx.feedError ||
+      ctx.readerError ||
+      ctx.topics.length === 0
+    ) {
       return;
     }
+    const genBefore = feedGenerationRef.current;
     backgroundPollInFlightRef.current = true;
     try {
       const latest = await fetchTopicFeed({
@@ -1356,24 +1396,22 @@ export const App: React.FC = () => {
         tag: ctx.selectedTag,
         background: true,
       });
-      lastFeedSyncedAtRef.current = Date.now();
       const latestCtx = feedPollCtxRef.current;
       if (
+        genBefore === feedGenerationRef.current &&
+        !latestCtx.feedLoading &&
+        !latestCtx.loadingMoreTopics &&
         latestCtx.currentSort === ctx.currentSort &&
         latestCtx.selectedCategoryId === ctx.selectedCategoryId &&
         latestCtx.selectedTag === ctx.selectedTag &&
         latestCtx.topics.length > 0 &&
         latest.topics.length > 0
       ) {
-        const currentIds = new Set(
-          latestCtx.topics.slice(0, 40).map((t) => `${t.id}:${t.highestPostNumber}`)
+        const nowMs = Date.now();
+        lastFeedSyncedAtRef.current = nowMs;
+        setPendingFeed((prev) =>
+          evaluatePendingFeedPoll(prev, latestCtx.topics, latest.topics, nowMs)
         );
-        const changed = latest.topics.filter(
-          (t) => !t.pinned && !currentIds.has(`${t.id}:${t.highestPostNumber}`)
-        );
-        if (changed.length > 0) {
-          setPendingNewTopics(latest.topics);
-        }
       }
       if (latestCtx.isAuthorized) {
         const me = await refreshCurrentUserSession();
@@ -1430,7 +1468,11 @@ export const App: React.FC = () => {
       void checkPendingNewFeedSilently();
     }, 75000);
     const onVisibility = () => {
-      if (!document.hidden && Date.now() - lastFeedSyncedAtRef.current >= 60000) {
+      const latestSyncOrPollMs = Math.max(
+        lastFeedSyncedAtRef.current,
+        pendingFeedRef.current.fetchedAtMs
+      );
+      if (!document.hidden && Date.now() - latestSyncOrPollMs >= 60000) {
         void checkPendingNewFeedSilently();
       }
     };
@@ -1444,7 +1486,11 @@ export const App: React.FC = () => {
   // Also check quietly when switching back to HOME tab after >= 60s
   useEffect(() => {
     if (!inMainApp || currentTab !== "HOME") return;
-    if (Date.now() - lastFeedSyncedAtRef.current >= 60000) {
+    const latestSyncOrPollMs = Math.max(
+      lastFeedSyncedAtRef.current,
+      pendingFeedRef.current.fetchedAtMs
+    );
+    if (Date.now() - latestSyncOrPollMs >= 60000) {
       const t = setTimeout(() => {
         void checkPendingNewFeedSilently();
       }, 450);
@@ -1453,17 +1499,22 @@ export const App: React.FC = () => {
   }, [inMainApp, currentTab, checkPendingNewFeedSilently]);
 
   const applyPendingNewTopicsNow = useCallback(() => {
-    if (pendingNewTopics && pendingNewTopics.length > 0) {
-      setTopics((prev) => {
-        const freshIds = new Set(pendingNewTopics.map((t) => t.id));
-        return [...pendingNewTopics, ...prev.filter((p) => !freshIds.has(p.id))];
-      });
-      setPendingNewTopics(null);
-      lastFeedSyncedAtRef.current = Date.now();
-    } else {
-      loadFeed();
+    const nowMs = Date.now();
+    const snapshot = pendingFeedRef.current;
+    setPendingFeed(createEmptyPendingFeedSnapshot());
+    const decision = resolvePendingFeedApply(snapshot, feedPollCtxRef.current.topics, nowMs);
+    if (decision.kind === "fetch_live") {
+      void loadFeed();
+      return;
     }
-  }, [pendingNewTopics, loadFeed]);
+    feedGenerationRef.current += 1;
+    setTopics(decision.nextTopics);
+    if (decision.resetPageToZero) {
+      setFeedPage(0);
+    }
+    setHasMoreTopics(true);
+    lastFeedSyncedAtRef.current = nowMs;
+  }, [loadFeed]);
 
   const paneAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -2287,22 +2338,7 @@ export const App: React.FC = () => {
                       isAuthorized={isAuthorized}
                       currentUser={currentUser}
                       unreadNotificationCount={unreadCount}
-                      pendingNewCount={
-                        pendingNewTopics
-                          ? Math.max(
-                              1,
-                              pendingNewTopics.filter(
-                                (nt) =>
-                                  !nt.pinned &&
-                                  !topics.some(
-                                    (t) =>
-                                      t.id === nt.id &&
-                                      t.highestPostNumber === nt.highestPostNumber
-                                  )
-                              ).length
-                            )
-                          : 0
-                      }
+                      pendingNewCount={pendingNewCount}
                       isLoading={feedLoading}
                       isLoadingMore={loadingMoreTopics}
                       hasMore={hasMoreTopics}
@@ -2687,22 +2723,7 @@ export const App: React.FC = () => {
                 isAuthorized={isAuthorized}
                 currentUser={currentUser}
                 unreadNotificationCount={unreadCount}
-                pendingNewCount={
-                  pendingNewTopics
-                    ? Math.max(
-                        1,
-                        pendingNewTopics.filter(
-                          (nt) =>
-                            !nt.pinned &&
-                            !topics.some(
-                              (t) =>
-                                t.id === nt.id &&
-                                t.highestPostNumber === nt.highestPostNumber
-                            )
-                        ).length
-                      )
-                    : 0
-                }
+                pendingNewCount={pendingNewCount}
                 isLoading={feedLoading}
                 isLoadingMore={loadingMoreTopics}
                 hasMore={hasMoreTopics}
@@ -2863,6 +2884,8 @@ export const App: React.FC = () => {
           onConfirm={async () => {
             setShowLogoutConfirm(false);
             await logoutAccount(false);
+            feedGenerationRef.current += 1;
+            setPendingFeed(createEmptyPendingFeedSnapshot());
             setIsGuestMode(false);
             setTopics([]);
             setActiveSummary(null);

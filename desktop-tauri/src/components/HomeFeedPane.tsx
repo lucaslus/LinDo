@@ -11,6 +11,7 @@ import {
   resolveCategoryVisual,
 } from "../lib/palette";
 import { resolveDiscourseTopicUnread } from "../lib/topicReadState";
+import { formatPendingNewCount } from "../lib/pendingFeedState";
 import {
   LinDoCategoryBadge,
   LinDoIcons,
@@ -877,7 +878,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
               backgroundColor: "color-mix(in srgb, var(--brand-gold) 72%, var(--ink-secondary))",
             }}
           />
-          <span>{pendingNewCount >= 25 ? "20+" : pendingNewCount} 条新动态</span>
+          <span>{formatPendingNewCount(pendingNewCount)} 条新动态</span>
           <SmoothRefreshIcon spinning={false} size={11} className="opacity-65" />
         </button>
       )}
