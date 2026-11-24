@@ -14,12 +14,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
-import do_.linux.lindo.core.network.UserApiKeyAuthManager
 import do_.linux.lindo.core.site.AuthorFeedbackSpec
-import do_.linux.lindo.core.update.AppUpdateManager
 import do_.linux.lindo.ui.components.LinDoIcons
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import lindo.composeapp.generated.resources.Res
 import lindo.composeapp.generated.resources.lindo_brand_mark
 import org.jetbrains.compose.resources.painterResource
@@ -35,18 +31,7 @@ internal fun LindoAboutPage(
     onOpenAuthorFeedback: (() -> Unit)? = null
 ) {
     val palette = LocalPalette.current
-    val scope = rememberCoroutineScope()
     var showLicenses by remember { mutableStateOf(false) }
-    var showAuthorFeedback by remember { mutableStateOf(false) }
-    var checkHint by remember { mutableStateOf<String?>(null) }
-    val updateInfo = AppUpdateManager.latestInfo
-    val checkingUpdate = AppUpdateManager.checking
-    LaunchedEffect(checkHint) {
-        if (checkHint != null) {
-            delay(2800L)
-            checkHint = null
-        }
-    }
     val (debugHint, onVersionTap) = rememberDebugUnlockTapState(onUnlocked = onOpenDebugDiagnostics)
     LinDoFullScreenPage(onBack = onDismiss) {
         LinDoPageTopBar(title = "关于 Lindo", onBack = onDismiss)
@@ -54,76 +39,42 @@ internal fun LindoAboutPage(
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
             LazyColumn(Modifier.widthIn(max = 600.dp).fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
                 item {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 40.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally) {
-                        Image(painterResource(Res.drawable.lindo_brand_mark), "Lindo 零度娘 LOGO", Modifier.size(80.dp))
-                        Spacer(Modifier.height(16.dp))
-                        Text("Lindo", fontSize = 26.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 36.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Image(painterResource(Res.drawable.lindo_brand_mark), "Lindo 零度娘 LOGO", Modifier.size(76.dp))
+                        Spacer(Modifier.height(14.dp))
+                        Text("Lindo", fontSize = 24.sp, fontWeight = FontWeight.SemiBold, color = palette.inkPrimary)
                         Spacer(Modifier.height(4.dp))
-                        Text(LinDoDiagnosticLogger.APP_VERSION_DISPLAY.removePrefix("Lindo "), fontSize = 12.sp, color = palette.inkTertiary,
-                            modifier = Modifier.testTag("about_version_debug_trigger")
-                                .clickable(onClick = onVersionTap).padding(horizontal = 12.dp, vertical = 12.dp))
-                        if (debugHint != null) Text(debugHint, fontSize = 12.sp, color = palette.activeChipText)
-                    }
-                }
-                item {
-                    val statusValue = when {
-                        checkingUpdate -> "正在检查..."
-                        updateInfo?.hasUpdate == true -> "发现新版本 build ${updateInfo.latestVersionCode}"
-                        checkHint != null -> checkHint.orEmpty()
-                        updateInfo != null -> "当前最新"
-                        else -> ""
-                    }
-                    LinDoSettingRow(
-                        icon = LinDoIcons.Download,
-                        title = "检查更新",
-                        value = statusValue,
-                        onClick = {
-                            if (updateInfo?.hasUpdate == true) {
-                                AppUpdateManager.openDialog()
-                            } else if (!checkingUpdate) {
-                                scope.launch {
-                                    val res = AppUpdateManager.checkForUpdates(openDialogWhenAvailable = true)
-                                    res.onSuccess { info ->
-                                        if (!info.hasUpdate) {
-                                            checkHint = "已是最新版本 (build ${info.currentVersionCode})"
-                                        }
-                                    }.onFailure {
-                                        checkHint = "检查未成功，请稍后重试"
-                                    }
-                                }
-                            }
+                        Text(
+                            LinDoDiagnosticLogger.APP_VERSION_DISPLAY.removePrefix("Lindo "),
+                            fontSize = 12.sp,
+                            color = palette.inkTertiary,
+                            modifier = Modifier
+                                .testTag("about_version_debug_trigger")
+                                .clickable(onClick = onVersionTap)
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                        if (debugHint != null) {
+                            Text(debugHint, fontSize = 12.sp, color = palette.activeChipText)
                         }
-                    )
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            text = "问题与建议反馈：请站内搜索 @${AuthorFeedbackSpec.AUTHOR_USERNAME} 进行私信，或在 GitHub 提交 Issue",
+                            fontSize = 12.5.sp,
+                            lineHeight = 19.sp,
+                            color = palette.inkSecondary,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            modifier = Modifier.widthIn(max = 360.dp)
+                        )
+                    }
                 }
                 item { LinDoSettingRow(LinDoIcons.Globe, "项目主页", onClick = { onOpenLink(LINDO_PROJECT_URL) }) }
-                item {
-                    LinDoSettingRow(
-                        icon = LinDoIcons.MessageCircle,
-                        title = "私信作者反馈",
-                        value = "@${AuthorFeedbackSpec.AUTHOR_USERNAME}",
-                        onClick = {
-                            if (onOpenAuthorFeedback != null) {
-                                onOpenAuthorFeedback()
-                            } else if (UserApiKeyAuthManager.isAuthorized()) {
-                                showAuthorFeedback = true
-                            } else {
-                                onOpenLink("https://linux.do/u/${AuthorFeedbackSpec.AUTHOR_USERNAME}")
-                            }
-                        }
-                    )
-                }
                 item { LinDoSettingRow(LinDoIcons.MessageCircle, "GitHub Issues", onClick = { onOpenLink("$LINDO_PROJECT_URL/issues") }) }
-                item { LinDoSettingRow(LinDoIcons.Code, "开源许可", onClick = { showLicenses = true }) }
-                item { LinDoSettingRow(LinDoIcons.FileText, "诊断与崩溃日志", showDivider = false, onClick = onOpenDebugDiagnostics) }
+                item { LinDoSettingRow(LinDoIcons.Code, "开源许可", showDivider = false, onClick = { showLicenses = true }) }
             }
         }
-    }
-    if (showAuthorFeedback) {
-        AuthorFeedbackDialog(
-            onDismiss = { showAuthorFeedback = false },
-            onSentSuccess = { checkHint = "已通过站内私信发送给 @${AuthorFeedbackSpec.AUTHOR_USERNAME}" }
-        )
     }
     if (showLicenses) {
         LindoLicensesPage(onBack = { showLicenses = false }, onOpenLink = onOpenLink)

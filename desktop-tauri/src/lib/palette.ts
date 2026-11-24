@@ -24,6 +24,17 @@ export interface BrandThemeSpec {
 
 export const BRAND_THEMES: BrandThemeSpec[] = [
   {
+    key: "WARM_ORANGE",
+    label: "橙",
+    swatchColor: "#F97316",
+    logoDoColor: "#F97316",
+    tabIndicatorColor: "#F97316",
+    lightChipBg: "#FFEDD5",
+    lightChipText: "#9A3412",
+    darkChipBg: "#482913",
+    darkChipText: "#FDBA74",
+  },
+  {
     key: "OFFICIAL_GOLD",
     label: "金",
     swatchColor: "#F59E0B",
@@ -88,17 +99,6 @@ export const BRAND_THEMES: BrandThemeSpec[] = [
     lightChipText: "#0E7490",
     darkChipBg: "#153C46",
     darkChipText: "#67E8F9",
-  },
-  {
-    key: "WARM_ORANGE",
-    label: "橙",
-    swatchColor: "#F97316",
-    logoDoColor: "#F97316",
-    tabIndicatorColor: "#F97316",
-    lightChipBg: "#FFEDD5",
-    lightChipText: "#9A3412",
-    darkChipBg: "#482913",
-    darkChipText: "#FDBA74",
   },
 ];
 

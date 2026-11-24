@@ -273,8 +273,13 @@ class MobileParityTddSpecTest {
             .toList()
         assertTrue(forbiddenHits.isEmpty(), "Forbidden copy '抢沙发' found in: $forbiddenHits")
 
-        assertTrue(linDoAppSrc.contains("私信作者反馈"))
-        assertTrue(aboutSrc.contains("私信作者反馈"))
+        assertTrue(linDoAppSrc.contains("问题与建议反馈"))
+        assertTrue(linDoAppSrc.contains("扫码 / 口令登录"))
+        assertTrue(linDoAppSrc.contains("LinDoMessagesCopy.DIAGNOSTICS_SHEET_TITLE.text"))
+        assertFalse(linDoAppSrc.contains("CommunityActivitySummary(it)"))
+        assertTrue(aboutSrc.contains("站内搜索"))
+        assertFalse(aboutSrc.contains("检查更新"))
+        assertFalse(aboutSrc.contains("诊断与崩溃日志"))
     }
 
     @Test

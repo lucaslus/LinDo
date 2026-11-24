@@ -569,8 +569,8 @@ private object DesktopStateStore {
         )
         UserApiKeyAuthManager.uiDarkTheme = props.getProperty("ui_dark_theme")?.toBooleanStrictOrNull() ?: false
         UserApiKeyAuthManager.uiEnableAnimations = props.getProperty("ui_enable_animations")?.toBooleanStrictOrNull() ?: true
-        UserApiKeyAuthManager.uiThemeAccent = props.getProperty("ui_theme_accent")?.takeIf { it.isNotBlank() } ?: "OFFICIAL_GOLD"
-        UserApiKeyAuthManager.uiCompactFeed = props.getProperty("ui_compact_feed")?.toBooleanStrictOrNull() ?: false
+        UserApiKeyAuthManager.uiThemeAccent = props.getProperty("ui_theme_accent")?.takeIf { it.isNotBlank() } ?: "WARM_ORANGE"
+        UserApiKeyAuthManager.uiCompactFeed = props.getProperty("ui_compact_feed")?.toBooleanStrictOrNull() ?: true
         UserApiKeyAuthManager.uiHomeSearchExpanded = props.getProperty("ui_home_search_expanded")?.toBooleanStrictOrNull() ?: true
         UserApiKeyAuthManager.uiSplitFraction =
             (props.getProperty("ui_split_fraction")?.toFloatOrNull() ?: 0.42f).coerceIn(0.28f, 0.62f)

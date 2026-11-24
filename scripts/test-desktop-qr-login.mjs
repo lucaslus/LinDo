@@ -132,6 +132,18 @@ test("Settings home order & strict 2-state cursor policy guard hold across deskt
   assert.ok(acctIdx > 0);
   assert.ok(qrIdx > acctIdx, "登录二维码 should be placed directly below 账号管理");
   assert.ok(qrIdx < appearanceIdx);
+  assert.ok(secSrc.includes('title="问题与建议反馈"'));
+  assert.ok(!secSrc.includes("<AuthorFeedbackModal"));
+
+  const paletteSrc = fs.readFileSync(path.join(SRC_ROOT, "lib/palette.ts"), "utf8");
+  const firstThemeMatch = /BRAND_THEMES:\s*BrandThemeSpec\[\]\s*=\s*\[\s*\{\s*key:\s*"([^"]+)"/.exec(
+    paletteSrc
+  );
+  assert.equal(firstThemeMatch?.[1], "WARM_ORANGE");
+
+  const appSrc = fs.readFileSync(path.join(SRC_ROOT, "App.tsx"), "utf8");
+  assert.ok(appSrc.includes('themeOption: "WARM_ORANGE"'));
+  assert.ok(appSrc.includes("compactFeed: true"));
 
   const forbidden =
     /\bcursor-(?:ns-resize|ew-resize|col-resize|row-resize|nesw-resize|nwse-resize|zoom-in|zoom-out|grab|grabbing|text)\b|cursor:\s*(?:ns-resize|ew-resize|col-resize|row-resize|zoom-in|zoom-out|grab|grabbing|text)\b/i;

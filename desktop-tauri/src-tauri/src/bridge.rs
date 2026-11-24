@@ -6981,5 +6981,9 @@ mod tests {
             parse_qr_login_uri("https://linux.do/latest", now).unwrap_err(),
             "不是 Lindo 登录二维码"
         );
+
+        let def_prefs = crate::legacy::UserPreferences::default();
+        assert_eq!(def_prefs.theme_option, "WARM_ORANGE");
+        assert!(def_prefs.compact_feed);
     }
 }

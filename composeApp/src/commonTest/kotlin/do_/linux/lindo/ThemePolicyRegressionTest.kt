@@ -38,9 +38,10 @@ class ThemePolicyRegressionTest {
         assertEquals(ReaderFontScalePreset.MINIMUM, ReaderFontScalePreset.MAXIMUM.nextCycle())
     }
     @Test fun persistedThemeKeysRemainCompatible() {
-        for (key in listOf("OFFICIAL_GOLD", "IDEAL_RED", "GEEK_BLUE", "BAMBOO_GREEN", "SOFT_PURPLE", "CLEAR_TEAL", "WARM_ORANGE"))
+        for (key in listOf("WARM_ORANGE", "OFFICIAL_GOLD", "IDEAL_RED", "GEEK_BLUE", "BAMBOO_GREEN", "SOFT_PURPLE", "CLEAR_TEAL"))
             assertEquals(key, BrandThemeOption.fromKey(key).key)
-        assertEquals(BrandThemeOption.OFFICIAL_GOLD, BrandThemeOption.fromKey("unknown"))
+        assertEquals(BrandThemeOption.WARM_ORANGE, BrandThemeOption.fromKey("unknown"))
+        assertEquals(BrandThemeOption.WARM_ORANGE, BrandThemeOption.displayOrder.first())
     }
     @Test fun readingInkHierarchyPreventsDarkHalationAndPreservesContrast() {
         for (dark in listOf(false, true)) {

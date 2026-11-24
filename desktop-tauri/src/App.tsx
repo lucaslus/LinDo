@@ -86,10 +86,10 @@ import {
 
 const DEFAULT_PREFS: UserPreferences = {
   appearance: "dark",
-  themeOption: "OFFICIAL_GOLD",
+  themeOption: "WARM_ORANGE",
   fontScale: 1.0,
   splitFraction: 0.42,
-  compactFeed: false,
+  compactFeed: true,
   defaultSearchExpanded: true,
   enableAnimations: true,
   echRoutingMode: "smart_auto",

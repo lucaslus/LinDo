@@ -40,14 +40,14 @@ pub struct UserPreferences {
     /// "system" | "light" | "dark"
     #[serde(default = "default_appearance")]
     pub appearance: String,
-    /// "OFFICIAL_GOLD" | "GEEK_BLUE" | "BAMBOO_GREEN" | "IDEAL_RED" | "SOFT_PURPLE" | "CLEAR_TEAL" | "WARM_ORANGE"
+    /// "WARM_ORANGE" | "OFFICIAL_GOLD" | "GEEK_BLUE" | "BAMBOO_GREEN" | "IDEAL_RED" | "SOFT_PURPLE" | "CLEAR_TEAL"
     #[serde(default = "default_theme_option")]
     pub theme_option: String,
     #[serde(default = "default_font_scale")]
     pub font_scale: f32,
     #[serde(default = "default_split_fraction")]
     pub split_fraction: f32,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compact_feed: bool,
     #[serde(default = "default_true")]
     pub default_search_expanded: bool,
@@ -62,7 +62,7 @@ fn default_appearance() -> String {
     "dark".to_string()
 }
 fn default_theme_option() -> String {
-    "OFFICIAL_GOLD".to_string()
+    "WARM_ORANGE".to_string()
 }
 fn default_font_scale() -> f32 {
     1.0
@@ -84,7 +84,7 @@ impl Default for UserPreferences {
             theme_option: default_theme_option(),
             font_scale: default_font_scale(),
             split_fraction: default_split_fraction(),
-            compact_feed: false,
+            compact_feed: true,
             default_search_expanded: true,
             enable_animations: true,
             ech_routing_mode: default_ech_routing_mode(),

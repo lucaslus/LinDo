@@ -269,7 +269,7 @@ internal fun LinDoWelcomeScreen(
                             )
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                "扫码登录",
+                                "扫码 / 口令",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 1

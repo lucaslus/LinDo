@@ -523,10 +523,10 @@ object UserApiKeyAuthManager {
     var uiEnableAnimations: Boolean = true
 
     @Volatile
-    var uiThemeAccent: String = "OFFICIAL_GOLD"
+    var uiThemeAccent: String = "WARM_ORANGE"
 
     @Volatile
-    var uiCompactFeed: Boolean = false
+    var uiCompactFeed: Boolean = true
 
     @Volatile
     var uiHomeSearchExpanded: Boolean = true

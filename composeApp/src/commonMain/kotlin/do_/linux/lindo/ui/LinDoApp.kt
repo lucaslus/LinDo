@@ -281,6 +281,10 @@ enum class BrandThemeOption(
     val publishBtnBg: Color,
     val publishBtnContent: Color
 ) {
+    WARM_ORANGE("WARM_ORANGE", LinDoFeedCopy.THEME_WARM_ORANGE.text,
+        Color(0xFFF97316), Color(0xFFF97316), Color(0xFFF97316),
+        Color(0xFFFFEDD5), Color(0xFF9A3412), Color(0xFF482913), Color(0xFFFDBA74),
+        Color(0xFF9A3412), Color.White),
     OFFICIAL_GOLD(
         key = "OFFICIAL_GOLD",
         label = LinDoFeedCopy.THEME_OFFICIAL_GOLD.text,
@@ -340,16 +344,12 @@ enum class BrandThemeOption(
     CLEAR_TEAL("CLEAR_TEAL", LinDoFeedCopy.THEME_CLEAR_TEAL.text,
         Color(0xFF0891B2), Color(0xFF0891B2), Color(0xFF0891B2),
         Color(0xFFCFFAFE), Color(0xFF0E7490), Color(0xFF153C46), Color(0xFF67E8F9),
-        Color(0xFF0E7490), Color.White),
-    WARM_ORANGE("WARM_ORANGE", LinDoFeedCopy.THEME_WARM_ORANGE.text,
-        Color(0xFFF97316), Color(0xFFF97316), Color(0xFFF97316),
-        Color(0xFFFFEDD5), Color(0xFF9A3412), Color(0xFF482913), Color(0xFFFDBA74),
-        Color(0xFF9A3412), Color.White);
+        Color(0xFF0E7490), Color.White);
 
     companion object {
-        val displayOrder = listOf(OFFICIAL_GOLD, GEEK_BLUE, BAMBOO_GREEN, IDEAL_RED, SOFT_PURPLE, CLEAR_TEAL, WARM_ORANGE)
+        val displayOrder = listOf(WARM_ORANGE, OFFICIAL_GOLD, GEEK_BLUE, BAMBOO_GREEN, IDEAL_RED, SOFT_PURPLE, CLEAR_TEAL)
         fun fromKey(key: String?): BrandThemeOption {
-            return entries.firstOrNull { it.key == key } ?: OFFICIAL_GOLD
+            return entries.firstOrNull { it.key == key } ?: WARM_ORANGE
         }
     }
 }
@@ -389,7 +389,7 @@ data class LinDoThemePalette(
 
 internal fun buildLinDoPalette(
     isDark: Boolean,
-    option: BrandThemeOption = BrandThemeOption.OFFICIAL_GOLD
+    option: BrandThemeOption = BrandThemeOption.WARM_ORANGE
 ): LinDoThemePalette {
     return if (!isDark) {
         LinDoThemePalette(
@@ -480,8 +480,8 @@ internal val isAndroidRuntime: Boolean by lazy {
 /** 悬浮底栏占用高度（不含系统导航区）：外边距 10dp + 胶囊 58dp，再留 12dp 间距。 */
 internal val FloatingNavClearance = 80.dp
 
-private val LightPalette = buildLinDoPalette(isDark = false, option = BrandThemeOption.OFFICIAL_GOLD)
-private val DarkPalette = buildLinDoPalette(isDark = true, option = BrandThemeOption.OFFICIAL_GOLD)
+private val LightPalette = buildLinDoPalette(isDark = false, option = BrandThemeOption.WARM_ORANGE)
+private val DarkPalette = buildLinDoPalette(isDark = true, option = BrandThemeOption.WARM_ORANGE)
 
 internal val LocalPalette = staticCompositionLocalOf { LightPalette }
 
@@ -4153,6 +4153,8 @@ internal fun LinDoApp(
                                             authStatusHint = null
                                             showAuthSheet = true
                                         },
+                                        onGenerateQrLogin = { showQrGenerateSheet = true },
+                                        onScanQrLogin = { showQrScanSheet = true },
                                         onOpenWebUrl = { openSmartUrl(it) },
                                         onPrimaryWebLogin = ::triggerPrimaryLogin,
                                         onRequestGuestLogin = ::requestGuestLogin,
@@ -4385,6 +4387,8 @@ internal fun LinDoApp(
                                                     authStatusHint = null
                                                     showAuthSheet = true
                                                 },
+                                                onGenerateQrLogin = { showQrGenerateSheet = true },
+                                                onScanQrLogin = { showQrScanSheet = true },
                                                 onOpenWebUrl = { openSmartUrl(it) },
                                                 onPrimaryWebLogin = ::triggerPrimaryLogin,
                                                 onRequestGuestLogin = ::requestGuestLogin,
@@ -13672,8 +13676,8 @@ internal fun CommunityProfileScreen(
     wideSplitEnabled: Boolean = true,
     showWideLayoutOption: Boolean = false,
     onToggleWideSplit: () -> Unit = {},
-    themeOption: BrandThemeOption = BrandThemeOption.OFFICIAL_GOLD,
-    isCompactFeed: Boolean = false,
+    themeOption: BrandThemeOption = BrandThemeOption.WARM_ORANGE,
+    isCompactFeed: Boolean = true,
     defaultSearchExpanded: Boolean = true,
     fontScale: Float,
     enableAnimations: Boolean,
@@ -13703,6 +13707,8 @@ internal fun CommunityProfileScreen(
     onOpenBadgesCenter: () -> Unit = {},
     onOpenConnectSheet: () -> Unit,
     onOpenAuthSheet: () -> Unit,
+    onGenerateQrLogin: () -> Unit = {},
+    onScanQrLogin: () -> Unit = {},
     onOpenWebUrl: (String) -> Unit = {},
     onPrimaryWebLogin: () -> Unit,
     onRequestGuestLogin: (String, String) -> Unit = { _, _ -> onPrimaryWebLogin() },
@@ -13961,9 +13967,6 @@ internal fun CommunityProfileScreen(
                         }
                     }
 
-                    if (isAuthorized && fullProfile?.username.equals(currentUser?.username, ignoreCase = true)) {
-                        fullProfile?.let { CommunityActivitySummary(it) }
-                    }
                     Spacer(modifier = Modifier.height(16.dp))
 
                     // 顶部 4 项线性图标快捷栏（我的收藏 | 阅读历史 | 草稿箱 | 我的活动）
@@ -14058,21 +14061,35 @@ internal fun CommunityProfileScreen(
                     LinDoSettingRow(
                         icon = LinDoIcons.ShieldCheck,
                         title = LinDoMessagesCopy.ROW_ACCOUNT_PREFERENCES.text,
-                        showDivider = isAuthorized,
+                        showDivider = true,
                         onClick = {
                             if (isAuthorized) onOpenAccountPreferences()
                             else promptGuest(GuestGateScenario.PREFERENCES)
                         }
                     )
-                    if (isAuthorized) {
-                        LinDoSettingRow(
-                            icon = LinDoIcons.Globe,
-                            title = LinDoAuthCopy.ACCOUNT_SESSION_TITLE.text,
-                            value = currentUser?.username?.let { "@$it" }.orEmpty(),
-                            showDivider = false,
-                            onClick = onOpenAuthSheet
-                        )
-                    }
+                    LinDoSettingRow(
+                        icon = LinDoIcons.Globe,
+                        title = LinDoAuthCopy.ACCOUNT_SESSION_TITLE.text,
+                        value = if (isAuthorized) {
+                            currentUser?.username?.let { "@$it" }.orEmpty()
+                        } else if (SavedAccounts.accounts.isNotEmpty()) {
+                            "已保存 ${SavedAccounts.accounts.size} 个账号"
+                        } else {
+                            "登录 / 切换账号"
+                        },
+                        showDivider = true,
+                        onClick = onOpenAuthSheet
+                    )
+                    LinDoSettingRow(
+                        icon = LinDoIcons.QrCode,
+                        title = "扫码 / 口令登录",
+                        value = if (isAuthorized) "生成二维码与口令" else "相机扫码 / 粘贴口令",
+                        showDivider = false,
+                        onClick = {
+                            if (isAuthorized) onGenerateQrLogin()
+                            else onScanQrLogin()
+                        }
+                    )
 
                     HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
                 }
@@ -14261,36 +14278,33 @@ internal fun CommunityProfileScreen(
                         }
                     )
 
-                    var showAuthorFeedbackDialog by remember { mutableStateOf(false) }
-                    var authorFeedbackNotice by remember { mutableStateOf<String?>(null) }
-                    LaunchedEffect(authorFeedbackNotice) {
-                        if (authorFeedbackNotice != null) {
-                            delay(2800L)
-                            authorFeedbackNotice = null
-                        }
-                    }
+                    LinDoSettingRow(
+                        icon = LinDoIcons.FileText,
+                        title = LinDoMessagesCopy.DIAGNOSTICS_SHEET_TITLE.text,
+                        onClick = onOpenDebugDiagnostics
+                    )
+
+                    var showFeedbackGuideDialog by remember { mutableStateOf(false) }
                     LinDoSettingRow(
                         icon = LinDoIcons.MessageCircle,
-                        title = "私信作者反馈",
-                        value = authorFeedbackNotice ?: "@${AuthorFeedbackSpec.AUTHOR_USERNAME}",
-                        onClick = {
-                            if (isAuthorized) {
-                                showAuthorFeedbackDialog = true
-                            } else {
-                                onOpenAuthSheet()
-                            }
-                        }
+                        title = "问题与建议反馈",
+                        value = "@${AuthorFeedbackSpec.AUTHOR_USERNAME} / GitHub",
+                        onClick = { showFeedbackGuideDialog = true }
                     )
-                    if (showAuthorFeedbackDialog) {
-                        AuthorFeedbackDialog(
-                            onDismiss = { showAuthorFeedbackDialog = false },
-                            onSentSuccess = {
-                                authorFeedbackNotice = "已私信反馈给 @${AuthorFeedbackSpec.AUTHOR_USERNAME}"
+                    if (showFeedbackGuideDialog) {
+                        LinDoConfirmDialog(
+                            title = "问题与建议反馈",
+                            detail = "请站内搜索 @${AuthorFeedbackSpec.AUTHOR_USERNAME} 进行私信交流，或前往 GitHub 提交 Issue。",
+                            confirmLabel = "前往 GitHub Issues",
+                            destructive = false,
+                            onDismiss = { showFeedbackGuideDialog = false },
+                            onConfirm = {
+                                showFeedbackGuideDialog = false
+                                onOpenWebUrl("https://github.com/lucaslus/LinDo/issues")
                             }
                         )
                     }
 
-                    // Version and diagnostics live in the local About Lindo page.
                     LinDoSettingRow(
                         icon = LinDoIcons.InfoCircle,
                         title = "关于 Lindo",
@@ -15370,7 +15384,7 @@ private fun GuestLoginGuideSheet(
                         )
                         Spacer(modifier = Modifier.width(7.dp))
                         Text(
-                            text = "扫码登录",
+                            text = "扫码 / 口令登录",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Medium,
                             color = palette.inkPrimary,
@@ -20602,9 +20616,11 @@ private fun UserReadHistorySheet(
                 )
             }
             if (isSearchingCloud) {
-                Text(
-                    text = "检索中…",
-                    fontSize = 11.sp,
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .size(14.dp)
+                        .testTag("history_cloud_searching_spinner"),
+                    strokeWidth = 1.6.dp,
                     color = palette.inkTertiary
                 )
             }

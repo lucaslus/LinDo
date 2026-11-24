@@ -3548,8 +3548,8 @@ class MainActivity : ComponentActivity() {
             )
             UserApiKeyAuthManager.uiDarkTheme = prefs.getBoolean("ui_dark_theme", false)
             UserApiKeyAuthManager.uiEnableAnimations = prefs.getBoolean("ui_enable_animations", true)
-            UserApiKeyAuthManager.uiThemeAccent = prefs.getString("ui_theme_accent", "OFFICIAL_GOLD") ?: "OFFICIAL_GOLD"
-            UserApiKeyAuthManager.uiCompactFeed = prefs.getBoolean("ui_compact_feed", false)
+            UserApiKeyAuthManager.uiThemeAccent = prefs.getString("ui_theme_accent", "WARM_ORANGE") ?: "WARM_ORANGE"
+            UserApiKeyAuthManager.uiCompactFeed = prefs.getBoolean("ui_compact_feed", true)
             UserApiKeyAuthManager.uiHomeSearchExpanded = prefs.getBoolean("ui_home_search_expanded", true)
             // 移动端默认对半分栏：分隔线与折叠屏铰链对齐，仍可拖拽调整
             UserApiKeyAuthManager.uiSplitFraction = prefs.getFloat("ui_split_fraction", 0.5f).coerceIn(0.28f, 0.62f)

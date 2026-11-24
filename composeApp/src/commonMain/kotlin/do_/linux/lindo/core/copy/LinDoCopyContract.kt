@@ -525,8 +525,8 @@ enum class ReaderFontScalePreset(val scale: Float, val labelCopy: LinDoMessagesC
 }
 
 enum class FeedDensityMode(val isCompact: Boolean, val labelCopy: LinDoMessagesCopy) {
-    SPACIOUS(false, LinDoMessagesCopy.FEED_DENSITY_SPACIOUS),
-    COMPACT(true, LinDoMessagesCopy.FEED_DENSITY_COMPACT);
+    COMPACT(true, LinDoMessagesCopy.FEED_DENSITY_COMPACT),
+    SPACIOUS(false, LinDoMessagesCopy.FEED_DENSITY_SPACIOUS);
 
     companion object {
         fun fromCompact(isCompact: Boolean): FeedDensityMode = if (isCompact) COMPACT else SPACIOUS

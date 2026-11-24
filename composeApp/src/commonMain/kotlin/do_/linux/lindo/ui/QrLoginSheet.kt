@@ -31,6 +31,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -95,7 +96,7 @@ internal fun QrCodeScanSheet(
     }
 
     LinDoFullScreenPage(onBack = onDismiss, containerColor = palette.cardSurface) {
-        LinDoPageTopBar(title = "扫码登录", onBack = onDismiss)
+        LinDoPageTopBar(title = "扫码 / 口令登录", onBack = onDismiss)
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
         Column(
@@ -124,7 +125,7 @@ internal fun QrCodeScanSheet(
                 }
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    text = "将已登录 Lindo / FluxDO 的另一台设备二维码放入框内",
+                    text = "扫描已登录 Lindo / FluxDO 设备的二维码，或在下方粘贴登录口令",
                     color = palette.inkSecondary,
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center
@@ -146,7 +147,7 @@ internal fun QrCodeScanSheet(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "可在已登录设备的「账号管理 → 扫码登录其他设备」复制口令",
+                    text = "可在已登录设备的「我的 → 扫码 / 口令登录」生成并复制口令",
                     color = palette.inkSecondary,
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center
@@ -282,8 +283,12 @@ internal fun QrCodeGenerateSheet(
         }
     }
 
+    LaunchedEffect(Unit) {
+        generate()
+    }
+
     LinDoFullScreenPage(onBack = onDismiss, containerColor = palette.cardSurface) {
-        LinDoPageTopBar(title = "扫码登录其他设备", onBack = onDismiss)
+        LinDoPageTopBar(title = "生成登录二维码与口令", onBack = onDismiss)
         HorizontalDivider(thickness = 0.5.dp, color = palette.hairline)
 
         Column(
@@ -303,7 +308,7 @@ internal fun QrCodeGenerateSheet(
                 Spacer(Modifier.height(6.dp))
             }
             Text(
-                text = "仅供您本人的另一台设备扫码登录，请勿截图发给他人。扫码完成后该临时凭据会自动销毁。",
+                text = "同时生成一次性登录二维码与跨设备登录口令：另一台手机可直接扫码，电脑端可复制下方口令或识别二维码截图登录。使用后凭据自动销毁，请勿发给他人。",
                 color = palette.inkSecondary,
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
@@ -347,11 +352,7 @@ internal fun QrCodeGenerateSheet(
                 }
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    text = if (generatedPayload?.username?.isNotBlank() == true) {
-                        "一次性授权令牌已就绪（约 10 分钟内有效）"
-                    } else {
-                        "一次性授权令牌已就绪"
-                    },
+                    text = "二维码与登录口令已就绪（约 10 分钟内有效）",
                     color = palette.inkSecondary,
                     fontSize = 12.sp
                 )
@@ -368,7 +369,7 @@ internal fun QrCodeGenerateSheet(
                     border = BorderStroke(1.dp, palette.hairline),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = palette.inkPrimary)
                 ) {
-                    Text(if (copiedHint) "已复制登录口令" else "复制登录口令", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(if (copiedHint) "已复制登录口令" else "复制登录口令（供电脑或其他设备粘贴）", fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 }
                 Spacer(Modifier.height(10.dp))
             }
@@ -385,10 +386,10 @@ internal fun QrCodeGenerateSheet(
             }
 
             LinDoPrimaryButton(
-                label = if (matrix == null) "生成一次性登录二维码" else "重新生成",
+                label = if (matrix == null) "生成登录二维码与口令" else "重新生成二维码与口令",
                 onClick = ::generate,
                 busy = generating,
-                busyLabel = "正在生成...",
+                busyLabel = "正在生成二维码与口令...",
                 leadingIcon = LinDoIcons.QrCode,
                 modifier = Modifier.widthIn(max = 360.dp)
             )

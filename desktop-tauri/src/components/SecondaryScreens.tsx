@@ -3635,14 +3635,14 @@ export const ProfileSettingsView: React.FC<{
               <SettingsSegmentedChoices
                 options={[
                   {
-                    key: "loose" as const,
-                    label: "宽松",
-                    visual: <LinDoIcons.LayoutCards size={15} />,
-                  },
-                  {
                     key: "compact" as const,
                     label: "紧凑",
                     visual: <LinDoIcons.LayoutCompact size={15} />,
+                  },
+                  {
+                    key: "loose" as const,
+                    label: "宽松",
+                    visual: <LinDoIcons.LayoutCards size={15} />,
                   },
                 ]}
                 selected={preferences.compactFeed ? "compact" : "loose"}
@@ -3842,18 +3842,9 @@ export const ProfileSettingsView: React.FC<{
             />
             <SettingRow
               icon={<LinDoIcons.MessageCircle size={19} />}
-              title="私信作者反馈"
-              value={`@${LINDO_AUTHOR_USERNAME}`}
-              onClick={() => {
-                if (!isAuthorized) {
-                  onRequestGuestLogin(
-                    "登录后私信作者反馈",
-                    "登录 LINUX DO 账号即可通过站内私信直接联系作者"
-                  );
-                  return;
-                }
-                setShowAuthorFeedback(true);
-              }}
+              title="问题与建议反馈"
+              value={`@${LINDO_AUTHOR_USERNAME} / GitHub`}
+              onClick={() => setShowAuthorFeedback(true)}
             />
             <SettingRow
               icon={<LinDoIcons.InfoCircle size={19} />}
@@ -4088,10 +4079,11 @@ export const ProfileSettingsView: React.FC<{
                   />
                   {historyCloudSearching && (
                     <span
-                      className="shrink-0 text-[11px]"
+                      aria-label="正在检索"
+                      className="inline-flex shrink-0 items-center"
                       style={{ color: "var(--ink-tertiary)" }}
                     >
-                      云端检索中…
+                      <SmoothRefreshIcon spinning size={13.5} />
                     </span>
                   )}
                   {historySearchInput.inputValue && (
@@ -5477,66 +5469,13 @@ export const ProfileSettingsView: React.FC<{
                   <p className="text-[12.5px]" style={{ color: "var(--ink-secondary)" }}>
                     LINUX DO 第三方原生桌面客户端 · 真诚 · 友善 · 团结 · 专业
                   </p>
+                  <p
+                    className="mx-auto max-w-[360px] text-[12px] leading-relaxed"
+                    style={{ color: "var(--ink-tertiary)" }}
+                  >
+                    问题与建议反馈：请站内搜索 @{LINDO_AUTHOR_USERNAME} 进行私信，或在 GitHub 提交 Issue
+                  </p>
                   <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (updateInfo?.hasUpdate && onOpenUpdateModal) {
-                          setSubSheet(null);
-                          onOpenUpdateModal();
-                        } else {
-                          onCheckUpdate?.();
-                        }
-                      }}
-                      className="rounded-full px-4 py-1.5 text-[12.5px] font-semibold cursor-pointer"
-                      style={{
-                        backgroundColor: updateInfo?.hasUpdate
-                          ? "var(--publish-btn-bg)"
-                          : "var(--subtle-surface)",
-                        border: "0.5px solid var(--hairline)",
-                        color: updateInfo?.hasUpdate
-                          ? "var(--publish-btn-fg)"
-                          : "var(--ink-primary)",
-                      }}
-                    >
-                      {checkingUpdate
-                        ? "检查中..."
-                        : updateInfo?.hasUpdate
-                          ? `升级至 v${updateInfo.latestVersion}`
-                          : "检查更新"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSubSheet("diagnostics")}
-                      className="lindo-interactive rounded-full px-4 py-1.5 text-[12.5px]"
-                      style={{
-                        border: "0.5px solid var(--hairline)",
-                        color: "var(--ink-primary)",
-                      }}
-                    >
-                      诊断与导出日志
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSubSheet(null);
-                        if (!isAuthorized) {
-                          onRequestGuestLogin(
-                            "登录后私信作者反馈",
-                            "登录 LINUX DO 账号即可通过站内私信直接联系作者"
-                          );
-                          return;
-                        }
-                        setShowAuthorFeedback(true);
-                      }}
-                      className="lindo-interactive rounded-full px-4 py-1.5 text-[12.5px]"
-                      style={{
-                        border: "0.5px solid var(--hairline)",
-                        color: "var(--active-chip-text)",
-                      }}
-                    >
-                      私信作者反馈
-                    </button>
                     <button
                       type="button"
                       onClick={() => openUrl("https://github.com/lucaslus/LinDo")}
@@ -5546,7 +5485,18 @@ export const ProfileSettingsView: React.FC<{
                         color: "var(--ink-primary)",
                       }}
                     >
-                      GitHub 主页
+                      项目主页
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openUrl("https://github.com/lucaslus/LinDo/issues")}
+                      className="lindo-interactive rounded-full px-4 py-1.5 text-[12.5px]"
+                      style={{
+                        border: "0.5px solid var(--hairline)",
+                        color: "var(--ink-primary)",
+                      }}
+                    >
+                      GitHub Issues
                     </button>
                   </div>
                 </div>
@@ -5557,19 +5507,15 @@ export const ProfileSettingsView: React.FC<{
       )}
 
       {showAuthorFeedback && (
-        <AuthorFeedbackModal
-          appVersion={updateInfo?.currentVersion || DESKTOP_APP_VERSION}
-          currentUsername={currentUser?.username}
-          isAuthorized={isAuthorized}
-          onInspectAuthor={(uname) => onInspectUser(uname)}
-          onSent={(topicId, sentTitle) => {
+        <ConfirmDialog
+          title="问题与建议反馈"
+          detail={`请站内搜索 @${LINDO_AUTHOR_USERNAME} 进行私信交流，或前往 GitHub 提交 Issue。`}
+          confirmLabel="前往 GitHub Issues"
+          onCancel={() => setShowAuthorFeedback(false)}
+          onConfirm={() => {
             setShowAuthorFeedback(false);
-            setToast(`反馈私信已发送给 @${LINDO_AUTHOR_USERNAME}`);
-            if (topicId > 0) {
-              onOpenTopicById(topicId, sentTitle, 1);
-            }
+            openUrl("https://github.com/lucaslus/LinDo/issues");
           }}
-          onClose={() => setShowAuthorFeedback(false)}
         />
       )}
 
@@ -6725,7 +6671,7 @@ export const QrLoginModal: React.FC<{
                 className="mt-2 max-w-[360px] text-[12.5px] leading-relaxed"
                 style={{ color: "var(--ink-secondary)" }}
               >
-                仅供您本人的另一台设备扫码登录，请勿截图发给他人。扫码完成后该临时凭据会自动销毁。
+                同时生成一次性登录二维码与跨设备登录口令：另一台设备可直接扫码或粘贴口令登录。使用后凭据自动销毁，请勿泄露给他人。
               </p>
 
               <div
@@ -6748,19 +6694,19 @@ export const QrLoginModal: React.FC<{
                 ) : generating ? (
                   <div className="flex flex-col items-center gap-2.5 text-[#4B5563]">
                     <SmoothRefreshIcon spinning size={24} />
-                    <span className="text-[12.5px] font-medium">正在生成加密登录码…</span>
+                    <span className="text-[12.5px] font-medium">正在生成二维码与口令…</span>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center gap-2 px-4 text-[#6B7280]">
                     <LinDoIcons.QrCode size={42} />
-                    <span className="text-[12px]">点击下方按钮生成二维码</span>
+                    <span className="text-[12px]">点击下方按钮生成二维码与口令</span>
                   </div>
                 )}
               </div>
 
               {qrSvg && !genError && (
                 <p className="mt-3 text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
-                  打开手机端 Lindo「扫码登录」对准上方二维码（约 10 分钟内有效）
+                  二维码与登录口令均已就绪（约 10 分钟内有效）
                 </p>
               )}
 
@@ -6809,8 +6755,8 @@ export const QrLoginModal: React.FC<{
                     {generating
                       ? "正在生成…"
                       : qrSvg
-                        ? "重新生成二维码"
-                        : "生成一次性登录二维码"}
+                        ? "重新生成二维码与口令"
+                        : "生成登录二维码与口令"}
                   </span>
                 </button>
               </div>
@@ -6821,7 +6767,7 @@ export const QrLoginModal: React.FC<{
                 className="text-center text-[12.5px] leading-relaxed"
                 style={{ color: "var(--ink-secondary)" }}
               >
-                在已登录 Lindo / FluxDO 的手机进入「账号管理 → 扫码登录其他设备」，复制口令或将二维码截图发至电脑即可登录。
+                在已登录 Lindo / FluxDO 的手机打开「我的 → 扫码 / 口令登录」，复制登录口令或将二维码截图发至电脑即可登录。
               </p>
 
               <input

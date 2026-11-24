@@ -136,5 +136,7 @@ describe("Cross-device QR login protocol & ISO/IEC 18004 codec", () => {
     expect(acctIdx).toBeGreaterThan(0);
     expect(qrIdx).toBeGreaterThan(acctIdx);
     expect(qrIdx).toBeLessThan(appearanceIdx);
+    expect(src).toContain('title="问题与建议反馈"');
+    expect(src).not.toContain("<AuthorFeedbackModal");
   });
 });
