@@ -14268,10 +14268,10 @@ internal fun CommunityProfileScreen(
                                     val res = AppUpdateManager.checkForUpdates(openDialogWhenAvailable = true)
                                     res.onSuccess { info ->
                                         if (!info.hasUpdate) {
-                                            updateCheckFeedback = "当前已是最新 (build ${info.currentVersionCode})"
+                                            updateCheckFeedback = "已是最新版本"
                                         }
                                     }.onFailure {
-                                        updateCheckFeedback = "检查失败，请稍后重试"
+                                        updateCheckFeedback = "检查失败"
                                     }
                                 }
                             }
@@ -14280,27 +14280,32 @@ internal fun CommunityProfileScreen(
                             when {
                                 isCheckingUpdate -> {
                                     Text("检查中...", fontSize = 13.sp, color = palette.inkTertiary)
+                                    Spacer(Modifier.width(6.dp))
                                 }
                                 latestUpdateInfo?.hasUpdate == true -> {
                                     Box(
                                         modifier = Modifier
+                                            .size(6.dp)
                                             .clip(CircleShape)
-                                            .background(palette.activeChipBg)
-                                            .padding(horizontal = 8.dp, vertical = 2.5.dp)
-                                    ) {
-                                        Text(
-                                            text = "新版本 build ${latestUpdateInfo.latestVersionCode}",
-                                            fontSize = 11.5.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = palette.activeChipText
-                                        )
-                                    }
-                                }
-                                updateCheckFeedback != null -> {
-                                    Text(updateCheckFeedback.orEmpty(), fontSize = 12.5.sp, color = palette.inkTertiary)
+                                            .background(palette.brandGold)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = "v${latestUpdateInfo.latestVersionName}",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.inkPrimary
+                                    )
                                     Spacer(Modifier.width(6.dp))
                                 }
-                                else -> Unit
+                                updateCheckFeedback != null -> {
+                                    Text(updateCheckFeedback.orEmpty(), fontSize = 13.sp, color = palette.inkTertiary)
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                else -> {
+                                    Text("v${LinDoDiagnosticLogger.APP_VERSION_NAME}", fontSize = 13.sp, color = palette.inkTertiary)
+                                    Spacer(Modifier.width(6.dp))
+                                }
                             }
                             Icon(LinDoIcons.ChevronRight, null, Modifier.size(14.dp), tint = palette.inkTertiary)
                         }

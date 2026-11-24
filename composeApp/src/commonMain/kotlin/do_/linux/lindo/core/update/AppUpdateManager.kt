@@ -510,18 +510,46 @@ object AppUpdateManager {
         return ""
     }
 
-    private fun extractNotesFromMarkdown(body: String): List<String> =
+    private val markdownLinkRegex = Regex("""\[([^\]]+)]\((https?://[^)\s]+)\)""")
+    private val prAuthorSuffixRegex = Regex("""\s+by\s+@\S+\s+in\s+https?://\S+""", RegexOption.IGNORE_CASE)
+    private val bareUrlRegex = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+    private val numberedBulletRegex = Regex("""^\d+\.\s+""")
+
+    internal fun extractNotesFromMarkdown(body: String): List<String> =
         body.lineSequence()
             .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("```") }
-            .map {
-                it.removePrefix("- ")
+            .filter { line ->
+                line.isNotEmpty() &&
+                    !line.startsWith("#") &&
+                    !line.startsWith("```") &&
+                    !line.startsWith("---") &&
+                    !line.startsWith("***") &&
+                    !line.contains("Full Changelog", ignoreCase = true) &&
+                    !line.contains("What's Changed", ignoreCase = true) &&
+                    !line.contains("New Contributors", ignoreCase = true) &&
+                    !line.contains("made their first contribution", ignoreCase = true)
+            }
+            .mapNotNull { raw ->
+                val cleaned = raw
+                    .removePrefix("- ")
                     .removePrefix("* ")
                     .removePrefix("• ")
+                    .replace(numberedBulletRegex, "")
+                    .replace(markdownLinkRegex, "$1")
+                    .replace(prAuthorSuffixRegex, "")
+                    .replace(bareUrlRegex, "")
+                    .replace("**", "")
+                    .replace("__", "")
+                    .replace("`", "")
                     .trim()
+                    .trimEnd(':', '：', '-', '·')
+                    .trim()
+                cleaned.takeIf {
+                    it.isNotEmpty() && !it.startsWith("chore(release)", ignoreCase = true)
+                }
             }
-            .filter { it.isNotEmpty() }
-            .take(10)
+            .distinct()
+            .take(6)
             .toList()
 
     private fun compareSemver(a: String, b: String): Int {

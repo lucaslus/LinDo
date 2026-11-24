@@ -474,6 +474,95 @@ class MainActivity : ComponentActivity() {
     private var pendingLogExportCallback: ((Boolean, String) -> Unit)? = null
     private var pendingApkInstallFile: java.io.File? = null
 
+    private fun extractSigningDigests(pkg: android.content.pm.PackageInfo?): Set<String> {
+        if (pkg == null) return emptySet()
+        val rawSigs = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            val info = pkg.signingInfo
+            when {
+                info == null -> emptyArray()
+                info.hasMultipleSigners() -> info.apkContentsSigners
+                else -> info.signingCertificateHistory
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            pkg.signatures
+        } ?: emptyArray()
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        return rawSigs.mapNotNull { sig ->
+            runCatching {
+                md.reset()
+                md.digest(sig.toByteArray()).joinToString("") { "%02x".format(it) }
+            }.getOrNull()
+        }.toSet()
+    }
+
+    private fun hasCompatibleApkSignature(apkFile: java.io.File): Boolean = runCatching {
+        val installedPkg = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageInfo(
+                packageName,
+                android.content.pm.PackageManager.PackageInfoFlags.of(
+                    android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES.toLong()
+                )
+            )
+        } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, android.content.pm.PackageManager.GET_SIGNATURES)
+        }
+
+        val archivePkg = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageArchiveInfo(
+                apkFile.absolutePath,
+                android.content.pm.PackageManager.PackageInfoFlags.of(
+                    android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES.toLong()
+                )
+            )
+        } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageArchiveInfo(apkFile.absolutePath, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageArchiveInfo(apkFile.absolutePath, android.content.pm.PackageManager.GET_SIGNATURES)
+        }
+
+        val installedDigests = extractSigningDigests(installedPkg)
+        val archiveDigests = extractSigningDigests(archivePkg)
+        if (installedDigests.isEmpty() || archiveDigests.isEmpty()) {
+            true
+        } else {
+            installedDigests.intersect(archiveDigests).isNotEmpty()
+        }
+    }.getOrDefault(true)
+
+    private fun saveApkToSystemDownloads(apkFile: java.io.File): Boolean = runCatching {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return@runCatching false
+        val resolver = applicationContext.contentResolver
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, apkFile.name)
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/vnd.android.package-archive")
+            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+            put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: return@runCatching false
+        try {
+            resolver.openOutputStream(uri)?.use { out ->
+                apkFile.inputStream().use { input -> input.copyTo(out) }
+                out.flush()
+            } ?: return@runCatching false
+            val done = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+            }
+            resolver.update(uri, done, null, null)
+            true
+        } catch (t: Throwable) {
+            runCatching { resolver.delete(uri, null, null) }
+            false
+        }
+    }.getOrDefault(false)
+
     private fun launchApkViewInstaller(apkFile: java.io.File) {
         val apkUri = androidx.core.content.FileProvider.getUriForFile(
             applicationContext,
@@ -884,6 +973,15 @@ class MainActivity : ComponentActivity() {
         }
         AppUpdateManager.apkInstaller = { apkFile ->
             runCatching {
+                if (!hasCompatibleApkSignature(apkFile)) {
+                    pendingApkInstallFile = null
+                    val exported = saveApkToSystemDownloads(apkFile)
+                    if (exported) {
+                        error("当前旧版测试包签名不一致，无法直接覆盖。新安装包已保存至系统「下载」目录，请先卸载旧版再安装（后续版本均可直接升级）")
+                    } else {
+                        error("当前旧版测试包签名不一致，请先卸载旧版后再下载安装新版本（后续版本均可直接升级）")
+                    }
+                }
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
                     !packageManager.canRequestPackageInstalls()
                 ) {

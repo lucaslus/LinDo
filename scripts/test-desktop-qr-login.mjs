@@ -208,12 +208,14 @@ test("All Desktop and Mobile release version manifests stay unified at >= 1.1.0"
   const ktVer = /DEFAULT_APP_VERSION_NAME:\s*String\s*=\s*"([^"]+)"/.exec(ktDiag)?.[1];
   const ktCode = Number(/DEFAULT_APP_BUILD:\s*Int\s*=\s*(\d+)/.exec(ktDiag)?.[1]);
 
-  assert.equal(pkgJson.version, "1.1.0");
+  assert.match(pkgJson.version, /^\d+\.\d+\.\d+$/);
+  const [maj, min] = pkgJson.version.split(".").map(Number);
+  assert.ok(maj > 1 || (maj === 1 && min >= 1), `Expected >= 1.1.0, got ${pkgJson.version}`);
   assert.equal(tauriConf.version, pkgJson.version);
   assert.equal(cargoVer, pkgJson.version);
   assert.equal(diagVer, pkgJson.version);
   assert.equal(gradleVer, pkgJson.version);
   assert.equal(ktVer, pkgJson.version);
-  assert.equal(gradleCode, 100);
+  assert.ok(gradleCode >= 100);
   assert.equal(ktCode, gradleCode);
 });

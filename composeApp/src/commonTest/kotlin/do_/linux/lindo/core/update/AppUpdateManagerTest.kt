@@ -115,6 +115,21 @@ class AppUpdateManagerTest {
     }
 
     @Test
+    fun extractNotesFromMarkdownStripsGithubFullChangelogAndRawMarkdownNoise() {
+        val githubAutoBody = """
+            ## What's Changed
+            * **极简更新弹窗**：移除多余装饰与构建号 by @lucaslus in https://github.com/lucaslus/LinDo/pull/12
+            - chore(release): unify v1.1.1 manifests
+            **Full Changelog**: https://github.com/lucaslus/LinDo/commits/v1.1.1
+        """.trimIndent()
+        val notes = AppUpdateManager.extractNotesFromMarkdown(githubAutoBody)
+        assertEquals(listOf("极简更新弹窗：移除多余装饰与构建号"), notes)
+
+        val emptyChangelogOnly = "**Full Changelog**: https://github.com/lucaslus/LinDo/commits/v1.1.0"
+        assertTrue(AppUpdateManager.extractNotesFromMarkdown(emptyChangelogOnly).isEmpty())
+    }
+
+    @Test
     fun bindInstalledVersionOverridesRuntimeVersionAndMatchesBuildGradleDefaults() {
         val origName = LinDoDiagnosticLogger.APP_VERSION_NAME
         val origBuild = LinDoDiagnosticLogger.APP_BUILD

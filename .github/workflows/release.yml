@@ -249,22 +249,35 @@ jobs:
           REF_FULL: ${{ github.ref }}
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
-            mkdir -p "$HOME/.android"
-            echo "$KEYSTORE_B64" | base64 -d > "$HOME/.android/debug.keystore"
-            chmod 600 "$HOME/.android/debug.keystore"
-            keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+            KS_PATH="${RUNNER_TEMP}/lindo-release.keystore"
+            echo "$KEYSTORE_B64" | base64 -d > "$KS_PATH"
+            chmod 600 "$KS_PATH"
+            mkdir -p "$HOME/.android" "${XDG_CONFIG_HOME:-$HOME/.config}/.android"
+            cp -f "$KS_PATH" "$HOME/.android/debug.keystore"
+            cp -f "$KS_PATH" "${XDG_CONFIG_HOME:-$HOME/.config}/.android/debug.keystore"
+            keytool -list -keystore "$KS_PATH" -storepass android -alias androiddebugkey >/dev/null
+            echo "LINDO_KEYSTORE_PATH=$KS_PATH" >> "$GITHUB_ENV"
           elif [[ "$REF_FULL" == refs/tags/v* ]] || [ -n "$INPUT_TAG" ]; then
             echo "ERROR: ANDROID_DEBUG_KEYSTORE_BASE64 secret is required for official Release builds so future in-app updates preserve APK signature compatibility." >&2
             exit 1
           fi
 
-      - name: Build Android Release APK
+      - name: Build Android Release APK & verify certificate match
         run: |
           ./gradlew :composeApp:assembleRelease --no-daemon --console=plain
           VER_NAME=$(grep -E 'versionName = "' composeApp/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
           VER_CODE=$(grep -E 'versionCode = ' composeApp/build.gradle.kts | head -n1 | sed -E 's/.*= *([0-9]+).*/\1/')
           mkdir -p dist-android
           APK_SRC=$(find composeApp/build/outputs/apk/release -name "*.apk" | head -n1)
+          if [ -n "${LINDO_KEYSTORE_PATH:-}" ]; then
+            EXPECTED_SHA=$(keytool -list -v -keystore "$LINDO_KEYSTORE_PATH" -storepass android -alias androiddebugkey | grep -E 'SHA256:' | head -n1 | awk '{print $2}')
+            ACTUAL_SHA=$(keytool -printcert -jarfile "$APK_SRC" | grep -E 'SHA256:' | head -n1 | awk '{print $2}')
+            echo "APK signing SHA256: actual=$ACTUAL_SHA expected=$EXPECTED_SHA"
+            if [ -z "$ACTUAL_SHA" ] || [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+              echo "ERROR: APK certificate SHA256 ($ACTUAL_SHA) does not match keystore ($EXPECTED_SHA)!" >&2
+              exit 1
+            fi
+          fi
           cp "$APK_SRC" "dist-android/lindo-${VER_NAME}-build${VER_CODE}.apk"
           ls -lh dist-android/
 
@@ -279,6 +292,10 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != '' }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download all platform artifacts
         uses: actions/download-artifact@v4
         with:
@@ -293,12 +310,26 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           IS_PRE: ${{ github.event.inputs.prerelease }}
         run: |
+          TARGET_TAG="${INPUT_TAG:-$REF_NAME}"
+          PREV_TAG=$(git tag --list 'v*' --sort=-version:refname | grep -Fxv "$TARGET_TAG" | head -n1 || true)
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          if [ -n "$PREV_TAG" ] && git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
+            git log "${PREV_TAG}..HEAD" --no-merges --pretty=format:"- %s" \
+              | grep -Ev '^- chore\(release\):' \
+              | head -n 8 > "$NOTES_FILE" || true
+          else
+            git log -n 6 --no-merges --pretty=format:"- %s" \
+              | grep -Ev '^- chore\(release\):' > "$NOTES_FILE" || true
+          fi
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "- 常规体验优化与问题修复" > "$NOTES_FILE"
+          fi
+
           cd release-assets
           sha256sum * > ../SHA256SUMS.txt
           mv ../SHA256SUMS.txt ./SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-          TARGET_TAG="${INPUT_TAG:-$REF_NAME}"
           PRE_FLAG=""
           if [ "$IS_PRE" = "true" ]; then
             PRE_FLAG="--prerelease"
@@ -308,7 +339,7 @@ jobs:
             gh release create "$TARGET_TAG" * \
               --repo "$REPO" \
               --title "Lindo ${TARGET_TAG}" \
-              --generate-notes \
+              --notes-file "$NOTES_FILE" \
               $PRE_FLAG
           else
             gh release upload "$TARGET_TAG" * --repo "$REPO" --clobber

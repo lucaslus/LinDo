@@ -111,8 +111,24 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 100
-        versionName = "1.1.0"
+        versionCode = 101
+        versionName = "1.1.1"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            val explicitKeystore = System.getenv("LINDO_KEYSTORE_PATH")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let(::File)
+                ?: File(System.getProperty("user.home"), ".android/debug.keystore").takeIf { it.isFile }
+            if (explicitKeystore != null && explicitKeystore.isFile) {
+                storeFile = explicitKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
     }
 
     packaging {
@@ -171,12 +187,12 @@ compose.desktop {
             modules("java.net.http", "jdk.crypto.ec")
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.1.0"
+            packageVersion = "1.1.1"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
             vendor = "Lindo Community"
 
             macOS {
-                packageBuildVersion = "1.1.0"
+                packageBuildVersion = "1.1.1"
                 bundleID = "do.linux.lindo"
                 iconFile.set(project.file("src/desktopMain/resources/icon.icns"))
                 infoPlist {

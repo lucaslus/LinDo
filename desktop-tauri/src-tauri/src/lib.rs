@@ -497,21 +497,90 @@ fn parse_semver_tuple(v: &str) -> (u32, u32, u32) {
     )
 }
 
+fn strip_markdown_links_and_urls(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '[' {
+            if let Some(close_bracket) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let cb = i + 1 + close_bracket;
+                if cb + 1 < chars.len() && chars[cb + 1] == '(' {
+                    if let Some(close_paren) = chars[cb + 2..].iter().position(|&c| c == ')') {
+                        let cp = cb + 2 + close_paren;
+                        let url_part: String = chars[cb + 2..cp].iter().collect();
+                        if url_part.starts_with("http://") || url_part.starts_with("https://") {
+                            for &ch in &chars[i + 1..cb] {
+                                out.push(ch);
+                            }
+                            i = cp + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out.split_whitespace()
+        .filter(|tok| !tok.starts_with("http://") && !tok.starts_with("https://"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn extract_release_notes_from_markdown(body: &str) -> Vec<String> {
-    let mut notes = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
     for raw_line in body.lines() {
         let trimmed = raw_line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("```") {
+        let lower = trimmed.to_ascii_lowercase();
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("```")
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("***")
+            || lower.contains("full changelog")
+            || lower.contains("what's changed")
+            || lower.contains("new contributors")
+            || lower.contains("made their first contribution")
+        {
             continue;
         }
-        let cleaned = trimmed
+        let mut cleaned = trimmed
             .trim_start_matches("- ")
             .trim_start_matches("* ")
             .trim_start_matches("• ")
-            .trim();
-        if !cleaned.is_empty() {
-            notes.push(cleaned.to_string());
-            if notes.len() >= 10 {
+            .trim()
+            .to_string();
+        if let Some(dot_idx) = cleaned.find(". ") {
+            if cleaned[..dot_idx].chars().all(|c| c.is_ascii_digit()) {
+                cleaned = cleaned[dot_idx + 2..].trim().to_string();
+            }
+        }
+        if let Some(by_idx) = cleaned.to_ascii_lowercase().find(" by @") {
+            if cleaned[by_idx..].contains("http://") || cleaned[by_idx..].contains("https://") {
+                cleaned.truncate(by_idx);
+            }
+        }
+        cleaned = strip_markdown_links_and_urls(&cleaned)
+            .replace("**", "")
+            .replace("__", "")
+            .replace('`', "");
+        let final_line = cleaned
+            .trim()
+            .trim_end_matches([':', '：', '-', '·'])
+            .trim()
+            .to_string();
+        if final_line.is_empty()
+            || final_line
+                .to_ascii_lowercase()
+                .starts_with("chore(release)")
+        {
+            continue;
+        }
+        if !notes.contains(&final_line) {
+            notes.push(final_line);
+            if notes.len() >= 6 {
                 break;
             }
         }
@@ -1633,6 +1702,22 @@ mod tests {
             win_with_sums.sha256,
             "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         );
+    }
+
+    #[test]
+    fn sanitizes_github_full_changelog_and_markdown_syntax_from_release_notes() {
+        let raw = "\
+            ## What's Changed\n\
+            * **极简更新弹窗**：移除多余装饰与链接 by @lucaslus in https://github.com/lucaslus/LinDo/pull/12\n\
+            - chore(release): bump v1.1.1\n\
+            **Full Changelog**: https://github.com/lucaslus/LinDo/commits/v1.1.1\n\
+        ";
+        let notes = extract_release_notes_from_markdown(raw);
+        assert_eq!(notes, vec!["极简更新弹窗：移除多余装饰与链接".to_string()]);
+        assert!(extract_release_notes_from_markdown(
+            "**Full Changelog**: https://github.com/lucaslus/LinDo/commits/v1.1.0"
+        )
+        .is_empty());
     }
 
     #[tokio::test]

@@ -3817,15 +3817,14 @@ export const ProfileSettingsView: React.FC<{
                 )
               }
               title="检查更新"
-              badgeText={
-                updateInfo?.hasUpdate ? `发现新版本 v${updateInfo.latestVersion}` : undefined
-              }
+              dot={Boolean(updateInfo?.hasUpdate) && !checkingUpdate}
+              highlightValue={Boolean(updateInfo?.hasUpdate) && !checkingUpdate}
               value={
                 checkingUpdate
-                  ? "正在检查..."
-                  : !updateInfo?.hasUpdate
-                    ? `当前 v${updateInfo?.currentVersion || DESKTOP_APP_VERSION}`
-                    : undefined
+                  ? "检查中..."
+                  : updateInfo?.hasUpdate
+                    ? `v${updateInfo.latestVersion}`
+                    : `v${updateInfo?.currentVersion || DESKTOP_APP_VERSION}`
               }
               onClick={() => {
                 if (updateInfo?.hasUpdate && onOpenUpdateModal) {
@@ -5875,9 +5874,11 @@ const SettingRow: React.FC<{
   title: string;
   value?: string;
   badgeText?: string;
+  dot?: boolean;
+  highlightValue?: boolean;
   hideDivider?: boolean;
   onClick: () => void;
-}> = ({ icon, title, value, badgeText, hideDivider, onClick }) => (
+}> = ({ icon, title, value, badgeText, dot, highlightValue, hideDivider, onClick }) => (
   <div>
     <button
       type="button"
@@ -5897,6 +5898,12 @@ const SettingRow: React.FC<{
         className="flex items-center gap-1.5 text-[13px]"
         style={{ color: "var(--ink-tertiary)" }}
       >
+        {dot && (
+          <span
+            className="h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ backgroundColor: "var(--brand-gold)" }}
+          />
+        )}
         {badgeText && (
           <span
             className="rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold"
@@ -5908,7 +5915,14 @@ const SettingRow: React.FC<{
             {badgeText}
           </span>
         )}
-        {value && <span>{value}</span>}
+        {value && (
+          <span
+            className={highlightValue ? "font-medium" : undefined}
+            style={highlightValue ? { color: "var(--ink-primary)" } : undefined}
+          >
+            {value}
+          </span>
+        )}
         <LinDoIcons.ChevronRight size={14} />
       </span>
     </button>
@@ -8233,6 +8247,42 @@ export const ImageLightboxModal: React.FC<{
 };
 
 /* ==================== 10. 客户端平滑检查与一键下载升级弹窗 ==================== */
+function sanitizeDesktopUpdateNotes(rawNotes: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of rawNotes) {
+    const trimmed = raw.trim();
+    const lower = trimmed.toLowerCase();
+    if (
+      !trimmed ||
+      trimmed.startsWith("#") ||
+      trimmed.startsWith("```") ||
+      trimmed.startsWith("---") ||
+      lower.includes("full changelog") ||
+      lower.includes("what's changed") ||
+      lower.includes("new contributors") ||
+      lower.includes("made their first contribution")
+    ) {
+      continue;
+    }
+    const cleaned = trimmed
+      .replace(/^[-*•]\s+/, "")
+      .replace(/^\d+\.\s+/, "")
+      .replace(/\[([^\]]+)\]\(https?:\/\/[^)\s]+\)/g, "$1")
+      .replace(/\s+by\s+@\S+\s+in\s+https?:\/\/\S+/gi, "")
+      .replace(/https?:\/\/\S+/gi, "")
+      .replace(/\*\*|__|`/g, "")
+      .trim()
+      .replace(/[:：\-·]+$/, "")
+      .trim();
+    if (!cleaned || /^chore\(release\)/i.test(cleaned)) continue;
+    if (!out.includes(cleaned)) {
+      out.push(cleaned);
+      if (out.length >= 6) break;
+    }
+  }
+  return out;
+}
+
 export const DesktopUpdateModal: React.FC<{
   info: DesktopUpdateInfo;
   installing: boolean;
@@ -8241,167 +8291,139 @@ export const DesktopUpdateModal: React.FC<{
   onStartInstall: () => void;
   onClose: () => void;
 }> = ({ info, installing, progress, error, onStartInstall, onClose }) => {
-  const formatMb = (bytes: number) => `${(bytes / 1048576).toFixed(1)} MB`;
-  const archLabel = info.arch.startsWith("windows")
-    ? `Windows (${info.arch.replace("windows-", "")})`
-    : info.arch === "x64"
-      ? "Intel (x86_64)"
-      : "Apple Silicon (arm64)";
+  const cleanNotes = useMemo(() => sanitizeDesktopUpdateNotes(info.notes || []), [info.notes]);
+  const pct = Math.max(2, Math.min(100, progress?.percent ?? 2));
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/62 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/58 p-4"
       onClick={() => {
         if (!installing) onClose();
       }}
     >
       <div
-        className="w-[440px] max-w-full rounded-2xl p-5 shadow-2xl"
+        className="w-[360px] max-w-full rounded-2xl p-5 shadow-2xl"
         style={{
           backgroundColor: "var(--card-surface)",
           border: "0.5px solid var(--hairline)",
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <img src="/brand/lindo-mark.svg" alt="Lindo" className="h-11 w-11 shrink-0" />
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-[16px] font-bold" style={{ color: "var(--ink-primary)" }}>
-                  发现新版本 v{info.latestVersion}
-                </span>
-                <span
-                  className="rounded-full px-2 py-0.5 text-[10.5px] font-semibold"
-                  style={{
-                    backgroundColor: "var(--active-chip-bg)",
-                    color: "var(--active-chip-text)",
-                  }}
-                >
-                  {archLabel}
-                </span>
-              </div>
-              <div className="mt-0.5 text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
-                当前版本 v{info.currentVersion}
-                {info.updatedAt ? ` · ${info.updatedAt} 发布` : ""}
-              </div>
-            </div>
-          </div>
-
-          {!installing && (
-            <button
-              type="button"
-              onClick={onClose}
-              className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full"
-              style={{ color: "var(--ink-secondary)" }}
-            >
-              <LinDoIcons.Close size={15} />
-            </button>
-          )}
+        <div className="text-[16px] font-semibold leading-snug" style={{ color: "var(--ink-primary)" }}>
+          发现新版本 v{info.latestVersion}
+        </div>
+        <div className="mt-1 text-[12.5px]" style={{ color: "var(--ink-tertiary)" }}>
+          当前 v{info.currentVersion}
         </div>
 
-        {info.notes.length > 0 && (
-          <div
-            className="lindo-scroll mt-4 max-h-[210px] rounded-xl p-3.5 text-[12.5px] leading-relaxed space-y-1.5"
-            style={{
-              backgroundColor: "var(--subtle-surface)",
-              border: "0.5px solid var(--hairline)",
-              color: "var(--ink-secondary)",
-            }}
-          >
-            {info.notes.map((line, idx) => (
-              <div key={idx} className="flex items-start gap-2">
-                <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: "var(--brand-gold)" }} />
-                <span>{line}</span>
-              </div>
-            ))}
-          </div>
+        {cleanNotes.length > 0 && (
+          <>
+            <div className="my-3.5 h-[0.5px] w-full" style={{ backgroundColor: "var(--hairline)" }} />
+            <div
+              className="lindo-scroll max-h-[164px] space-y-1.5 text-[13px] leading-[19px]"
+              style={{ color: "var(--ink-secondary)" }}
+            >
+              {cleanNotes.map((line, idx) => (
+                <div key={idx} className="flex items-start gap-2">
+                  <span
+                    className="mt-[7px] h-1 w-1 shrink-0 rounded-full"
+                    style={{ backgroundColor: "var(--ink-tertiary)" }}
+                  />
+                  <span>{line}</span>
+                </div>
+              ))}
+            </div>
+          </>
         )}
 
         {installing && (
-          <div className="mt-4 space-y-2">
+          <div className="mt-4 space-y-1.5">
             <div className="flex items-center justify-between text-[12px]">
-              <span style={{ color: "var(--ink-primary)" }}>
-                {progress?.message || "正在准备下载更新..."}
+              <span className="truncate" style={{ color: "var(--ink-secondary)" }}>
+                {pct >= 96 ? "正在校验与安装..." : "正在下载更新..."}
               </span>
-              <span className="tabular-nums font-semibold" style={{ color: "var(--brand-gold)" }}>
-                {progress?.percent ?? 1}%
+              <span className="ml-2 shrink-0 tabular-nums font-medium" style={{ color: "var(--ink-primary)" }}>
+                {pct}%
               </span>
             </div>
             <div
-              className="h-2 w-full overflow-hidden rounded-full"
+              className="h-1 w-full overflow-hidden rounded-full"
               style={{ backgroundColor: "var(--subtle-surface)" }}
             >
               <div
                 className="h-full rounded-full transition-[width] duration-150 ease-out"
                 style={{
-                  width: `${Math.max(3, Math.min(100, progress?.percent ?? 3))}%`,
+                  width: `${pct}%`,
                   backgroundColor: "var(--brand-gold)",
                 }}
               />
             </div>
-            {progress && progress.totalBytes > 0 && (
-              <div className="text-right text-[11px] tabular-nums" style={{ color: "var(--ink-tertiary)" }}>
-                {formatMb(progress.downloadedBytes)} / {formatMb(progress.totalBytes)}
-              </div>
-            )}
           </div>
         )}
 
         {error && (
           <div
-            className="mt-3 rounded-xl px-3 py-2 text-[12px]"
+            className="mt-3.5 rounded-lg px-3 py-2.5 text-[12px] leading-relaxed"
             style={{
               backgroundColor: "var(--error-bg)",
-              border: "0.5px solid var(--error-border)",
               color: "var(--error-fg)",
             }}
           >
-            {error}
+            <div>{error}</div>
+            <button
+              type="button"
+              onClick={() =>
+                openUrl(
+                  info.dmgUrl ||
+                    info.zipUrl ||
+                    "https://github.com/lucaslus/LinDo/releases"
+                )
+              }
+              className="mt-1.5 text-[12px] font-medium hover:underline cursor-pointer"
+              style={{ color: "var(--brand-gold)" }}
+            >
+              使用浏览器下载安装包
+            </button>
           </div>
         )}
 
-        <div className="mt-5 flex items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={() =>
-              openUrl(
-                info.dmgUrl ||
-                  info.zipUrl ||
-                  "https://github.com/lucaslus/LinDo/releases"
-              )
-            }
-            className="text-[12px] hover:underline cursor-pointer"
-            style={{ color: "var(--ink-tertiary)" }}
-          >
-            前往 GitHub Release 下载
-          </button>
-
-          <div className="flex items-center gap-2">
-            {!installing && (
+        <div className="mt-4.5 pt-0.5">
+          {installing ? (
+            <div
+              className="flex h-9 w-full items-center justify-center rounded-lg text-[13px] font-medium whitespace-nowrap"
+              style={{
+                backgroundColor: "var(--subtle-surface)",
+                color: "var(--ink-tertiary)",
+              }}
+            >
+              正在更新...
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
                 onClick={onClose}
-                className="lindo-interactive rounded-full px-4 py-1.5 text-[12.5px] font-medium"
-                style={{ color: "var(--ink-secondary)" }}
+                className="lindo-interactive flex h-9 items-center justify-center rounded-lg text-[13px] font-medium whitespace-nowrap cursor-pointer"
+                style={{
+                  backgroundColor: "var(--subtle-surface)",
+                  color: "var(--ink-secondary)",
+                }}
               >
                 稍后
               </button>
-            )}
-            <button
-              type="button"
-              disabled={installing}
-              onClick={onStartInstall}
-              className="inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-[12.8px] font-bold cursor-pointer disabled:opacity-50"
-              style={{
-                backgroundColor: "var(--publish-btn-bg)",
-                color: "var(--publish-btn-fg)",
-              }}
-            >
-              <LinDoIcons.Download size={15} />
-              <span>{installing ? "正在升级..." : "立即更新并重启"}</span>
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={onStartInstall}
+                className="flex h-9 items-center justify-center rounded-lg text-[13px] font-semibold whitespace-nowrap cursor-pointer"
+                style={{
+                  backgroundColor: "var(--publish-btn-bg)",
+                  color: "var(--publish-btn-fg)",
+                }}
+              >
+                立即更新
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

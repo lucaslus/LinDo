@@ -1,6 +1,5 @@
 package do_.linux.lindo.ui
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,17 +16,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import do_.linux.lindo.core.update.AppUpdateManager
 import do_.linux.lindo.core.update.MobileUpdateInfo
-import do_.linux.lindo.ui.components.LinDoIcons
 import kotlinx.coroutines.launch
-import lindo.composeapp.generated.resources.Res
-import lindo.composeapp.generated.resources.lindo_brand_mark
-import org.jetbrains.compose.resources.painterResource
 
 @Composable
 internal fun LindoAppUpdateDialog(
@@ -56,90 +52,52 @@ internal fun LindoAppUpdateDialog(
     ) {
         Surface(
             modifier = Modifier
-                .padding(horizontal = 20.dp)
-                .widthIn(max = 420.dp)
+                .padding(horizontal = 24.dp)
+                .widthIn(max = 340.dp)
                 .fillMaxWidth()
-                .border(0.5.dp, palette.hairline, RoundedCornerShape(22.dp)),
-            shape = RoundedCornerShape(22.dp),
+                .border(0.5.dp, palette.hairline, RoundedCornerShape(18.dp)),
+            shape = RoundedCornerShape(18.dp),
             color = palette.cardSurface,
             tonalElevation = 0.dp,
-            shadowElevation = 16.dp
+            shadowElevation = 14.dp
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Image(
-                        painter = painterResource(Res.drawable.lindo_brand_mark),
-                        contentDescription = "Lindo",
-                        modifier = Modifier.size(44.dp)
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "发现新版本 v${info.latestVersionName}",
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.inkPrimary
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Box(
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(palette.activeChipBg)
-                                    .padding(horizontal = 7.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "build ${info.latestVersionCode}",
-                                    fontSize = 10.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.activeChipText
-                                )
-                            }
+                Text(
+                    text = "发现新版本 v${info.latestVersionName}",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.inkPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = buildString {
+                        append("当前 v${info.currentVersionName}")
+                        if (info.sizeBytes > 0L) {
+                            append(" · ${formatMb(info.sizeBytes)}")
                         }
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            text = buildString {
-                                append("当前 build ${info.currentVersionCode}")
-                                if (info.sizeBytes > 0L) {
-                                    append(" · 包体 ${formatMb(info.sizeBytes)}")
-                                }
-                                if (info.updatedAt.isNotBlank()) {
-                                    append(" · ${info.updatedAt}")
-                                }
-                            },
-                            fontSize = 11.5.sp,
-                            color = palette.inkTertiary
-                        )
-                    }
-                    if (!downloading) {
-                        IconButton(
-                            onClick = { AppUpdateManager.dismissDialog() },
-                            modifier = Modifier.size(30.dp)
-                        ) {
-                            Icon(
-                                imageVector = LinDoIcons.Close,
-                                contentDescription = "关闭",
-                                modifier = Modifier.size(16.dp),
-                                tint = palette.inkSecondary
-                            )
-                        }
-                    }
-                }
+                    },
+                    fontSize = 12.5.sp,
+                    color = palette.inkTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
 
                 if (info.notes.isNotEmpty()) {
                     Spacer(Modifier.height(14.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(0.5.dp)
+                            .background(palette.hairline)
+                    )
+                    Spacer(Modifier.height(12.dp))
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 190.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(palette.subtleSurface)
-                            .border(0.5.dp, palette.hairline, RoundedCornerShape(14.dp))
-                            .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                            .heightIn(max = 156.dp)
+                            .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         info.notes.forEach { line ->
@@ -147,15 +105,15 @@ internal fun LindoAppUpdateDialog(
                                 Box(
                                     modifier = Modifier
                                         .padding(top = 7.dp)
-                                        .size(5.dp)
+                                        .size(4.dp)
                                         .clip(CircleShape)
-                                        .background(palette.brandGold)
+                                        .background(palette.inkTertiary)
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 Text(
                                     text = line,
-                                    fontSize = 12.5.sp,
-                                    lineHeight = 18.sp,
+                                    fontSize = 13.sp,
+                                    lineHeight = 19.sp,
                                     color = palette.inkSecondary
                                 )
                             }
@@ -163,60 +121,50 @@ internal fun LindoAppUpdateDialog(
                     }
                 }
 
-                if (downloading || progress != null) {
-                    val curProg = progress
-                    if (curProg != null && downloading) {
-                        Spacer(Modifier.height(14.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = curProg.message,
-                                fontSize = 12.sp,
-                                color = palette.inkPrimary,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "${curProg.percent}%",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.brandGold
-                            )
-                        }
-                        Spacer(Modifier.height(6.dp))
-                        LinearProgressIndicator(
-                            progress = { (curProg.percent.coerceIn(2, 100)) / 100f },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(6.dp)
-                                .clip(CircleShape),
-                            color = palette.brandGold,
-                            trackColor = palette.subtleSurface
+                if (downloading) {
+                    val pct = (progress?.percent ?: 2).coerceIn(2, 100)
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (pct >= 97) "正在校验安装包..." else "正在下载更新...",
+                            fontSize = 12.sp,
+                            color = palette.inkSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
-                        if (curProg.totalBytes > 0L) {
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = "${formatMb(curProg.downloadedBytes)} / ${formatMb(curProg.totalBytes)}",
-                                fontSize = 11.sp,
-                                color = palette.inkTertiary,
-                                modifier = Modifier.align(Alignment.End)
-                            )
-                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "$pct%",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkPrimary
+                        )
                     }
+                    Spacer(Modifier.height(6.dp))
+                    LinearProgressIndicator(
+                        progress = { pct / 100f },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(CircleShape),
+                        color = palette.brandGold,
+                        trackColor = palette.subtleSurface
+                    )
                 }
 
                 if (!error.isNullOrBlank()) {
-                    Spacer(Modifier.height(12.dp))
-                    Box(
+                    Spacer(Modifier.height(14.dp))
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0x1FEF4444))
-                            .border(0.5.dp, Color(0x4DEF4444), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 9.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0x14EF4444))
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
                     ) {
                         Text(
                             text = error,
@@ -224,63 +172,85 @@ internal fun LindoAppUpdateDialog(
                             lineHeight = 17.sp,
                             color = Color(0xFFEF4444)
                         )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "使用浏览器下载安装包",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.brandGold,
+                            modifier = Modifier.clickable {
+                                onOpenExternalUrl(info.apkUrl.ifBlank { AppUpdateManager.DOWNLOAD_PAGE_URL })
+                            }
+                        )
                     }
                 }
 
                 Spacer(Modifier.height(18.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "前往 GitHub 下载",
-                        fontSize = 12.sp,
-                        color = palette.inkTertiary,
+                if (downloading) {
+                    Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable {
-                                onOpenExternalUrl(info.apkUrl.ifBlank { AppUpdateManager.DOWNLOAD_PAGE_URL })
-                            }
-                            .padding(horizontal = 6.dp, vertical = 6.dp)
-                    )
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(palette.subtleSurface),
+                        contentAlignment = Alignment.Center
                     ) {
-                        if (!downloading) {
-                            TextButton(onClick = { AppUpdateManager.dismissDialog() }) {
-                                Text("稍后", fontSize = 13.sp, color = palette.inkSecondary)
-                            }
-                        }
-                        Button(
-                            enabled = !downloading,
-                            onClick = {
-                                scope.launch {
-                                    AppUpdateManager.downloadAndInstall(
-                                        info = info,
-                                        onFallbackOpenBrowser = onOpenExternalUrl
-                                    )
-                                }
-                            },
-                            shape = CircleShape,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = palette.publishBtnBg,
-                                contentColor = palette.publishBtnContent
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 9.dp)
+                        Text(
+                            text = "更新中...",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.inkTertiary,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(palette.subtleSurface)
+                                .clickable { AppUpdateManager.dismissDialog() },
+                            contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = LinDoIcons.Download,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
                             Text(
-                                text = if (downloading) "正在升级..." else "立即下载并安装",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
+                                text = "稍后",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.inkSecondary,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(palette.publishBtnBg)
+                                .clickable {
+                                    scope.launch {
+                                        AppUpdateManager.downloadAndInstall(
+                                            info = info,
+                                            onFallbackOpenBrowser = onOpenExternalUrl
+                                        )
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "立即更新",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.publishBtnContent,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }

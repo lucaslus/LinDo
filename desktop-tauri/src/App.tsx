@@ -1750,7 +1750,7 @@ export const App: React.FC = () => {
       if (info.hasUpdate) {
         setShowUpdateModal(true);
       } else {
-        setGlobalNotice(`当前已是最新版本 v${info.currentVersion}`);
+        setGlobalNotice("已是最新版本");
       }
     } catch (err: any) {
       diagLog("WARN", "SYSTEM", "GitHubUpdate", "检查 GitHub Release 失败", String(err?.message || err));
@@ -1769,18 +1769,18 @@ export const App: React.FC = () => {
       downloadedBytes: 0,
       totalBytes: 0,
       percent: 1,
-      message: "正在连接更新服务器...",
+      message: "正在下载更新...",
     });
     try {
       const result = await downloadAndInstallUpdateInRust(updateInfo);
       if (result === "OPENED_DMG") {
         setInstallingUpdate(false);
         setShowUpdateModal(false);
-        setGlobalNotice("已挂载新版安装包，请拖入「应用程序」完成升级");
+        setGlobalNotice("安装包已打开，拖入「应用程序」即可完成更新");
       }
     } catch (err: any) {
       setInstallingUpdate(false);
-      setUpdateError(err?.message || "自动升级失败，可点击左下角手动下载安装包");
+      setUpdateError(err?.message || "自动更新失败，请重试");
     }
   }, [updateInfo, installingUpdate]);
 
