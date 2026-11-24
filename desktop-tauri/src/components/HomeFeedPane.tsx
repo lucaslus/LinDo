@@ -10,6 +10,7 @@ import {
   formatRelativeTime,
   resolveCategoryVisual,
 } from "../lib/palette";
+import { resolveDiscourseTopicUnread } from "../lib/topicReadState";
 import {
   LinDoCategoryBadge,
   LinDoIcons,
@@ -975,7 +976,7 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                       <button
                         type="button"
                         onClick={() => onSelectTopic(pinnedTopics[0])}
-                        className="min-w-0 flex-1 truncate text-left text-[12.5px] transition-opacity hover:opacity-85 cursor-pointer"
+                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[12.5px] transition-opacity hover:opacity-85 cursor-pointer"
                         style={{
                           color:
                             selectedTopicId === pinnedTopics[0].id
@@ -984,7 +985,20 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                           fontWeight: selectedTopicId === pinnedTopics[0].id ? 600 : 400,
                         }}
                       >
-                        {pinnedTopics[0].title}
+                        <span className="truncate">{pinnedTopics[0].title}</span>
+                        {resolveDiscourseTopicUnread({
+                          unseen: pinnedTopics[0].unseen,
+                          unreadPosts: pinnedTopics[0].unreadPosts,
+                          highestPostNumber: pinnedTopics[0].highestPostNumber,
+                          postsCount: pinnedTopics[0].postsCount,
+                          lastReadPostNumber: pinnedTopics[0].lastReadPostNumber,
+                          localReadFloor: readFloors[String(pinnedTopics[0].id)] ?? 0,
+                        }).isUnread && (
+                          <span
+                            className="h-[5.5px] w-[5.5px] shrink-0 rounded-full opacity-75"
+                            style={{ backgroundColor: "var(--brand-gold)" }}
+                          />
+                        )}
                       </button>
 
                       {pinnedTopics.length > 1 && (
@@ -1004,6 +1018,14 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                     <div className="py-0.5">
                       {pinnedTopics.map((pinned, pIdx) => {
                         const selected = selectedTopicId === pinned.id;
+                        const pinnedUnread = resolveDiscourseTopicUnread({
+                          unseen: pinned.unseen,
+                          unreadPosts: pinned.unreadPosts,
+                          highestPostNumber: pinned.highestPostNumber,
+                          postsCount: pinned.postsCount,
+                          lastReadPostNumber: pinned.lastReadPostNumber,
+                          localReadFloor: readFloors[String(pinned.id)] ?? 0,
+                        }).isUnread;
                         return (
                           <React.Fragment key={pinned.id}>
                             {pIdx > 0 && (
@@ -1034,13 +1056,19 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                                 <span>置顶</span>
                               </span>
                               <span
-                                className="flex-1 truncate text-[13.5px]"
+                                className="flex min-w-0 flex-1 items-center gap-1.5 text-[13.5px]"
                                 style={{
                                   color: "var(--ink-primary)",
                                   fontWeight: selected ? 600 : 500,
                                 }}
                               >
-                                {pinned.title}
+                                <span className="truncate">{pinned.title}</span>
+                                {pinnedUnread && (
+                                  <span
+                                    className="h-[5.5px] w-[5.5px] shrink-0 rounded-full opacity-75"
+                                    style={{ backgroundColor: "var(--brand-gold)" }}
+                                  />
+                                )}
                               </span>
                               <span
                                 className="shrink-0 text-[11.5px] tabular-nums"
@@ -1078,10 +1106,16 @@ export const HomeFeedPane: React.FC<HomeFeedPaneProps> = ({
                 const nextSelected = Boolean(nextTopic && nextTopic.id === selectedTopicId);
                 const hideBottomDivider =
                   selected || nextSelected || idx === regularTopics.length - 1;
-                const confirmedFloor = readFloors[String(topic.id)] ?? topic.lastReadPostNumber ?? 0;
-                const isReadDimmed = confirmedFloor >= topic.highestPostNumber;
-                const isUnread =
-                  (topic.unseen || topic.unreadPosts > 0) && !isReadDimmed;
+                const readRes = resolveDiscourseTopicUnread({
+                  unseen: topic.unseen,
+                  unreadPosts: topic.unreadPosts,
+                  highestPostNumber: topic.highestPostNumber,
+                  postsCount: topic.postsCount,
+                  lastReadPostNumber: topic.lastReadPostNumber,
+                  localReadFloor: readFloors[String(topic.id)] ?? 0,
+                });
+                const isReadDimmed = readRes.isReadDimmed;
+                const isUnread = readRes.isUnread;
                 return (
                   <FeedTopicRow
                     key={topic.id}

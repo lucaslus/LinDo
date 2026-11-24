@@ -2108,16 +2108,20 @@ internal fun LinDoApp(
     }
 
     fun applyConfirmedFloorToSummary(item: TopicSummary, confirmedFloor: Int?): TopicSummary {
-        if (confirmedFloor == null || confirmedFloor <= 0) return item
-        val highest = maxOf(item.highestPostNumber, item.postsCount, 1)
-        val remainingUnread = if (item.unreadPosts > 0) {
-            minOf(item.unreadPosts, (highest - confirmedFloor).coerceAtLeast(0))
-        } else {
-            0
-        }
-        val nextUnseen = if (confirmedFloor >= 1) false else item.unseen
-        return if (nextUnseen != item.unseen || remainingUnread != item.unreadPosts) {
-            item.copy(unseen = nextUnseen, unreadPosts = remainingUnread)
+        val localFloor = ScreenTrackEngine.getLocalViewedMaxFloor(item.id)
+        val visited = ScreenTrackEngine.isTopicVisitedLocally(item.id)
+        val effFloor = maxOf(confirmedFloor ?: 0, localFloor)
+        if (!visited && effFloor <= 0) return item
+        val res = resolveDiscourseTopicUnread(
+            rawUnseen = item.unseen,
+            rawUnreadPosts = item.unreadPosts,
+            highestPostNumber = item.highestPostNumber,
+            postsCount = item.postsCount,
+            visitedLocally = visited,
+            effectiveReadFloor = effFloor
+        )
+        return if (res.effectiveUnseen != item.unseen || res.effectiveUnreadPosts != item.unreadPosts) {
+            item.copy(unseen = res.effectiveUnseen, unreadPosts = res.effectiveUnreadPosts)
         } else {
             item
         }
@@ -2492,6 +2496,12 @@ internal fun LinDoApp(
                 cachedEntry.second.loadError == null &&
                 cachedEntry.second.posts.isNotEmpty()
             ) {
+                if (isAuthorized && UserApiKeyAuthManager.isAuthorized()) {
+                    ScreenTrackEngine.markTopicVisitedLocally(
+                        topicId = topic.id,
+                        initialFloor = cachedEntry.second.lastReadPostNumber ?: 0
+                    )
+                }
                 targetFloorJumpNonce++
                 activeTopicSummary = topic
                 activeTargetPostNumber = null
@@ -2544,6 +2554,12 @@ internal fun LinDoApp(
                     }
                 }
                 if (!loaded.unavailable) {
+                    if (loaded.loadError == null && loaded.posts.isNotEmpty() && isAuthorized && UserApiKeyAuthManager.isAuthorized()) {
+                        ScreenTrackEngine.markTopicVisitedLocally(
+                            topicId = topic.id,
+                            initialFloor = loaded.lastReadPostNumber ?: 0
+                        )
+                    }
                     val refreshedHighest = maxOf(
                         topic.highestPostNumber,
                         loaded.highestPostNumber ?: 0,
@@ -7087,9 +7103,7 @@ internal fun CommunityHomeFeedPane(
                                         .background(palette.cardSurface)
                                 ) {
                                     displayedPinned.forEach { pinned ->
-                                        val highestFloor = maxOf(pinned.highestPostNumber, pinned.postsCount, 1)
-                                        val isPinnedUnread = (pinned.unseen || pinned.unreadPosts > 0) &&
-                                            !LinuxDoRepository.isTopicConfirmedReadReactive(pinned.id, highestFloor)
+                                        val isPinnedUnread = rememberTopicUnreadInFeed(pinned)
                                         var showPinnedDotSlot by remember(pinned.id) { mutableStateOf(isPinnedUnread) }
                                         if (isPinnedUnread && !showPinnedDotSlot) {
                                             showPinnedDotSlot = true
@@ -7787,9 +7801,7 @@ private fun CommunityTopicItem(
     val rowBgColor = if (isSelected) palette.subtleSurface else palette.cardSurface
     val itemInteractionSource = remember { MutableInteractionSource() }
     val pressBackground = Modifier.background(rowBgColor).rowStateLayer(itemInteractionSource)
-    val highestFloor = maxOf(topic.highestPostNumber, topic.postsCount, 1)
-    val isTopicUnread = (topic.unseen || topic.unreadPosts > 0) &&
-        !LinuxDoRepository.isTopicConfirmedReadReactive(topic.id, highestFloor)
+    val isTopicUnread = rememberTopicUnreadInFeed(topic)
     var showUnreadDotSlot by remember(topic.id) { mutableStateOf(isTopicUnread) }
     if (isTopicUnread && !showUnreadDotSlot) {
         showUnreadDotSlot = true
@@ -8718,7 +8730,14 @@ internal fun CommunityTopicReaderPane(
 
     LaunchedEffect(summary.id, isAuthorized) {
         if (!isAuthorized || !UserApiKeyAuthManager.isAuthorized()) return@LaunchedEffect
-        ScreenTrackEngine.onTopicEntered(topicId = summary.id, initialVisiblePosts = emptySet())
+        val initVisible = currentReaderListState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
+            latestFloorByPostId[item.key as? Int]
+        }.toSet()
+        ScreenTrackEngine.onTopicEntered(topicId = summary.id, initialVisiblePosts = initVisible)
+        ScreenTrackEngine.markTopicVisitedLocally(
+            topicId = summary.id,
+            initialFloor = latestDetail?.lastReadPostNumber ?: 0
+        )
         var tickAccumulatorMs = 0L
         while (isAuthorized && UserApiKeyAuthManager.isAuthorized()) {
             delay(400L)
@@ -8734,6 +8753,33 @@ internal fun CommunityTopicReaderPane(
                 tickAccumulatorMs = 0L
                 ScreenTrackEngine.tickAndEnqueue(nowMs)
             }
+        }
+    }
+
+    // 当已读到话题实际最后一个可见楼层时，自动对齐推进至 highestPostNumber（解决末尾存在已删除/隐藏楼层导致 Feed 圆点残留的问题）
+    val observedLocalReadVer = ScreenTrackEngine.localReadVersion
+    LaunchedEffect(
+        summary.id,
+        isAuthorized,
+        posts.size,
+        afterTailPostIds.size,
+        onlyOpFilter,
+        summaryFilter,
+        observedLocalReadVer
+    ) {
+        if (!isAuthorized || !UserApiKeyAuthManager.isAuthorized()) return@LaunchedEffect
+        if (onlyOpFilter || summaryFilter || afterTailPostIds.isNotEmpty() || posts.isEmpty()) return@LaunchedEffect
+        val lastVisiblePost = posts.last()
+        val tailViewed = ScreenTrackEngine.isPostViewedLocally(summary.id, lastVisiblePost.postNumber) ||
+            (lastVisiblePost.isRead && posts.size == 1 && summary.unreadPosts == 0)
+        if (tailViewed) {
+            val effectiveHighest = maxOf(
+                lastVisiblePost.postNumber,
+                summary.highestPostNumber,
+                detail?.highestPostNumber ?: 0,
+                detail?.postsCount ?: 0
+            )
+            ScreenTrackEngine.recordLocalTopicFloorViewed(summary.id, effectiveHighest)
         }
     }
     LaunchedEffect(summary.id, isAuthorized, readerListState) {

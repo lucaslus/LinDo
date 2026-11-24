@@ -411,6 +411,23 @@ export const App: React.FC = () => {
     });
   }, []);
 
+  const handleFloorSeen = useCallback((tid: number, floor: number) => {
+    const cleared = recordConfirmedTopicFloorForNotifications(tid, floor);
+    if (cleared > 0) {
+      setUnreadCount((prev) => {
+        const next = Math.max(0, prev - cleared);
+        setUnreadBadgeInRust(next).catch(() => {});
+        return next;
+      });
+    }
+    setReadFloors((prev) => {
+      const old = prev[String(tid)] ?? 0;
+      if (floor <= old) return prev;
+      recordReadFloorInRust(tid, floor).catch(() => {});
+      return { ...prev, [String(tid)]: floor };
+    });
+  }, []);
+
   const openTopic = useCallback(
     async (
       topic: TopicSummary,
@@ -527,6 +544,21 @@ export const App: React.FC = () => {
       }
 
       if (!isFilterSwitch && instantCached) {
+        if (isAuthorized && instantCached.posts.length > 0) {
+          const singleFloorAllRead =
+            instantCached.posts.length === 1 &&
+            (topic.unreadPosts || 0) === 0 &&
+            instantCached.posts[0].isRead;
+          const initFloor = singleFloorAllRead
+            ? Math.max(
+                instantCached.lastReadPostNumber ?? 0,
+                instantCached.highestPostNumber ?? 0,
+                topic.highestPostNumber ?? 0,
+                1
+              )
+            : Math.max(instantCached.lastReadPostNumber ?? 0, 1);
+          handleFloorSeen(instantCached.id, initFloor);
+        }
         setReaderLoading(false);
         setActiveDetail(instantCached);
         setTargetJumpNonce((n) => n + 1);
@@ -608,6 +640,37 @@ export const App: React.FC = () => {
           );
           return { addedReplies: Math.max(0, detail.postsCount - prevPostsCount) };
         }
+        if (isAuthorized && detail.posts.length > 0) {
+          const singleFloorAllRead =
+            detail.posts.length === 1 &&
+            (topic.unreadPosts || 0) === 0 &&
+            detail.posts[0].isRead;
+          const initFloor = singleFloorAllRead
+            ? Math.max(
+                detail.lastReadPostNumber ?? 0,
+                detail.highestPostNumber ?? 0,
+                topic.highestPostNumber ?? 0,
+                1
+              )
+            : Math.max(detail.lastReadPostNumber ?? 0, 1);
+          handleFloorSeen(detail.id, initFloor);
+        }
+        setTopics((prev) =>
+          prev.map((t) =>
+            t.id === detail.id
+              ? {
+                  ...t,
+                  unseen: isAuthorized ? false : t.unseen,
+                  postsCount: Math.max(t.postsCount, detail.postsCount),
+                  highestPostNumber: Math.max(
+                    t.highestPostNumber,
+                    detail.highestPostNumber ?? 0,
+                    detail.postsCount
+                  ),
+                }
+              : t
+          )
+        );
         setActiveDetail(detail);
         setTargetJumpNonce((n) => n + 1);
       } catch (err: any) {
@@ -630,7 +693,17 @@ export const App: React.FC = () => {
         }
       }
     },
-    [activeDetail?.id, activeSummary?.id, currentTab, isWideLayout, readerError, onlyOpFilter, summaryFilter]
+    [
+      activeDetail?.id,
+      activeSummary?.id,
+      currentTab,
+      handleFloorSeen,
+      isAuthorized,
+      isWideLayout,
+      readerError,
+      onlyOpFilter,
+      summaryFilter,
+    ]
   );
 
   const openMessageTopic = useCallback(
@@ -1714,23 +1787,6 @@ export const App: React.FC = () => {
       appearance: isDark ? "light" : "dark",
     });
   }, [preferences, isDark, updatePreferences]);
-
-  const handleFloorSeen = useCallback((tid: number, floor: number) => {
-    const cleared = recordConfirmedTopicFloorForNotifications(tid, floor);
-    if (cleared > 0) {
-      setUnreadCount((prev) => {
-        const next = Math.max(0, prev - cleared);
-        setUnreadBadgeInRust(next).catch(() => {});
-        return next;
-      });
-    }
-    setReadFloors((prev) => {
-      const old = prev[String(tid)] ?? 0;
-      if (floor <= old) return prev;
-      recordReadFloorInRust(tid, floor).catch(() => {});
-      return { ...prev, [String(tid)]: floor };
-    });
-  }, []);
 
   const handleManualCheckUpdate = useCallback(async () => {
     if (checkingUpdate) return;

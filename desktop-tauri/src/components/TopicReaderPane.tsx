@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isImeComposingEvent } from "../lib/imeGuard";
+import { resolveEffectiveViewedFloor } from "../lib/topicReadState";
 import {
   LinDoCategoryBadge,
   LinDoIcons,
@@ -1167,12 +1168,25 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
     let reportTimer: ReturnType<typeof setTimeout> | null = null;
     let lastMeasureMs = 0;
     let lastSettleArmMs = 0;
+    const topicEnteredAtMs = performance.now();
     const pendingDwell = new Set<number>();
     const seenServerBatch = new Set<number>();
 
     // Cache floor elements once per post-list mutation so we NEVER run querySelectorAll during 144Hz scroll frames!
     const floorNodes = Array.from(container.querySelectorAll<HTMLElement>("[data-floor]"));
     const floorNumbers = floorNodes.map((n) => Number(n.dataset.floor || 1));
+
+    const computeEffectiveFloor = (curDetail: TopicDetailModel, rawMaxFloor: number) =>
+      resolveEffectiveViewedFloor({
+        rawMaxFloor,
+        posts: curDetail.posts,
+        streamIds: curDetail.streamIds,
+        onlyOpFilter,
+        summaryFilter,
+        topicHighestPostNumber: summary?.highestPostNumber,
+        detailHighestPostNumber: curDetail.highestPostNumber,
+        detailPostsCount: curDetail.postsCount,
+      });
 
     const scheduleDwellFlush = () => {
       if (dwellTimer) clearTimeout(dwellTimer);
@@ -1195,7 +1209,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         if (mutated) {
           setLocallyViewedFloors(new Set(locallyViewedRef.current));
         }
-        onFloorSeen(curDetail.id, maxFloor);
+        onFloorSeen(curDetail.id, computeEffectiveFloor(curDetail, maxFloor));
 
         if (reportTimer) clearTimeout(reportTimer);
         reportTimer = setTimeout(() => {
@@ -1205,7 +1219,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
             reportTopicTimings(detailRef.current.id, batch);
           }
         }, 650);
-      }, 1250);
+      }, 1000);
     };
 
     const collectVisibleFloors = (commitReactState: boolean) => {
@@ -1328,6 +1342,17 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
       if (settleTimer) clearTimeout(settleTimer);
       if (dwellTimer) clearTimeout(dwellTimer);
       if (reportTimer) clearTimeout(reportTimer);
+      if (pendingDwell.size > 0 && detailRef.current && performance.now() - topicEnteredAtMs >= 450) {
+        const curDetail = detailRef.current;
+        let maxFloor = visibleFloorRef.current;
+        pendingDwell.forEach((f) => {
+          if (f > maxFloor) maxFloor = f;
+          locallyViewedRef.current.add(f);
+          seenServerBatch.add(f);
+        });
+        pendingDwell.clear();
+        onFloorSeen(curDetail.id, computeEffectiveFloor(curDetail, maxFloor));
+      }
       if (isAuthorized && seenServerBatch.size > 0 && detailRef.current) {
         const batch = Array.from(seenServerBatch);
         seenServerBatch.clear();
@@ -1335,7 +1360,7 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
         void flushTopicTimingsNow();
       }
     };
-  }, [detail?.id, detail?.posts.length, isAuthorized, onlyOpFilter, onAppendPosts, onFloorSeen]);
+  }, [detail?.id, detail?.posts.length, isAuthorized, onlyOpFilter, summaryFilter, summary?.highestPostNumber, onAppendPosts, onFloorSeen]);
 
   // Passive, zero-interference text selection quote (`引用并回复`): never runs while pointer is dragging!
   useEffect(() => {

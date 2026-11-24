@@ -12,6 +12,10 @@ import {
   isQrLoginUri,
   parseQrLoginPayload,
 } from "../desktop-tauri/src/lib/qrLogin.ts";
+import {
+  resolveDiscourseTopicUnread,
+  resolveEffectiveViewedFloor,
+} from "../desktop-tauri/src/lib/topicReadState.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC_ROOT = path.resolve(__dirname, "../desktop-tauri/src");
@@ -218,4 +222,75 @@ test("All Desktop and Mobile release version manifests stay unified at >= 1.1.0"
   assert.equal(ktVer, pkgJson.version);
   assert.ok(gradleCode >= 100);
   assert.equal(ktCode, gradleCode);
+});
+
+test("Discourse topic unread & trailing deleted floor resolution match Mobile 1:1", () => {
+  // 1. Unseen 50-floor new topic clears unread dot immediately once visited (localReadFloor >= 1)
+  assert.deepEqual(
+    resolveDiscourseTopicUnread({
+      unseen: true,
+      unreadPosts: 0,
+      highestPostNumber: 50,
+      postsCount: 50,
+      localReadFloor: 0,
+    }),
+    {
+      effectiveUnseen: true,
+      effectiveUnreadPosts: 0,
+      isUnread: true,
+      isReadDimmed: false,
+    }
+  );
+  assert.deepEqual(
+    resolveDiscourseTopicUnread({
+      unseen: true,
+      unreadPosts: 0,
+      highestPostNumber: 50,
+      postsCount: 50,
+      localReadFloor: 1,
+    }),
+    {
+      effectiveUnseen: false,
+      effectiveUnreadPosts: 0,
+      isUnread: false,
+      isReadDimmed: true,
+    }
+  );
+
+  // 2. Tracked topic with unreadPosts=3 stays unread until final visible floor is reached
+  const partial = resolveDiscourseTopicUnread({
+    unseen: false,
+    unreadPosts: 3,
+    highestPostNumber: 15,
+    postsCount: 14,
+    lastReadPostNumber: 12,
+    localReadFloor: 13,
+  });
+  assert.equal(partial.isUnread, true);
+  assert.equal(partial.effectiveUnreadPosts, 2);
+
+  // Final visible post is #14 (id=914 == streamIds.at(-1)) while #15 was deleted -> advances to 15
+  const alignedFloor = resolveEffectiveViewedFloor({
+    rawMaxFloor: 14,
+    posts: [
+      { id: 901, postNumber: 1 },
+      { id: 914, postNumber: 14 },
+    ],
+    streamIds: [901, 914],
+    topicHighestPostNumber: 15,
+    detailHighestPostNumber: 15,
+    detailPostsCount: 14,
+  });
+  assert.equal(alignedFloor, 15);
+
+  const cleared = resolveDiscourseTopicUnread({
+    unseen: false,
+    unreadPosts: 3,
+    highestPostNumber: 15,
+    postsCount: 14,
+    lastReadPostNumber: 12,
+    localReadFloor: alignedFloor,
+  });
+  assert.equal(cleared.isUnread, false);
+  assert.equal(cleared.isReadDimmed, true);
 });

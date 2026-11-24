@@ -191,11 +191,72 @@ object ScreenTrackEngine {
     private val readPostsSet = LinkedHashSet<Pair<Int, Int>>()
     // Visual reading feedback is independent of network acknowledgement/retry bookkeeping.
     private val locallyViewedPosts = LinkedHashSet<Pair<Int, Int>>()
+    private val locallyVisitedTopics = LinkedHashSet<Int>()
+    private val localMaxViewedFloorByTopic = LinkedHashMap<Int, Int>()
     var localReadVersion by mutableLongStateOf(0L)
         private set
 
     fun isPostViewedLocally(topicId: Int, postNumber: Int): Boolean = synchronized(lock) {
         locallyViewedPosts.contains(topicId to postNumber)
+    }
+
+    fun isTopicVisitedLocally(topicId: Int): Boolean = synchronized(lock) {
+        topicId > 0 && locallyVisitedTopics.contains(topicId)
+    }
+
+    fun getLocalViewedMaxFloor(topicId: Int): Int = synchronized(lock) {
+        if (topicId > 0) localMaxViewedFloorByTopic[topicId] ?: 0 else 0
+    }
+
+    private fun recordLocalVisitedTopicLocked(topicId: Int): Boolean {
+        if (topicId <= 0) return false
+        if (!locallyVisitedTopics.add(topicId)) return false
+        while (locallyVisitedTopics.size > MAX_TRACKED_READ_POSTS) {
+            val it = locallyVisitedTopics.iterator()
+            if (!it.hasNext()) break
+            it.next()
+            it.remove()
+        }
+        return true
+    }
+
+    private fun advanceLocalMaxFloorLocked(topicId: Int, floor: Int): Boolean {
+        if (topicId <= 0 || floor <= 0) return false
+        val prev = localMaxViewedFloorByTopic[topicId] ?: 0
+        if (floor <= prev) return false
+        localMaxViewedFloorByTopic.remove(topicId)
+        localMaxViewedFloorByTopic[topicId] = floor
+        while (localMaxViewedFloorByTopic.size > MAX_TRACKED_READ_POSTS) {
+            val it = localMaxViewedFloorByTopic.entries.iterator()
+            if (!it.hasNext()) break
+            it.next()
+            it.remove()
+        }
+        return true
+    }
+
+    fun markTopicVisitedLocally(topicId: Int, initialFloor: Int = 0) {
+        if (topicId <= 0) return
+        val mutated = synchronized(lock) {
+            val visitedAdded = recordLocalVisitedTopicLocked(topicId)
+            val floorAdvanced = advanceLocalMaxFloorLocked(topicId, initialFloor)
+            visitedAdded || floorAdvanced
+        }
+        if (mutated) {
+            runUiSafeStateWrite { localReadVersion += 1L }
+        }
+    }
+
+    fun recordLocalTopicFloorViewed(topicId: Int, floor: Int) {
+        if (topicId <= 0 || floor <= 0) return
+        val mutated = synchronized(lock) {
+            val visitedAdded = recordLocalVisitedTopicLocked(topicId)
+            val floorAdvanced = advanceLocalMaxFloorLocked(topicId, floor)
+            visitedAdded || floorAdvanced
+        }
+        if (mutated) {
+            runUiSafeStateWrite { localReadVersion += 1L }
+        }
     }
 
     private var sessionReadingMilliseconds = 0L
@@ -334,8 +395,16 @@ object ScreenTrackEngine {
         for (postNumber in onscreenPosts) {
             currentTimingsMs[postNumber] = (currentTimingsMs[postNumber] ?: 0) + diffMs
             val visibleTime = (totalTimingsMs[postNumber] ?: 0) + currentTimingsMs.getValue(postNumber)
-            if (visibleTime >= 1_000 && addBoundedReadPostLocked(locallyViewedPosts, topicId to postNumber)) {
-                newlyViewed = true
+            if (visibleTime >= 1_000) {
+                if (addBoundedReadPostLocked(locallyViewedPosts, topicId to postNumber)) {
+                    newlyViewed = true
+                }
+                if (recordLocalVisitedTopicLocked(topicId)) {
+                    newlyViewed = true
+                }
+                if (advanceLocalMaxFloorLocked(topicId, postNumber)) {
+                    newlyViewed = true
+                }
             }
         }
         if (newlyViewed) runUiSafeStateWrite { localReadVersion += 1L }
@@ -414,13 +483,30 @@ object ScreenTrackEngine {
 
     private fun onTopicExitedLocked(topicId: Int, nowMs: Long) {
         if (currentTopicId != topicId) return
+        var newlyViewedOnExit = false
         if (currentTimingsMs.isEmpty() && onscreenPosts.isNotEmpty() && lastTickEpochMs > 0L && nowMs > lastTickEpochMs) {
             val remainderMs = (nowMs - lastTickEpochMs).coerceIn(150L, 3_000L).toInt()
             currentTopicTimeMs += remainderMs
             for (postNumber in onscreenPosts) {
-                currentTimingsMs[postNumber] = (currentTimingsMs[postNumber] ?: 0) + remainderMs
+                val nextCur = (currentTimingsMs[postNumber] ?: 0) + remainderMs
+                currentTimingsMs[postNumber] = nextCur
+                val totalVisible = (totalTimingsMs[postNumber] ?: 0) + nextCur
+                if (totalVisible >= 450) {
+                    if (addBoundedReadPostLocked(locallyViewedPosts, topicId to postNumber)) {
+                        newlyViewedOnExit = true
+                    }
+                    if (recordLocalVisitedTopicLocked(topicId)) {
+                        newlyViewedOnExit = true
+                    }
+                    if (advanceLocalMaxFloorLocked(topicId, postNumber)) {
+                        newlyViewedOnExit = true
+                    }
+                }
             }
             lastTickEpochMs = nowMs
+        }
+        if (newlyViewedOnExit) {
+            runUiSafeStateWrite { localReadVersion += 1L }
         }
         // Disposal must enqueue, never launch work into a scope that Compose is cancelling.
         enqueueCurrentTopicTimingsLocked()
@@ -584,8 +670,12 @@ object ScreenTrackEngine {
         currentTimingsMs.clear()
         totalTimingsMs.clear()
         readPostsSet.clear()
-        val hadLocalReads = locallyViewedPosts.isNotEmpty()
+        val hadLocalReads = locallyViewedPosts.isNotEmpty() ||
+            locallyVisitedTopics.isNotEmpty() ||
+            localMaxViewedFloorByTopic.isNotEmpty()
         locallyViewedPosts.clear()
+        locallyVisitedTopics.clear()
+        localMaxViewedFloorByTopic.clear()
         val hadConfirmed = serverConfirmedReadPosts.isNotEmpty()
         serverConfirmedReadPosts.clear()
         consolidatedQueue.clear()
@@ -616,6 +706,8 @@ object ScreenTrackEngine {
         totalTimingsMs.clear()
         readPostsSet.clear()
         locallyViewedPosts.clear()
+        locallyVisitedTopics.clear()
+        localMaxViewedFloorByTopic.clear()
         serverConfirmedReadPosts.clear()
         consolidatedQueue.clear()
         retryCounts.clear()

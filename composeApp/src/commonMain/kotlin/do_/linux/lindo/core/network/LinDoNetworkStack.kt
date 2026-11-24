@@ -3795,8 +3795,10 @@ object LinuxDoRepository {
                 ?: topicExcerptCache[tid]?.takeIf { it.isNotBlank() }
             val createdIso = pObj["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val confirmedFloor = serverConfirmedReadFloor[tid]
+            val localVisited = ScreenTrackEngine.isTopicVisitedLocally(tid) ||
+                ScreenTrackEngine.getLocalViewedMaxFloor(tid) >= 1
             val rawUnseen = topicObj?.get("unseen")?.jsonPrimitive?.booleanOrNull ?: false
-            val effectiveUnseen = if (confirmedFloor != null && confirmedFloor >= 1) false else rawUnseen
+            val effectiveUnseen = if ((confirmedFloor != null && confirmedFloor >= 1) || localVisited) false else rawUnseen
 
             summaries.add(
                 TopicSummary(
@@ -7194,27 +7196,22 @@ object LinuxDoRepository {
                 ?: 0).coerceAtLeast(0)
             val serverLastRead = tObj["last_read_post_number"]?.jsonPrimitive?.intOrNull
 
-            if (rawUnseen) {
-                val removed = serverConfirmedReadFloor.remove(id) != null
-                synchronized(readTopicsStateLock) {
-                    readTopicOrder.remove(id)
-                }
-                if (removed) {
-                    bumpReadTopicsVersion()
-                }
-            } else if (serverLastRead != null && serverLastRead > 0) {
+            if (!rawUnseen && serverLastRead != null && serverLastRead > 0) {
                 val localConfirmed = serverConfirmedReadFloor[id] ?: 0
                 if (serverLastRead >= localConfirmed) {
                     recordServerConfirmedReadFloor(id, serverLastRead, notify = false, persist = false)
                 }
             }
 
-            val confirmedFloor = serverConfirmedReadFloor[id]
-            val effectiveUnseen = if (confirmedFloor != null && confirmedFloor >= 1) false else rawUnseen
-            val effectiveUnreadPosts = when {
-                confirmedFloor != null && (serverLastRead == null || confirmedFloor > serverLastRead) ->
-                    minOf(rawUnreadPosts, (rawHighest - confirmedFloor).coerceAtLeast(0))
-                else -> rawUnreadPosts
+            val confirmedFloor = serverConfirmedReadFloor[id] ?: 0
+            val localFloor = ScreenTrackEngine.getLocalViewedMaxFloor(id)
+            val effectiveFloor = maxOf(confirmedFloor, localFloor, serverLastRead ?: 0)
+            val hasVisited = effectiveFloor >= 1 || ScreenTrackEngine.isTopicVisitedLocally(id)
+            val effectiveUnseen = rawUnseen && !hasVisited
+            val effectiveUnreadPosts = if (rawUnreadPosts > 0 && effectiveFloor > (serverLastRead ?: 0)) {
+                minOf(rawUnreadPosts, (rawHighest - effectiveFloor).coerceAtLeast(0))
+            } else {
+                rawUnreadPosts
             }
 
             val rawExcerpt = tObj["excerpt"]?.jsonPrimitive?.contentOrNull

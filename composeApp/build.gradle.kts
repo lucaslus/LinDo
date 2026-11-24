@@ -111,8 +111,8 @@ android {
         applicationId = "do_.linux.lindo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 101
-        versionName = "1.1.1"
+        versionCode = 102
+        versionName = "1.1.2"
     }
 
     signingConfigs {
@@ -187,12 +187,12 @@ compose.desktop {
             modules("java.net.http", "jdk.crypto.ec")
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Lindo"
-            packageVersion = "1.1.1"
+            packageVersion = "1.1.2"
             description = "Lindo — High-Performance Native Linux.do Client for Android, macOS, and Windows"
             vendor = "Lindo Community"
 
             macOS {
-                packageBuildVersion = "1.1.1"
+                packageBuildVersion = "1.1.2"
                 bundleID = "do.linux.lindo"
                 iconFile.set(project.file("src/desktopMain/resources/icon.icns"))
                 infoPlist {
