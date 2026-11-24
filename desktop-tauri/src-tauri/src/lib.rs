@@ -984,6 +984,7 @@ async fn download_and_install_update(
     let pkg_path = base_dir.join(pkg_filename);
 
     let app_progress = app.clone();
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     let (downloaded_bytes, _) = stream_download_and_verify_sha256(
         &target_url,
         &pkg_path,

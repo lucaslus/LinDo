@@ -1,5 +1,16 @@
 package do_.linux.lindo.core.network
 
+enum class VerifyTicketOutcome {
+    /** `/challenge` 成功签发了与旧值不同的新 `cf_clearance` */
+    ROTATED,
+    /** `cf_clearance` 未变，且此前未被实测挑战证伪（如临期预热/恢复检查） */
+    EXISTING_VALID,
+    /** `cf_clearance` 未变，但该值刚被实测 403/429 挑战拒绝（`/challenge` 未触发全站盾直达源站 404，严禁洗白旧票据） */
+    STALE_UNCHALLENGED_404,
+    /** 浏览器中不存在任何 `cf_clearance` */
+    ABSENT
+}
+
 /**
  * `cf_clearance` v2 权威状态机（纯「在位值粘性」· 彻底废除墓碑黑名单）：
  *
@@ -79,6 +90,30 @@ object CfClearanceAuthority {
     fun markRotationOpen() {
         updatedAtEpochMs = 0L
         challenged = null
+    }
+
+    /**
+     * 基于实测证据判定 `/challenge` 结束后的票据状态：
+     * - 仅当 `freshClearance != previousClearance` 时才算真正换新（`ROTATED`）；
+     * - 若旧票据此前已被真实 403/429 挑战证伪（`previousWasChallenged == true`），而 `/challenge` 因局部 WAF 规则未拦截直达源站 404，
+     *   必须返回 `STALE_UNCHALLENGED_404`，绝不能调用 `markRotationOpen()` 把刚被拒的死票据重新洗白为 `verified=true`！
+     */
+    fun evaluateVerifyOutcome(
+        freshClearance: String?,
+        previousClearance: String?,
+        previousWasChallenged: Boolean
+    ): VerifyTicketOutcome {
+        val cleanFresh = freshClearance?.trim().orEmpty()
+        if (cleanFresh.isEmpty()) return VerifyTicketOutcome.ABSENT
+        val cleanPrev = previousClearance?.trim().orEmpty()
+        if (cleanPrev.isEmpty() || cleanFresh != cleanPrev) {
+            return VerifyTicketOutcome.ROTATED
+        }
+        return if (previousWasChallenged) {
+            VerifyTicketOutcome.STALE_UNCHALLENGED_404
+        } else {
+            VerifyTicketOutcome.EXISTING_VALID
+        }
     }
 
     @Synchronized

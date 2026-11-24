@@ -31,6 +31,19 @@ pub const VERIFY_INEFFECTIVE_WINDOW_SECS: u64 = 15;
 ///   2. Healthy sticky `incumbent` (not matching `last_challenged`, within rotation age, still in store) -> keep it.
 ///   3. Rotation open (`incumbent` empty, challenged, or approaching expiry) -> adopt canonical `.linux.do` value.
 ///   4. Transient empty browser cookie read -> preserve healthy fresh incumbent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyTicketOutcome {
+    /// A brand-new unchallenged `cf_clearance` was minted during `/challenge`.
+    Rotated,
+    /// Existing `cf_clearance` was NOT previously challenged and origin reached cleanly.
+    ExistingValid,
+    /// Previous `cf_clearance` WAS challenged, `/challenge` hit unchallenged origin 404/200,
+    /// and NO fresh `cf_clearance` was minted -> stale ticket MUST NOT be washed clean!
+    StaleUnchallenged404,
+    /// No `cf_clearance` exists in browser cookie store.
+    Absent,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CfClearanceAuthority {
     pub incumbent: Option<String>,
@@ -117,6 +130,39 @@ impl CfClearanceAuthority {
     pub fn mark_rotation_open(&mut self) {
         self.updated_at_ms = 0;
         self.last_challenged = None;
+    }
+
+    /// Evaluates whether `/challenge` actually produced a valid clearance or merely hit an unchallenged
+    /// Discourse 404 while still carrying a falsified `cf_clearance` (preventing false clearance whitewashing).
+    pub fn evaluate_verify_outcome(
+        &self,
+        baseline_cfs: &std::collections::HashSet<String>,
+        current_cfs: &[String],
+        previous_was_challenged: bool,
+        saw_origin_pass: bool,
+    ) -> VerifyTicketOutcome {
+        let clean_current: Vec<&str> = current_cfs
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if clean_current.is_empty() {
+            return VerifyTicketOutcome::Absent;
+        }
+        let has_fresh = clean_current
+            .iter()
+            .any(|c| !baseline_cfs.contains(*c) && !self.is_challenged(c));
+        if has_fresh {
+            return VerifyTicketOutcome::Rotated;
+        }
+        let any_unchallenged = clean_current.iter().any(|c| !self.is_challenged(c));
+        if previous_was_challenged || !any_unchallenged {
+            VerifyTicketOutcome::StaleUnchallenged404
+        } else if saw_origin_pass {
+            VerifyTicketOutcome::ExistingValid
+        } else {
+            VerifyTicketOutcome::Absent
+        }
     }
 
     /// `candidates` is `Vec<(value, host_only)>`. Canonical Cloudflare `cf_clearance` has `host_only == false` (`Domain=.linux.do`).
@@ -337,6 +383,128 @@ impl Cf429AdaptiveClassifier {
 pub const CF_NEAR_EXPIRY_SILENT_REFRESH_SECS: u64 = 10 * 3600 + 1800; // 10.5 hours
 pub const CSRF_FAILURE_COOLDOWN_SECS: u64 = 30;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeTimeoutSpec {
+    pub fetch_timeout_ms: u64,
+    pub csrf_timeout_ms: u64,
+    pub retry_fetch_timeout_ms: u64,
+    pub js_hard_cap_ms: u64,
+    pub rust_ipc_timeout_secs: u64,
+}
+
+/// Authoritative timeout budget matrix across JS `fetch()` / `AbortSignal`, JS outer hard-cap,
+/// and Rust `native_call("evaluate", ..., timeout_secs)`.
+/// Invariant: `rust_ipc_timeout_secs * 1000 >= js_hard_cap_ms + 5_000` across ALL lanes!
+pub fn compute_bridge_timeouts(
+    is_read: bool,
+    is_background: bool,
+    is_timings: bool,
+) -> BridgeTimeoutSpec {
+    if is_timings {
+        return BridgeTimeoutSpec {
+            fetch_timeout_ms: 6_000,
+            csrf_timeout_ms: 5_000,
+            retry_fetch_timeout_ms: 5_000,
+            js_hard_cap_ms: 12_000,
+            rust_ipc_timeout_secs: 18,
+        };
+    }
+    match (is_read, is_background) {
+        (true, true) => BridgeTimeoutSpec {
+            fetch_timeout_ms: 9_000,
+            csrf_timeout_ms: 0,
+            retry_fetch_timeout_ms: 7_000,
+            js_hard_cap_ms: 11_000,
+            rust_ipc_timeout_secs: 17,
+        },
+        (false, true) => BridgeTimeoutSpec {
+            fetch_timeout_ms: 10_000,
+            csrf_timeout_ms: 6_000,
+            retry_fetch_timeout_ms: 8_000,
+            js_hard_cap_ms: 17_000,
+            rust_ipc_timeout_secs: 23,
+        },
+        (true, false) => BridgeTimeoutSpec {
+            fetch_timeout_ms: 12_000,
+            csrf_timeout_ms: 0,
+            retry_fetch_timeout_ms: 10_000,
+            js_hard_cap_ms: 22_000,
+            rust_ipc_timeout_secs: 28,
+        },
+        (false, false) => BridgeTimeoutSpec {
+            fetch_timeout_ms: 15_000,
+            csrf_timeout_ms: 8_000,
+            retry_fetch_timeout_ms: 12_000,
+            js_hard_cap_ms: 30_000,
+            rust_ipc_timeout_secs: 36,
+        },
+    }
+}
+
+pub const BG_READ_WAVE_DEDUP_WINDOW: Duration = Duration::from_secs(5);
+pub const BG_WRITE_ESCALATE_THRESHOLD: u32 = 2;
+pub const BG_READ_WAVE_ESCALATE_THRESHOLD: u32 = 3;
+
+/// Tracks background Cloudflare challenge hits separately for reads vs writes (aligned with Android `BackgroundChallengeTracker`):
+/// - Concurrent background GETs within a 5s window count as a single `read_wave` (`>= 3` waves escalate).
+/// - Background mutations (`POST /topics/timings`, `PUT /notifications/mark-read.json`, `POST /drafts.json`)
+///   increment `consecutive_write_hits` (`>= 2` hits escalate).
+/// - Critically, a foreground `GET 2xx` ONLY resets `read_waves`; it MUST NOT reset `consecutive_write_hits`,
+///   preventing an infinite oscillation loop when Cloudflare allows GETs while rejecting stale IP-bound `cf_clearance` on writes!
+#[derive(Debug, Clone, Default)]
+pub struct BackgroundChallengeTracker {
+    read_waves: u32,
+    last_read_wave_at: Option<Instant>,
+    consecutive_write_hits: u32,
+}
+
+impl BackgroundChallengeTracker {
+    /// Records a background CF challenge and returns `true` when silent verification / attention should trigger.
+    pub fn note_background_challenge(&mut self, is_write: bool, now: Instant) -> bool {
+        if is_write {
+            self.consecutive_write_hits = self.consecutive_write_hits.saturating_add(1);
+        } else {
+            let is_new_wave = self
+                .last_read_wave_at
+                .map(|prev| now.saturating_duration_since(prev) >= BG_READ_WAVE_DEDUP_WINDOW)
+                .unwrap_or(true);
+            if is_new_wave {
+                self.last_read_wave_at = Some(now);
+                self.read_waves = self.read_waves.saturating_add(1);
+            }
+        }
+        self.consecutive_write_hits >= BG_WRITE_ESCALATE_THRESHOLD
+            || self.read_waves >= BG_READ_WAVE_ESCALATE_THRESHOLD
+    }
+
+    pub fn note_healthy_response(&mut self, is_write: bool) {
+        if is_write {
+            self.consecutive_write_hits = 0;
+        } else {
+            self.read_waves = 0;
+            self.last_read_wave_at = None;
+        }
+    }
+
+    pub fn has_unresolved_write_challenges(&self) -> bool {
+        self.consecutive_write_hits > 0
+    }
+
+    pub fn consecutive_write_hits(&self) -> u32 {
+        self.consecutive_write_hits
+    }
+
+    pub fn read_waves(&self) -> u32 {
+        self.read_waves
+    }
+
+    pub fn reset(&mut self) {
+        self.read_waves = 0;
+        self.last_read_wave_at = None;
+        self.consecutive_write_hits = 0;
+    }
+}
+
 /// End-to-end logical call deadline across queue wait, retries, and body read.
 /// Supports `pause()` / `resume()` while user interacts with Cloudflare Turnstile
 /// so manual verification never causes the waiting request to expire prematurely.
@@ -359,12 +527,11 @@ impl CallDeadline {
     }
 
     pub fn for_request(idempotent: bool, is_background: bool, now: Instant) -> Self {
-        let secs = if is_background {
-            10
-        } else if idempotent {
-            28
-        } else {
-            35
+        let secs = match (idempotent, is_background) {
+            (true, true) => 20,
+            (false, true) => 26,
+            (true, false) => 34,
+            (false, false) => 42,
         };
         Self::new(Duration::from_secs(secs), now)
     }
@@ -605,6 +772,7 @@ impl VerifyCoordinator {
         &mut self,
         round: u64,
         passed: bool,
+        abandoned: bool,
         final_presentation: VerifyPresentation,
         now: Instant,
     ) -> VerifyOutcome {
@@ -621,12 +789,14 @@ impl VerifyCoordinator {
             self.silent_backoff_until = None;
             self.last_passed_round = round;
             self.last_passed_at = Some(now);
-        } else if final_presentation == VerifyPresentation::Silent {
-            // Silent background probe hit interactive challenge: do NOT count as a user failure,
-            // only apply a gentle silent backoff so background polls never spin `/challenge`.
-            self.silent_backoff_until = Some(now + Duration::from_secs(VERIFY_SILENT_BACKOFF_SECS));
-        } else {
-            self.record_round_failure_locked(Some(round), now);
+        } else if !abandoned {
+            if final_presentation == VerifyPresentation::Silent {
+                // Silent background probe hit interactive challenge: do NOT count as a user failure,
+                // only apply a gentle silent backoff so background polls never spin `/challenge`.
+                self.silent_backoff_until = Some(now + Duration::from_secs(VERIFY_SILENT_BACKOFF_SECS));
+            } else {
+                self.record_round_failure_locked(Some(round), now);
+            }
         }
 
         let cooldown_remain_ms = self
@@ -756,9 +926,23 @@ impl VerifyFlightGuard {
         self.finished = true;
         let final_pres = VerifyPresentation::from_u8(self.presentation.load(Ordering::SeqCst));
         match self.coord.lock() {
-            Ok(mut c) => c.finish_flight(self.round, passed, final_pres, now),
+            Ok(mut c) => c.finish_flight(self.round, passed, false, final_pres, now),
             Err(_) => VerifyOutcome {
                 passed,
+                round: self.round,
+                ineffective_blocked: false,
+                cooldown_remain_ms: 0,
+            },
+        }
+    }
+
+    pub fn abandon(mut self, now: Instant) -> VerifyOutcome {
+        self.finished = true;
+        let final_pres = VerifyPresentation::from_u8(self.presentation.load(Ordering::SeqCst));
+        match self.coord.lock() {
+            Ok(mut c) => c.finish_flight(self.round, false, true, final_pres, now),
+            Err(_) => VerifyOutcome {
+                passed: false,
                 round: self.round,
                 ineffective_blocked: false,
                 cooldown_remain_ms: 0,
@@ -772,7 +956,7 @@ impl Drop for VerifyFlightGuard {
         if !self.finished {
             let final_pres = VerifyPresentation::from_u8(self.presentation.load(Ordering::SeqCst));
             if let Ok(mut c) = self.coord.lock() {
-                let _ = c.finish_flight(self.round, false, final_pres, Instant::now());
+                let _ = c.finish_flight(self.round, false, true, final_pres, Instant::now());
             }
         }
     }
@@ -1287,7 +1471,7 @@ mod tests {
         assert_eq!(VerifyPresentation::from_u8(pres1.load(Ordering::SeqCst)), VerifyPresentation::Blocking);
 
         // 3. Round #1 cancelled/failed: BOTH leader and follower receive identical outcome, failure counted ONCE!
-        let outcome = coord.finish_flight(r1, false, VerifyPresentation::Blocking, t0 + Duration::from_secs(2));
+        let outcome = coord.finish_flight(r1, false, false, VerifyPresentation::Blocking, t0 + Duration::from_secs(2));
         assert!(!outcome.passed);
         assert_eq!(outcome.round, 1);
         assert_eq!(follower_rx.borrow_and_update().unwrap(), outcome);
@@ -1305,7 +1489,7 @@ mod tests {
                 coord.join_or_start(VerifyPresentation::Blocking, t, false),
                 VerifyJoin::Leader { round, .. } if round == expected_round
             ));
-            coord.finish_flight(expected_round, false, VerifyPresentation::Blocking, t + Duration::from_secs(1));
+            coord.finish_flight(expected_round, false, false, VerifyPresentation::Blocking, t + Duration::from_secs(1));
         }
 
         let t_cool = t0 + Duration::from_secs(12);
@@ -1319,7 +1503,7 @@ mod tests {
             coord.join_or_start(VerifyPresentation::Manual, t_cool, false),
             VerifyJoin::Leader { round: 4, .. }
         ));
-        coord.finish_flight(4, true, VerifyPresentation::Manual, t_cool + Duration::from_secs(2));
+        coord.finish_flight(4, true, false, VerifyPresentation::Manual, t_cool + Duration::from_secs(2));
         assert_eq!(coord.snapshot(t_cool + Duration::from_secs(2)).consecutive_failures, 0);
 
         // 6. Recent-pass coalescing within 5s for fresh callers
@@ -1345,7 +1529,7 @@ mod tests {
             coord.join_or_start(VerifyPresentation::Silent, t0, false),
             VerifyJoin::Leader { round: 1, .. }
         ));
-        coord.finish_flight(1, false, VerifyPresentation::Silent, t0 + Duration::from_secs(2));
+        coord.finish_flight(1, false, false, VerifyPresentation::Silent, t0 + Duration::from_secs(2));
         let snap = coord.snapshot(t0 + Duration::from_secs(2));
         assert_eq!(snap.consecutive_failures, 0);
         assert_eq!(snap.cooldown_remain_ms, 0);
@@ -1505,7 +1689,7 @@ mod tests {
         assert_eq!(VerifyPresentation::from_u8(pres1.load(Ordering::SeqCst)), VerifyPresentation::Pill);
         let _ = coord.join_or_start(VerifyPresentation::Blocking, t0 + Duration::from_millis(40), false);
         assert_eq!(VerifyPresentation::from_u8(pres1.load(Ordering::SeqCst)), VerifyPresentation::Blocking);
-        coord.finish_flight(r1, true, VerifyPresentation::Blocking, t0 + Duration::from_secs(1));
+        coord.finish_flight(r1, true, false, VerifyPresentation::Blocking, t0 + Duration::from_secs(1));
     }
 
     #[test]
@@ -1577,5 +1761,155 @@ mod tests {
         assert!(!should_trigger_near_expiry_silent_refresh(Some(38_500), 1, false));
         assert!(!should_trigger_near_expiry_silent_refresh(Some(38_500), 0, true));
         assert!(should_trigger_near_expiry_silent_refresh(Some(38_500), 0, false));
+    }
+
+    #[test]
+    fn bridge_timeouts_and_call_deadlines_never_invert_across_all_lanes() {
+        let now = Instant::now();
+        let cases = [
+            (true, true, false),   // background read
+            (false, true, false),  // background write (mark-read, drafts)
+            (false, true, true),   // timings telemetry
+            (true, false, false),  // foreground read
+            (false, false, false), // foreground write
+        ];
+        for (is_read, is_bg, is_timings) in cases {
+            let spec = compute_bridge_timeouts(is_read, is_bg, is_timings);
+            assert!(
+                spec.js_hard_cap_ms >= spec.fetch_timeout_ms + spec.csrf_timeout_ms,
+                "JS hard cap must cover CSRF + primary fetch for ({is_read}, {is_bg}, {is_timings}): {spec:?}"
+            );
+            assert!(
+                spec.rust_ipc_timeout_secs * 1000 >= spec.js_hard_cap_ms + 5_000,
+                "Rust IPC timeout must exceed JS hard cap by >= 5s for ({is_read}, {is_bg}, {is_timings}): {spec:?}"
+            );
+            let dl = CallDeadline::for_request(is_read, is_bg, now);
+            assert!(
+                dl.remaining_ms(now) > spec.rust_ipc_timeout_secs * 1000,
+                "CallDeadline ({}) must exceed Rust IPC timeout ({}ms) for ({is_read}, {is_bg}, {is_timings})",
+                dl.remaining_ms(now),
+                spec.rust_ipc_timeout_secs * 1000
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_verify_outcome_blocks_stale_unchallenged_404_whitewashing() {
+        let mut auth = CfClearanceAuthority::default();
+        auth.confirm_healthy("cf_stale", 1_700_000_000_000);
+        auth.note_challenged(Some("cf_stale"));
+
+        let mut baseline = std::collections::HashSet::new();
+        baseline.insert("cf_stale".to_string());
+
+        // 1. `/challenge` hits Discourse 404 without rotating `cf_stale` -> MUST be StaleUnchallenged404!
+        assert_eq!(
+            auth.evaluate_verify_outcome(&baseline, &["cf_stale".to_string()], true, true),
+            VerifyTicketOutcome::StaleUnchallenged404
+        );
+        // `cf_stale` remains marked challenged (never washed clean!)
+        assert!(auth.is_challenged("cf_stale"));
+
+        // 2. `/challenge` mints fresh `cf_fresh` -> Rotated!
+        assert_eq!(
+            auth.evaluate_verify_outcome(
+                &baseline,
+                &["cf_stale".to_string(), "cf_fresh".to_string()],
+                true,
+                true
+            ),
+            VerifyTicketOutcome::Rotated
+        );
+
+        // 3. Unchallenged prewarm with healthy existing `cf_valid` -> ExistingValid!
+        let mut healthy_auth = CfClearanceAuthority::default();
+        healthy_auth.confirm_healthy("cf_valid", 1_700_000_000_000);
+        let mut healthy_base = std::collections::HashSet::new();
+        healthy_base.insert("cf_valid".to_string());
+        assert_eq!(
+            healthy_auth.evaluate_verify_outcome(&healthy_base, &["cf_valid".to_string()], false, true),
+            VerifyTicketOutcome::ExistingValid
+        );
+
+        // 4. Empty cookie store -> Absent!
+        assert_eq!(
+            healthy_auth.evaluate_verify_outcome(&healthy_base, &[], false, true),
+            VerifyTicketOutcome::Absent
+        );
+    }
+
+    #[test]
+    fn background_challenge_tracker_isolates_write_streaks_from_get_200() {
+        let t0 = Instant::now();
+        let mut tr = BackgroundChallengeTracker::default();
+
+        // 1. Concurrent background GET challenges within 5s deduplicate into 1 wave
+        assert!(!tr.note_background_challenge(false, t0));
+        assert!(!tr.note_background_challenge(false, t0 + Duration::from_secs(2)));
+        assert_eq!(tr.read_waves(), 1);
+        assert!(!tr.note_background_challenge(false, t0 + Duration::from_secs(6)));
+        assert_eq!(tr.read_waves(), 2);
+        assert!(tr.note_background_challenge(false, t0 + Duration::from_secs(12)));
+        assert_eq!(tr.read_waves(), 3);
+
+        // Foreground GET 200 clears read waves
+        tr.note_healthy_response(false);
+        assert_eq!(tr.read_waves(), 0);
+
+        // 2. Background write challenges (`POST /topics/timings`, `PUT /notifications/mark-read.json`):
+        //    1st hit stays quiet; 2nd hit escalates; interleaved `GET 200` MUST NOT clear `consecutive_write_hits`!
+        assert!(!tr.note_background_challenge(true, t0 + Duration::from_secs(15)));
+        assert_eq!(tr.consecutive_write_hits(), 1);
+        tr.note_healthy_response(false); // Foreground GET /t/123.json -> 200 OK
+        assert!(tr.has_unresolved_write_challenges());
+        assert_eq!(tr.consecutive_write_hits(), 1);
+
+        // Next background write 403 immediately escalates (`consecutive_write_hits == 2`)!
+        assert!(tr.note_background_challenge(true, t0 + Duration::from_secs(18)));
+        assert_eq!(tr.consecutive_write_hits(), 2);
+
+        // Only a healthy write 2xx (or explicit verification reset) clears `consecutive_write_hits`!
+        tr.note_healthy_response(true);
+        assert!(!tr.has_unresolved_write_challenges());
+        assert_eq!(tr.consecutive_write_hits(), 0);
+    }
+
+    #[test]
+    fn abandoned_flight_and_guard_drop_never_arm_backoff_or_penalize_failures() {
+        let t0 = Instant::now();
+        let coord = Arc::new(StdMutex::new(VerifyCoordinator::default()));
+
+        // 1. Silent prewarm abandoned (e.g. unchallenged 404 with zero cf_clearance) -> 0 silent backoff!
+        let (r1, p1) = match coord.lock().unwrap().join_or_start(VerifyPresentation::Silent, t0, false) {
+            VerifyJoin::Leader { round, presentation, .. } => (round, presentation),
+            _ => panic!("expected leader"),
+        };
+        let guard1 = VerifyFlightGuard::new(Arc::clone(&coord), r1, p1);
+        let out1 = guard1.abandon(t0 + Duration::from_secs(1));
+        assert!(!out1.passed);
+        let snap1 = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(1));
+        assert!(!snap1.active);
+        assert_eq!(snap1.consecutive_failures, 0);
+        assert_eq!(snap1.silent_backoff_remain_ms, 0);
+
+        // 2. Blocking leader dropped mid-flight -> followers wake up cleanly and `consecutive_failures` stays 0!
+        let (r2, p2) = match coord.lock().unwrap().join_or_start(VerifyPresentation::Blocking, t0 + Duration::from_secs(2), false) {
+            VerifyJoin::Leader { round, presentation, .. } => (round, presentation),
+            _ => panic!("expected leader"),
+        };
+        let mut follower_rx = match coord.lock().unwrap().join_or_start(VerifyPresentation::Blocking, t0 + Duration::from_secs(2), false) {
+            VerifyJoin::Follower { rx, .. } => rx,
+            _ => panic!("expected follower"),
+        };
+        {
+            let _guard2 = VerifyFlightGuard::new(Arc::clone(&coord), r2, p2);
+            // `_guard2` dropped here without `.complete(...)`
+        }
+        let follower_out = follower_rx.borrow_and_update().expect("follower must receive outcome on drop");
+        assert!(!follower_out.passed);
+        let snap2 = coord.lock().unwrap().snapshot(t0 + Duration::from_secs(3));
+        assert!(!snap2.active);
+        assert_eq!(snap2.consecutive_failures, 0);
+        assert_eq!(snap2.cooldown_remain_ms, 0);
     }
 }

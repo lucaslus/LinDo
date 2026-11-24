@@ -3,11 +3,12 @@ use crate::legacy::{
     PersistedState, SavedAccountEntry, UserProfile,
 };
 use crate::net_policy::{
-    is_logout_exempt_from_session_recovery, is_transient_retryable_status, parse_retry_after_secs,
-    should_trigger_near_expiry_silent_refresh, transient_backoff_ms, AdaptiveTokenBucket,
-    AttemptBudget, CallDeadline, Cf429AdaptiveClassifier, Cf429Decision, CfClearanceAuthority,
-    PriorityGate, RequestPriority, VerifyCoordinator, VerifyFlightGuard, VerifyJoin, VerifyOutcome,
-    VerifyPresentation, VERIFY_PILL_DELAY_MS,
+    compute_bridge_timeouts, is_logout_exempt_from_session_recovery, is_transient_retryable_status,
+    parse_retry_after_secs, should_trigger_near_expiry_silent_refresh, transient_backoff_ms,
+    AdaptiveTokenBucket, AttemptBudget, BackgroundChallengeTracker, BridgeTimeoutSpec,
+    CallDeadline, Cf429AdaptiveClassifier, Cf429Decision, CfClearanceAuthority, PriorityGate,
+    RequestPriority, VerifyCoordinator, VerifyFlightGuard, VerifyJoin, VerifyOutcome,
+    VerifyPresentation, VerifyTicketOutcome, VERIFY_PILL_DELAY_MS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,6 +31,305 @@ const CF_CHALLENGE_PREFIX: &str = "<!--lindo-cf-challenge-->";
 const MAX_MEDIA_CACHE_ITEMS: usize = 192;
 const MAX_MEDIA_CACHE_SINGLE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MEDIA_CACHE_TOTAL_BYTES: usize = 36 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnifiedVerifyDisposition {
+    Passed,
+    Failed,
+    Abandoned,
+}
+
+/// Standalone, VM-testable Desktop WebView HTTP bridge script template (`__LINDO_CFG_JSON__` placeholder).
+/// Enforces:
+/// 1. At-most-once settlement with an outer JS `hardCapMs` timer (`rust_ipc_timeout_secs * 1000 >= js_hard_cap_ms + 5_000`),
+///    guaranteeing JS resolves structured `{ netErr, originLost, timedOut }` BEFORE Rust IPC ever times out.
+/// 2. Account-scoped CSRF owner isolation (`window.__lindoCsrfOwner`), clearing stale cached tokens across account switches
+///    without penalizing fresh WebView boot.
+/// 3. Remaining-budget-clamped `AbortController` timeouts across CSRF fetch, primary fetch, guest fallback, and `BAD CSRF` retry.
+pub(crate) const DESKTOP_HTTP_BRIDGE_TEMPLATE_JS: &str = r#"(() => new Promise((resolve) => {
+    const c = __LINDO_CFG_JSON__;
+    const hardCapMs = Math.max(3000, Number(c.hardCapMs) || 22000);
+    const deadlineMs = Date.now() + hardCapMs;
+    let settled = false;
+    let phase = 'init';
+    const activeControllers = new Set();
+    const finish = (payload) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(hardTimer);
+        resolve(payload);
+    };
+    const makeScopedSignal = (capMs) => {
+        const remain = Math.max(400, deadlineMs - Date.now() - 150);
+        const effMs = Math.max(400, Math.min(Number(capMs) || 10000, remain));
+        const ctrl = new AbortController();
+        activeControllers.add(ctrl);
+        const t = setTimeout(() => {
+            try { ctrl.abort(); } catch (_) {}
+        }, effMs);
+        return {
+            ctrl,
+            cleanup: () => {
+                clearTimeout(t);
+                activeControllers.delete(ctrl);
+            }
+        };
+    };
+    const hardTimer = setTimeout(() => {
+        for (const ctrl of Array.from(activeControllers)) {
+            try { ctrl.abort(); } catch (_) {}
+        }
+        activeControllers.clear();
+        let originLostNow = false;
+        try { originLostNow = location.origin !== 'https://linux.do'; } catch (_) { originLostNow = true; }
+        finish({
+            netErr: 'bridge_js_hard_timeout:' + phase + ':' + hardCapMs + 'ms',
+            originLost: originLostNow,
+            timedOut: true
+        });
+    }, hardCapMs);
+
+    (async () => {
+        try {
+            if (location.origin !== 'https://linux.do') {
+                return finish({ originLost: true });
+            }
+            const owner = (typeof c.csrfOwner === 'string' && c.csrfOwner.length > 0) ? c.csrfOwner : '__anon__';
+            const hadPriorOwner = typeof window.__lindoCsrfOwner === 'string' && window.__lindoCsrfOwner.length > 0;
+            if (hadPriorOwner && window.__lindoCsrfOwner !== owner) {
+                window.__lindoCsrf = null;
+                window.__lindoIgnoreDomCsrf = true;
+                window.__lindoCsrfCooldownUntil = 0;
+            }
+            window.__lindoCsrfOwner = owner;
+
+            const write = !['GET', 'HEAD'].includes(c.method);
+            const isOtp = c.url.indexOf('/session/otp/') !== -1;
+            const reqTimeoutMs = Number(c.reqTimeoutMs) || (write ? 15000 : 12000);
+            const csrfTimeoutMs = Number(c.csrfTimeoutMs) || 8000;
+            const retryTimeoutMs = Number(c.retryTimeoutMs) || 10000;
+            const reqReferrer = c.referrer || 'https://linux.do/';
+            const readResetHdr = (hdrs) =>
+                hdrs.get('x-ratelimit-reset') || hdrs.get('ratelimit-reset') || hdrs.get('x-rate-limit-reset');
+
+            async function fetchFreshCsrf(bypassCooldown) {
+                const nowMs = Date.now();
+                if (!bypassCooldown && window.__lindoCsrfCooldownUntil && nowMs < window.__lindoCsrfCooldownUntil) {
+                    return { err: { status: 429, body: '{"errors":["会话凭证刷新冷却中，请稍候再试"]}', localCooldown: true } };
+                }
+                if (window.__lindoCsrfPromise) {
+                    return await window.__lindoCsrfPromise;
+                }
+                window.__lindoCsrfPromise = (async () => {
+                    const sig = makeScopedSignal(csrfTimeoutMs);
+                    try {
+                        const cr = await fetch('/session/csrf.json', {
+                            credentials: 'include',
+                            cache: 'no-store',
+                            referrer: reqReferrer,
+                            referrerPolicy: 'strict-origin-when-cross-origin',
+                            headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest', 'Discourse-Present': 'true' },
+                            signal: sig.ctrl.signal
+                        });
+                        if (!cr.ok) {
+                            window.__lindoCsrfCooldownUntil = Date.now() + 30000;
+                            return {
+                                err: {
+                                    status: cr.status,
+                                    body: await cr.text(),
+                                    retryAfter: cr.headers.get('Retry-After'),
+                                    rateLimitReset: readResetHdr(cr.headers),
+                                    challenge: cr.headers.get('cf-mitigated'),
+                                    cfRay: cr.headers.get('cf-ray'),
+                                    contentType: cr.headers.get('content-type')
+                                }
+                            };
+                        }
+                        const tok = (await cr.json()).csrf;
+                        if (tok) {
+                            window.__lindoCsrf = tok;
+                            window.__lindoCsrfCooldownUntil = 0;
+                        }
+                        return { token: tok };
+                    } catch (e) {
+                        window.__lindoCsrfCooldownUntil = Date.now() + 30000;
+                        throw e;
+                    } finally {
+                        sig.cleanup();
+                        window.__lindoCsrfPromise = null;
+                    }
+                })();
+                return await window.__lindoCsrfPromise;
+            }
+
+            if (write) {
+                phase = 'csrf';
+                let token = isOtp
+                    ? null
+                    : (window.__lindoCsrf || (!window.__lindoIgnoreDomCsrf && document.querySelector('meta[name="csrf-token"]')?.content));
+                if (!token) {
+                    const fc = await fetchFreshCsrf(false);
+                    if (fc.err) return finish(fc.err);
+                    token = fc.token;
+                }
+                if (!token) return finish({ status: 422, body: '{"errors":["会话尚未就绪，请稍后再试"]}' });
+                c.headers['X-CSRF-Token'] = token;
+            }
+
+            phase = 'fetch';
+            window.__lindoActiveHttp = window.__lindoActiveHttp || Object.create(null);
+            if (!window.__lindoCancelHttp) {
+                window.__lindoCancelHttp = function(k) {
+                    try {
+                        const ac = window.__lindoActiveHttp && window.__lindoActiveHttp[k];
+                        if (ac) { delete window.__lindoActiveHttp[k]; ac.abort(); }
+                    } catch (_) {}
+                };
+            }
+            const reqKey = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+            const primarySig = makeScopedSignal(reqTimeoutMs);
+            window.__lindoActiveHttp[reqKey] = primarySig.ctrl;
+            const noStore = !!c.forceNoStore || /\/session\/(csrf|current)\.json|\/notifications|\/drafts/i.test(c.url);
+            let r;
+            let bodyText;
+            try {
+                r = await fetch(c.url, {
+                    method: c.method,
+                    headers: c.headers,
+                    credentials: 'include',
+                    referrer: reqReferrer,
+                    referrerPolicy: 'strict-origin-when-cross-origin',
+                    cache: noStore ? 'no-store' : 'default',
+                    body: c.form ? new URLSearchParams(c.form) : undefined,
+                    signal: primarySig.ctrl.signal
+                });
+                phase = 'read_body';
+                bodyText = await r.text();
+            } finally {
+                primarySig.cleanup();
+                try { delete window.__lindoActiveHttp[reqKey]; } catch (_) {}
+            }
+
+            let cfHeader = r.headers.get('cf-mitigated');
+            let csrfRefreshed = false;
+            if (!write && !cfHeader && (r.status === 403 || r.status === 401) && c.headers['Discourse-Logged-In'] && !c.url.includes('/session/current.json') && /not_logged_in|need to be logged in/i.test(bodyText)) {
+                if (deadlineMs - Date.now() > 1200) {
+                    phase = 'guest_fallback';
+                    const guestHdrs = Object.assign({}, c.headers);
+                    delete guestHdrs['Discourse-Logged-In'];
+                    const guestSig = makeScopedSignal(retryTimeoutMs);
+                    try {
+                        const gr = await fetch(c.url, {
+                            method: c.method,
+                            headers: guestHdrs,
+                            credentials: 'include',
+                            referrer: reqReferrer,
+                            referrerPolicy: 'strict-origin-when-cross-origin',
+                            cache: 'no-store',
+                            signal: guestSig.ctrl.signal
+                        });
+                        if (gr.ok) {
+                            return finish({
+                                status: gr.status,
+                                body: await gr.text(),
+                                retryAfter: gr.headers.get('Retry-After'),
+                                rateLimitReset: readResetHdr(gr.headers),
+                                challenge: gr.headers.get('cf-mitigated'),
+                                cfRay: gr.headers.get('cf-ray'),
+                                contentType: gr.headers.get('content-type'),
+                                requestId: gr.headers.get('x-request-id'),
+                                discourseUser: gr.headers.get('x-discourse-username') || '',
+                                loggedOutHeader: gr.headers.get('discourse-logged-out') || '',
+                                hadUnauthLoggedHeader: true,
+                                guestFallback: true
+                            });
+                        }
+                    } finally {
+                        guestSig.cleanup();
+                    }
+                }
+            }
+
+            if (write && !isOtp && !cfHeader && (r.status === 403 || r.status === 422) && /csrf|authenticity token/i.test(bodyText)) {
+                window.__lindoCsrf = null;
+                window.__lindoIgnoreDomCsrf = true;
+                if (deadlineMs - Date.now() > 1500) {
+                    phase = 'csrf_retry';
+                    const fc2 = await fetchFreshCsrf(true);
+                    if (fc2.token && deadlineMs - Date.now() > 1000) {
+                        csrfRefreshed = true;
+                        c.headers['X-CSRF-Token'] = fc2.token;
+                        phase = 'write_retry';
+                        const retrySig = makeScopedSignal(retryTimeoutMs);
+                        try {
+                            r = await fetch(c.url, {
+                                method: c.method,
+                                headers: c.headers,
+                                credentials: 'include',
+                                referrer: reqReferrer,
+                                referrerPolicy: 'strict-origin-when-cross-origin',
+                                cache: 'no-store',
+                                body: c.form ? new URLSearchParams(c.form) : undefined,
+                                signal: retrySig.ctrl.signal
+                            });
+                            bodyText = await r.text();
+                            cfHeader = r.headers.get('cf-mitigated');
+                        } finally {
+                            retrySig.cleanup();
+                        }
+                    }
+                }
+            }
+
+            return finish({
+                status: r.status,
+                body: bodyText,
+                retryAfter: r.headers.get('Retry-After'),
+                rateLimitReset: readResetHdr(r.headers),
+                challenge: cfHeader,
+                cfRay: r.headers.get('cf-ray'),
+                contentType: r.headers.get('content-type'),
+                requestId: r.headers.get('x-request-id'),
+                discourseUser: r.headers.get('x-discourse-username') || '',
+                loggedOutHeader: r.headers.get('discourse-logged-out') || '',
+                csrfRefreshed
+            });
+        } catch (err) {
+            let originLostNow = false;
+            try { originLostNow = location.origin !== 'https://linux.do'; } catch (_) { originLostNow = true; }
+            return finish({
+                netErr: String((err && err.message) || err || 'Network error'),
+                originLost: originLostNow
+            });
+        }
+    })();
+}))()"#;
+
+pub(crate) fn build_http_bridge_script(
+    url: &str,
+    method: &str,
+    headers: &HashMap<String, String>,
+    form: &Option<HashMap<String, String>>,
+    referrer: &str,
+    force_no_store: bool,
+    csrf_owner: &str,
+    timeouts: BridgeTimeoutSpec,
+) -> String {
+    let cfg = json!({
+        "url": url,
+        "method": method,
+        "headers": headers,
+        "form": form,
+        "referrer": referrer,
+        "forceNoStore": force_no_store,
+        "csrfOwner": csrf_owner,
+        "reqTimeoutMs": timeouts.fetch_timeout_ms,
+        "csrfTimeoutMs": timeouts.csrf_timeout_ms,
+        "retryTimeoutMs": timeouts.retry_fetch_timeout_ms,
+        "hardCapMs": timeouts.js_hard_cap_ms,
+    });
+    DESKTOP_HTTP_BRIDGE_TEMPLATE_JS.replacen("__LINDO_CFG_JSON__", &cfg.to_string(), 1)
+}
 
 pub fn now_epoch_ms() -> u64 {
     SystemTime::now()
@@ -365,11 +665,13 @@ pub struct BridgeEngine {
     media_pacer: StdMutex<AdaptiveTokenBucket>,
     active_fg_requests: AtomicUsize,
     session_generation: AtomicU64,
+    nav_nonce_seq: AtomicU64,
     warmup_spawned: AtomicBool,
     inner: StdMutex<BridgeRuntime>,
     verify_coord: Arc<StdMutex<VerifyCoordinator>>,
     cf_authority: StdMutex<CfClearanceAuthority>,
     cf_429_classifier: StdMutex<Cf429AdaptiveClassifier>,
+    bg_challenge_tracker: StdMutex<BackgroundChallengeTracker>,
     media_cache: StdMutex<MediaCacheState>,
     media_inflight: StdMutex<HashMap<String, Arc<Notify>>>,
 }
@@ -488,6 +790,7 @@ impl BridgeEngine {
             media_pacer: StdMutex::new(AdaptiveTokenBucket::new(3.0, 5.2, 2.0, 5.6)),
             active_fg_requests: AtomicUsize::new(0),
             session_generation: AtomicU64::new(1),
+            nav_nonce_seq: AtomicU64::new(1),
             warmup_spawned: AtomicBool::new(false),
             inner: StdMutex::new(BridgeRuntime {
                 initialized: false,
@@ -513,6 +816,7 @@ impl BridgeEngine {
             verify_coord: Arc::new(StdMutex::new(VerifyCoordinator::default())),
             cf_authority: StdMutex::new(CfClearanceAuthority::default()),
             cf_429_classifier: StdMutex::new(Cf429AdaptiveClassifier::default()),
+            bg_challenge_tracker: StdMutex::new(BackgroundChallengeTracker::default()),
             media_cache: StdMutex::new(MediaCacheState::default()),
             media_inflight: StdMutex::new(HashMap::new()),
         })
@@ -548,7 +852,8 @@ impl BridgeEngine {
             }
         });
 
-        // Adaptive network / proxy / VPN watcher (3s poll, zero-cost when idle) for macOS & Windows
+        // Adaptive network / proxy / VPN watcher (3s poll, zero-cost when idle) for macOS & Windows:
+        // heals stale rate-limit / challenge cooldowns across ALL routing modes (including `system_default`)!
         let eng_net = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             let mut last_sig = crate::ech_desktop::detect_net_env().signature();
@@ -557,20 +862,19 @@ impl BridgeEngine {
                 let new_sig = crate::ech_desktop::detect_net_env().signature();
                 if new_sig != last_sig {
                     last_sig = new_sig.clone();
-                    let mode_pref = eng_net
-                        .state
-                        .lock()
-                        .unwrap()
-                        .preferences
-                        .ech_routing_mode
-                        .clone();
-                    let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
-                    if mode != crate::ech_desktop::EchRoutingMode::SystemDefault {
-                        if let Some(app) = GLOBAL_APP_HANDLE.get().cloned() {
-                            eng_net.on_network_changed(&app, &new_sig).await;
-                        } else {
-                            let _ = crate::ech_desktop::reconcile_with_mode(mode);
-                        }
+                    if let Some(app) = GLOBAL_APP_HANDLE.get().cloned() {
+                        eng_net.on_network_changed(&app, &new_sig).await;
+                    } else {
+                        let mode_pref = eng_net
+                            .state
+                            .lock()
+                            .unwrap()
+                            .preferences
+                            .ech_routing_mode
+                            .clone();
+                        let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
+                        crate::ech_desktop::notify_network_route_changed();
+                        let _ = crate::ech_desktop::reconcile_with_mode(mode);
                     }
                 }
             }
@@ -588,6 +892,7 @@ impl BridgeEngine {
         }
         self.verify_coord.lock().unwrap().reset_on_healthy_response();
         self.cf_429_classifier.lock().unwrap().reset();
+        self.bg_challenge_tracker.lock().unwrap().reset();
         {
             let mut auth = self.cf_authority.lock().unwrap();
             auth.updated_at_ms = 0;
@@ -607,6 +912,7 @@ impl BridgeEngine {
             .ech_routing_mode
             .clone();
         let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
+        crate::ech_desktop::notify_network_route_changed();
         let ech_snap = crate::ech_desktop::reconcile_with_mode(mode);
         crate::ech_desktop::notify_ui_ech_updated(app, &ech_snap);
         if prev_ech_active != ech_snap.active {
@@ -763,6 +1069,28 @@ impl BridgeEngine {
                 auth.note_challenged(Some(val));
             }
         }
+        // Also strip any purged/stale cf_clearance & __cf_bm from persisted `raw_cookies`
+        // so guest/anonymous sessions never retain a ghost `cf_clearance` in memory!
+        {
+            let mut st = self.state.lock().unwrap();
+            let cleaned: Vec<String> = st
+                .raw_cookies
+                .split(';')
+                .map(|s| s.trim())
+                .filter(|s| {
+                    !s.is_empty()
+                        && !s.starts_with("cf_clearance=")
+                        && !s.starts_with("__cf_bm=")
+                })
+                .map(|s| s.to_string())
+                .collect();
+            let joined = cleaned.join("; ");
+            if st.raw_cookies != joined || st.cf_clearance_updated_at_ms != 0 {
+                st.raw_cookies = joined;
+                st.cf_clearance_updated_at_ms = 0;
+                save_state(&st);
+            }
+        }
         deleted
     }
 
@@ -866,37 +1194,77 @@ impl BridgeEngine {
         emit_diag(app, level, "NETWORK", "NetHealth", summary, Some(&detail));
     }
 
+    fn next_nav_nonce(&self) -> String {
+        format!(
+            "nav_{}_{}",
+            now_epoch_ms(),
+            self.nav_nonce_seq.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    async fn stamp_leaving_nonce(&self, nonce: &str) {
+        let js = format!(
+            "(() => {{ try {{ window.__lindoLeavingNonce = {}; }} catch (_) {{}} return true; }})()",
+            json!(nonce)
+        );
+        let _ = native_call("evaluate", json!({ "isolated": true, "script": js }), 3).await;
+    }
+
     /// Navigates the hidden shared bridge WebView back to lightweight `https://linux.do/about`
-    /// and waits for `/about` to actually commit before returning so immediate POST/GET replays never abort with `Load failed`.
+    /// and waits for the NEW `/about` document to actually commit (guarded by `window.__lindoLeavingNonce`)
+    /// before returning so immediate POST/GET replays never match the outgoing document or blindly mark a broken page ready.
     async fn restore_about_origin_context(&self) {
+        let nonce = self.next_nav_nonce();
+        self.stamp_leaving_nonce(&nonce).await;
         let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let probe_script = format!(
+            r#"(() => {{
+                if (location.origin !== 'https://linux.do') return {{ state: 'waiting' }};
+                if (window.__lindoLeavingNonce === {nonce_json}) return {{ state: 'waiting' }};
+                if (location.pathname.indexOf('/about') !== 0) return {{ state: 'waiting' }};
+                if (document.readyState === 'loading') return {{ state: 'waiting' }};
+                const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
+                    || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
+                if (explicitChallenge) return {{ state: 'challenge' }};
+                return {{ state: 'ready' }};
+            }})()"#,
+            nonce_json = json!(nonce)
+        );
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut saw_challenge = false;
         while Instant::now() < deadline {
-            let ready = native_call(
+            let state_str = native_call(
                 "evaluate",
                 json!({
                     "isolated": true,
-                    "script": "(() => { if (location.origin !== 'https://linux.do') return false; if (location.pathname.indexOf('/about') !== 0) return false; return document.readyState !== 'loading'; })()"
+                    "script": probe_script
                 }),
                 4,
             )
             .await
             .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-            if ready {
-                let _ = native_call(
-                    "evaluate",
-                    json!({
-                        "script": "(() => { const tok = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; window.__lindoCsrf = tok; window.__lindoIgnoreDomCsrf = !tok; try { if (window.MessageBus && typeof window.MessageBus.stop === 'function') window.MessageBus.stop(); } catch (_) {} return true; })()"
-                    }),
-                    4,
-                )
-                .await;
-                self.inner.lock().unwrap().origin_ready = true;
-                return;
+            .and_then(|v| v.get("state")?.as_str().map(|s| s.to_string()));
+            match state_str.as_deref() {
+                Some("ready") => {
+                    let _ = native_call(
+                        "evaluate",
+                        json!({
+                            "script": "(() => { const tok = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; window.__lindoCsrf = tok; window.__lindoIgnoreDomCsrf = !tok; try { if (window.MessageBus && typeof window.MessageBus.stop === 'function') window.MessageBus.stop(); } catch (_) {} return true; })()"
+                        }),
+                        4,
+                    )
+                    .await;
+                    let mut rt = self.inner.lock().unwrap();
+                    rt.origin_ready = true;
+                    rt.bootstrap_challenged = false;
+                    return;
+                }
+                Some("challenge") => {
+                    saw_challenge = true;
+                }
+                _ => {}
             }
-            tokio::time::sleep(Duration::from_millis(60)).await;
+            tokio::time::sleep(Duration::from_millis(65)).await;
         }
         let _ = native_call(
             "evaluate",
@@ -904,7 +1272,11 @@ impl BridgeEngine {
             4,
         )
         .await;
-        self.inner.lock().unwrap().origin_ready = true;
+        let mut rt = self.inner.lock().unwrap();
+        rt.origin_ready = false;
+        if saw_challenge {
+            rt.bootstrap_challenged = true;
+        }
     }
 
     /// Unified single-flight Cloudflare verification coordinator:
@@ -978,19 +1350,20 @@ impl BridgeEngine {
                 let _verify_guard = self.verify_lock.lock().await;
                 let _verifying_flag = VerifyingFlagGuard::enter(&self.inner);
 
-                let passed = self
+                let disposition = self
                     .run_unified_cf_verify(app, is_dark, round, &presentation, &escalate_notify)
                     .await
-                    .unwrap_or(false);
+                    .unwrap_or(UnifiedVerifyDisposition::Failed);
 
                 let _ = native_call("hide", json!({}), 5).await;
                 {
                     let _nav = self.nav_lock.write().await;
                     self.restore_about_origin_context().await;
                 }
+                let passed = disposition == UnifiedVerifyDisposition::Passed;
                 if passed {
+                    self.bg_challenge_tracker.lock().unwrap().reset();
                     let mut rt = self.inner.lock().unwrap();
-                    rt.origin_ready = true;
                     rt.bootstrap_challenged = false;
                     rt.last_challenge_url = None;
                     rt.fg_challenge_until = None;
@@ -999,7 +1372,10 @@ impl BridgeEngine {
                     rt.challenge_429_streak = 0;
                     rt.cf_attention_notified = false;
                 }
-                let outcome = flight_guard.complete(passed, Instant::now());
+                let outcome = match disposition {
+                    UnifiedVerifyDisposition::Abandoned => flight_guard.abandon(Instant::now()),
+                    _ => flight_guard.complete(passed, Instant::now()),
+                };
                 let _ = app.emit(
                     "lindo://verify-pill",
                     json!({ "visible": false, "round": round, "stage": "done" }),
@@ -1020,13 +1396,20 @@ impl BridgeEngine {
         round: u64,
         presentation: &Arc<AtomicU8>,
         escalate_notify: &Arc<Notify>,
-    ) -> Result<bool, String> {
+    ) -> Result<UnifiedVerifyDisposition, String> {
         native_call("init", json!({}), 10).await?;
         self.inner.lock().unwrap().initialized = true;
         let _ = self.seed_session_verified(true).await;
 
+        let had_challenged_before_verify = self
+            .cf_authority
+            .lock()
+            .map(|a| a.last_challenged.is_some())
+            .unwrap_or(false);
         // Snapshot incumbent clearance (NEVER purge valid cf_clearance before loading /challenge!)
-        let stale_cf: std::collections::HashSet<String> = self.browser_cf_clearances().await.into_iter().collect();
+        let mut stale_cf: std::collections::HashSet<String> =
+            self.browser_cf_clearances().await.into_iter().collect();
+        let mut stale_purged_once = false;
 
         // Drain any in-flight `evaluate()` fetches cleanly BEFORE navigating away from `/about` to `/challenge`!
         {
@@ -1060,7 +1443,7 @@ impl BridgeEngine {
         let mut terminated_reloaded = false;
         let mut pill_emitted = false;
         let loop_started = Instant::now();
-        let mut cleared = false;
+        let mut disposition = UnifiedVerifyDisposition::Failed;
 
         loop {
             let cur_pres = VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst));
@@ -1334,13 +1717,27 @@ impl BridgeEngine {
             }
 
             if is_discourse_oops {
-                let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+                let current_cfs = self.browser_cf_clearances().await;
+                let has_fresh = {
+                    let auth = self.cf_authority.lock().unwrap();
+                    current_cfs
+                        .iter()
+                        .any(|c| !stale_cf.contains(c) && !auth.is_challenged(c))
+                };
+                if has_fresh {
+                    self.cf_authority.lock().unwrap().mark_rotation_open();
+                    let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+                } else {
+                    let _ = self.sync_cookies_from_webkit_verified(false, false).await;
+                }
                 if !oops_reloaded {
                     oops_reloaded = true;
                     let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
                     continue;
                 }
-                cleared = true;
+                if has_fresh || !had_challenged_before_verify {
+                    disposition = UnifiedVerifyDisposition::Passed;
+                }
                 break;
             }
 
@@ -1486,6 +1883,73 @@ impl BridgeEngine {
                 continue;
             }
 
+            let ticket_outcome = {
+                let auth = self.cf_authority.lock().unwrap();
+                auth.evaluate_verify_outcome(
+                    &stale_cf,
+                    &current_cfs,
+                    had_challenged_before_verify,
+                    is_origin_404 || ready,
+                )
+            };
+
+            match ticket_outcome {
+                VerifyTicketOutcome::StaleUnchallenged404 => {
+                    if !stale_purged_once {
+                        stale_purged_once = true;
+                        quiet_rounds = 0;
+                        let purged = self.purge_cf_clearance_for_reverify().await;
+                        for p in purged {
+                            stale_cf.insert(p);
+                        }
+                        emit_diag(
+                            app,
+                            "INFO",
+                            "AUTH",
+                            "VerifyPurgeStale",
+                            "检测到陈旧 cf_clearance 未轮换即落入 404，已清理失效票据并重拉验证",
+                            Some(&format!("round={round}")),
+                        );
+                        let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
+                        continue;
+                    }
+                    // Already purged once, yet stale challenged cookie is still present without rotation:
+                    // NEVER wash `last_challenged` clean with `mark_rotation_open()`!
+                    let _ = self.sync_cookies_from_webkit_verified(false, false).await;
+                    disposition = if cur_pres == VerifyPresentation::Silent && !had_challenged_before_verify {
+                        UnifiedVerifyDisposition::Abandoned
+                    } else {
+                        UnifiedVerifyDisposition::Failed
+                    };
+                    break;
+                }
+                VerifyTicketOutcome::Absent => {
+                    if had_challenged_before_verify && !stale_purged_once {
+                        stale_purged_once = true;
+                        quiet_rounds = 0;
+                        let purged = self.purge_cf_clearance_for_reverify().await;
+                        for p in purged {
+                            stale_cf.insert(p);
+                        }
+                        let _ = native_call("navigate", json!({ "url": "https://linux.do/challenge" }), 8).await;
+                        continue;
+                    }
+                    // No `cf_clearance` in browser and `/challenge` reached origin without challenge:
+                    // keep `last_challenged` intact (`verified = false` — zero false whitewashing!).
+                    let _ = self.sync_cookies_from_webkit_verified(false, false).await;
+                    if cur_pres == VerifyPresentation::Silent && !stale_purged_once {
+                        disposition = UnifiedVerifyDisposition::Abandoned;
+                        break;
+                    }
+                }
+                VerifyTicketOutcome::Rotated | VerifyTicketOutcome::ExistingValid => {}
+            }
+
+            let ticket_verified = matches!(
+                ticket_outcome,
+                VerifyTicketOutcome::Rotated | VerifyTicketOutcome::ExistingValid
+            );
+
             // Self-heal zombie local session if Discourse `data-preloaded` proves `_t` expired
             let has_preloaded = probe
                 .as_ref()
@@ -1522,15 +1986,23 @@ impl BridgeEngine {
                     let _ = app.emit("lindo://state-updated", ());
                 }
             } else if let Some(profile) = preloaded_user {
-                self.cf_authority.lock().unwrap().mark_rotation_open();
-                let _ = self.sync_cookies_from_webkit_verified(true, true).await;
+                if ticket_verified {
+                    self.cf_authority.lock().unwrap().mark_rotation_open();
+                }
+                let _ = self
+                    .sync_cookies_from_webkit_verified(true, ticket_verified)
+                    .await;
                 self.commit_authenticated_user(app, profile);
             }
 
-            self.cf_authority.lock().unwrap().mark_rotation_open();
-            let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+            if ticket_verified {
+                self.cf_authority.lock().unwrap().mark_rotation_open();
+            }
+            let _ = self
+                .sync_cookies_from_webkit_verified(false, ticket_verified)
+                .await;
             let pass_detail = format!(
-                "round={round}, panelShown={panel_shown}, elapsedMs={}, hasFreshCf={has_fresh_cf}, origin404={is_origin_404}, ready={ready}",
+                "round={round}, panelShown={panel_shown}, elapsedMs={}, outcome={ticket_outcome:?}, hasFreshCf={has_fresh_cf}, origin404={is_origin_404}, ready={ready}",
                 loop_started.elapsed().as_millis()
             );
             emit_diag(
@@ -1545,11 +2017,11 @@ impl BridgeEngine {
                 },
                 Some(&pass_detail),
             );
-            cleared = true;
+            disposition = UnifiedVerifyDisposition::Passed;
             break;
         }
 
-        Ok(cleared)
+        Ok(disposition)
     }
 
     async fn ensure_ready(&self, force_reload: bool) -> Result<(), String> {
@@ -1661,11 +2133,43 @@ impl BridgeEngine {
                 rt.origin_ready = false;
                 rt.bootstrap_challenged = false;
             }
+            let nav_nonce = self.next_nav_nonce();
+            self.stamp_leaving_nonce(&nav_nonce).await;
             // Bootstrap same-origin `https://linux.do` via lightweight `/about` HTML document:
             // establishes genuine `Sec-Fetch-Mode: navigate` HTML context (`__cf_bm` + `_forum_session` + `<meta name="csrf-token">`)
             // without loading heavy 30-topic image streams!
             native_call("navigate", json!({ "url": "https://linux.do/about" }), 10).await?;
             tokio::time::sleep(Duration::from_millis(80)).await;
+            let boot_probe_script = format!(
+                r#"(() => {{
+                    if (location.origin !== 'https://linux.do') return {{ state: 'waiting' }};
+                    if (window.__lindoLeavingNonce === {nonce_json}) return {{ state: 'waiting' }};
+                    const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
+                        || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
+                    if (explicitChallenge) return {{ state: 'challenge' }};
+                    const tok = document.querySelector('meta[name="csrf-token"]')?.content || '';
+                    const preEl = document.getElementById('data-preloaded');
+                    const hasPreloaded = !!preEl;
+                    let hasPreloadedUser = false;
+                    if (preEl && preEl.dataset && preEl.dataset.preloaded) {{
+                        try {{
+                            const parsed = JSON.parse(preEl.dataset.preloaded);
+                            if (parsed && typeof parsed.currentUser === 'string' && parsed.currentUser.length > 2) {{
+                                hasPreloadedUser = true;
+                            }}
+                        }} catch (_) {{}}
+                    }}
+                    const hasDiscourseDom = hasPreloaded || !!document.querySelector('header.d-header, #main-outlet, #d-splash');
+                    if (tok || hasDiscourseDom) {{
+                        return {{ state: 'ready', csrf: tok, hasPreloaded, hasPreloadedUser }};
+                    }}
+                    if (document.readyState === 'complete' && location.pathname.indexOf('/about') === 0) {{
+                        return {{ state: 'ready', csrf: '', hasPreloaded: false, hasPreloadedUser: false }};
+                    }}
+                    return {{ state: 'waiting' }};
+                }})()"#,
+                nonce_json = json!(nav_nonce)
+            );
             let deadline = Instant::now() + Duration::from_secs(12);
             let mut challenge_seen_since: Option<Instant> = None;
             while Instant::now() < deadline {
@@ -1686,32 +2190,7 @@ impl BridgeEngine {
                     "evaluate",
                     json!({
                         "isolated": true,
-                        "script": r#"(() => {
-                            if (location.origin !== 'https://linux.do') return { state: 'waiting' };
-                            const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
-                                || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
-                            if (explicitChallenge) return { state: 'challenge' };
-                            const tok = document.querySelector('meta[name="csrf-token"]')?.content || '';
-                            const preEl = document.getElementById('data-preloaded');
-                            const hasPreloaded = !!preEl;
-                            let hasPreloadedUser = false;
-                            if (preEl && preEl.dataset && preEl.dataset.preloaded) {
-                                try {
-                                    const parsed = JSON.parse(preEl.dataset.preloaded);
-                                    if (parsed && typeof parsed.currentUser === 'string' && parsed.currentUser.length > 2) {
-                                        hasPreloadedUser = true;
-                                    }
-                                } catch (_) {}
-                            }
-                            const hasDiscourseDom = hasPreloaded || !!document.querySelector('header.d-header, #main-outlet, #d-splash');
-                            if (tok || hasDiscourseDom) {
-                                return { state: 'ready', csrf: tok, hasPreloaded, hasPreloadedUser };
-                            }
-                            if (document.readyState === 'complete' && location.pathname.indexOf('/about') === 0) {
-                                return { state: 'ready', csrf: '', hasPreloaded: false, hasPreloadedUser: false };
-                            }
-                            return { state: 'waiting' };
-                        })()"#
+                        "script": boot_probe_script
                     }),
                     5,
                 )
@@ -2163,7 +2642,14 @@ impl BridgeEngine {
         }
         let session_gen = self.session_generation.load(Ordering::Acquire);
         let method_upper = method.to_uppercase();
-        let is_logged_in = { self.state.lock().unwrap().current_user.is_some() };
+        let (is_logged_in, csrf_owner) = {
+            let st = self.state.lock().unwrap();
+            match st.current_user.as_ref() {
+                Some(u) if !u.username.trim().is_empty() => (true, u.username.to_ascii_lowercase()),
+                Some(_) => (true, "__auth__".to_string()),
+                None => (false, "__anon__".to_string()),
+            }
+        };
         let mut safe_headers = HashMap::new();
         safe_headers.insert(
             "Accept".to_string(),
@@ -2201,6 +2687,9 @@ impl BridgeEngine {
         }
 
         let is_timings_req = url.contains("/topics/timings");
+        if is_timings_req {
+            is_background = true;
+        }
         let is_write = method_upper != "GET" && method_upper != "HEAD";
         let req_priority = if is_background || is_timings_req {
             RequestPriority::Low
@@ -2361,190 +2850,17 @@ impl BridgeEngine {
             }
         }
 
+        let bridge_timeouts = compute_bridge_timeouts(!is_write, is_background, is_timings_req);
         let build_script = |force_no_store: bool| -> String {
-            let cfg = json!({
-                "url": url,
-                "method": method_upper,
-                "headers": safe_headers,
-                "form": form,
-                "referrer": custom_referrer,
-                "forceNoStore": force_no_store
-            });
-            format!(
-                r#"(async () => {{
-                try {{
-                    const c = {cfg};
-                    if (location.origin !== 'https://linux.do') return {{ originLost: true }};
-                    const write = !['GET', 'HEAD'].includes(c.method);
-                    const isOtp = c.url.indexOf('/session/otp/') !== -1;
-                    const isTimings = c.url.indexOf('/topics/timings') !== -1;
-                    const reqTimeoutMs = isTimings ? 6000 : (write ? 15000 : 10000);
-                    const reqReferrer = c.referrer || 'https://linux.do/';
-                    const readResetHdr = (hdrs) =>
-                        hdrs.get('x-ratelimit-reset') || hdrs.get('ratelimit-reset') || hdrs.get('x-rate-limit-reset');
-                    async function fetchFreshCsrf(bypassCooldown) {{
-                        const nowMs = Date.now();
-                        if (!bypassCooldown && window.__lindoCsrfCooldownUntil && nowMs < window.__lindoCsrfCooldownUntil) {{
-                            return {{ err: {{ status: 429, body: '{{"errors":["会话凭证刷新冷却中，请稍候再试"]}}', localCooldown: true }} }};
-                        }}
-                        if (window.__lindoCsrfPromise) {{
-                            return await window.__lindoCsrfPromise;
-                        }}
-                        window.__lindoCsrfPromise = (async () => {{
-                            try {{
-                                const cr = await fetch('/session/csrf.json', {{
-                                    credentials: 'include',
-                                    cache: 'no-store',
-                                    referrer: reqReferrer,
-                                    referrerPolicy: 'strict-origin-when-cross-origin',
-                                    headers: {{ 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest', 'Discourse-Present': 'true' }},
-                                    signal: AbortSignal.timeout(10000)
-                                }});
-                                if (!cr.ok) {{
-                                    window.__lindoCsrfCooldownUntil = Date.now() + 30000;
-                                    return {{
-                                        err: {{
-                                            status: cr.status,
-                                            body: await cr.text(),
-                                            retryAfter: cr.headers.get('Retry-After'),
-                                            rateLimitReset: readResetHdr(cr.headers),
-                                            challenge: cr.headers.get('cf-mitigated'),
-                                            cfRay: cr.headers.get('cf-ray'),
-                                            contentType: cr.headers.get('content-type')
-                                        }}
-                                    }};
-                                }}
-                                const tok = (await cr.json()).csrf;
-                                if (tok) {{
-                                    window.__lindoCsrf = tok;
-                                    window.__lindoCsrfCooldownUntil = 0;
-                                }}
-                                return {{ token: tok }};
-                            }} catch (e) {{
-                                window.__lindoCsrfCooldownUntil = Date.now() + 30000;
-                                throw e;
-                            }} finally {{
-                                window.__lindoCsrfPromise = null;
-                            }}
-                        }})();
-                        return await window.__lindoCsrfPromise;
-                    }}
-                    if (write) {{
-                        let token = isOtp
-                            ? null
-                            : (window.__lindoCsrf || (!window.__lindoIgnoreDomCsrf && document.querySelector('meta[name="csrf-token"]')?.content));
-                        if (!token) {{
-                            const fc = await fetchFreshCsrf(false);
-                            if (fc.err) return fc.err;
-                            token = fc.token;
-                        }}
-                        if (!token) return {{ status: 422, body: '{{"errors":["会话尚未就绪，请稍后再试"]}}' }};
-                        c.headers['X-CSRF-Token'] = token;
-                    }}
-                    window.__lindoActiveHttp = window.__lindoActiveHttp || Object.create(null);
-                    if (!window.__lindoCancelHttp) {{
-                        window.__lindoCancelHttp = function(k) {{
-                            try {{
-                                const ac = window.__lindoActiveHttp && window.__lindoActiveHttp[k];
-                                if (ac) {{ delete window.__lindoActiveHttp[k]; ac.abort(); }}
-                            }} catch (_) {{}}
-                        }};
-                    }}
-                    const reqKey = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-                    const reqCtrl = new AbortController();
-                    window.__lindoActiveHttp[reqKey] = reqCtrl;
-                    const reqTimer = setTimeout(() => {{ try {{ reqCtrl.abort(); }} catch (_) {{}} }}, reqTimeoutMs);
-                    const noStore = !!c.forceNoStore || /\/session\/(csrf|current)\.json|\/notifications|\/drafts/i.test(c.url);
-                    let r;
-                    let bodyText;
-                    try {{
-                        r = await fetch(c.url, {{
-                            method: c.method,
-                            headers: c.headers,
-                            credentials: 'include',
-                            referrer: reqReferrer,
-                            referrerPolicy: 'strict-origin-when-cross-origin',
-                            cache: noStore ? 'no-store' : 'default',
-                            body: c.form ? new URLSearchParams(c.form) : undefined,
-                            signal: reqCtrl.signal
-                        }});
-                        bodyText = await r.text();
-                    }} finally {{
-                        clearTimeout(reqTimer);
-                        try {{ delete window.__lindoActiveHttp[reqKey]; }} catch (_) {{}}
-                    }}
-                    let cfHeader = r.headers.get('cf-mitigated');
-                    let csrfRefreshed = false;
-                    if (!write && !cfHeader && (r.status === 403 || r.status === 401) && c.headers['Discourse-Logged-In'] && !c.url.includes('/session/current.json') && /not_logged_in|need to be logged in/i.test(bodyText)) {{
-                        const guestHdrs = Object.assign({{}}, c.headers);
-                        delete guestHdrs['Discourse-Logged-In'];
-                        const gr = await fetch(c.url, {{
-                            method: c.method,
-                            headers: guestHdrs,
-                            credentials: 'include',
-                            referrer: reqReferrer,
-                            referrerPolicy: 'strict-origin-when-cross-origin',
-                            cache: 'no-store',
-                            signal: AbortSignal.timeout(15000)
-                        }});
-                        if (gr.ok) {{
-                            return {{
-                                status: gr.status,
-                                body: await gr.text(),
-                                retryAfter: gr.headers.get('Retry-After'),
-                                rateLimitReset: readResetHdr(gr.headers),
-                                challenge: gr.headers.get('cf-mitigated'),
-                                cfRay: gr.headers.get('cf-ray'),
-                                contentType: gr.headers.get('content-type'),
-                                requestId: gr.headers.get('x-request-id'),
-                                discourseUser: gr.headers.get('x-discourse-username') || '',
-                                loggedOutHeader: gr.headers.get('discourse-logged-out') || '',
-                                hadUnauthLoggedHeader: true,
-                                guestFallback: true
-                            }};
-                        }}
-                    }}
-                    if (write && !isOtp && !cfHeader && (r.status === 403 || r.status === 422) && /csrf|authenticity token/i.test(bodyText)) {{
-                        window.__lindoCsrf = null;
-                        window.__lindoIgnoreDomCsrf = true;
-                        const fc2 = await fetchFreshCsrf(true);
-                        if (fc2.token) {{
-                            csrfRefreshed = true;
-                            c.headers['X-CSRF-Token'] = fc2.token;
-                            r = await fetch(c.url, {{
-                                method: c.method,
-                                headers: c.headers,
-                                credentials: 'include',
-                                referrer: reqReferrer,
-                                referrerPolicy: 'strict-origin-when-cross-origin',
-                                cache: 'no-store',
-                                body: c.form ? new URLSearchParams(c.form) : undefined,
-                                signal: AbortSignal.timeout(15000)
-                            }});
-                            bodyText = await r.text();
-                            cfHeader = r.headers.get('cf-mitigated');
-                        }}
-                    }}
-                    return {{
-                        status: r.status,
-                        body: bodyText,
-                        retryAfter: r.headers.get('Retry-After'),
-                        rateLimitReset: readResetHdr(r.headers),
-                        challenge: cfHeader,
-                        cfRay: r.headers.get('cf-ray'),
-                        contentType: r.headers.get('content-type'),
-                        requestId: r.headers.get('x-request-id'),
-                        discourseUser: r.headers.get('x-discourse-username') || '',
-                        loggedOutHeader: r.headers.get('discourse-logged-out') || '',
-                        csrfRefreshed
-                    }};
-                }} catch (err) {{
-                    return {{
-                        netErr: String((err && err.message) || err || 'Network error'),
-                        originLost: location.origin !== 'https://linux.do'
-                    }};
-                }}
-            }})()"#
+            build_http_bridge_script(
+                url,
+                &method_upper,
+                &safe_headers,
+                &form,
+                &custom_referrer,
+                force_no_store,
+                &csrf_owner,
+                bridge_timeouts,
             )
         };
 
@@ -2618,9 +2934,11 @@ impl BridgeEngine {
                             "cf_challenge_detected",
                             Some(&format!("phase=bootstrap method={method_upper} url={url}")),
                         );
+                        call_deadline.pause(Instant::now());
                         let outcome = self
                             .coordinate_cf_verification(app, VerifyPresentation::Blocking, is_dark, false)
                             .await;
+                        call_deadline.resume(Instant::now());
                         verify_attempted = true;
                         if outcome.round > 0 {
                             verify_round = Some(outcome.round);
@@ -2665,13 +2983,25 @@ impl BridgeEngine {
 
             let script = build_script(force_no_store_replay);
             let raw_eval = if in_verification {
-                native_call("evaluate", json!({ "script": script }), 16).await
+                native_call(
+                    "evaluate",
+                    json!({ "script": script }),
+                    bridge_timeouts.rust_ipc_timeout_secs,
+                )
+                .await
             } else {
                 let _nav = self.nav_lock.read().await;
-                native_call("evaluate", json!({ "script": script }), 16).await
+                native_call(
+                    "evaluate",
+                    json!({ "script": script }),
+                    bridge_timeouts.rust_ipc_timeout_secs,
+                )
+                .await
             };
 
             // Check transient network/origin failure or retryable 502/503/504 (STRICTLY idempotent GET/HEAD only!)
+            // On IPC timeout/channel error (`Err`), probe actual WebView status/origin instead of blindly assuming
+            // `originLost = true` (which previously force-reloaded `/about` and aborted sibling in-flight fetches!).
             let (is_net_or_origin_err, is_origin_lost, is_transient_5xx) = match &raw_eval {
                 Ok(v) if v.is_object() => {
                     let origin_lost = v.get("originLost").and_then(|b| b.as_bool()) == Some(true);
@@ -2687,7 +3017,30 @@ impl BridgeEngine {
                         !origin_lost && !net_err && is_transient_retryable_status(st, is_cf),
                     )
                 }
-                _ => (true, true, false),
+                _ => {
+                    let terminated = native_call("status", json!({}), 3)
+                        .await
+                        .ok()
+                        .and_then(|s| s.get("processTerminated")?.as_bool())
+                        .unwrap_or(false);
+                    let origin_ok = if terminated {
+                        false
+                    } else {
+                        native_call(
+                            "evaluate",
+                            json!({
+                                "isolated": true,
+                                "script": "location.origin === 'https://linux.do'"
+                            }),
+                            3,
+                        )
+                        .await
+                        .ok()
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(true)
+                    };
+                    (true, !origin_ok, false)
+                }
             };
 
             if (is_net_or_origin_err || is_transient_5xx)
@@ -2968,16 +3321,25 @@ impl BridgeEngine {
                 .note_challenged(carried_cf.as_deref());
             let should_probe_bg = {
                 let now = Instant::now();
+                let bg_escalated = if is_background {
+                    self.bg_challenge_tracker
+                        .lock()
+                        .unwrap()
+                        .note_background_challenge(is_write, now)
+                } else {
+                    false
+                };
                 let mut rt = self.inner.lock().unwrap();
                 rt.bg_challenge_until = Some(now + Duration::from_secs(30));
                 if !is_background {
                     rt.fg_challenge_until = Some(now + Duration::from_millis(1200));
                     false
                 } else {
-                    !rt.verifying && !rt.cf_attention_notified
+                    bg_escalated && !rt.verifying
                 }
             };
-            // Background challenge: run silent probe through unified `VerifyCoordinator`; ONLY if human click is needed,
+            // Background challenge: once threshold (`>= 2` write hits or `>= 3` read waves) is reached,
+            // run silent probe through unified `VerifyCoordinator`; ONLY if human click is needed,
             // surface the non-intrusive 32px hairline bar (`lindo://cf-attention-needed`) without interrupting reading!
             if should_probe_bg {
                 if let Some(eng) = app.try_state::<Arc<BridgeEngine>>() {
@@ -2992,6 +3354,7 @@ impl BridgeEngine {
                         {
                             let mut rt = eng_clone.inner.lock().unwrap();
                             if outcome.passed {
+                                eng_clone.bg_challenge_tracker.lock().unwrap().reset();
                                 if rt.cf_attention_notified {
                                     rt.cf_attention_notified = false;
                                     emit_attention = Some(false);
@@ -3011,7 +3374,12 @@ impl BridgeEngine {
             let now = Instant::now();
             self.api_pacer.lock().unwrap().on_success(now);
             self.cf_429_classifier.lock().unwrap().note_healthy_2xx();
-            if !is_background {
+            let has_unresolved_bg_writes = {
+                let mut tr = self.bg_challenge_tracker.lock().unwrap();
+                tr.note_healthy_response(is_write);
+                tr.has_unresolved_write_challenges()
+            };
+            if !is_background && !has_unresolved_bg_writes {
                 self.verify_coord.lock().unwrap().reset_on_healthy_response();
             }
             let clear_banner = {
@@ -3020,8 +3388,22 @@ impl BridgeEngine {
                 rt.challenge_429_streak = 0;
                 if !is_background {
                     rt.fg_challenge_until = None;
-                    rt.bg_challenge_until = None;
                     rt.bootstrap_challenged = false;
+                    // Never clear `bg_challenge_until` or hide `cf-attention-needed` on a foreground GET 200
+                    // while background mutations (`POST /topics/timings`, `PUT /notifications/mark-read.json`) remain blocked!
+                    if !has_unresolved_bg_writes {
+                        rt.bg_challenge_until = None;
+                        if rt.cf_attention_notified {
+                            rt.cf_attention_notified = false;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else if is_write && !has_unresolved_bg_writes {
+                    rt.bg_challenge_until = None;
                     if rt.cf_attention_notified {
                         rt.cf_attention_notified = false;
                         true
@@ -3035,7 +3417,7 @@ impl BridgeEngine {
             if clear_banner {
                 let _ = app.emit("lindo://cf-attention-needed", false);
             }
-            if !is_background {
+            if !is_background && !has_unresolved_bg_writes {
                 let live_cf = {
                     let raw = self.state.lock().unwrap().raw_cookies.clone();
                     Self::parse_cookie_map(&raw).remove("cf_clearance")
@@ -3455,29 +3837,70 @@ impl BridgeEngine {
             "data": data_base64
         });
         let script = format!(
-            r#"(async () => {{
-                if (location.origin !== 'https://linux.do') return {{ originLost: true }};
+            r#"(() => new Promise((resolve) => {{
                 const c = {cfg};
-                const csrfRes = await fetch('/session/csrf.json', {{ credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(12000) }});
-                if (!csrfRes.ok) return {{ status: csrfRes.status, body: await csrfRes.text(), challenge: csrfRes.headers.get('cf-mitigated'), cfRay: csrfRes.headers.get('cf-ray'), contentType: csrfRes.headers.get('content-type') }};
-                const token = (await csrfRes.json()).csrf;
-                if (!token) return {{ status: 422, body: '{{"errors":["请先完成登录"]}}' }};
-                const bin = atob(c.data);
-                const bytes = new Uint8Array(bin.length);
-                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                const form = new FormData();
-                form.append('type', 'composer');
-                form.append('synchronous', 'true');
-                form.append('files[]', new Blob([bytes], {{ type: c.mime }}), c.name);
-                const r = await fetch('/uploads.json', {{
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: {{ 'X-CSRF-Token': token, 'X-Requested-With': 'XMLHttpRequest', 'Discourse-Present': 'true' }},
-                    body: form,
-                    signal: AbortSignal.timeout(90000)
-                }});
-                return {{ status: r.status, body: await r.text(), challenge: r.headers.get('cf-mitigated'), cfRay: r.headers.get('cf-ray'), contentType: r.headers.get('content-type') }};
-            }})()"#
+                const hardCapMs = 96000;
+                let settled = false;
+                let activeCtrl = null;
+                const finish = (payload) => {{
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(hardTimer);
+                    resolve(payload);
+                }};
+                const hardTimer = setTimeout(() => {{
+                    try {{ if (activeCtrl) activeCtrl.abort(); }} catch (_) {{}}
+                    let originLostNow = false;
+                    try {{ originLostNow = location.origin !== 'https://linux.do'; }} catch (_) {{ originLostNow = true; }}
+                    finish({{ netErr: 'upload_js_hard_timeout:96000ms', originLost: originLostNow }});
+                }}, hardCapMs);
+                (async () => {{
+                    try {{
+                        if (location.origin !== 'https://linux.do') return finish({{ originLost: true }});
+                        const csrfCtrl = new AbortController();
+                        activeCtrl = csrfCtrl;
+                        const csrfTimer = setTimeout(() => {{ try {{ csrfCtrl.abort(); }} catch (_) {{}} }}, 10000);
+                        let csrfRes;
+                        try {{
+                            csrfRes = await fetch('/session/csrf.json', {{ credentials: 'include', cache: 'no-store', signal: csrfCtrl.signal }});
+                        }} finally {{
+                            clearTimeout(csrfTimer);
+                        }}
+                        if (!csrfRes.ok) return finish({{ status: csrfRes.status, body: await csrfRes.text(), challenge: csrfRes.headers.get('cf-mitigated'), cfRay: csrfRes.headers.get('cf-ray'), contentType: csrfRes.headers.get('content-type') }});
+                        const token = (await csrfRes.json()).csrf;
+                        if (!token) return finish({{ status: 422, body: '{{"errors":["请先完成登录"]}}' }});
+                        const bin = atob(c.data);
+                        const bytes = new Uint8Array(bin.length);
+                        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                        const form = new FormData();
+                        form.append('type', 'composer');
+                        form.append('synchronous', 'true');
+                        form.append('files[]', new Blob([bytes], {{ type: c.mime }}), c.name);
+                        const upCtrl = new AbortController();
+                        activeCtrl = upCtrl;
+                        const upTimer = setTimeout(() => {{ try {{ upCtrl.abort(); }} catch (_) {{}} }}, 85000);
+                        let r;
+                        let bodyText;
+                        try {{
+                            r = await fetch('/uploads.json', {{
+                                method: 'POST',
+                                credentials: 'include',
+                                headers: {{ 'X-CSRF-Token': token, 'X-Requested-With': 'XMLHttpRequest', 'Discourse-Present': 'true' }},
+                                body: form,
+                                signal: upCtrl.signal
+                            }});
+                            bodyText = await r.text();
+                        }} finally {{
+                            clearTimeout(upTimer);
+                        }}
+                        return finish({{ status: r.status, body: bodyText, challenge: r.headers.get('cf-mitigated'), cfRay: r.headers.get('cf-ray'), contentType: r.headers.get('content-type') }});
+                    }} catch (err) {{
+                        let originLostNow = false;
+                        try {{ originLostNow = location.origin !== 'https://linux.do'; }} catch (_) {{ originLostNow = true; }}
+                        return finish({{ netErr: String((err && err.message) || err || 'Upload failed'), originLost: originLostNow }});
+                    }}
+                }})();
+            }}))()"#
         );
 
         let mut budget = AttemptBudget::for_request(false);
@@ -3486,6 +3909,7 @@ impl BridgeEngine {
         let mut verify_cooldown_ms: u64 = 0;
         let mut ineffective_clearance = false;
         let mut silent_cf_revalidated = false;
+        let mut origin_reloaded_once = false;
 
         let res: Value = loop {
             let _acct = self.account_lock.read().await;
@@ -3500,6 +3924,18 @@ impl BridgeEngine {
                 let _nav = self.nav_lock.read().await;
                 native_call("evaluate", json!({ "script": script }), 105).await?
             };
+            if eval_val.get("originLost").and_then(|v| v.as_bool()) == Some(true) {
+                if !origin_reloaded_once {
+                    origin_reloaded_once = true;
+                    self.inner.lock().unwrap().origin_ready = false;
+                    let _ = self.ensure_ready(true).await;
+                    continue;
+                }
+                return Err("内置网页上下文正在唤醒，请重试上传".to_string());
+            }
+            if let Some(net_err) = eval_val.get("netErr").and_then(|v| v.as_str()) {
+                return Err(format!("上传请求超时或中断: {net_err}"));
+            }
             let st = eval_val.get("status").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
             let bd = eval_val.get("body").and_then(|v| v.as_str()).unwrap_or("");
             let cf = eval_val.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
@@ -4059,11 +4495,20 @@ impl BridgeEngine {
         };
         let probe_get_url = Self::challenge_url_to_probe_get_url(&recovery_url);
 
-        let stale_cf: std::collections::HashSet<String> = if !login && !is_otp_flow {
+        let had_challenged_before_verify = if !login && !is_otp_flow {
+            self.cf_authority
+                .lock()
+                .map(|a| a.last_challenged.is_some())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let mut stale_cf: std::collections::HashSet<String> = if !login && !is_otp_flow {
             self.browser_cf_clearances().await.into_iter().collect()
         } else {
             std::collections::HashSet::new()
         };
+        let mut stale_purged_once = false;
 
         let mut mask_visible = false;
         if !login && !is_otp_flow {
@@ -4521,6 +4966,59 @@ impl BridgeEngine {
                     continue;
                 }
 
+                let ticket_outcome = {
+                    let auth = self.cf_authority.lock().unwrap();
+                    auth.evaluate_verify_outcome(
+                        &stale_cf,
+                        &current_cfs,
+                        had_challenged_before_verify,
+                        is_origin_404 || ready,
+                    )
+                };
+                match ticket_outcome {
+                    VerifyTicketOutcome::StaleUnchallenged404 => {
+                        if !stale_purged_once {
+                            stale_purged_once = true;
+                            quiet_rounds = 0;
+                            let purged = self.purge_cf_clearance_for_reverify().await;
+                            for p in purged {
+                                stale_cf.insert(p);
+                            }
+                            let _ = native_call(
+                                "navigate",
+                                json!({ "url": "https://linux.do/challenge" }),
+                                8,
+                            )
+                            .await;
+                            continue;
+                        }
+                        let _ = self.sync_cookies_from_webkit_verified(false, false).await;
+                        return Ok(false);
+                    }
+                    VerifyTicketOutcome::Absent => {
+                        if had_challenged_before_verify && !stale_purged_once {
+                            stale_purged_once = true;
+                            quiet_rounds = 0;
+                            let purged = self.purge_cf_clearance_for_reverify().await;
+                            for p in purged {
+                                stale_cf.insert(p);
+                            }
+                            let _ = native_call(
+                                "navigate",
+                                json!({ "url": "https://linux.do/challenge" }),
+                                8,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                    VerifyTicketOutcome::Rotated | VerifyTicketOutcome::ExistingValid => {}
+                }
+                let ticket_verified = matches!(
+                    ticket_outcome,
+                    VerifyTicketOutcome::Rotated | VerifyTicketOutcome::ExistingValid
+                );
+
                 let has_preloaded = probe
                     .as_ref()
                     .and_then(|p| p.get("hasPreloaded")?.as_bool())
@@ -4561,13 +5059,22 @@ impl BridgeEngine {
                         let _ = app.emit("lindo://state-updated", ());
                     }
                 } else if let Some(profile) = preloaded_user {
-                    self.cf_authority.lock().unwrap().mark_rotation_open();
-                    let _ = self.sync_cookies_from_webkit_verified(true, true).await;
+                    if ticket_verified {
+                        self.cf_authority.lock().unwrap().mark_rotation_open();
+                    }
+                    let _ = self
+                        .sync_cookies_from_webkit_verified(true, ticket_verified)
+                        .await;
                     self.commit_authenticated_user(app, profile);
                 }
 
-                self.cf_authority.lock().unwrap().mark_rotation_open();
-                let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+                if ticket_verified {
+                    self.cf_authority.lock().unwrap().mark_rotation_open();
+                }
+                let _ = self
+                    .sync_cookies_from_webkit_verified(false, ticket_verified)
+                    .await;
+                self.bg_challenge_tracker.lock().unwrap().reset();
                 {
                     let mut rt = self.inner.lock().unwrap();
                     rt.last_challenge_url = None;
@@ -5497,12 +6004,18 @@ impl BridgeEngine {
             native_call("setCookies", json!({ "cookies": to_set }), 10).await?;
         }
         self.inner.lock().unwrap().last_seeded_token = installed_t;
+        let nav_nonce = self.next_nav_nonce();
+        self.stamp_leaving_nonce(&nav_nonce).await;
         native_call("navigate", json!({ "url": "https://linux.do/about" }), 10).await?;
+        let check_js = format!(
+            "location.origin === 'https://linux.do' && window.__lindoLeavingNonce !== {} && document.readyState !== 'loading'",
+            json!(nav_nonce)
+        );
         let deadline = Instant::now() + Duration::from_secs(12);
         while Instant::now() < deadline {
             let ok = native_call(
                 "evaluate",
-                json!({ "script": "location.origin === 'https://linux.do' && document.readyState !== 'loading'" }),
+                json!({ "isolated": true, "script": check_js }),
                 6,
             )
             .await

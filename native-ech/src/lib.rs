@@ -166,6 +166,7 @@ pub fn update_network(net_handle: u64, bypass_vpn: bool) {
         if let Some(ref mut state) = *guard {
             state.net_handle = net_handle;
             state.bypass_vpn = bypass_vpn;
+            state.upstream.clear_h2_pool();
             if changed {
                 Some(Arc::clone(&state.doh))
             } else {
@@ -181,6 +182,29 @@ pub fn update_network(net_handle: u64, bypass_vpn: bool) {
                 let _ = doh.get_ech_and_sticky_ip().await;
             });
         }
+    }
+}
+
+/// Notifies the active ECH gateway that the host's underlying network route/interface/proxy changed
+/// even when `(net_handle, bypass_vpn)` or `GatewayRouteMode` stayed identical (e.g., Desktop Wi-Fi switch).
+/// Bumps `NETWORK_GEN`, evicts dead pooled HTTP/2 sessions, and warms DoH ECH + sticky IP in background.
+pub fn notify_network_changed() {
+    let meta = {
+        let guard = gateway_lock().lock();
+        guard
+            .as_ref()
+            .map(|g| (g.net_handle, g.bypass_vpn, Arc::clone(&g.doh), Arc::clone(&g.upstream)))
+    };
+    if let Some((handle, bypass, doh, upstream)) = meta {
+        net_bind::update_network(handle, bypass);
+        upstream.clear_h2_pool();
+        if let Ok(rt) = runtime() {
+            rt.spawn(async move {
+                let _ = doh.get_ech_and_sticky_ip().await;
+            });
+        }
+    } else {
+        net_bind::update_network(net_bind::physical_handle(), net_bind::bypass_vpn());
     }
 }
 
@@ -1110,5 +1134,25 @@ mod tests {
         assert!(captured_connect.lock().starts_with("CONNECT linux.do:443 HTTP/1.1"));
 
         server.stop();
+    }
+
+    #[test]
+    fn test_upstream_send_timeout_and_notify_network_changed_bump_gen() {
+        assert_eq!(
+            tls_upstream::upstream_send_timeout_for_path(&http::Method::POST, "/uploads.json"),
+            std::time::Duration::from_secs(95)
+        );
+        assert_eq!(
+            tls_upstream::upstream_send_timeout_for_path(&http::Method::POST, "/posts.json"),
+            std::time::Duration::from_secs(25)
+        );
+        assert_eq!(
+            tls_upstream::upstream_send_timeout_for_path(&http::Method::GET, "/latest.json"),
+            std::time::Duration::from_secs(15)
+        );
+
+        let before_gen = net_bind::network_gen();
+        notify_network_changed();
+        assert!(net_bind::network_gen() > before_gen);
     }
 }

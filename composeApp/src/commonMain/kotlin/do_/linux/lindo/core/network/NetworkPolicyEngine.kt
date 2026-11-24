@@ -6,6 +6,8 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlin.math.max
 import kotlin.math.min
 
@@ -560,12 +562,106 @@ class CallDeadline(
     companion object {
         fun forRequest(isRead: Boolean, isBackground: Boolean, nowMs: Long = System.currentTimeMillis()): CallDeadline {
             val budget = when {
-                isBackground -> 10_000L
+                isBackground -> 14_000L
                 isRead -> 28_000L
                 else -> 35_000L
             }
             return CallDeadline(budget, nowMs)
         }
+    }
+}
+
+/**
+ * 协程上下文传递的当前请求 `CallDeadline`：
+ * 使平台层 `silentRevalidateChallenge` / `verifyInteractiveChallengeSession` 在等待安全验证完成期间
+ * 自动调用 `pause()` / `resume()` 冻结外层调用时限，杜绝人工勾框刚通过外层请求却因预算耗尽被误杀。
+ */
+class ActiveCallDeadlineContext(
+    val deadline: CallDeadline
+) : AbstractCoroutineContextElement(ActiveCallDeadlineContext) {
+    companion object Key : CoroutineContext.Key<ActiveCallDeadlineContext>
+}
+
+data class BackgroundChallengeDecision(
+    val invalidateClearance: Boolean,
+    val requestPrewarm: Boolean,
+    val streak: Int,
+    val writeStreak: Int
+)
+
+/**
+ * 后台请求挑战实测证伪追踪器：
+ * - 第 1 次后台撞盾且持有在位 `cf_clearance`：不毒化票据、不触发预热（防止瞬时毛刺引发死循环）；
+ * - 连续 >= 2 次后台撞盾（如 VPN 后台切出口 IP 后，`GET` 仍放行但 `POST /topics/timings`、`PUT /notifications/mark-read.json` 持续 403）：
+ *   立即证伪旧 IP 残留票据并触发单飞零 UI 预热，彻底终结长达数小时的 `hasCf=true, prewarm=false` 静默死锁；
+ * - 注意：普通 `GET 2xx` 仅清零纯读抖动计数，绝不掩盖持续失败的后台写挑战计数（`consecutiveWriteHits` 仅在真实写 `2xx` 或新票据过盾后清零）。
+ */
+class BackgroundChallengeTracker(
+    private val staleResetWindowMs: Long = 30L * 60L * 1000L,
+    private val readWaveWindowMs: Long = 5_000L
+) {
+    private var readWaves: Int = 0
+    private var lastReadWaveAtMs: Long = 0L
+    private var consecutiveWriteHits: Int = 0
+    private var lastHitAtMs: Long = 0L
+
+    @Synchronized
+    fun onBackgroundChallenge(
+        isWrite: Boolean,
+        hasHealthyClearance: Boolean,
+        nowMs: Long = System.currentTimeMillis()
+    ): BackgroundChallengeDecision {
+        if (lastHitAtMs > 0L && (nowMs - lastHitAtMs) > staleResetWindowMs) {
+            readWaves = 0
+            lastReadWaveAtMs = 0L
+            consecutiveWriteHits = 0
+        }
+        lastHitAtMs = nowMs
+        if (isWrite) {
+            consecutiveWriteHits += 1
+        } else if (lastReadWaveAtMs <= 0L || (nowMs - lastReadWaveAtMs) >= readWaveWindowMs) {
+            readWaves += 1
+            lastReadWaveAtMs = nowMs
+        }
+        if (!hasHealthyClearance) {
+            return BackgroundChallengeDecision(
+                invalidateClearance = false,
+                requestPrewarm = true,
+                streak = readWaves + consecutiveWriteHits,
+                writeStreak = consecutiveWriteHits
+            )
+        }
+        val shouldEscalate = consecutiveWriteHits >= 2 || readWaves >= 3
+        return BackgroundChallengeDecision(
+            invalidateClearance = shouldEscalate,
+            requestPrewarm = shouldEscalate,
+            streak = readWaves + consecutiveWriteHits,
+            writeStreak = consecutiveWriteHits
+        )
+    }
+
+    @Synchronized
+    fun noteHealthyResponse(isWrite: Boolean) {
+        if (isWrite) {
+            readWaves = 0
+            lastReadWaveAtMs = 0L
+            consecutiveWriteHits = 0
+            lastHitAtMs = 0L
+        } else {
+            readWaves = 0
+            lastReadWaveAtMs = 0L
+            if (consecutiveWriteHits == 0) {
+                lastHitAtMs = 0L
+            }
+        }
+    }
+
+    @Synchronized
+    fun reset() {
+        readWaves = 0
+        lastReadWaveAtMs = 0L
+        consecutiveWriteHits = 0
+        lastHitAtMs = 0L
     }
 }
 
@@ -756,6 +852,7 @@ object NetworkPolicyEngine {
     val mediaTokenBucket = AdaptiveTokenBucket(initialRate = 5.0, minRate = 1.2, maxRate = 6.5, maxBurst = 6.0)
     val priorityGate = PriorityGate(maxInflight = 4, maxLowInflight = 1)
     val timeoutBlackholeDetector = TimeoutBlackholeDetector()
+    val backgroundChallengeTracker = BackgroundChallengeTracker()
 
     /** 由平台层（如 MainActivity）挂载的只读实时运行态元数据提供器：(profileName, webViewGen, netSignature) */
     @Volatile
@@ -788,6 +885,24 @@ object NetworkPolicyEngine {
             }
         }
         return clean
+    }
+
+    /**
+     * 提取非 VPN 的底层物理网络承载集合（如 `"wifi"`、`"cell"`、`"eth"`）：
+     * 用于在 VPN 隧道接口保持不断开（`vpn|tun0|198.18.0.2`）时，经 2.0s 稳态去抖精准识别真实的「Wi-Fi ↔ 蜂窝 5G」物理链路迁移，
+     * 既完全免疫 77ms 双通道瞬态抖动，又能在真切网后及时回收挂死的 H2 连接池并放开 `cf_clearance` 轮换窗口。
+     */
+    fun extractPhysicalTransportSet(rawSig: String): String {
+        val clean = rawSig.trim()
+        if (clean.isEmpty()) return ""
+        val transportPart = clean.substringBefore('|')
+        return transportPart
+            .split(',')
+            .map { it.trim().lowercase() }
+            .filter { it == "wifi" || it == "cell" || it == "eth" }
+            .distinct()
+            .sorted()
+            .joinToString(",")
     }
 
     /** CSRF 刷新失败冷却截止时间（P1 统一收口，30s 冷却避免 403/429 风暴） */
@@ -916,6 +1031,7 @@ object NetworkPolicyEngine {
         verifyCoordinator.resetOnHealthyResponse()
         cf429Classifier.reset()
         timeoutBlackholeDetector.noteHealthyResponse()
+        backgroundChallengeTracker.reset()
         clearCsrfCooldown()
         CfClearanceAuthority.markRotationOpen()
     }
@@ -927,6 +1043,7 @@ object NetworkPolicyEngine {
         mediaTokenBucket.reset()
         priorityGate.resetForTesting()
         timeoutBlackholeDetector.resetForTesting()
+        backgroundChallengeTracker.reset()
         clearCsrfCooldown()
     }
 }

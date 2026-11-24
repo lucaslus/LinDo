@@ -313,6 +313,9 @@ object CookieSentinel {
         if (observedCfValues.isNotEmpty()) {
             val winnerCf = CfClearanceAuthority.selectWinner(observedCfValues, verified = verified)
             if (winnerCf != null) {
+                if (verified) {
+                    NetworkPolicyEngine.backgroundChallengeTracker.reset()
+                }
                 removeCookieByName("cf_clearance", domain = domain)
                 putCookie(
                     StoredCookieRecord(
@@ -2746,7 +2749,11 @@ object LinuxDoRepository {
     fun getCachedCsrfToken(): String? = cachedCsrfToken?.takeIf { it.isNotBlank() }
 
     fun updateCsrfToken(token: String?) {
-        cachedCsrfToken = token?.trim()?.takeIf { it.isNotBlank() }
+        val clean = token?.trim()?.takeIf { it.isNotBlank() }
+        cachedCsrfToken = clean
+        if (clean != null) {
+            NetworkPolicyEngine.clearCsrfCooldown()
+        }
     }
 
     private suspend fun fetchCsrfTokenViaSharedClient(forceRefresh: Boolean = false): String? {
@@ -2836,21 +2843,34 @@ object LinuxDoRepository {
     private val lastBackgroundChallengeLogAtMs = java.util.concurrent.atomic.AtomicLong(0L)
 
     /**
-     * 后台请求撞盾：只记录诊断 + 请求平台零 UI 预热，绝不拉全局熔断、绝不把当前票据标为失效。
-     * （timings 自身已有 90s 挂起，通知轮询下一轮自然重试。）
+     * 后台请求撞盾：绝不拉起全局 `challengeBlockedUntilMs` 熔断（不阻断前台操作）；
+     * - 首次偶发撞盾且持有健康票据时：静默忽略（防瞬时毛刺死循环）；
+     * - 无健康票据、或连续 >= 2 次后台撞盾（如 VPN 出口切换后 `POST /topics/timings`、`PUT /notifications/mark-read.json` 持续 403）：
+     *   按实测证伪淘汰失效票据并触发单飞零 UI 预热，破除持续数小时的静默死锁。
      */
     private fun noteBackgroundChallenge(method: String, url: String, status: Int) {
         val now = System.currentTimeMillis()
-        val hasCf = !CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value.isNullOrBlank()
+        val isWrite = method.uppercase() !in setOf("GET", "HEAD", "OPTIONS")
+        val carriedCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
+        val hasHealthyCf = !carriedCf.isNullOrBlank() && !CfClearanceAuthority.isChallenged(carriedCf)
+        val decision = NetworkPolicyEngine.backgroundChallengeTracker.onBackgroundChallenge(
+            isWrite = isWrite,
+            hasHealthyClearance = hasHealthyCf,
+            nowMs = now
+        )
+        if (decision.invalidateClearance && !carriedCf.isNullOrBlank()) {
+            CfClearanceAuthority.noteChallenged(carriedCf)
+            CookieSentinel.removeCookieByName("cf_clearance", domain = "linux.do")
+        }
         val last = lastBackgroundChallengeLogAtMs.get()
         if (now - last >= 30_000L && lastBackgroundChallengeLogAtMs.compareAndSet(last, now)) {
             LinDoDiagnosticLogger.warn(
                 DiagnosticCategory.NETWORK,
                 "BackgroundChallenge",
-                "${method.uppercase()} ${LinDoDiagnosticLogger.sanitizeUrl(url)} -> HTTP $status [cfMitigated=challenge] (background; hasCf=$hasCf, prewarm=${!hasCf})"
+                "${method.uppercase()} ${LinDoDiagnosticLogger.sanitizeUrl(url)} -> HTTP $status [cfMitigated=challenge] (background; hasCf=$hasHealthyCf, streak=${decision.streak}, writeStreak=${decision.writeStreak}, prewarm=${decision.requestPrewarm})"
             )
         }
-        if (!hasCf) {
+        if (decision.requestPrewarm) {
             runCatching { UserApiKeyAuthManager.onRequestClearancePrewarm?.invoke("background_challenge") }
         }
     }
@@ -3031,7 +3051,9 @@ object LinuxDoRepository {
                 val startMs = System.currentTimeMillis()
                 lastWebViewDiagReason = null
                 return try {
-                    val rawResult = executor(url, method, formParams, overrideHeaders)
+                    val rawResult = withContext(ActiveCallDeadlineContext(deadline)) {
+                        executor(url, method, formParams, overrideHeaders)
+                    }
                     val result = rawResult?.takeIf { it.first != 0 }
                     val elapsedMs = System.currentTimeMillis() - startMs
                     var diagReason: String? = null
@@ -3047,10 +3069,14 @@ object LinuxDoRepository {
                         }
                     }
                     lastWebViewDiagReason = diagReason
+                    if (diagReason in setOf("csrf_timeout", "csrf_net_err", "csrf_failed")) {
+                        NetworkPolicyEngine.noteCsrfRefreshFailed()
+                    }
                     if (result == null && diagReason != null && diagReason in setOf(
                             "csrf_timeout",
                             "csrf_net_err",
                             "csrf_failed",
+                            "origin_lost",
                             "webview_not_ready",
                             "webview_not_ready_pre",
                             "webview_null",
@@ -3114,6 +3140,7 @@ object LinuxDoRepository {
                     challenge429Streak.set(0)
                     NetworkPolicyEngine.timeoutBlackholeDetector.noteHealthyResponse()
                     NetworkPolicyEngine.verifyCoordinator.resetOnHealthyResponse()
+                    NetworkPolicyEngine.backgroundChallengeTracker.noteHealthyResponse(isWrite = true)
                     CfClearanceAuthority.confirmHealthy(
                         CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                     )
@@ -3161,6 +3188,7 @@ object LinuxDoRepository {
                         challenge429Streak.set(0)
                         NetworkPolicyEngine.timeoutBlackholeDetector.noteHealthyResponse()
                         NetworkPolicyEngine.verifyCoordinator.resetOnHealthyResponse()
+                        NetworkPolicyEngine.backgroundChallengeTracker.noteHealthyResponse(isWrite = false)
                         CfClearanceAuthority.confirmHealthy(
                             CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
                         )
@@ -7615,7 +7643,7 @@ object LinuxDoRepository {
             val statusCode = fastRes?.first ?: 0
             val fastBody = fastRes?.second
             if (fastBody != null && looksLikeCloudflareChallenge(fastBody)) {
-                noteBackgroundChallenge("GET", fastUrl, statusCode)
+                // executeHttp 已统一上报 noteBackgroundChallenge，此处直接返回避免单次摘要请求重复计次
                 return@withPermit null
             }
             if (statusCode == 429) {

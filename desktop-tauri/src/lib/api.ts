@@ -685,8 +685,14 @@ async function mutateJsonOrThrow(
   form?: Record<string, string>,
   extraHeaders?: Record<string, string>
 ): Promise<any> {
+  const isBackground = extraHeaders?.["Discourse-Background"] === "true";
   let res = await siteRequest(url, method, form, extraHeaders);
-  if (res.isChallenge && !res.diag?.verifyAttempted && !(res.diag?.verifyCooldownMs ?? 0)) {
+  if (
+    !isBackground &&
+    res.isChallenge &&
+    !res.diag?.verifyAttempted &&
+    !(res.diag?.verifyCooldownMs ?? 0)
+  ) {
     const passed = await triggerInteractiveVerifyOnce(false);
     if (passed) {
       res = await siteRequest(url, method, form, extraHeaders);

@@ -19,6 +19,8 @@ import {
   recordConfirmedTopicFloorForNotifications,
   resetNotificationReadState,
   resolveAuthoritativeUnreadCount,
+  saveCloudDraft,
+  SiteError,
 } from "../lib/api";
 
 function makeNotif(id: number, overrides: Partial<NotificationItem> = {}): NotificationItem {
@@ -194,5 +196,35 @@ describe("Notification read-state & 60-page sync refactor", () => {
     resetNotificationReadState();
     const afterReset = await fetchNotifications(0, true);
     expect(afterReset[0].read).toBe(false);
+  });
+
+  it("never triggers interactive site_verify modal when background saveCloudDraft hits 403 challenge", async () => {
+    const seenCmds: string[] = [];
+    invokeMock.mockImplementation(async (cmd: string) => {
+      seenCmds.push(cmd);
+      if (cmd === "site_request") {
+        return {
+          status: 403,
+          isChallenge: true,
+          isUnauthenticated: false,
+          body: "<!--lindo-cf-challenge--><html>Just a moment</html>",
+          diag: { verifyAttempted: false, verifyCooldownMs: 0 },
+        };
+      }
+      if (cmd === "site_verify") {
+        return true;
+      }
+      return {};
+    });
+
+    await expect(
+      saveCloudDraft({
+        draftKey: "topic_100",
+        sequence: 1,
+        data: { reply: "typing draft..." },
+      })
+    ).rejects.toBeInstanceOf(SiteError);
+
+    expect(seenCmds).toEqual(["site_request"]);
   });
 });

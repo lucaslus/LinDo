@@ -36,6 +36,20 @@ fn empty_req_body() -> BoxReqBody {
         .boxed()
 }
 
+/// Computes response-header wait timeout for upstream ECH HTTP/1.1 & HTTP/2 requests.
+/// Multipart `/uploads` streams full file bytes and waits for Discourse synchronous S3 processing before
+/// response headers arrive, so it MUST NOT be capped at 15s (which previously aborted >15s uploads with 502).
+pub fn upstream_send_timeout_for_path(method: &http::Method, path: &str) -> Duration {
+    let lower_path = path.to_ascii_lowercase();
+    if lower_path.contains("/uploads") {
+        Duration::from_secs(95)
+    } else if matches!(*method, http::Method::GET | http::Method::HEAD | http::Method::OPTIONS) {
+        Duration::from_secs(15)
+    } else {
+        Duration::from_secs(25)
+    }
+}
+
 static ECH_HANDSHAKE_COUNT: AtomicU64 = AtomicU64::new(0);
 static LAST_ECH_ACCEPTED: AtomicBool = AtomicBool::new(false);
 
@@ -170,10 +184,11 @@ impl UpstreamPool {
         }
 
         let mut boxed_req = req.map(|b| b.boxed());
+        let send_timeout = upstream_send_timeout_for_path(boxed_req.method(), boxed_req.uri().path());
         if let Some(mut sender) = self.take_ready_h2_sender(host) {
             if !sender.is_closed() && sender.ready().await.is_ok() {
                 normalize_for_h2(host, &mut boxed_req);
-                return match timeout(Duration::from_secs(15), sender.send_request(boxed_req)).await {
+                return match timeout(send_timeout, sender.send_request(boxed_req)).await {
                     Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
                     Ok(Err(e)) => {
                         self.evict_h2_sender(host);
@@ -229,12 +244,13 @@ impl UpstreamPool {
         host: &str,
         mut req: Request<BoxReqBody>,
     ) -> Result<Response<BoxRespBody>, String> {
+        let send_timeout = upstream_send_timeout_for_path(req.method(), req.uri().path());
         let conn = {
             let _guard = self.connect_lock.lock().await;
             if let Some(mut sender) = self.take_ready_h2_sender(host) {
                 if !sender.is_closed() && sender.ready().await.is_ok() {
                     normalize_for_h2(host, &mut req);
-                    return match timeout(Duration::from_secs(15), sender.send_request(req)).await {
+                    return match timeout(send_timeout, sender.send_request(req)).await {
                         Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
                         Ok(Err(e)) => {
                             self.evict_h2_sender(host);
@@ -288,7 +304,7 @@ impl UpstreamPool {
             self.store_h2_sender(&clean_host, net_gen, sender.clone());
 
             normalize_for_h2(host, &mut req);
-            match timeout(Duration::from_secs(15), sender.send_request(req)).await {
+            match timeout(send_timeout, sender.send_request(req)).await {
                 Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
                 Ok(Err(e)) => {
                     self.evict_h2_sender(&clean_host);
@@ -313,7 +329,7 @@ impl UpstreamPool {
                 .await
                 .map_err(|e| format!("http1 ready: {e}"))?;
             normalize_for_h1(host, &mut req);
-            let resp = timeout(Duration::from_secs(15), sender.send_request(req))
+            let resp = timeout(send_timeout, sender.send_request(req))
                 .await
                 .map_err(|_| "http1 send timeout".to_string())?
                 .map_err(|e| format!("http1 send: {e}"))?;

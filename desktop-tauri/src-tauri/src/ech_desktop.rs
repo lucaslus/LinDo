@@ -451,10 +451,12 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
             }
             if should_ech {
                 lindo_ech::set_gateway_route_mode(GatewayRouteMode::EchDirect);
-                let port = lindo_ech::current_gateway_port();
                 #[cfg(target_os = "macos")]
-                unsafe {
-                    lindo_macos_set_webkit_proxy(port);
+                {
+                    let port = lindo_ech::current_gateway_port();
+                    unsafe {
+                        lindo_macos_set_webkit_proxy(port);
+                    }
                 }
             }
         } else if supported {
@@ -694,6 +696,10 @@ pub fn current_snapshot() -> EchDesktopSnapshot {
 
 pub fn rotate_sticky_ip() {
     lindo_ech::rotate_sticky_ip();
+}
+
+pub fn notify_network_route_changed() {
+    lindo_ech::notify_network_changed();
 }
 
 pub fn notify_ui_ech_updated(app: &AppHandle, snap: &EchDesktopSnapshot) {

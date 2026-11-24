@@ -1963,6 +1963,11 @@ internal fun LinDoApp(
     var isFeedPaneCollapsed by remember { mutableStateOf(false) }
     var pendingVerifyTargetUrl by remember { mutableStateOf("https://linux.do/challenge#lindo-verify") }
     var pendingVerifyModalCallback by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
+    fun cancelPendingVerifyModalIfAny() {
+        val cb = pendingVerifyModalCallback ?: return
+        pendingVerifyModalCallback = null
+        cb(false)
+    }
     LaunchedEffect(authVersion) {
         topicDetailUiCache.clear()
     }
@@ -1982,6 +1987,7 @@ internal fun LinDoApp(
             pendingVerifyTargetUrl = "https://linux.do/challenge#lindo-verify"
             showSiteVerifySheet = true
         } else if (hasEmbeddedWebLogin) {
+            cancelPendingVerifyModalIfAny()
             activeWebLoginUrl = url
         } else {
             val normalized = trimmed.trimEnd('/')
@@ -2836,6 +2842,7 @@ internal fun LinDoApp(
                     showAuthSheet = false
                     showSiteVerifySheet = false
                     guestLoginPrompt = null
+                    cancelPendingVerifyModalIfAny()
                     activeWebLoginUrl = null
                     isGuestMode = false
                     authVersion++
@@ -2848,6 +2855,7 @@ internal fun LinDoApp(
                     authStatusHint = null
                     showAuthSheet = false
                     guestLoginPrompt = null
+                    cancelPendingVerifyModalIfAny()
                     activeWebLoginUrl = null
                     isGuestMode = false
                     authVersion++
@@ -2928,6 +2936,7 @@ internal fun LinDoApp(
             sessionExpiredBannerUser = null
             UserApiKeyAuthManager.clearExpiredSessionNotice()
             guestLoginPrompt = null
+            cancelPendingVerifyModalIfAny()
             activeWebLoginUrl = null
             showAuthSheet = false
             loadTopics(currentSort, selectedCategoryId, selectedTag, currentTopPeriod)
@@ -5207,7 +5216,12 @@ internal fun LinDoApp(
                 activeWebLoginUrl?.let { loginUrl ->
                     DisposableEffect(loginUrl) {
                         val remove = BackNavigationBridge.pushInterceptor { closeWebPage() }
-                        onDispose { remove() }
+                        onDispose {
+                            remove()
+                            if (do_.linux.lindo.core.network.webPagePurpose(loginUrl) == do_.linux.lindo.core.network.WebPagePurpose.VERIFICATION) {
+                                cancelPendingVerifyModalIfAny()
+                            }
+                        }
                     }
                     val renderer = PlatformWebLoginHost.webLoginRenderer
                     if (renderer != null) {

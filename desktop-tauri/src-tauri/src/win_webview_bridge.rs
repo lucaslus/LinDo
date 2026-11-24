@@ -232,12 +232,22 @@ async fn eval_async_promise(
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(2));
     let mut delay_ms = 10u64;
+    let mut last_poll_err: Option<String> = None;
 
     while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         delay_ms = (delay_ms + 12).min(55);
 
-        let raw = eval_single_sync(wv, poll_js.clone()).await?;
+        let raw = match eval_single_sync(wv, poll_js.clone()).await {
+            Ok(r) => {
+                last_poll_err = None;
+                r
+            }
+            Err(e) => {
+                last_poll_err = Some(e);
+                continue;
+            }
+        };
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed == "null" || trimmed == "\"\"" {
             continue;
@@ -250,8 +260,16 @@ async fn eval_async_promise(
         if inner_json_str.is_empty() {
             continue;
         }
-        let envelope: Value = serde_json::from_str(&inner_json_str)
-            .map_err(|e| format!("解析 WebView2 返回结果失败: {e}"))?;
+        let envelope: Value = match serde_json::from_str(&inner_json_str) {
+            Ok(v) => v,
+            Err(e) => {
+                let cleanup_js = format!(
+                    r#"if (window.__lindoAsyncStore) {{ delete window.__lindoAsyncStore["{slot}"]; }}"#
+                );
+                let _ = wv.eval(cleanup_js);
+                return Err(format!("解析 WebView2 返回结果失败: {e}"));
+            }
+        };
         if envelope.get("ok").and_then(|b| b.as_bool()) == Some(true) {
             return Ok(envelope.get("value").cloned().unwrap_or(Value::Null));
         } else {
@@ -267,7 +285,11 @@ async fn eval_async_promise(
         r#"if (window.__lindoAsyncStore) {{ delete window.__lindoAsyncStore["{slot}"]; }}"#
     );
     let _ = wv.eval(cleanup_js);
-    Err("WebView2 异步操作超时".to_string())
+    if let Some(err) = last_poll_err {
+        Err(format!("WebView2 异步操作超时 ({err})"))
+    } else {
+        Err("WebView2 异步操作超时".to_string())
+    }
 }
 
 fn purge_storage_auth_js(wv: &WebviewWindow) {

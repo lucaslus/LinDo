@@ -169,6 +169,15 @@ object EchGatewayManager {
 
     fun consumeRouteStackFlip(): Boolean = routeStackFlipped.getAndSet(false)
 
+    fun hasPendingProxyOverride(): Boolean = pendingProxyDeferred?.isCompleted == false
+
+    suspend fun awaitPendingProxyOverride(timeoutMs: Long = 1_500L) {
+        val pending = pendingProxyDeferred ?: return
+        if (!pending.isCompleted) {
+            withTimeoutOrNull(timeoutMs) { pending.await() }
+        }
+    }
+
     suspend fun awaitReconcileAndProxyReady(timeoutMs: Long = 3_500L) {
         if (!initialized.get() || !NativeEchBridge.loaded) return
         withTimeoutOrNull(timeoutMs) {
