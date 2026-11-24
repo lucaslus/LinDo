@@ -130,6 +130,52 @@ class AppUpdateManagerTest {
     }
 
     @Test
+    fun cleanupObsoleteCacheEvictsOlderApkWhenNewerVersionArrivesAndMarksExactVerifiedApkReady() {
+        val tempDir = java.nio.file.Files.createTempDirectory("lindo_update_gc_test").toFile()
+        try {
+            AppUpdateManager.cacheDirProvider = { tempDir }
+            val oldApk = java.io.File(tempDir, "Lindo-v1.1.0-build100.apk")
+            oldApk.writeBytes(ByteArray(120_000) { 0x41 })
+
+            val nextBuild = LinDoDiagnosticLogger.APP_BUILD + 2
+            val newApk = java.io.File(tempDir, "Lindo-v1.1.2-build$nextBuild.apk")
+            val payload = ByteArray(150_000) { (it % 251).toByte() }
+            newApk.writeBytes(payload)
+            val sha = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(payload)
+                .joinToString("") { "%02x".format(it) }
+
+            val targetInfo = MobileUpdateInfo(
+                hasUpdate = true,
+                currentVersionName = LinDoDiagnosticLogger.APP_VERSION_NAME,
+                currentVersionCode = LinDoDiagnosticLogger.APP_BUILD,
+                latestVersionName = "1.1.2",
+                latestVersionCode = nextBuild,
+                apkUrl = "https://github.com/lucaslus/LinDo/releases/download/v1.1.2/lindo-1.1.2-build$nextBuild.apk",
+                sha256 = sha,
+                sizeBytes = payload.size.toLong(),
+                notes = emptyList(),
+                updatedAt = "2026-11-24"
+            )
+
+            AppUpdateManager.cleanupObsoleteCache(keepLatest = targetInfo)
+            assertFalse(oldApk.exists(), "Older v1.1.0 APK must be evicted when v1.1.2 is latest")
+            assertTrue(newApk.exists(), "Verified v1.1.2 APK must be retained")
+            assertTrue(AppUpdateManager.cachedApkReady)
+
+            // Post-upgrade: when hasUpdate=false, all cached APKs are garbage-collected
+            AppUpdateManager.cleanupObsoleteCache(
+                keepLatest = targetInfo.copy(hasUpdate = false, latestVersionCode = LinDoDiagnosticLogger.APP_BUILD)
+            )
+            assertFalse(newApk.exists(), "Post-upgrade cache must be reclaimed")
+            assertFalse(AppUpdateManager.cachedApkReady)
+        } finally {
+            AppUpdateManager.cacheDirProvider = null
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun bindInstalledVersionOverridesRuntimeVersionAndMatchesBuildGradleDefaults() {
         val origName = LinDoDiagnosticLogger.APP_VERSION_NAME
         val origBuild = LinDoDiagnosticLogger.APP_BUILD

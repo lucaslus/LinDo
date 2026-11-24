@@ -270,9 +270,11 @@ jobs:
           mkdir -p dist-android
           APK_SRC=$(find composeApp/build/outputs/apk/release -name "*.apk" | head -n1)
           if [ -n "${LINDO_KEYSTORE_PATH:-}" ]; then
-            EXPECTED_SHA=$(keytool -list -v -keystore "$LINDO_KEYSTORE_PATH" -storepass android -alias androiddebugkey | grep -E 'SHA256:' | head -n1 | awk '{print $2}')
-            ACTUAL_SHA=$(keytool -printcert -jarfile "$APK_SRC" | grep -E 'SHA256:' | head -n1 | awk '{print $2}')
-            echo "APK signing SHA256: actual=$ACTUAL_SHA expected=$EXPECTED_SHA"
+            SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+            APKSIGNER_BIN=$(ls -1 "$SDK_ROOT"/build-tools/*/apksigner | sort -V | tail -n1)
+            EXPECTED_SHA=$(keytool -list -v -keystore "$LINDO_KEYSTORE_PATH" -storepass android -alias androiddebugkey | grep -E 'SHA256:' | head -n1 | awk '{print $2}' | tr -d ':' | tr 'A-F' 'a-f')
+            ACTUAL_SHA=$("$APKSIGNER_BIN" verify --print-certs "$APK_SRC" | grep -E 'Signer #1 certificate SHA-256 digest:' | head -n1 | awk -F': ' '{print $2}' | tr -d '[:space:]' | tr 'A-F' 'a-f')
+            echo "APK v2 signing SHA256: actual=$ACTUAL_SHA expected=$EXPECTED_SHA"
             if [ -z "$ACTUAL_SHA" ] || [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
               echo "ERROR: APK certificate SHA256 ($ACTUAL_SHA) does not match keystore ($EXPECTED_SHA)!" >&2
               exit 1

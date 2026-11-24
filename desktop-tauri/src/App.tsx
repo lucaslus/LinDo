@@ -1754,11 +1754,15 @@ export const App: React.FC = () => {
       }
     } catch (err: any) {
       diagLog("WARN", "SYSTEM", "GitHubUpdate", "检查 GitHub Release 失败", String(err?.message || err));
-      setGlobalNotice(err?.message || "检查更新失败，请稍后重试");
+      if (updateInfo?.hasUpdate) {
+        setShowUpdateModal(true);
+      } else {
+        setGlobalNotice(err?.message || "检查更新失败，请稍后重试");
+      }
     } finally {
       setCheckingUpdate(false);
     }
-  }, [checkingUpdate]);
+  }, [checkingUpdate, updateInfo]);
 
   const handleStartInstallUpdate = useCallback(async () => {
     if (!updateInfo || installingUpdate) return;

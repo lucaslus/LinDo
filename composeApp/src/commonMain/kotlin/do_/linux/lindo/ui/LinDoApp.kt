@@ -14261,9 +14261,7 @@ internal fun CommunityProfileScreen(
                         icon = LinDoIcons.Download,
                         title = "检查更新",
                         onClick = {
-                            if (latestUpdateInfo?.hasUpdate == true) {
-                                AppUpdateManager.openDialog()
-                            } else if (!isCheckingUpdate) {
+                            if (!isCheckingUpdate) {
                                 settingScope.launch {
                                     val res = AppUpdateManager.checkForUpdates(openDialogWhenAvailable = true)
                                     res.onSuccess { info ->
@@ -14271,7 +14269,9 @@ internal fun CommunityProfileScreen(
                                             updateCheckFeedback = "已是最新版本"
                                         }
                                     }.onFailure {
-                                        updateCheckFeedback = "检查失败"
+                                        if (AppUpdateManager.latestInfo?.hasUpdate != true) {
+                                            updateCheckFeedback = "检查失败"
+                                        }
                                     }
                                 }
                             }

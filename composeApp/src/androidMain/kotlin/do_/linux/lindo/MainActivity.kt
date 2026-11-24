@@ -956,6 +956,9 @@ class MainActivity : ComponentActivity() {
             }.getOrDefault(false)
         }
         AppUpdateManager.cacheDirProvider = { java.io.File(cacheDir, "updates") }
+        activityScope.launch(Dispatchers.IO) {
+            AppUpdateManager.cleanupObsoleteCache()
+        }
         runCatching {
             val savedTrustedHosts = prefs.getString("trusted_ext_hosts_v1", "")
                 ?.split(',')
@@ -4352,6 +4355,9 @@ class MainActivity : ComponentActivity() {
                 ensureHealthyApiWebView(forceCheck = true)
                 runOnCookieIo {
                     runCatching { ensureAuthCookiesInWebKit(MainActivity.currentWebViewCookieManager()) }
+                }
+                if (pausedMs >= 15L * 60_000L) {
+                    AppUpdateManager.refreshIfStale()
                 }
             }
         }

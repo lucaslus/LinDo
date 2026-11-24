@@ -76,11 +76,62 @@ object AppUpdateManager {
     var dialogVisible by mutableStateOf(false)
         private set
 
+    var cachedApkReady by mutableStateOf(false)
+        private set
+
+    @Volatile
+    private var lastCheckedAtEpochMs: Long = 0L
+
     @Volatile
     var cacheDirProvider: (() -> File)? = null
 
     @Volatile
     var apkInstaller: ((File) -> Result<Unit>)? = null
+
+    private fun expectedApkFileName(info: MobileUpdateInfo): String =
+        "Lindo-v${info.latestVersionName}-build${info.latestVersionCode}.apk"
+
+    /**
+     * 启动时与检查更新后自动回收已过期的本地安装包缓存：
+     * - 若当前已是最新版本（或缓存中的 build <= 当前已安装 build），立即删除回收存储空间；
+     * - 若远端发布了更高版本（如 1.1.1 取代 1.1.0），立即淘汰旧的 1.1.0.apk，绝不锁定旧包。
+     */
+    fun cleanupObsoleteCache(keepLatest: MobileUpdateInfo? = latestInfo) {
+        runCatching {
+            val baseDir = cacheDirProvider?.invoke() ?: return
+            if (!baseDir.exists()) {
+                runUiSafeStateWrite { cachedApkReady = false }
+                return
+            }
+            val keepFileName = keepLatest
+                ?.takeIf { it.hasUpdate && it.latestVersionCode > LinDoDiagnosticLogger.APP_BUILD }
+                ?.let(::expectedApkFileName)
+
+            var ready = false
+            baseDir.listFiles()?.forEach { f ->
+                if (!f.name.endsWith(".apk") && !f.name.endsWith(".part")) return@forEach
+                if (keepFileName != null && f.name == keepFileName && f.length() > 100_000L) {
+                    val expectedSha = keepLatest.sha256.trim()
+                    val valid = expectedSha.isEmpty() || computeSha256(f).equals(expectedSha, ignoreCase = true)
+                    if (valid) {
+                        ready = true
+                    } else {
+                        runCatching { f.delete() }
+                    }
+                } else {
+                    runCatching { f.delete() }
+                }
+            }
+            runUiSafeStateWrite { cachedApkReady = ready }
+        }
+    }
+
+    suspend fun refreshIfStale(maxAgeMs: Long = 30L * 60_000L) {
+        if (apkInstaller == null || checking || downloading) return
+        val now = System.currentTimeMillis()
+        if (now - lastCheckedAtEpochMs < maxAgeMs) return
+        checkForUpdates(openDialogWhenAvailable = false)
+    }
 
     fun openDialog() {
         runUiSafeStateWrite {
@@ -177,10 +228,17 @@ object AppUpdateManager {
                     conn.disconnect()
                 }
             }
+            lastCheckedAtEpochMs = System.currentTimeMillis()
+            withContext(Dispatchers.IO) {
+                cleanupObsoleteCache(keepLatest = info)
+            }
             runUiSafeStateWrite {
                 latestInfo = info
                 if (openDialogWhenAvailable && info.hasUpdate) {
+                    errorMessage = null
                     dialogVisible = true
+                } else if (!info.hasUpdate) {
+                    dialogVisible = false
                 }
             }
             Result.success(info)
@@ -190,6 +248,13 @@ object AppUpdateManager {
                 tag = "AppUpdate",
                 message = "GitHub Release 检查更新未成功: ${t.message ?: t::class.simpleName}"
             )
+            val fallback = latestInfo
+            if (openDialogWhenAvailable && fallback != null && fallback.hasUpdate) {
+                runUiSafeStateWrite {
+                    errorMessage = null
+                    dialogVisible = true
+                }
+            }
             Result.failure(t)
         } finally {
             runUiSafeStateWrite {
@@ -274,7 +339,7 @@ object AppUpdateManager {
                 ?: File(System.getProperty("java.io.tmpdir"), "lindo_updates")
             if (!baseDir.exists()) baseDir.mkdirs()
 
-            val fileName = "Lindo-v${info.latestVersionName}-build${info.latestVersionCode}.apk"
+            val fileName = expectedApkFileName(info)
             val targetFile = File(baseDir, fileName)
 
             baseDir.listFiles()?.forEach { f ->
@@ -288,6 +353,7 @@ object AppUpdateManager {
                     computeSha256(targetFile).equals(info.sha256.trim(), ignoreCase = true)
                 if (cachedValid) {
                     runUiSafeStateWrite {
+                        cachedApkReady = true
                         progress = UpdateDownloadProgress(
                             stage = "installing",
                             downloadedBytes = targetFile.length(),
@@ -299,6 +365,7 @@ object AppUpdateManager {
                     return@withContext targetFile
                 } else {
                     runCatching { targetFile.delete() }
+                    runUiSafeStateWrite { cachedApkReady = false }
                 }
             }
 
@@ -379,6 +446,7 @@ object AppUpdateManager {
                 }
 
                 runUiSafeStateWrite {
+                    cachedApkReady = true
                     progress = UpdateDownloadProgress(
                         stage = "installing",
                         downloadedBytes = targetFile.length(),

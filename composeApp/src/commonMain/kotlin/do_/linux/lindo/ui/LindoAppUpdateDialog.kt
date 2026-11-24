@@ -35,6 +35,7 @@ internal fun LindoAppUpdateDialog(
     val downloading = AppUpdateManager.downloading
     val progress = AppUpdateManager.progress
     val error = AppUpdateManager.errorMessage
+    val readyToInstall = AppUpdateManager.cachedApkReady
 
     fun formatMb(bytes: Long): String {
         val mb = bytes.toDouble() / (1024.0 * 1024.0)
@@ -74,7 +75,9 @@ internal fun LindoAppUpdateDialog(
                 Text(
                     text = buildString {
                         append("当前 v${info.currentVersionName}")
-                        if (info.sizeBytes > 0L) {
+                        if (readyToInstall) {
+                            append(" · 安装包已就绪")
+                        } else if (info.sizeBytes > 0L) {
                             append(" · ${formatMb(info.sizeBytes)}")
                         }
                     },
@@ -245,7 +248,7 @@ internal fun LindoAppUpdateDialog(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "立即更新",
+                                text = if (readyToInstall) "立即安装" else "立即更新",
                                 fontSize = 13.5.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = palette.publishBtnContent,

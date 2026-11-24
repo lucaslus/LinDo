@@ -3827,11 +3827,7 @@ export const ProfileSettingsView: React.FC<{
                     : `v${updateInfo?.currentVersion || DESKTOP_APP_VERSION}`
               }
               onClick={() => {
-                if (updateInfo?.hasUpdate && onOpenUpdateModal) {
-                  onOpenUpdateModal();
-                } else {
-                  onCheckUpdate?.();
-                }
+                onCheckUpdate?.();
               }}
             />
             <SettingRow

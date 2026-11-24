@@ -1059,6 +1059,15 @@ async fn check_app_update() -> Result<DesktopUpdateInfo, String> {
         }
     }
 
+    if !parsed.has_update {
+        if let Some(base_dir) = dirs::home_dir()
+            .or_else(dirs::cache_dir)
+            .map(|d| d.join(".lindo").join("updates"))
+        {
+            let _ = std::fs::remove_dir_all(base_dir);
+        }
+    }
+
     Ok(parsed)
 }
 
