@@ -21,10 +21,15 @@ def find_asset(names: list[str], predicate) -> str | None:
     return None
 
 
-def resolve_asset_urls(repo: str, tag: str, asset_names: Iterable[str]) -> dict[str, str]:
+def resolve_asset_urls(
+    repo: str,
+    tag: str,
+    asset_names: Iterable[str],
+    strict_existing: bool = False,
+) -> dict[str, str]:
     names = list(asset_names)
     dl_prefix = f"https://github.com/{repo}/releases/download/{tag}"
-    fallback = f"https://github.com/{repo}/releases/latest"
+    fallback = "" if (strict_existing and names) else f"https://github.com/{repo}/releases/latest"
 
     def url_for(pred) -> str:
         hit = find_asset(names, pred)
@@ -43,33 +48,33 @@ def resolve_asset_urls(repo: str, tag: str, asset_names: Iterable[str]) -> dict[
 
 
 def render_os_table(urls: dict[str, str]) -> str:
-    rows = [
+    spec_rows = [
         (
             "Android",
             [
-                f"[![APK-ARMv8](https://img.shields.io/badge/APK-ARMv8-2ea043?logo=android&logoColor=white)]({urls['apk_arm64']})",
+                ("apk_arm64", "APK-ARMv8", "https://img.shields.io/badge/APK-ARMv8-2ea043?logo=android&logoColor=white"),
             ],
         ),
         (
             "Windows",
             [
-                f"[![Setup-x64](https://img.shields.io/badge/Setup-x64-0078D4)]({urls['win_setup']})",
-                f"[![MSI-x64](https://img.shields.io/badge/MSI-x64-4B9CD3)]({urls['win_msi']})",
+                ("win_setup", "Setup-x64", "https://img.shields.io/badge/Setup-x64-0078D4"),
+                ("win_msi", "MSI-x64", "https://img.shields.io/badge/MSI-x64-4B9CD3"),
             ],
         ),
         (
             "macOS",
             [
-                f"[![DMG-Apple Silicon](https://img.shields.io/badge/DMG-Apple_Silicon-181717?logo=apple&logoColor=white)]({urls['mac_arm64']})",
-                f"[![DMG-Intel X64](https://img.shields.io/badge/DMG-Intel_X64-0071C5?logo=apple&logoColor=white)]({urls['mac_x64']})",
+                ("mac_arm64", "DMG-Apple Silicon", "https://img.shields.io/badge/DMG-Apple_Silicon-181717?logo=apple&logoColor=white"),
+                ("mac_x64", "DMG-Intel X64", "https://img.shields.io/badge/DMG-Intel_X64-0071C5?logo=apple&logoColor=white"),
             ],
         ),
         (
             "Linux",
             [
-                f"[![AppImage-x64](https://img.shields.io/badge/AppImage-x64-D94625?logo=linux&logoColor=white)]({urls['linux_appimage']})",
-                f"[![DebPackage-x64](https://img.shields.io/badge/DebPackage-x64-E95420?logo=debian&logoColor=white)]({urls['linux_deb']})",
-                f"[![RpmPackage-x64](https://img.shields.io/badge/RpmPackage-x64-D97706?logo=redhat&logoColor=white)]({urls['linux_rpm']})",
+                ("linux_appimage", "AppImage-x64", "https://img.shields.io/badge/AppImage-x64-D94625?logo=linux&logoColor=white"),
+                ("linux_deb", "DebPackage-x64", "https://img.shields.io/badge/DebPackage-x64-E95420?logo=debian&logoColor=white"),
+                ("linux_rpm", "RpmPackage-x64", "https://img.shields.io/badge/RpmPackage-x64-D97706?logo=redhat&logoColor=white"),
             ],
         ),
     ]
@@ -77,8 +82,14 @@ def render_os_table(urls: dict[str, str]) -> str:
         "| OS | Download |",
         "| :--- | :--- |",
     ]
-    for os_name, badges in rows:
-        lines.append(f"| **{os_name}** | {'<br/>'.join(badges)} |")
+    for os_name, items in spec_rows:
+        badges = [
+            f"[![{alt}]({badge_img})]({urls[key]})"
+            for key, alt, badge_img in items
+            if urls.get(key)
+        ]
+        if badges:
+            lines.append(f"| **{os_name}** | {'<br/>'.join(badges)} |")
     return "\n".join(lines)
 
 
@@ -176,7 +187,12 @@ def main() -> None:
         if p.is_dir():
             asset_names.extend(f.name for f in p.iterdir() if f.is_file())
 
-    urls = resolve_asset_urls(args.repo, args.tag, asset_names)
+    urls = resolve_asset_urls(
+        args.repo,
+        args.tag,
+        asset_names,
+        strict_existing=(args.mode == "release"),
+    )
 
     if args.mode == "release":
         raw_notes = (

@@ -1,7 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use cookie::time::Duration as CookieDuration;
-use cookie::Cookie;
+use cookie::SameSite;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -13,17 +12,29 @@ use url::Url;
 const BRIDGE_WINDOW_LABEL: &str = "lindo-bridge-host";
 const BROWSER_WINDOW_LABEL: &str = "lindo-forum-browser";
 const CONNECT_PROBE_LABEL: &str = "lindo-connect-probe";
+const ISOLATED_WORLD_NAME: &str = "lindo_isolated";
 
 const LINUX_ORIGIN_HTML: &str =
     "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>";
 
-const FORUM_ECH_PINNED_HOSTS: [&str; 6] = [
+const FORUM_ECH_PINNED_HOSTS: [&str; 17] = [
     "linux.do",
     "www.linux.do",
     "connect.linux.do",
+    "cdk.linux.do",
+    "credit.linux.do",
+    "hub.linux.do",
+    "lottery.linux.do",
+    "wiki.linux.do",
     "ldstatic.com",
     "cdn.ldstatic.com",
+    "cdn1.ldstatic.com",
+    "cdn2.ldstatic.com",
+    "cdn3.ldstatic.com",
+    "cdn4.ldstatic.com",
+    "cdn5.ldstatic.com",
     "idcflare.com",
+    "www.idcflare.com",
 ];
 
 static ACTIVE_PROXY_PORT: AtomicU16 = AtomicU16::new(0);
@@ -36,6 +47,12 @@ static RELOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
 static PROTOCOL_REGISTERED: OnceLock<()> = OnceLock::new();
 static CACHED_BRIDGE_UA: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
 static BRIDGE_LAST_ERROR: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
+static DYNAMIC_PINNED_HOSTS: OnceLock<std::sync::Mutex<(u16, std::collections::HashSet<String>)>> =
+    OnceLock::new();
+
+fn dynamic_pinned_hosts() -> &'static std::sync::Mutex<(u16, std::collections::HashSet<String>)> {
+    DYNAMIC_PINNED_HOSTS.get_or_init(|| std::sync::Mutex::new((0, std::collections::HashSet::new())))
+}
 
 fn register_linux_url_protocols_once() {
     PROTOCOL_REGISTERED.get_or_init(|| {
@@ -181,7 +198,13 @@ fn apply_proxy_and_certs_on_inner(inner: &webkit2gtk::WebView, port: u16) {
 /// `port == 0` routes WebKitGTK directly through OS / TUN (`NetworkProxyMode::Default`);
 /// `port > 0` routes WebKitGTK through the local ECH gateway (`http://127.0.0.1:{port}`).
 pub fn set_webkit_proxy_port(port: u16) {
-    ACTIVE_PROXY_PORT.store(port, Ordering::SeqCst);
+    let prev = ACTIVE_PROXY_PORT.swap(port, Ordering::SeqCst);
+    if prev != port {
+        if let Ok(mut g) = dynamic_pinned_hosts().lock() {
+            g.0 = port;
+            g.1.clear();
+        }
+    }
     let Some(app) = crate::bridge::global_app_handle() else {
         return;
     };
@@ -191,6 +214,68 @@ pub fn set_webkit_proxy_port(port: u16) {
                 let inner = platform_wv.inner();
                 apply_proxy_and_certs_on_inner(&inner, port);
             });
+        }
+    }
+}
+
+/// Ensures any dynamically encountered `should_mitm_host` subdomain (e.g., future `cdn9.ldstatic.com`)
+/// has its local gateway leaf certificate pinned on WebKitGTK's `WebContext` BEFORE subresource `fetch()`.
+pub async fn ensure_host_cert_pinned_for_url(raw_url: &str) {
+    let port = ACTIVE_PROXY_PORT.load(Ordering::SeqCst);
+    if port == 0 {
+        return;
+    }
+    let Ok(parsed) = Url::parse(raw_url) else {
+        return;
+    };
+    let Some(raw_host) = parsed.host_str() else {
+        return;
+    };
+    let host = raw_host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() || FORUM_ECH_PINNED_HOSTS.contains(&host.as_str()) {
+        return;
+    }
+    {
+        if let Ok(mut g) = dynamic_pinned_hosts().lock() {
+            if g.0 != port {
+                g.0 = port;
+                g.1.clear();
+            }
+            if g.1.contains(&host) {
+                return;
+            }
+        }
+    }
+    let Some(pem) = lindo_ech::mint_active_gateway_leaf_pem(&host) else {
+        return;
+    };
+    let Some(app) = crate::bridge::global_app_handle() else {
+        return;
+    };
+    let Some(wv) = app.get_webview_window(BRIDGE_WINDOW_LABEL) else {
+        return;
+    };
+    let host_for_gtk = host.clone();
+    let (tx, rx) = oneshot::channel::<bool>();
+    let scheduled = wv.with_webview(move |platform_wv| {
+        use webkit2gtk::{WebContextExt, WebViewExt};
+        let mut pinned = false;
+        if let (Ok(tls_cert), Some(ctx)) = (
+            gio::TlsCertificate::from_pem(&pem),
+            platform_wv.inner().context(),
+        ) {
+            ctx.allow_tls_certificate_for_host(&tls_cert, &host_for_gtk);
+            pinned = true;
+        }
+        let _ = tx.send(pinned);
+    });
+    if scheduled.is_ok() {
+        if let Ok(Ok(true)) = tokio::time::timeout(Duration::from_secs(2), rx).await {
+            if let Ok(mut g) = dynamic_pinned_hosts().lock() {
+                if g.0 == port {
+                    g.1.insert(host);
+                }
+            }
         }
     }
 }
@@ -399,9 +484,22 @@ fn ensure_bridge_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 
 fn open_or_reuse_browser_window(app: &AppHandle, target_url: Url, dark: bool) -> Result<(), String> {
     let theme = if dark { Theme::Dark } else { Theme::Light };
+    let mode_pref = app
+        .try_state::<std::sync::Arc<crate::bridge::BridgeEngine>>()
+        .map(|e| e.state.lock().unwrap().preferences.ech_routing_mode.clone())
+        .unwrap_or_else(|| "smart_auto".to_string());
+    crate::ech_desktop::ensure_linux_ech_reconciled(&mode_pref);
+    let cur_port = ACTIVE_PROXY_PORT.load(Ordering::SeqCst);
+
     if let Some(existing) = app.get_webview_window(BROWSER_WINDOW_LABEL) {
         let _ = existing.set_theme(Some(theme));
-        let _ = existing.navigate(target_url);
+        let target_str = target_url.as_str().to_string();
+        let _ = existing.with_webview(move |platform_wv| {
+            use webkit2gtk::WebViewExt;
+            let inner = platform_wv.inner();
+            apply_proxy_and_certs_on_inner(&inner, cur_port);
+            inner.load_uri(&target_str);
+        });
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
@@ -444,66 +542,88 @@ fn open_or_reuse_browser_window(app: &AppHandle, target_url: Url, dark: bool) ->
     Ok(())
 }
 
-fn soup_to_rust_cookie(mut sc: soup::Cookie) -> Cookie<'static> {
-    let name = sc.name().map(|n| n.to_string()).unwrap_or_default();
-    let value = sc.value().map(|v| v.to_string()).unwrap_or_default();
-    let mut b = cookie::CookieBuilder::new(name, value);
-    if let Some(dom) = sc.domain().map(|d| d.to_string()) {
-        b = b.domain(dom);
-    }
-    if let Some(path) = sc.path().map(|p| p.to_string()) {
-        b = b.path(path);
-    }
-    b = b.http_only(sc.is_http_only());
-    b = b.secure(sc.is_secure());
-    b = b.same_site(match sc.same_site_policy() {
-        soup::SameSitePolicy::Lax => cookie::SameSite::Lax,
-        soup::SameSitePolicy::Strict => cookie::SameSite::Strict,
-        _ => cookie::SameSite::None,
-    });
-    if let Some(dt) = sc.expires() {
-        if let Ok(odt) = cookie::time::OffsetDateTime::from_unix_timestamp(dt.to_unix()) {
-            b = b.expires(cookie::Expiration::DateTime(odt));
-        }
-    } else {
-        b = b.expires(cookie::Expiration::Session);
-    }
-    b.build()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxForumCookie {
+    name: String,
+    value: String,
+    /// Exact domain as stored by libsoup (`".linux.do"` for domain cookies, `"linux.do"` for host-only cookies).
+    /// NEVER pass through `cookie::Cookie::domain()`, which strips the leading `.`!
+    domain: String,
+    path: String,
+    http_only: bool,
+    secure: bool,
+    same_site: SameSite,
+    expires_unix: Option<i64>,
+    max_age_secs: i32,
 }
 
-fn rust_to_soup_cookie(ck: &Cookie<'_>) -> soup::Cookie {
+impl LinuxForumCookie {
+    fn clean_domain(&self) -> &str {
+        self.domain.strip_prefix('.').unwrap_or(&self.domain)
+    }
+
+    fn host_only(&self) -> bool {
+        !self.domain.starts_with('.')
+    }
+}
+
+fn soup_to_linux_cookie(mut sc: soup::Cookie) -> LinuxForumCookie {
+    let name = sc.name().map(|n| n.to_string()).unwrap_or_default();
+    let value = sc.value().map(|v| v.to_string()).unwrap_or_default();
+    let domain = sc
+        .domain()
+        .map(|d| d.to_string())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "linux.do".to_string());
+    let path = sc
+        .path()
+        .map(|p| p.to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "/".to_string());
+    let same_site = match sc.same_site_policy() {
+        soup::SameSitePolicy::Lax => SameSite::Lax,
+        soup::SameSitePolicy::Strict => SameSite::Strict,
+        _ => SameSite::None,
+    };
+    let expires_unix = sc.expires().map(|dt| dt.to_unix());
+    LinuxForumCookie {
+        name,
+        value,
+        domain,
+        path,
+        http_only: sc.is_http_only(),
+        secure: sc.is_secure(),
+        same_site,
+        expires_unix,
+        max_age_secs: -1,
+    }
+}
+
+fn linux_to_soup_cookie(ck: &LinuxForumCookie) -> soup::Cookie {
     let mut sc = soup::Cookie::new(
-        ck.name(),
-        ck.value(),
-        ck.domain().unwrap_or("linux.do"),
-        ck.path().unwrap_or("/"),
-        ck.max_age()
-            .map(|d| d.whole_seconds() as i32)
-            .unwrap_or(-1),
+        &ck.name,
+        &ck.value,
+        &ck.domain,
+        &ck.path,
+        ck.max_age_secs,
     );
-    if let Some(dt) = ck.expires_datetime() {
-        if let Ok(gdt) = glib::DateTime::from_unix_utc(dt.unix_timestamp()) {
+    if let Some(ts) = ck.expires_unix {
+        if let Ok(gdt) = glib::DateTime::from_unix_utc(ts) {
             sc.set_expires(&gdt);
         }
     }
-    if let Some(ho) = ck.http_only() {
-        sc.set_http_only(ho);
-    }
-    if let Some(ss) = ck.same_site() {
-        sc.set_same_site_policy(match ss {
-            cookie::SameSite::Lax => soup::SameSitePolicy::Lax,
-            cookie::SameSite::Strict => soup::SameSitePolicy::Strict,
-            cookie::SameSite::None => soup::SameSitePolicy::None,
-        });
-    }
-    if let Some(sec) = ck.secure() {
-        sc.set_secure(sec);
-    }
+    sc.set_http_only(ck.http_only);
+    sc.set_same_site_policy(match ck.same_site {
+        SameSite::Lax => soup::SameSitePolicy::Lax,
+        SameSite::Strict => soup::SameSitePolicy::Strict,
+        SameSite::None => soup::SameSitePolicy::None,
+    });
+    sc.set_secure(ck.secure);
     sc
 }
 
-async fn read_forum_cookies_async(wv: &WebviewWindow) -> Result<Vec<Cookie<'static>>, String> {
-    let (tx, rx) = oneshot::channel::<Result<Vec<Cookie<'static>>, String>>();
+async fn read_forum_cookies_async(wv: &WebviewWindow) -> Result<Vec<LinuxForumCookie>, String> {
+    let (tx, rx) = oneshot::channel::<Result<Vec<LinuxForumCookie>, String>>();
     wv.with_webview(move |platform_wv| {
         use webkit2gtk::{CookieManagerExt, WebViewExt, WebsiteDataManagerExt};
         let inner = platform_wv.inner();
@@ -518,12 +638,8 @@ async fn read_forum_cookies_async(wv: &WebviewWindow) -> Result<Vec<Cookie<'stat
             let mapped = res
                 .map(|list| {
                     list.into_iter()
-                        .map(soup_to_rust_cookie)
-                        .filter(|c| {
-                            let dom = c.domain().unwrap_or("");
-                            let clean = dom.strip_prefix('.').unwrap_or(dom);
-                            is_forum_host(Some(clean))
-                        })
+                        .map(soup_to_linux_cookie)
+                        .filter(|c| is_forum_host(Some(c.clean_domain())))
                         .collect::<Vec<_>>()
                 })
                 .map_err(|e| format!("读取 WebKitGTK Cookie 失败: {e}"));
@@ -538,7 +654,7 @@ async fn read_forum_cookies_async(wv: &WebviewWindow) -> Result<Vec<Cookie<'stat
         .map_err(|_| "WebKitGTK Cookie 通道已关闭".to_string())?
 }
 
-async fn set_forum_cookie_async(wv: &WebviewWindow, ck: Cookie<'static>) -> Result<(), String> {
+async fn set_forum_cookie_async(wv: &WebviewWindow, ck: LinuxForumCookie) -> Result<(), String> {
     let (tx, rx) = oneshot::channel::<Result<(), String>>();
     wv.with_webview(move |platform_wv| {
         use webkit2gtk::{CookieManagerExt, WebViewExt, WebsiteDataManagerExt};
@@ -550,7 +666,7 @@ async fn set_forum_cookie_async(wv: &WebviewWindow, ck: Cookie<'static>) -> Resu
             let _ = tx.send(Ok(()));
             return;
         };
-        let mut sc = rust_to_soup_cookie(&ck);
+        let mut sc = linux_to_soup_cookie(&ck);
         cm.add_cookie(&mut sc, None::<&gio::Cancellable>, move |res| {
             let _ = tx.send(res.map_err(|e| format!("写入 Cookie 失败: {e}")));
         });
@@ -560,7 +676,7 @@ async fn set_forum_cookie_async(wv: &WebviewWindow, ck: Cookie<'static>) -> Resu
     Ok(())
 }
 
-async fn delete_forum_cookie_async(wv: &WebviewWindow, ck: Cookie<'static>) -> Result<(), String> {
+async fn delete_forum_cookie_async(wv: &WebviewWindow, ck: LinuxForumCookie) -> Result<(), String> {
     let (tx, rx) = oneshot::channel::<Result<(), String>>();
     wv.with_webview(move |platform_wv| {
         use webkit2gtk::{CookieManagerExt, WebViewExt, WebsiteDataManagerExt};
@@ -572,7 +688,7 @@ async fn delete_forum_cookie_async(wv: &WebviewWindow, ck: Cookie<'static>) -> R
             let _ = tx.send(Ok(()));
             return;
         };
-        let mut sc = rust_to_soup_cookie(&ck);
+        let mut sc = linux_to_soup_cookie(&ck);
         cm.delete_cookie(&mut sc, None::<&gio::Cancellable>, move |res| {
             let _ = tx.send(res.map_err(|e| format!("删除 Cookie 失败: {e}")));
         });
@@ -610,35 +726,62 @@ fn clear_challenge_retry_counters_fire_and_forget(wv: &WebviewWindow) {
 }
 
 #[allow(deprecated)]
-fn eval_fire_and_forget(wv: &WebviewWindow, js: String) -> Result<(), String> {
+fn eval_fire_and_forget_in_world(
+    wv: &WebviewWindow,
+    js: String,
+    world: Option<&'static str>,
+) -> Result<(), String> {
     wv.with_webview(move |platform_wv| {
         use webkit2gtk::WebViewExt;
-        platform_wv
-            .inner()
-            .run_javascript(&js, None::<&gio::Cancellable>, |_res| {});
+        if let Some(world_name) = world {
+            platform_wv.inner().run_javascript_in_world(
+                &js,
+                world_name,
+                None::<&gio::Cancellable>,
+                |_res| {},
+            );
+        } else {
+            platform_wv
+                .inner()
+                .run_javascript(&js, None::<&gio::Cancellable>, |_res| {});
+        }
     })
     .map_err(|e| format!("WebKitGTK 启动脚本失败: {e}"))
 }
 
 #[allow(deprecated)]
-async fn eval_single_sync(wv: &WebviewWindow, js: String) -> Result<String, String> {
+async fn eval_single_sync_in_world(
+    wv: &WebviewWindow,
+    js: String,
+    world: Option<&'static str>,
+) -> Result<String, String> {
     let (tx, rx) = oneshot::channel::<Result<String, String>>();
     wv.with_webview(move |platform_wv| {
         use javascriptcore::ValueExt;
         use webkit2gtk::WebViewExt;
-        platform_wv
-            .inner()
-            .run_javascript(&js, None::<&gio::Cancellable>, move |res| {
-                let mapped = match res {
-                    Ok(js_res) => Ok(js_res
-                        .js_value()
-                        .and_then(|v| v.to_json(0))
-                        .map(|g| g.to_string())
-                        .unwrap_or_default()),
-                    Err(err) => Err(format!("WebKitGTK 脚本执行错误: {err}")),
-                };
-                let _ = tx.send(mapped);
-            });
+        let handler = move |res: Result<webkit2gtk::JavascriptResult, glib::Error>| {
+            let mapped = match res {
+                Ok(js_res) => Ok(js_res
+                    .js_value()
+                    .and_then(|v| v.to_json(0))
+                    .map(|g| g.to_string())
+                    .unwrap_or_default()),
+                Err(err) => Err(format!("WebKitGTK 脚本执行错误: {err}")),
+            };
+            let _ = tx.send(mapped);
+        };
+        if let Some(world_name) = world {
+            platform_wv.inner().run_javascript_in_world(
+                &js,
+                world_name,
+                None::<&gio::Cancellable>,
+                handler,
+            );
+        } else {
+            platform_wv
+                .inner()
+                .run_javascript(&js, None::<&gio::Cancellable>, handler);
+        }
     })
     .map_err(|e| format!("WebKitGTK 脚本调用失败: {e}"))?;
 
@@ -648,10 +791,11 @@ async fn eval_single_sync(wv: &WebviewWindow, js: String) -> Result<String, Stri
         .map_err(|_| "WebKitGTK 回调通道已关闭".to_string())?
 }
 
-async fn eval_async_promise(
+async fn eval_async_promise_in_world(
     wv: &WebviewWindow,
     script: &str,
     timeout_secs: u64,
+    world: Option<&'static str>,
 ) -> Result<Value, String> {
     let slot = format!("__lindo_r_{}", EVAL_SEQ.fetch_add(1, Ordering::Relaxed));
     let launch_js = format!(
@@ -669,8 +813,16 @@ async fn eval_async_promise(
 }})()"#
     );
 
-    eval_fire_and_forget(wv, launch_js)?;
+    eval_fire_and_forget_in_world(wv, launch_js, world)?;
+    poll_async_slot_in_world(wv, &slot, timeout_secs, world).await
+}
 
+async fn poll_async_slot_in_world(
+    wv: &WebviewWindow,
+    slot: &str,
+    timeout_secs: u64,
+    world: Option<&'static str>,
+) -> Result<Value, String> {
     let poll_js = format!(
         r#"(() => {{
   const st = window.__lindoAsyncStore;
@@ -692,7 +844,7 @@ async fn eval_async_promise(
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         delay_ms = (delay_ms + 12).min(55);
 
-        let raw = match eval_single_sync(wv, poll_js.clone()).await {
+        let raw = match eval_single_sync_in_world(wv, poll_js.clone(), world).await {
             Ok(r) => {
                 last_poll_err = None;
                 r
@@ -719,7 +871,7 @@ async fn eval_async_promise(
                 let cleanup_js = format!(
                     r#"if (window.__lindoAsyncStore) {{ delete window.__lindoAsyncStore["{slot}"]; }}"#
                 );
-                let _ = eval_fire_and_forget(wv, cleanup_js);
+                let _ = eval_fire_and_forget_in_world(wv, cleanup_js, world);
                 return Err(format!("解析 WebKitGTK 返回结果失败: {e}"));
             }
         };
@@ -737,7 +889,7 @@ async fn eval_async_promise(
     let cleanup_js = format!(
         r#"if (window.__lindoAsyncStore) {{ delete window.__lindoAsyncStore["{slot}"]; }}"#
     );
-    let _ = eval_fire_and_forget(wv, cleanup_js);
+    let _ = eval_fire_and_forget_in_world(wv, cleanup_js, world);
     if let Some(err) = last_poll_err {
         Err(format!("WebKitGTK 异步操作超时 ({err})"))
     } else {
@@ -746,7 +898,7 @@ async fn eval_async_promise(
 }
 
 fn purge_storage_auth_js(wv: &WebviewWindow) {
-    let _ = eval_fire_and_forget(
+    let _ = eval_fire_and_forget_in_world(
         wv,
         r#"try {
   if (location.hostname === 'linux.do') {
@@ -757,6 +909,7 @@ fn purge_storage_auth_js(wv: &WebviewWindow) {
   }
 } catch (_) {}"#
             .to_string(),
+        Some(ISOLATED_WORLD_NAME),
     );
 }
 
@@ -767,20 +920,32 @@ fn is_cloudflare_domain_cookie_name(name: &str) -> bool {
     )
 }
 
-fn build_host_only_forum_cookie(name: String, value: String, persistent: bool) -> Cookie<'static> {
-    let mut builder = Cookie::build((name, value))
-        .domain("linux.do")
-        .path("/")
-        .secure(true)
-        .http_only(true);
-    if persistent {
-        builder = builder.max_age(CookieDuration::days(60));
+fn build_host_only_forum_cookie(
+    name: String,
+    value: String,
+    persistent: bool,
+) -> LinuxForumCookie {
+    let max_age_secs = if persistent { 60 * 86_400 } else { -1 };
+    let expires_unix = if persistent {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        Some(now_secs + 60 * 86_400)
+    } else {
+        None
+    };
+    LinuxForumCookie {
+        name,
+        value,
+        domain: "linux.do".to_string(),
+        path: "/".to_string(),
+        http_only: true,
+        secure: true,
+        same_site: SameSite::Lax,
+        expires_unix,
+        max_age_secs,
     }
-    let mut c = builder.build();
-    if c.domain().is_none() {
-        c.set_domain("linux.do");
-    }
-    c
 }
 
 pub async fn native_call(
@@ -889,7 +1054,9 @@ pub async fn native_call(
   }
 })()"#
                     .to_string();
-                if let Ok(raw) = eval_single_sync(&wv, probe_js).await {
+                if let Ok(raw) =
+                    eval_single_sync_in_world(&wv, probe_js, Some(ISOLATED_WORLD_NAME)).await
+                {
                     let trimmed = raw.trim();
                     let inner: String = serde_json::from_str::<String>(trimmed)
                         .unwrap_or_else(|_| trimmed.to_string());
@@ -991,17 +1158,36 @@ pub async fn native_call(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if isolated {
-                let sync_js = format!(
+                // Fast-path synchronous expressions in 1 IPC round-trip inside WebKitGTK's isolated script world
+                // (`lindo_isolated` — zero globals/listeners exposed to `pageWorld` on `/challenge`!),
+                // and attach `.then(...)` directly onto the ALREADY-CREATED Promise in the same single evaluation
+                // so async scripts (such as `confirm_fresh_cf_clearance_via_xhr`) NEVER execute twice!
+                let slot = format!("__lindo_r_{}", EVAL_SEQ.fetch_add(1, Ordering::Relaxed));
+                let sync_or_thenable_js = format!(
                     r#"(() => {{
   try {{
     const val = ({script});
+    if (val && (typeof val === 'object' || typeof val === 'function') && typeof val.then === 'function') {{
+      window.__lindoAsyncStore = window.__lindoAsyncStore || Object.create(null);
+      Promise.resolve(val).then(
+        (resolved) => {{
+          window.__lindoAsyncStore["{slot}"] = JSON.stringify({{ done: true, ok: true, value: resolved === undefined ? null : resolved }});
+        }},
+        (err) => {{
+          window.__lindoAsyncStore["{slot}"] = JSON.stringify({{ done: true, ok: false, error: String((err && err.message) || err || "Eval error") }});
+        }}
+      );
+      return JSON.stringify({{ pendingPromise: true }});
+    }}
     return JSON.stringify({{ ok: true, value: val === undefined ? null : val }});
   }} catch (err) {{
     return JSON.stringify({{ ok: false, error: String((err && err.message) || err || "Eval error") }});
   }}
 }})()"#
                 );
-                let raw = eval_single_sync(&wv, sync_js).await?;
+                let raw =
+                    eval_single_sync_in_world(&wv, sync_or_thenable_js, Some(ISOLATED_WORLD_NAME))
+                        .await?;
                 let trimmed = raw.trim();
                 let inner_json_str: String = match serde_json::from_str::<String>(trimmed) {
                     Ok(s) => s,
@@ -1009,7 +1195,10 @@ pub async fn native_call(
                 };
                 let envelope: Value = serde_json::from_str(&inner_json_str)
                     .map_err(|e| format!("解析 WebKitGTK 返回结果失败: {e}"))?;
-                if envelope.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+                if envelope.get("pendingPromise").and_then(|b| b.as_bool()) == Some(true) {
+                    poll_async_slot_in_world(&wv, &slot, timeout_secs, Some(ISOLATED_WORLD_NAME))
+                        .await
+                } else if envelope.get("ok").and_then(|b| b.as_bool()) == Some(true) {
                     Ok(envelope.get("value").cloned().unwrap_or(Value::Null))
                 } else {
                     Err(envelope
@@ -1019,7 +1208,7 @@ pub async fn native_call(
                         .to_string())
                 }
             } else {
-                eval_async_promise(&wv, script, timeout_secs).await
+                eval_async_promise_in_world(&wv, script, timeout_secs, None).await
             }
         }
         "cookies" => {
@@ -1027,15 +1216,13 @@ pub async fn native_call(
             let list = read_forum_cookies_async(&wv).await?;
             let mut out = Vec::new();
             for c in list {
-                let dom = c.domain().unwrap_or("linux.do");
-                let clean_dom = dom.strip_prefix('.').unwrap_or(dom);
-                if is_forum_host(Some(clean_dom)) {
-                    let host_only = !dom.starts_with('.');
+                if is_forum_host(Some(c.clean_domain())) {
+                    let host_only = c.host_only();
                     out.push(json!({
-                        "name": c.name(),
-                        "value": c.value(),
-                        "domain": dom,
-                        "path": c.path().unwrap_or("/"),
+                        "name": c.name,
+                        "value": c.value,
+                        "domain": c.domain,
+                        "path": c.path,
                         "hostOnly": host_only
                     }));
                 }
@@ -1068,7 +1255,7 @@ pub async fn native_call(
 
             if let Ok(existing) = read_forum_cookies_async(&wv).await {
                 for c in existing {
-                    if target_names.contains(c.name()) {
+                    if target_names.contains(&c.name) {
                         let _ = delete_forum_cookie_async(&wv, c).await;
                     }
                 }
@@ -1110,7 +1297,7 @@ pub async fn native_call(
 
             if mode == "clear" {
                 for c in existing {
-                    if matches!(c.name(), "_t" | "_forum_session" | "authentication_data") {
+                    if matches!(c.name.as_str(), "_t" | "_forum_session" | "authentication_data") {
                         let _ = delete_forum_cookie_async(&wv, c).await;
                     }
                 }
@@ -1120,24 +1307,19 @@ pub async fn native_call(
             let mut t_variants = Vec::new();
             let mut fs_variants = Vec::new();
             for c in existing {
-                if c.name() == "_t" && !c.value().is_empty() {
+                if c.name == "_t" && !c.value.is_empty() {
                     t_variants.push(c);
-                } else if c.name() == "_forum_session" && !c.value().is_empty() {
+                } else if c.name == "_forum_session" && !c.value.is_empty() {
                     fs_variants.push(c);
                 }
             }
 
-            let t_needs = t_variants.len() > 1
-                || t_variants
-                    .first()
-                    .and_then(|c| c.domain())
-                    .map(|d| d.starts_with('.'))
-                    .unwrap_or(false);
+            let t_needs =
+                t_variants.len() > 1 || t_variants.first().map(|c| !c.host_only()).unwrap_or(false);
             let fs_needs = fs_variants.len() > 1
                 || fs_variants
                     .first()
-                    .and_then(|c| c.domain())
-                    .map(|d| d.starts_with('.'))
+                    .map(|c| !c.host_only())
                     .unwrap_or(false);
 
             if !t_needs && !fs_needs {
@@ -1147,15 +1329,10 @@ pub async fn native_call(
             let winner_t = if t_needs {
                 t_variants
                     .iter()
-                    .find(|c| !preferred_t.is_empty() && c.value() == preferred_t)
-                    .or_else(|| {
-                        t_variants
-                            .iter()
-                            .rev()
-                            .find(|c| !c.domain().unwrap_or("").starts_with('.'))
-                    })
+                    .find(|c| !preferred_t.is_empty() && c.value == preferred_t)
+                    .or_else(|| t_variants.iter().rev().find(|c| c.host_only()))
                     .or_else(|| t_variants.last())
-                    .map(|c| c.value().to_string())
+                    .map(|c| c.value.clone())
             } else {
                 None
             };
@@ -1164,9 +1341,9 @@ pub async fn native_call(
                 fs_variants
                     .iter()
                     .rev()
-                    .find(|c| !c.domain().unwrap_or("").starts_with('.'))
+                    .find(|c| c.host_only())
                     .or_else(|| fs_variants.last())
-                    .map(|c| c.value().to_string())
+                    .map(|c| c.value.clone())
             } else {
                 None
             };
@@ -1201,11 +1378,11 @@ pub async fn native_call(
             if let Ok(existing) = read_forum_cookies_async(&wv).await {
                 for c in existing {
                     if matches!(
-                        c.name(),
+                        c.name.as_str(),
                         "cf_clearance" | "__cf_bm" | "cf_chl_rc_ni" | "cf_chl_rc_i" | "cf_chl_rc_m"
                     ) {
-                        if c.name() == "cf_clearance" {
-                            let val = c.value().to_string();
+                        if c.name == "cf_clearance" {
+                            let val = c.value.clone();
                             if !val.is_empty() && !deleted.contains(&val) {
                                 deleted.push(val);
                             }
@@ -1227,7 +1404,7 @@ pub async fn native_call(
 
             if let Ok(existing) = read_forum_cookies_async(&wv).await {
                 for c in existing {
-                    if is_clear_all || c.name() == target_name {
+                    if is_clear_all || c.name == target_name {
                         let _ = delete_forum_cookie_async(&wv, c).await;
                     }
                 }
@@ -1238,8 +1415,21 @@ pub async fn native_call(
             let connect_url: Url = "https://connect.linux.do/"
                 .parse()
                 .map_err(|e| format!("Invalid Connect URL: {e}"))?;
+            let mode_pref = app
+                .try_state::<std::sync::Arc<crate::bridge::BridgeEngine>>()
+                .map(|e| e.state.lock().unwrap().preferences.ech_routing_mode.clone())
+                .unwrap_or_else(|| "smart_auto".to_string());
+            crate::ech_desktop::ensure_linux_ech_reconciled(&mode_pref);
+            let cur_port = ACTIVE_PROXY_PORT.load(Ordering::SeqCst);
+
             let probe = if let Some(existing) = app.get_webview_window(CONNECT_PROBE_LABEL) {
-                let _ = existing.navigate(connect_url);
+                let target_str = connect_url.as_str().to_string();
+                let _ = existing.with_webview(move |platform_wv| {
+                    use webkit2gtk::WebViewExt;
+                    let inner = platform_wv.inner();
+                    apply_proxy_and_certs_on_inner(&inner, cur_port);
+                    inner.load_uri(&target_str);
+                });
                 existing
             } else {
                 let blank_url: Url = "about:blank"
@@ -1289,7 +1479,9 @@ pub async fn native_call(
   return JSON.stringify({{ host: h, isChallenge, hasWidget, isOAuthConsent, autoClicked, hasMarkers, html: hasMarkers && document.documentElement ? document.documentElement.outerHTML : '' }});
 }})()"#
                 );
-                if let Ok(raw) = eval_single_sync(&probe, check_js).await {
+                if let Ok(raw) =
+                    eval_single_sync_in_world(&probe, check_js, Some(ISOLATED_WORLD_NAME)).await
+                {
                     let inner_str = serde_json::from_str::<String>(raw.trim())
                         .unwrap_or_else(|_| raw.trim().to_string());
                     if let Ok(v) = serde_json::from_str::<Value>(&inner_str) {
@@ -1329,5 +1521,122 @@ pub async fn native_call(
         }
         "setVerifyMask" => Ok(json!({})),
         _ => Err(format!("Unsupported bridge command: {method}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_linux_forum_cookie_preserves_leading_dot_domain_roundtrip() {
+        let mut sc_dom = soup::Cookie::new("cf_clearance", "token123", ".linux.do", "/", 3600);
+        sc_dom.set_http_only(true);
+        sc_dom.set_secure(true);
+        sc_dom.set_same_site_policy(soup::SameSitePolicy::None);
+
+        let parsed_dom = soup_to_linux_cookie(sc_dom);
+        assert_eq!(parsed_dom.domain, ".linux.do");
+        assert_eq!(parsed_dom.clean_domain(), "linux.do");
+        assert!(!parsed_dom.host_only());
+
+        let mut rebuilt_dom = linux_to_soup_cookie(&parsed_dom);
+        assert_eq!(rebuilt_dom.domain().as_deref(), Some(".linux.do"));
+        assert_eq!(rebuilt_dom.value().as_deref(), Some("token123"));
+        assert!(rebuilt_dom.is_http_only());
+        assert!(rebuilt_dom.is_secure());
+
+        let sc_host = soup::Cookie::new("_t", "auth_tok", "linux.do", "/", -1);
+        let parsed_host = soup_to_linux_cookie(sc_host);
+        assert_eq!(parsed_host.domain, "linux.do");
+        assert!(parsed_host.host_only());
+
+        let mut rebuilt_host = linux_to_soup_cookie(&parsed_host);
+        assert_eq!(rebuilt_host.domain().as_deref(), Some("linux.do"));
+    }
+
+    #[test]
+    fn live_soup3_via_system_tls_bridge_passes_cloudflare_when_enabled() {
+        if std::env::var("LINDO_LIVE_LINUX_BRIDGE_E2E").as_deref() != Ok("1") {
+            return;
+        }
+        use gio::prelude::TlsCertificateExt;
+        use soup::prelude::SessionExt;
+
+        let cookie_file = crate::legacy::lindo_home_dir()
+            .join("webkitgtk-forum")
+            .join("cookies");
+        let raw_cookies = std::fs::read_to_string(&cookie_file)
+            .expect("expected ~/.lindo/webkitgtk-forum/cookies for live E2E");
+        let mut pairs = Vec::new();
+        for line in raw_cookies.lines() {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() >= 7 {
+                pairs.push(format!("{}={}", cols[5], cols[6]));
+            }
+        }
+        let cookie_hdr = pairs.join("; ");
+        assert!(cookie_hdr.contains("cf_clearance="));
+
+        let snap = crate::ech_desktop::reconcile_with_mode(
+            crate::ech_desktop::EchRoutingMode::SmartAuto,
+        );
+        let port = ACTIVE_PROXY_PORT.load(Ordering::SeqCst);
+        assert!(
+            port > 0,
+            "Linux bridge must route WebKitGTK via local BoringSSL gateway even when ECH yields to TUN ({snap:?})"
+        );
+
+        let proxy_uri = format!("http://127.0.0.1:{port}");
+        let resolver = gio::SimpleProxyResolver::new(Some(&proxy_uri), ["127.0.0.1", "localhost"]);
+        let session = soup::Session::new();
+        session.set_proxy_resolver(Some(&resolver));
+        session.set_user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15",
+        );
+
+        for (url, expected_status) in [
+            ("https://linux.do/challenge", soup::Status::NotFound),
+            ("https://linux.do/session/csrf.json", soup::Status::Ok),
+            ("https://linux.do/u/jedilus.json", soup::Status::Ok),
+            (
+                "https://linux.do/user-badges/jedilus.json?grouped=true",
+                soup::Status::Ok,
+            ),
+        ] {
+            let msg = soup::Message::new("GET", url).unwrap();
+            msg.connect_accept_certificate(|_msg, cert, _err| {
+                cert.certificate()
+                    .map(|der| lindo_ech::verify_leaf_der(&der, "linux.do"))
+                    .unwrap_or(false)
+            });
+            if let Some(hdrs) = msg.request_headers() {
+                if url.ends_with("/challenge") {
+                    hdrs.append(
+                        "Accept",
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    );
+                } else {
+                    hdrs.append("Accept", "application/json, text/javascript, */*; q=0.01");
+                    hdrs.append("X-Requested-With", "XMLHttpRequest");
+                }
+                hdrs.append("Cookie", &cookie_hdr);
+            }
+            let body = session
+                .send_and_read(&msg, None::<&gio::Cancellable>)
+                .expect("Soup3 request via SystemTlsBridge failed");
+            let st = msg.status();
+            let cf = msg
+                .response_headers()
+                .and_then(|h| h.one("cf-mitigated"))
+                .unwrap_or_default();
+            println!(
+                "LIVE Soup3 -> SystemTlsBridge {url}: status={st:?} cf={cf:?} bytes={}",
+                body.len()
+            );
+            assert_ne!(cf.as_str(), "challenge", "{url} hit CF challenge!");
+            assert_eq!(st, expected_status, "{url} unexpected status {st:?}");
+        }
+        lindo_ech::stop_gateway();
     }
 }

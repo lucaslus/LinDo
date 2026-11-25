@@ -3055,14 +3055,6 @@ internal fun LinDoApp(
         }
     }
 
-    fun openOfficialProfileEditor() {
-        if (isAuthorized) {
-            showEditProfileSheet = true
-        } else {
-            requestGuestLogin(GuestGateScenario.EDIT_PROFILE)
-        }
-    }
-
     fun closeWebPage() {
         val closedUrl = activeWebLoginUrl
         val wasEditingProfile = closedUrl?.endsWith("/preferences/profile") == true
@@ -3361,7 +3353,7 @@ internal fun LinDoApp(
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences/profile(?:[/?#].*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
-            if (isAuthorized) showEditProfileSheet = true else requestGuestLogin(GuestGateScenario.EDIT_PROFILE_WEB)
+            if (isAuthorized) openWebPage("https://linux.do/my/preferences/profile") else requestGuestLogin(GuestGateScenario.EDIT_PROFILE_WEB)
             return
         }
         if (Regex("""^https?://(?:www\.)?linux\.do/(?:my|u/[^/?#]+)/preferences(?:/.*)?$""", RegexOption.IGNORE_CASE).matches(trimmed)) {
@@ -4181,7 +4173,6 @@ internal fun LinDoApp(
                                             pmInitialDraft = null
                                             showPrivateMessagesSheet = true
                                         },
-                                        onOpenEditProfile = ::openOfficialProfileEditor,
                                         onOpenFollowSheet = { showFollowSheet = true },
                                         onOpenAccountPreferences = { showAccountPreferencesSheet = true },
                                         onOpenAboutSheet = { showAboutSheet = true },
@@ -4415,7 +4406,6 @@ internal fun LinDoApp(
                                                     pmInitialDraft = null
                                                     showPrivateMessagesSheet = true
                                                 },
-                                                onOpenEditProfile = ::openOfficialProfileEditor,
                                                 onOpenFollowSheet = { showFollowSheet = true },
                                                 onOpenAccountPreferences = { showAccountPreferencesSheet = true },
                                                 onOpenAboutSheet = { showAboutSheet = true },
@@ -4638,7 +4628,7 @@ internal fun LinDoApp(
                         onDismiss = { showAccountPreferencesSheet = false },
                         onOpenEditProfile = {
                             showAccountPreferencesSheet = false
-                            showEditProfileSheet = true
+                            openWebPage("https://linux.do/my/preferences/profile")
                         },
                         onUpdated = { syncUserProfile(force = true) },
                         onOpenWeb = ::openWebPage
@@ -13846,7 +13836,6 @@ internal fun CommunityProfileScreen(
     onOpenReadHistory: () -> Unit = {},
     onOpenCloudDrafts: () -> Unit = {},
     onOpenPrivateMessages: () -> Unit,
-    onOpenEditProfile: () -> Unit,
     onOpenFollowSheet: () -> Unit = {},
     onOpenAccountPreferences: () -> Unit = {},
     onOpenAboutSheet: () -> Unit = {},
@@ -13943,8 +13932,7 @@ internal fun CommunityProfileScreen(
                                 animatedAvatar = fullProfile?.animatedAvatar ?: currentUser?.animatedAvatar,
                                 primaryGroupName = fullProfile?.primaryGroupName,
                                 flair = fullProfile?.flair,
-                                avatarSize = 52.dp,
-                                onClick = onOpenEditProfile
+                                avatarSize = 52.dp
                             )
                         } else {
                             Box(
@@ -14041,23 +14029,7 @@ internal fun CommunityProfileScreen(
                             }
                         }
 
-                        if (isAuthorized) {
-                            Box(
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .clip(CircleShape)
-                                    .pointerHoverIcon(PointerIcon.Hand)
-                                    .clickable(onClick = onOpenEditProfile),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = LinDoIcons.Edit,
-                                    contentDescription = LinDoMessagesCopy.EDIT_PROFILE_SHORT.text,
-                                    modifier = Modifier.size(LinDoTokens.IconM),
-                                    tint = palette.inkSecondary
-                                )
-                            }
-                        } else {
+                        if (!isAuthorized) {
                             TextButton(
                                 onClick = onPrimaryWebLogin,
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)

@@ -27,7 +27,17 @@ use crate::tls_upstream::{BoxRespBody, UpstreamPool};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GatewayRouteMode {
     EchDirect,
+    /// Terminates local TLS for `should_mitm_host` and connects upstream via BoringSSL TLS 1.3 + HTTP/2
+    /// over the host's normal routing table / TUN (including FakeIP) or explicit upstream `http_proxy`,
+    /// without DoH ECH override or physical interface `SO_BINDTODEVICE`.
+    SystemTlsBridge { http_proxy: Option<SocketAddr> },
     SystemPassThrough { http_proxy: Option<SocketAddr> },
+}
+
+impl GatewayRouteMode {
+    pub fn uses_local_tls_mitm(&self) -> bool {
+        matches!(self, Self::EchDirect | Self::SystemTlsBridge { .. })
+    }
 }
 
 /// Returns `true` ONLY for forum/CDN origins where SNI ECH bypass is required.
@@ -192,7 +202,7 @@ async fn handle_proxy_client(
     }
 
     let mode_now = route_mode.read().clone();
-    if mode_now == GatewayRouteMode::EchDirect && port == 443 && should_mitm_host(&host) {
+    if mode_now.uses_local_tls_mitm() && port == 443 && should_mitm_host(&host) {
         let leaf = ca.leaf_for_host(&host)?;
         client_stream
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -265,11 +275,22 @@ async fn handle_proxy_client(
             .map_err(|e| format!("local tls accept ({host}): {e}"))?;
 
         let host_arc: Arc<str> = Arc::from(host.as_str());
+        let route_mode_for_service = Arc::clone(&route_mode);
         let service = service_fn(move |req: Request<Incoming>| {
             let host_inner = Arc::clone(&host_arc);
             let up_inner = Arc::clone(&upstream);
+            let req_mode = route_mode_for_service.read().clone();
             async move {
-                let res = match up_inner.send_request(&host_inner, req).await {
+                let send_res = match req_mode {
+                    GatewayRouteMode::SystemTlsBridge { http_proxy }
+                    | GatewayRouteMode::SystemPassThrough { http_proxy } => {
+                        up_inner
+                            .send_request_via_system(&host_inner, req, http_proxy, listen_port)
+                            .await
+                    }
+                    GatewayRouteMode::EchDirect => up_inner.send_request(&host_inner, req).await,
+                };
+                let res = match send_res {
                     Ok(resp) => resp,
                     Err(err_msg) => {
                         let body: BoxRespBody = Full::new(Bytes::from(err_msg))
@@ -294,7 +315,8 @@ async fn handle_proxy_client(
     } else {
         // Transparent tunnel pass-through: either Turnstile/third-party host or SystemPassThrough mode.
         let remote = match mode_now {
-            GatewayRouteMode::SystemPassThrough { http_proxy } => {
+            GatewayRouteMode::SystemPassThrough { http_proxy }
+            | GatewayRouteMode::SystemTlsBridge { http_proxy } => {
                 connect_passthrough_target(&host, port, http_proxy, listen_port).await
             }
             GatewayRouteMode::EchDirect => connect_tunnel_target(&doh, &host, port).await?,
@@ -318,7 +340,7 @@ async fn handle_proxy_client(
     }
 }
 
-async fn connect_passthrough_target(
+pub(crate) async fn connect_passthrough_target(
     host: &str,
     port: u16,
     http_proxy: Option<SocketAddr>,

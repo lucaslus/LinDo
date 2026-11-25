@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   FONT_SCALE_PRESETS,
@@ -206,5 +208,18 @@ describe("Incremental topic tail refresh (append only new comments without full 
     });
     expect(resNoOp.addedCount).toBe(0);
     expect(resNoOp.detail.posts.map((p) => p.id)).toEqual([10, 11, 12]);
+  });
+});
+
+describe("Profile view hides native profile-edit entry while preserving badge title wearing", () => {
+  it("removes profile_edit sub-sheet triggers from SecondaryScreens while keeping badge title wearing", () => {
+    const secondarySrc = fs.readFileSync(
+      path.resolve(__dirname, "../components/SecondaryScreens.tsx"),
+      "utf8"
+    );
+    expect(secondarySrc).not.toContain('setSubSheet("profile_edit")');
+    expect(secondarySrc).not.toContain("编辑个人资料与头衔");
+    expect(secondarySrc).not.toContain("个人资料与偏好设置");
+    expect(secondarySrc).toContain("佩戴头衔");
   });
 });

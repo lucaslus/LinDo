@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -6,10 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use boring2::ssl::{
-    CertificateCompressionAlgorithm, CertificateCompressor, SslConnector, SslConnectorBuilder,
-    SslMethod, SslVerifyMode, SslVersion,
-};
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+use boring2::ssl::{CertificateCompressionAlgorithm, CertificateCompressor};
+use boring2::ssl::{SslConnector, SslConnectorBuilder, SslMethod, SslVerifyMode, SslVersion};
 use boring2::x509::store::X509StoreBuilder;
 use boring2::x509::X509;
 use bytes::Bytes;
@@ -92,8 +92,10 @@ pub fn last_ech_accepted() -> bool {
     LAST_ECH_ACCEPTED.load(Ordering::Relaxed)
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 struct BrotliCertDecompressor;
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl CertificateCompressor for BrotliCertDecompressor {
     const ALGORITHM: CertificateCompressionAlgorithm = CertificateCompressionAlgorithm::BROTLI;
     const CAN_COMPRESS: bool = false;
@@ -129,6 +131,8 @@ pub struct TestTargetOverride {
 struct PoolKey {
     host: String,
     network_gen: u64,
+    system_bridge: bool,
+    http_proxy: Option<SocketAddr>,
 }
 
 type H2Sender = http2::SendRequest<BoxReqBody>;
@@ -309,10 +313,95 @@ impl UpstreamPool {
         self.connect_and_send(host, boxed_req).await
     }
 
+    /// Sends an HTTP request to `host` over BoringSSL TLS 1.3 + HTTP/2 using the host's normal
+    /// OS/TUN routing table (including FakeIP) or explicit upstream `http_proxy`, without DoH ECH override.
+    pub async fn send_request_via_system(
+        &self,
+        host: &str,
+        req: Request<Incoming>,
+        http_proxy: Option<SocketAddr>,
+        listen_port: u16,
+    ) -> Result<Response<BoxRespBody>, String> {
+        let is_bodyless = matches!(
+            *req.method(),
+            http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
+        );
+
+        if is_bodyless {
+            let (parts, _incoming) = req.into_parts();
+            if let Some(mut sender) = self.take_ready_h2_sender_mode(host, true, http_proxy) {
+                if !sender.is_closed() {
+                    let mut pooled_req = Request::from_parts(parts.clone(), empty_req_body());
+                    normalize_for_h2(host, &mut pooled_req);
+                    let probe_res = timeout(H2_POOL_PROBE_TIMEOUT, async {
+                        sender.ready().await?;
+                        sender.send_request(pooled_req).await
+                    })
+                    .await;
+                    match probe_res {
+                        Ok(Ok(resp)) => return Ok(resp.map(|b| b.boxed())),
+                        _ => self.evict_h2_sender_mode(host, true, http_proxy),
+                    }
+                } else {
+                    self.evict_h2_sender_mode(host, true, http_proxy);
+                }
+            }
+            return self
+                .connect_and_send_system(
+                    host,
+                    Request::from_parts(parts, empty_req_body()),
+                    http_proxy,
+                    listen_port,
+                )
+                .await;
+        }
+
+        let mut boxed_req = req.map(|b| b.boxed());
+        let send_timeout =
+            upstream_send_timeout_for_path(boxed_req.method(), boxed_req.uri().path());
+        if let Some(mut sender) = self.take_ready_h2_sender_mode(host, true, http_proxy) {
+            if !sender.is_closed() {
+                match timeout(H2_POOL_PROBE_TIMEOUT, sender.ready()).await {
+                    Ok(Ok(())) => {
+                        normalize_for_h2(host, &mut boxed_req);
+                        return match timeout(send_timeout, sender.send_request(boxed_req)).await {
+                            Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
+                            Ok(Err(e)) => {
+                                self.evict_h2_sender_mode(host, true, http_proxy);
+                                Err(format!("pooled system h2 send failed: {e}"))
+                            }
+                            Err(_) => {
+                                self.evict_h2_sender_mode(host, true, http_proxy);
+                                Err("pooled system h2 send timeout".to_string())
+                            }
+                        };
+                    }
+                    _ => self.evict_h2_sender_mode(host, true, http_proxy),
+                }
+            } else {
+                self.evict_h2_sender_mode(host, true, http_proxy);
+            }
+        }
+
+        self.connect_and_send_system(host, boxed_req, http_proxy, listen_port)
+            .await
+    }
+
     fn take_ready_h2_sender(&self, host: &str) -> Option<H2Sender> {
+        self.take_ready_h2_sender_mode(host, false, None)
+    }
+
+    fn take_ready_h2_sender_mode(
+        &self,
+        host: &str,
+        system_bridge: bool,
+        http_proxy: Option<SocketAddr>,
+    ) -> Option<H2Sender> {
         let key = PoolKey {
             host: crate::ca::normalize_host(host),
             network_gen: net_bind::network_gen(),
+            system_bridge,
+            http_proxy,
         };
         let mut guard = self.h2_pool.lock();
         if let Some(sender) = guard.get(&key) {
@@ -325,16 +414,40 @@ impl UpstreamPool {
     }
 
     fn store_h2_sender(&self, host: &str, net_gen: u64, sender: H2Sender) {
+        self.store_h2_sender_mode(host, net_gen, false, None, sender);
+    }
+
+    fn store_h2_sender_mode(
+        &self,
+        host: &str,
+        net_gen: u64,
+        system_bridge: bool,
+        http_proxy: Option<SocketAddr>,
+        sender: H2Sender,
+    ) {
         let key = PoolKey {
             host: crate::ca::normalize_host(host),
             network_gen: net_gen,
+            system_bridge,
+            http_proxy,
         };
         self.h2_pool.lock().insert(key, sender);
     }
 
     fn evict_h2_sender(&self, host: &str) {
+        self.evict_h2_sender_mode(host, false, None);
+    }
+
+    fn evict_h2_sender_mode(
+        &self,
+        host: &str,
+        system_bridge: bool,
+        http_proxy: Option<SocketAddr>,
+    ) {
         let clean = crate::ca::normalize_host(host);
-        self.h2_pool.lock().retain(|k, _| k.host != clean);
+        self.h2_pool.lock().retain(|k, _| {
+            !(k.host == clean && k.system_bridge == system_bridge && k.http_proxy == http_proxy)
+        });
     }
 
     pub fn clear_h2_pool(&self) {
@@ -394,7 +507,7 @@ impl UpstreamPool {
         if alpn.as_slice() == b"h2" {
             let io = TokioIo::new(conn.tls);
             let mut h2_builder = http2::Builder::new(TokioExecutor::new());
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 h2_builder
                     .timer(TokioTimer::new())
@@ -406,7 +519,7 @@ impl UpstreamPool {
                     .keep_alive_timeout(Duration::from_secs(10))
                     .keep_alive_while_idle(true);
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
                 h2_builder
                     .timer(TokioTimer::new())
@@ -474,6 +587,181 @@ impl UpstreamPool {
         }
     }
 
+    async fn connect_and_send_system(
+        &self,
+        host: &str,
+        mut req: Request<BoxReqBody>,
+        http_proxy: Option<SocketAddr>,
+        listen_port: u16,
+    ) -> Result<Response<BoxRespBody>, String> {
+        let send_timeout = upstream_send_timeout_for_path(req.method(), req.uri().path());
+        let host_lock = self.host_connect_lock(host);
+        let conn = {
+            let _guard = host_lock.lock().await;
+            if let Some(mut sender) = self.take_ready_h2_sender_mode(host, true, http_proxy) {
+                if !sender.is_closed() {
+                    match timeout(H2_POOL_PROBE_TIMEOUT, sender.ready()).await {
+                        Ok(Ok(())) => {
+                            normalize_for_h2(host, &mut req);
+                            return match timeout(send_timeout, sender.send_request(req)).await {
+                                Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
+                                Ok(Err(e)) => {
+                                    self.evict_h2_sender_mode(host, true, http_proxy);
+                                    Err(format!("system h2 coalesced send error: {e}"))
+                                }
+                                Err(_) => {
+                                    self.evict_h2_sender_mode(host, true, http_proxy);
+                                    Err("system h2 coalesced send timeout".to_string())
+                                }
+                            };
+                        }
+                        _ => self.evict_h2_sender_mode(host, true, http_proxy),
+                    }
+                } else {
+                    self.evict_h2_sender_mode(host, true, http_proxy);
+                }
+            }
+            self.establish_tls_system(host, http_proxy, listen_port)
+                .await?
+        };
+
+        let net_gen = conn.network_gen;
+        let alpn = conn
+            .tls
+            .ssl()
+            .selected_alpn_protocol()
+            .unwrap_or(b"http/1.1")
+            .to_vec();
+
+        if alpn.as_slice() == b"h2" {
+            let io = TokioIo::new(conn.tls);
+            let mut h2_builder = http2::Builder::new(TokioExecutor::new());
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            {
+                h2_builder
+                    .timer(TokioTimer::new())
+                    .max_frame_size(None)
+                    .initial_stream_window_size(2_097_152)
+                    .initial_connection_window_size(10_551_296)
+                    .max_concurrent_streams(100)
+                    .keep_alive_interval(Duration::from_secs(25))
+                    .keep_alive_timeout(Duration::from_secs(10))
+                    .keep_alive_while_idle(true);
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                h2_builder
+                    .timer(TokioTimer::new())
+                    .max_frame_size(None)
+                    .initial_stream_window_size(6_291_456)
+                    .initial_connection_window_size(15_728_640)
+                    .header_table_size(65_536)
+                    .max_header_list_size(262_144)
+                    .keep_alive_interval(Duration::from_secs(25))
+                    .keep_alive_timeout(Duration::from_secs(10))
+                    .keep_alive_while_idle(true);
+            }
+
+            let (mut sender, driver) = h2_builder
+                .handshake::<_, BoxReqBody>(io)
+                .await
+                .map_err(|e| format!("system h2 handshake: {e}"))?;
+
+            let clean_host = crate::ca::normalize_host(host);
+            tokio::spawn(async move {
+                let _ = driver.await;
+            });
+
+            sender
+                .ready()
+                .await
+                .map_err(|e| format!("system h2 sender ready: {e}"))?;
+            self.store_h2_sender_mode(&clean_host, net_gen, true, http_proxy, sender.clone());
+
+            normalize_for_h2(host, &mut req);
+            match timeout(send_timeout, sender.send_request(req)).await {
+                Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
+                Ok(Err(e)) => {
+                    self.evict_h2_sender_mode(&clean_host, true, http_proxy);
+                    Err(format!("system h2 send: {e}"))
+                }
+                Err(_) => {
+                    self.evict_h2_sender_mode(&clean_host, true, http_proxy);
+                    Err("system h2 send timeout".to_string())
+                }
+            }
+        } else {
+            let io = TokioIo::new(conn.tls);
+            let (mut sender, driver) = http1::Builder::new()
+                .handshake::<_, BoxReqBody>(io)
+                .await
+                .map_err(|e| format!("system http1 handshake: {e}"))?;
+            tokio::spawn(async move {
+                let _ = driver.await;
+            });
+            sender
+                .ready()
+                .await
+                .map_err(|e| format!("system http1 ready: {e}"))?;
+            normalize_for_h1(host, &mut req);
+            match timeout(send_timeout, sender.send_request(req)).await {
+                Ok(Ok(resp)) => Ok(resp.map(|b| b.boxed())),
+                Ok(Err(e)) => Err(format!("system http1 send: {e}")),
+                Err(_) => Err("system http1 send timeout".to_string()),
+            }
+        }
+    }
+
+    async fn establish_tls_system(
+        &self,
+        host: &str,
+        http_proxy: Option<SocketAddr>,
+        listen_port: u16,
+    ) -> Result<EstablishedTls, String> {
+        let net_gen = net_bind::network_gen();
+        let sni_host = strip_default_https_port(host);
+        let tcp = crate::proxy::connect_passthrough_target(sni_host, 443, http_proxy, listen_port)
+            .await?;
+
+        let mut cfg = self
+            .connector
+            .configure()
+            .map_err(|e| format!("system bridge connector configure: {e}"))?;
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = cfg.add_application_settings(b"h2");
+            cfg.set_alps_use_new_codepoint(true);
+        }
+        cfg.set_enable_ech_grease(true);
+
+        let ssl = cfg
+            .into_ssl(sni_host)
+            .map_err(|e| format!("system bridge into_ssl({sni_host}): {e}"))?;
+        let mut tls =
+            SslStream::new(ssl, tcp).map_err(|e| format!("system bridge ssl stream: {e}"))?;
+
+        let tls_handshake_timeout = {
+            #[cfg(test)]
+            {
+                self.test_tls_timeout.unwrap_or(UPSTREAM_TLS_HANDSHAKE_TIMEOUT)
+            }
+            #[cfg(not(test))]
+            {
+                UPSTREAM_TLS_HANDSHAKE_TIMEOUT
+            }
+        };
+
+        timeout(tls_handshake_timeout, Pin::new(&mut tls).connect())
+            .await
+            .map_err(|_| format!("system bridge tls handshake timeout for {sni_host}"))?
+            .map_err(|e| format!("system bridge tls connect ({sni_host}): {e}"))?;
+
+        Ok(EstablishedTls {
+            tls,
+            network_gen: net_gen,
+        })
+    }
+
     fn map_dial_addr(&self, addr: SocketAddr) -> SocketAddr {
         #[cfg(test)]
         {
@@ -500,7 +788,7 @@ impl UpstreamPool {
             .connector
             .configure()
             .map_err(|e| SingleHandshakeError::Tls(format!("connector configure: {e}")))?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = cfg.add_application_settings(b"h2");
             cfg.set_alps_use_new_codepoint(true);
@@ -745,9 +1033,9 @@ fn build_chromium_connector_builder(
     let _ = builder.set_min_proto_version(Some(SslVersion::TLS1_2));
     let _ = builder.set_max_proto_version(Some(SslVersion::TLS1_3));
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        // Safari / WKWebView TLS profile: fixed extension order (no permutation), P-521 included, 17+ Safari ciphers.
+        // WebKit (macOS WKWebView / Linux WebKit2GTK) TLS profile: fixed extension order (no permutation), P-521 included, 17+ Safari/WebKit ciphers.
         builder.set_permute_extensions(false);
         if builder
             .set_curves_list("X25519MLKEM768:X25519:P-256:P-384:P-521")
@@ -769,7 +1057,7 @@ fn build_chromium_connector_builder(
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         // Chromium (Android System WebView / Windows WebView2) TLS profile:
         // extension permutation + PQ X25519MLKEM768 + full 15-cipher suite (`t13d1516h2`).

@@ -47,7 +47,6 @@ import type {
   SavedAccountEntry,
   TopicSummary,
   UpdateProgressPayload,
-  UserAccountPreferencesSnapshot,
   UserPreferences,
   UserProfile,
 } from "../lib/types";
@@ -68,7 +67,6 @@ import {
   fetchReadHistoryTopics,
   fetchSiteBadges,
   fetchTopicFeed,
-  fetchUserAccountPreferences,
   fetchUserActions,
   fetchUserBadges,
   fetchUserBookmarks,
@@ -2995,7 +2993,6 @@ export const ProfileSettingsView: React.FC<{
     | "activity"
     | "follows"
     | "badges"
-    | "profile_edit"
     | "diagnostics"
     | "about"
     | null
@@ -3098,17 +3095,6 @@ export const ProfileSettingsView: React.FC<{
   const [subLoading, setSubLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Native profile & preferences editor state
-  const [acctSnap, setAcctSnap] = useState<UserAccountPreferencesSnapshot | null>(null);
-  const [editDisplayName, setEditDisplayName] = useState("");
-  const [editTitle, setEditTitle] = useState("");
-  const [editBio, setEditBio] = useState("");
-  const [editLocation, setEditLocation] = useState("");
-  const [editWebsite, setEditWebsite] = useState("");
-  const [editHidePresence, setEditHidePresence] = useState(false);
-  const [editAllowPm, setEditAllowPm] = useState(true);
-  const [savingProfile, setSavingProfile] = useState(false);
-
   useEffect(() => {
     if (!cacheClearedNotice) return;
     const t = setTimeout(() => setCacheClearedNotice(null), 2600);
@@ -3178,21 +3164,6 @@ export const ProfileSettingsView: React.FC<{
           ? fetchUserBadges(currentUser.username)
           : fetchSiteBadges();
       p.then(setBadges)
-        .catch(() => {})
-        .finally(() => setSubLoading(false));
-    } else if (subSheet === "profile_edit" && isAuthorized && currentUser?.username) {
-      setSubLoading(true);
-      fetchUserAccountPreferences(currentUser.username)
-        .then((snap) => {
-          setAcctSnap(snap);
-          setEditDisplayName(snap.displayName);
-          setEditTitle(snap.title);
-          setEditBio(snap.bioRaw);
-          setEditLocation(snap.location);
-          setEditWebsite(snap.website);
-          setEditHidePresence(snap.hideProfileAndPresence);
-          setEditAllowPm(snap.allowPrivateMessages);
-        })
         .catch(() => {})
         .finally(() => setSubLoading(false));
     }
@@ -3390,17 +3361,7 @@ export const ProfileSettingsView: React.FC<{
                 </div>
               </div>
 
-              {isAuthorized ? (
-                <button
-                  type="button"
-                  onClick={() => setSubSheet("profile_edit")}
-                  title="编辑个人资料与头衔"
-                  className="lindo-interactive flex h-8 w-8 items-center justify-center rounded-full"
-                  style={{ color: "var(--ink-secondary)" }}
-                >
-                  <LinDoIcons.Edit size={18} />
-                </button>
-              ) : (
+              {!isAuthorized && (
                 <div className="flex items-center gap-1.5">
                   {savedAccounts.length > 0 && (
                     <button
@@ -3511,18 +3472,6 @@ export const ProfileSettingsView: React.FC<{
                   onRequestGuestLogin(
                     "登录后访问 Connect 中心",
                     "查看信任等级进度、保级指标与专属社区权益"
-                  );
-              }}
-            />
-            <SettingRow
-              icon={<LinDoIcons.ShieldCheck size={19} />}
-              title="账号与偏好设置"
-              onClick={() => {
-                if (isAuthorized) setSubSheet("profile_edit");
-                else
-                  onRequestGuestLogin(
-                    "登录后管理账号设置",
-                    "自定义个人主页、头衔徽章与隐私偏好"
                   );
               }}
             />
@@ -3919,11 +3868,9 @@ export const ProfileSettingsView: React.FC<{
             className={`flex flex-col rounded-2xl shadow-2xl overflow-hidden ${
               subSheet === "about"
                 ? "w-[420px]"
-                : subSheet === "profile_edit"
-                  ? "max-h-[84vh] w-[580px]"
-                  : subSheet === "diagnostics"
-                    ? "h-[min(660px,84vh)] w-[680px] max-w-full"
-                    : "h-[min(640px,82vh)] w-[640px] max-w-full"
+                : subSheet === "diagnostics"
+                  ? "h-[min(660px,84vh)] w-[680px] max-w-full"
+                  : "h-[min(640px,82vh)] w-[640px] max-w-full"
             }`}
             style={{
               backgroundColor: "var(--card-surface)",
@@ -3950,11 +3897,9 @@ export const ProfileSettingsView: React.FC<{
                             ? "关注与粉丝"
                             : subSheet === "badges"
                               ? "社区徽章墙"
-                              : subSheet === "profile_edit"
-                                ? "个人资料与偏好设置"
-                                : subSheet === "diagnostics"
-                                  ? "运行日志"
-                                  : "关于 Lindo"}
+                              : subSheet === "diagnostics"
+                                ? "运行日志"
+                                : "关于 Lindo"}
                 </span>
                 {subSheet === "diagnostics" && (
                   <span
@@ -4853,207 +4798,6 @@ export const ProfileSettingsView: React.FC<{
                     })}
                   </div>
                 )
-              ) : subSheet === "profile_edit" ? (
-                <div className="space-y-3.5 p-5">
-                  <div>
-                    <label className="text-[12px] font-semibold" style={{ color: "var(--ink-secondary)" }}>
-                      显示昵称
-                    </label>
-                    <input
-                      type="text"
-                      value={editDisplayName}
-                      onChange={(e) => setEditDisplayName(e.target.value)}
-                      className="mt-1 h-9 w-full rounded-lg bg-transparent px-3 text-[13.5px] outline-none"
-                      style={{
-                        backgroundColor: "var(--subtle-surface)",
-                        border: "0.5px solid var(--hairline)",
-                        color: "var(--ink-primary)",
-                      }}
-                    />
-                  </div>
-
-                  {acctSnap && acctSnap.availableTitles.length > 0 && (
-                    <div>
-                      <label
-                        className="text-[12px] font-semibold"
-                        style={{ color: "var(--ink-secondary)" }}
-                      >
-                        社区头衔
-                      </label>
-                      <div className="mt-1.5 flex flex-wrap gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setEditTitle("")}
-                          className="rounded-full px-3 py-1 text-[12px] cursor-pointer"
-                          style={{
-                            backgroundColor: !editTitle
-                              ? "var(--active-chip-bg)"
-                              : "var(--subtle-surface)",
-                            color: !editTitle ? "var(--active-chip-text)" : "var(--ink-secondary)",
-                          }}
-                        >
-                          无头衔
-                        </button>
-                        {acctSnap.availableTitles.map((tl) => (
-                          <button
-                            key={tl}
-                            type="button"
-                            onClick={() => setEditTitle(tl)}
-                            className="rounded-full px-3 py-1 text-[12px] font-medium cursor-pointer"
-                            style={{
-                              backgroundColor:
-                                editTitle === tl
-                                  ? "var(--active-chip-bg)"
-                                  : "var(--subtle-surface)",
-                              color:
-                                editTitle === tl
-                                  ? "var(--active-chip-text)"
-                                  : "var(--ink-primary)",
-                            }}
-                          >
-                            {tl}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div>
-                    <label className="text-[12px] font-semibold" style={{ color: "var(--ink-secondary)" }}>
-                      个人简介（支持 Markdown）
-                    </label>
-                    <textarea
-                      rows={3}
-                      value={editBio}
-                      onChange={(e) => setEditBio(e.target.value)}
-                      className="mt-1 w-full rounded-lg bg-transparent p-3 text-[13px] outline-none resize-none"
-                      style={{
-                        backgroundColor: "var(--subtle-surface)",
-                        border: "0.5px solid var(--hairline)",
-                        color: "var(--ink-primary)",
-                      }}
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label
-                        className="text-[12px] font-semibold"
-                        style={{ color: "var(--ink-secondary)" }}
-                      >
-                        所在地
-                      </label>
-                      <input
-                        type="text"
-                        value={editLocation}
-                        onChange={(e) => setEditLocation(e.target.value)}
-                        className="mt-1 h-9 w-full rounded-lg bg-transparent px-3 text-[13px] outline-none"
-                        style={{
-                          backgroundColor: "var(--subtle-surface)",
-                          border: "0.5px solid var(--hairline)",
-                          color: "var(--ink-primary)",
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <label
-                        className="text-[12px] font-semibold"
-                        style={{ color: "var(--ink-secondary)" }}
-                      >
-                        个人网站
-                      </label>
-                      <input
-                        type="text"
-                        value={editWebsite}
-                        onChange={(e) => setEditWebsite(e.target.value)}
-                        className="mt-1 h-9 w-full rounded-lg bg-transparent px-3 text-[13px] outline-none"
-                        style={{
-                          backgroundColor: "var(--subtle-surface)",
-                          border: "0.5px solid var(--hairline)",
-                          color: "var(--ink-primary)",
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between pt-1">
-                    <span className="text-[13px]" style={{ color: "var(--ink-primary)" }}>
-                      隐藏个人公开资料与在线状态
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={editHidePresence}
-                      onChange={(e) => setEditHidePresence(e.target.checked)}
-                      className="accent-amber-400 cursor-pointer"
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <span className="text-[13px]" style={{ color: "var(--ink-primary)" }}>
-                      允许其他社区成员向我发送私信
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={editAllowPm}
-                      onChange={(e) => setEditAllowPm(e.target.checked)}
-                      className="accent-amber-400 cursor-pointer"
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between pt-3 lindo-hairline-t">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const uname = currentUser?.username;
-                        setSubSheet(null);
-                        onOpenInAppUrl(
-                          uname
-                            ? `https://linux.do/u/${encodeURIComponent(uname)}/preferences/security`
-                            : "https://linux.do/my/preferences/security"
-                        );
-                      }}
-                      className="text-[12px] hover:underline cursor-pointer"
-                      style={{ color: "var(--ink-secondary)" }}
-                    >
-                      打开高级安全设置（2FA / 通行密钥 / 头像）→
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={savingProfile || !currentUser}
-                      onClick={async () => {
-                        if (!currentUser) return;
-                        setSavingProfile(true);
-                        try {
-                          await updateUserProfileInfo(currentUser.username, {
-                            displayName: editDisplayName,
-                            title: editTitle,
-                            bioRaw: editBio,
-                            location: editLocation,
-                            website: editWebsite,
-                            hidePresence: editHidePresence,
-                            allowPrivateMessages: editAllowPm,
-                          });
-                          await refreshCurrentUserSession().catch(() => {});
-                          onProfileUpdated();
-                          setToast("个人资料已保存");
-                          setSubSheet(null);
-                        } catch (e: any) {
-                          setToast(e?.message || "保存失败");
-                        } finally {
-                          setSavingProfile(false);
-                        }
-                      }}
-                      className="rounded-full px-5 py-1.5 text-[13px] font-bold cursor-pointer disabled:opacity-50"
-                      style={{
-                        backgroundColor: "var(--publish-btn-bg)",
-                        color: "var(--publish-btn-fg)",
-                      }}
-                    >
-                      {savingProfile ? "保存中..." : "保存修改"}
-                    </button>
-                  </div>
-                </div>
               ) : subSheet === "diagnostics" ? (
                 (() => {
                   const warnOrErrCount = allDiagEntries.filter(

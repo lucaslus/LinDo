@@ -2063,7 +2063,9 @@ impl BridgeEngine {
             }
         })()"#;
 
-        let Ok(val) = native_call("evaluate", json!({ "script": probe_js }), 6).await else {
+        let Ok(val) =
+            native_call("evaluate", json!({ "isolated": true, "script": probe_js }), 6).await
+        else {
             return false;
         };
         let status = val.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
@@ -5424,6 +5426,8 @@ impl BridgeEngine {
         if self.inner.lock().unwrap().bootstrap_challenged {
             return Err("Site verification required".to_string());
         }
+        #[cfg(target_os = "linux")]
+        crate::linux_webview_bridge::ensure_host_cert_pinned_for_url(clean_url).await;
         let cache_mode = if is_emoji || is_avatar { "force-cache" } else { "default" };
         let cfg = json!({ "url": clean_url, "cacheMode": cache_mode });
         let script = format!(

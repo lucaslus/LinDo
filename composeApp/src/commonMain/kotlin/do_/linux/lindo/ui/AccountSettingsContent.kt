@@ -130,8 +130,8 @@ internal fun AccountPreferencesContent(
 ) {
     AccountSettingsColumn {
         AccountSection("个人资料")
-        AccountDetailRow("昵称与个人资料", "${snapshot.displayName.ifBlank { snapshot.username }} · @${snapshot.username}", onClick = onEditProfile)
-        AccountDetailRow("个人头衔", snapshot.title.ifBlank { "未设置" }, onClick = onEditProfile)
+        AccountDetailRow("昵称与个人资料", "${snapshot.displayName.ifBlank { snapshot.username }} · @${snapshot.username}", web = true, onClick = onEditProfile)
+        AccountDetailRow("个人头衔", snapshot.title.ifBlank { "未设置" }, web = true, onClick = onEditProfile)
         AccountDetailRow("绑定邮箱", snapshot.email.ifBlank { "在网页查看与管理" }, web = true,
             onClick = { onOpenWeb("https://linux.do/my/preferences/account") })
         AccountSection("隐私与互动")

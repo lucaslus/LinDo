@@ -99,7 +99,8 @@ struct HostCacheEntry {
 
 pub struct DohResolver {
     tls_connector: Arc<SslConnector>,
-    ech_cache: Arc<tokio::sync::Mutex<Option<EchBootstrap>>>,
+    bootstrap_flight: tokio::sync::Mutex<()>,
+    ech_cache: Mutex<Option<EchBootstrap>>,
     host_cache: Mutex<HashMap<String, HostCacheEntry>>,
     last_sticky_ip: Mutex<Option<(u64, Ipv4Addr)>>,
     avoid_sticky_ip: Mutex<Option<Ipv4Addr>>,
@@ -122,7 +123,8 @@ impl DohResolver {
         let _ = builder.set_alpn_protos(b"\x08http/1.1");
         Ok(Arc::new(Self {
             tls_connector: Arc::new(builder.build()),
-            ech_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            bootstrap_flight: tokio::sync::Mutex::new(()),
+            ech_cache: Mutex::new(None),
             host_cache: Mutex::new(HashMap::new()),
             last_sticky_ip: Mutex::new(None),
             avoid_sticky_ip: Mutex::new(None),
@@ -134,21 +136,18 @@ impl DohResolver {
     /// fast reachable Cloudflare Anycast IP for the current `network_gen`.
     pub async fn get_ech_and_sticky_ip(&self) -> Result<(Vec<u8>, Ipv4Addr), String> {
         let cur_gen = net_bind::network_gen();
-        {
-            let guard = self.ech_cache.lock().await;
-            if let Some(ref cached) = *guard {
-                if cached.network_gen == cur_gen
-                    && cached.fetched_at.elapsed() < cached.ttl
-                    && !cached.ech_config_list.is_empty()
-                {
-                    return Ok((cached.ech_config_list.clone(), cached.sticky_ip));
-                }
+        if let Some(ref cached) = *self.ech_cache.lock() {
+            if cached.network_gen == cur_gen
+                && cached.fetched_at.elapsed() < cached.ttl
+                && !cached.ech_config_list.is_empty()
+            {
+                return Ok((cached.ech_config_list.clone(), cached.sticky_ip));
             }
         }
 
-        let mut guard = self.ech_cache.lock().await;
+        let _flight = self.bootstrap_flight.lock().await;
         let cur_gen = net_bind::network_gen();
-        if let Some(ref cached) = *guard {
+        if let Some(ref cached) = *self.ech_cache.lock() {
             if cached.network_gen == cur_gen
                 && cached.fetched_at.elapsed() < cached.ttl
                 && !cached.ech_config_list.is_empty()
@@ -209,7 +208,6 @@ impl DohResolver {
         }
 
         let sticky_ip = race_fastest_cf_ip(&candidates).await.unwrap_or(candidates[0]);
-        *self.last_sticky_ip.lock() = Some((cur_gen, sticky_ip));
         let ttl_secs = https_res
             .as_ref()
             .ok()
@@ -217,14 +215,26 @@ impl DohResolver {
             .unwrap_or(180)
             .clamp(60, 600);
 
-        *guard = Some(EchBootstrap {
-            ech_config_list: ech_list.clone(),
-            sticky_ip,
-            candidates,
-            network_gen: cur_gen,
-            fetched_at: Instant::now(),
-            ttl: Duration::from_secs(ttl_secs as u64),
-        });
+        {
+            let mut guard = self.ech_cache.lock();
+            let newer_present = guard
+                .as_ref()
+                .map(|c| c.network_gen > cur_gen && !c.ech_config_list.is_empty())
+                .unwrap_or(false);
+            if !newer_present && net_bind::network_gen() == cur_gen {
+                *self.last_sticky_ip.lock() = Some((cur_gen, sticky_ip));
+                *guard = Some(EchBootstrap {
+                    ech_config_list: ech_list.clone(),
+                    sticky_ip,
+                    candidates,
+                    network_gen: cur_gen,
+                    fetched_at: Instant::now(),
+                    ttl: Duration::from_secs(ttl_secs as u64),
+                });
+            } else if let Some(ref existing) = *guard {
+                return Ok((existing.ech_config_list.clone(), existing.sticky_ip));
+            }
+        }
 
         Ok((ech_list, sticky_ip))
     }
@@ -251,10 +261,10 @@ impl DohResolver {
         prev
     }
 
-    /// Synchronously advances cached sticky IP onto `new_gen` if a valid bootstrap cache is unlocked,
+    /// Synchronously advances cached sticky IP onto `new_gen` if a valid bootstrap cache exists,
     /// allowing immediate status inspection right after `nativeRotateStickyIp` / mode switches.
     pub fn try_advance_sticky_ip_for_gen_sync(&self, new_gen: u64) -> Option<Ipv4Addr> {
-        let mut guard = self.ech_cache.try_lock().ok()?;
+        let mut guard = self.ech_cache.lock();
         let cached = guard.as_mut()?;
         if cached.ech_config_list.is_empty() || cached.fetched_at.elapsed() >= cached.ttl {
             return None;
@@ -273,7 +283,7 @@ impl DohResolver {
         let target_gen = net_bind::network_gen();
         let avoided = *self.avoid_sticky_ip.lock();
         let race_candidates = {
-            let mut guard = self.ech_cache.lock().await;
+            let mut guard = self.ech_cache.lock();
             if let Some(ref mut cached) = *guard {
                 if !cached.ech_config_list.is_empty() && cached.fetched_at.elapsed() < cached.ttl {
                     if cached.network_gen != target_gen {
@@ -303,7 +313,7 @@ impl DohResolver {
 
         if let Some(ordered) = race_candidates {
             if let Some(fastest) = race_fastest_cf_ip(&ordered).await {
-                let mut guard = self.ech_cache.lock().await;
+                let mut guard = self.ech_cache.lock();
                 if let Some(ref mut cached) = *guard {
                     if cached.network_gen == target_gen && net_bind::network_gen() == target_gen {
                         cached.sticky_ip = fastest;
@@ -323,7 +333,7 @@ impl DohResolver {
         if !crate::tls_upstream::is_valid_ech_config_list(&retry_configs) {
             return;
         }
-        let mut guard = self.ech_cache.lock().await;
+        let mut guard = self.ech_cache.lock();
         if let Some(ref mut cached) = *guard {
             cached.ech_config_list = retry_configs;
             cached.fetched_at = Instant::now();
@@ -334,7 +344,7 @@ impl DohResolver {
     /// for hedged concurrent TLS handshakes when the primary IP stalls after TCP connect.
     pub async fn peek_alternate_sticky_ip(&self, primary_ip: Ipv4Addr) -> Option<Ipv4Addr> {
         let avoided = *self.avoid_sticky_ip.lock();
-        let guard = self.ech_cache.lock().await;
+        let guard = self.ech_cache.lock();
         let cached = guard.as_ref()?;
         cached
             .candidates
@@ -352,7 +362,7 @@ impl DohResolver {
 
     /// Promotes a faster backup Cloudflare Anycast IP to `sticky_ip` when a hedged backup handshake wins.
     pub async fn promote_sticky_ip(&self, winner_ip: Ipv4Addr) {
-        let mut guard = self.ech_cache.lock().await;
+        let mut guard = self.ech_cache.lock();
         if let Some(ref mut cached) = *guard {
             let prev = cached.sticky_ip;
             if prev != winner_ip {
@@ -365,7 +375,7 @@ impl DohResolver {
 
     pub async fn rotate_sticky_ip(&self, failed_ip: Ipv4Addr) -> Option<Ipv4Addr> {
         *self.avoid_sticky_ip.lock() = Some(failed_ip);
-        let mut guard = self.ech_cache.lock().await;
+        let mut guard = self.ech_cache.lock();
         let cached = guard.as_mut()?;
         if cached.sticky_ip != failed_ip {
             return Some(cached.sticky_ip);
@@ -376,7 +386,7 @@ impl DohResolver {
     }
 
     pub async fn rotate_current_sticky_ip(&self) -> Option<Ipv4Addr> {
-        let mut guard = self.ech_cache.lock().await;
+        let mut guard = self.ech_cache.lock();
         let cached = guard.as_mut()?;
         *self.avoid_sticky_ip.lock() = Some(cached.sticky_ip);
         let next = rotate_cached_sticky_ip(cached)?;
@@ -385,7 +395,7 @@ impl DohResolver {
     }
 
     pub fn try_rotate_current_sticky_ip_sync(&self) -> Option<Ipv4Addr> {
-        let mut guard = self.ech_cache.try_lock().ok()?;
+        let mut guard = self.ech_cache.lock();
         let cached = guard.as_mut()?;
         *self.avoid_sticky_ip.lock() = Some(cached.sticky_ip);
         let next = rotate_cached_sticky_ip(cached)?;
@@ -518,11 +528,12 @@ impl DohResolver {
         ech_config_list: Vec<u8>,
         candidates: Vec<Ipv4Addr>,
     ) {
+        let mut guard = self.ech_cache.lock();
         let cur_gen = net_bind::network_gen();
         let sticky_ip = candidates[0];
         *self.avoid_sticky_ip.lock() = None;
         *self.last_sticky_ip.lock() = Some((cur_gen, sticky_ip));
-        *self.ech_cache.lock().await = Some(EchBootstrap {
+        *guard = Some(EchBootstrap {
             ech_config_list,
             sticky_ip,
             candidates,

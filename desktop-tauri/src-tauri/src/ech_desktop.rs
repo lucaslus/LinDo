@@ -527,13 +527,15 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
 
     let env = detect_net_env();
     let cur_sig = env.signature();
-    {
+    let env_changed = {
         let mut sig_guard = last_env_sig_lock().lock().unwrap();
+        let changed = !sig_guard.is_empty() && *sig_guard != cur_sig;
         if *sig_guard != cur_sig || mode_changed {
             *sig_guard = cur_sig;
             PROXY_TUNNEL_UNREACHABLE.store(false, Ordering::Release);
         }
-    }
+        changed
+    };
     let supported = is_platform_supported();
     let (mut should_ech, vpn_yielded) = if supported {
         decide_should_use_ech_with_fallback(
@@ -546,13 +548,53 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
     };
 
     DESIRED_ECH.store(should_ech, Ordering::SeqCst);
-    if should_ech {
+    if should_ech || crate::platform_bridge::CAPS.always_route_webview_via_tls_bridge {
         // Cancel any pending delayed gateway shutdown from a rapid `ech -> system_default -> ech` toggle.
         STOP_SEQ.fetch_add(1, Ordering::AcqRel);
     }
     let mut last_err = String::new();
 
-    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+    if crate::platform_bridge::CAPS.always_route_webview_via_tls_bridge && supported {
+        let target_route = if should_ech {
+            GatewayRouteMode::EchDirect
+        } else {
+            GatewayRouteMode::SystemTlsBridge {
+                http_proxy: env.http_proxy,
+            }
+        };
+        if lindo_ech::current_gateway_port() == 0 {
+            if let Err(e) = ensure_ca_material().and_then(|(cert, key)| {
+                lindo_ech::start_gateway_with_mode(&cert, &key, 0, false, target_route.clone())
+            }) {
+                last_err = e;
+                should_ech = false;
+            }
+        }
+        let port = lindo_ech::current_gateway_port();
+        if port > 0 {
+            let effective_route = if should_ech {
+                GatewayRouteMode::EchDirect
+            } else {
+                GatewayRouteMode::SystemTlsBridge {
+                    http_proxy: env.http_proxy,
+                }
+            };
+            lindo_ech::set_gateway_route_mode(effective_route.clone());
+            if had_running_gateway
+                && (mode_changed || env_changed || prev_gw_route.as_ref() != Some(&effective_route))
+            {
+                if should_ech {
+                    lindo_ech::rotate_sticky_ip();
+                }
+                lindo_ech::notify_network_changed();
+            }
+            #[cfg(target_os = "linux")]
+            crate::linux_webview_bridge::set_webkit_proxy_port(port);
+        } else {
+            #[cfg(target_os = "linux")]
+            crate::linux_webview_bridge::set_webkit_proxy_port(0);
+        }
+    } else if cfg!(target_os = "macos") {
         if supported && should_ech {
             if lindo_ech::current_gateway_port() == 0 {
                 match ensure_ca_material()
@@ -573,16 +615,10 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
                     lindo_ech::rotate_sticky_ip();
                     lindo_ech::notify_network_changed();
                 }
-                let port = lindo_ech::current_gateway_port();
                 #[cfg(target_os = "macos")]
                 unsafe {
-                    lindo_macos_set_webkit_proxy(port);
+                    lindo_macos_set_webkit_proxy(lindo_ech::current_gateway_port());
                 }
-                #[cfg(target_os = "linux")]
-                crate::linux_webview_bridge::set_webkit_proxy_port(port);
-            } else {
-                #[cfg(target_os = "linux")]
-                crate::linux_webview_bridge::set_webkit_proxy_port(0);
             }
         } else if supported {
             if lindo_ech::current_gateway_port() > 0 {
@@ -596,8 +632,6 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
             unsafe {
                 lindo_macos_set_webkit_proxy(0);
             }
-            #[cfg(target_os = "linux")]
-            crate::linux_webview_bridge::set_webkit_proxy_port(0);
             if lindo_ech::current_gateway_port() > 0 {
                 let seq = STOP_SEQ.fetch_add(1, Ordering::AcqRel) + 1;
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -615,25 +649,36 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
             }
         }
     } else if cfg!(target_os = "windows") && supported {
+        let target_route = if should_ech {
+            GatewayRouteMode::EchDirect
+        } else {
+            GatewayRouteMode::SystemPassThrough {
+                http_proxy: env.http_proxy,
+            }
+        };
         if lindo_ech::current_gateway_port() == 0 {
-            if let Err(e) = ensure_ca_material()
-                .and_then(|(cert, key)| lindo_ech::start_gateway(&cert, &key, 0, false))
-            {
+            if let Err(e) = ensure_ca_material().and_then(|(cert, key)| {
+                lindo_ech::start_gateway_with_mode(&cert, &key, 0, false, target_route.clone())
+            }) {
                 last_err = e;
                 should_ech = false;
             }
         }
         if lindo_ech::current_gateway_port() > 0 {
-            let target_route = if should_ech {
+            let effective_route = if should_ech {
                 GatewayRouteMode::EchDirect
             } else {
                 GatewayRouteMode::SystemPassThrough {
                     http_proxy: env.http_proxy,
                 }
             };
-            lindo_ech::set_gateway_route_mode(target_route.clone());
-            if had_running_gateway && (mode_changed || prev_gw_route.as_ref() != Some(&target_route)) {
-                lindo_ech::rotate_sticky_ip();
+            lindo_ech::set_gateway_route_mode(effective_route.clone());
+            if had_running_gateway
+                && (mode_changed || env_changed || prev_gw_route.as_ref() != Some(&effective_route))
+            {
+                if should_ech {
+                    lindo_ech::rotate_sticky_ip();
+                }
                 lindo_ech::notify_network_changed();
             }
         }
@@ -753,6 +798,13 @@ pub fn refresh_status_snapshot(mode_pref: &str) -> EchDesktopSnapshot {
     if prev.mode == mode.as_str() {
         // Pull fresh live counters/stickyIp/network flags from native gateway if active
         let env = detect_net_env();
+        if crate::platform_bridge::CAPS.always_route_webview_via_tls_bridge {
+            let need_reconcile = lindo_ech::current_gateway_port() == 0
+                || *last_env_sig_lock().lock().unwrap() != env.signature();
+            if need_reconcile {
+                return reconcile_with_mode(mode);
+            }
+        }
         let raw_status = lindo_ech::get_status_json();
         let v: Value = serde_json::from_str(&raw_status).unwrap_or(Value::Null);
         let listen_port = v
