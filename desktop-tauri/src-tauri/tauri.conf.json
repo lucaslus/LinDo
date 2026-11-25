@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Lindo",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "identifier": "do.linux.lindo",
   "build": {
     "frontendDist": "../dist",
@@ -45,7 +45,7 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0",
-      "bundleVersion": "1104.0.0",
+      "bundleVersion": "1105.0.0",
       "signingIdentity": "-"
     },
     "windows": {
