@@ -20,6 +20,8 @@ import {
   deleteLocalDraftInRust,
   fetchCategoryAllowedTags,
   fetchPostRawMarkdown,
+  fetchTopicDetail,
+  getCachedTopicDetail,
   publishReply,
   publishTopic,
   saveCloudDraft,
@@ -1168,6 +1170,89 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               : "回复"
             : "回复话题";
 
+  const [fallbackTopicContext, setFallbackTopicContext] = useState<{
+    topicId: number;
+    title: string;
+    username: string;
+    displayName?: string;
+    avatarTemplate: string;
+    animatedAvatar?: string | null;
+  } | null>(() => {
+    if (!request.topicId || request.action === "NEW_TOPIC") return null;
+    const cached = getCachedTopicDetail(request.topicId);
+    if (!cached) return null;
+    const opFloor = cached.posts.find((p) => p.postNumber === 1);
+    return {
+      topicId: cached.id,
+      title: cached.title,
+      username: opFloor?.username || cached.opUsername || "",
+      displayName: opFloor?.displayName || cached.opDisplayName,
+      avatarTemplate: opFloor?.avatarTemplate || cached.opAvatarTemplate || "",
+      animatedAvatar: opFloor?.animatedAvatar ?? cached.opAnimatedAvatar ?? null,
+    };
+  });
+
+  useEffect(() => {
+    const tid = request.topicId;
+    if (!tid || request.action === "NEW_TOPIC") return;
+    if (request.replyToUsername && request.replyToAvatarTemplate && request.topicTitle) return;
+    const cached = getCachedTopicDetail(tid);
+    if (cached) {
+      const opFloor = cached.posts.find((p) => p.postNumber === 1);
+      setFallbackTopicContext({
+        topicId: cached.id,
+        title: cached.title,
+        username: opFloor?.username || cached.opUsername || "",
+        displayName: opFloor?.displayName || cached.opDisplayName,
+        avatarTemplate: opFloor?.avatarTemplate || cached.opAvatarTemplate || "",
+        animatedAvatar: opFloor?.animatedAvatar ?? cached.opAnimatedAvatar ?? null,
+      });
+      return;
+    }
+    let cancelled = false;
+    fetchTopicDetail(tid, { trackVisit: false })
+      .then((det) => {
+        if (cancelled) return;
+        const opFloor = det.posts.find((p) => p.postNumber === 1);
+        const targetPost = request.replyToPostNumber
+          ? det.posts.find((p) => p.postNumber === request.replyToPostNumber)
+          : null;
+        const chosen = targetPost || opFloor;
+        setFallbackTopicContext({
+          topicId: det.id,
+          title: det.title,
+          username: chosen?.username || det.opUsername || "",
+          displayName: chosen?.displayName || det.opDisplayName,
+          avatarTemplate: chosen?.avatarTemplate || det.opAvatarTemplate || "",
+          animatedAvatar: chosen?.animatedAvatar ?? det.opAnimatedAvatar ?? null,
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    request.action,
+    request.topicId,
+    request.replyToPostNumber,
+    request.replyToUsername,
+    request.replyToAvatarTemplate,
+    request.topicTitle,
+  ]);
+
+  const ctxForTopic =
+    fallbackTopicContext && fallbackTopicContext.topicId === request.topicId
+      ? fallbackTopicContext
+      : null;
+  const effectiveTopicTitle = request.topicTitle || ctxForTopic?.title || "";
+  const effectiveReplyUsername = request.replyToUsername || ctxForTopic?.username || "";
+  const effectiveReplyDisplayName = request.replyToDisplayName || ctxForTopic?.displayName;
+  const effectiveAvatarTemplate = request.replyToAvatarTemplate || ctxForTopic?.avatarTemplate || "";
+  const effectiveAnimatedAvatar =
+    request.replyToAnimatedAvatar !== undefined
+      ? request.replyToAnimatedAvatar
+      : ctxForTopic?.animatedAvatar ?? null;
+
   const actionLabel =
     request.action === "NEW_TOPIC" ? "发布" : request.action === "EDIT" ? "保存" : "发送";
 
@@ -1221,18 +1306,27 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               <LinDoIcons.Close size={16} />
             </button>
           )}
+          {isDrawer && effectiveReplyUsername && (request.action === "REPLY" || (request.action === "EDIT" && !isEditingOp)) && (
+            <AvatarWithFlair
+              username={effectiveReplyUsername}
+              avatarTemplate={effectiveAvatarTemplate}
+              animatedAvatar={effectiveAnimatedAvatar}
+              sizePx={18}
+              className="shrink-0"
+            />
+          )}
           <span
             className={`truncate font-semibold ${isDrawer ? "text-[14px]" : "text-[15px]"}`}
             style={{ color: "var(--ink-primary)" }}
           >
             {headerTitle}
           </span>
-          {isDrawer && request.replyToSnippet && (
+          {isDrawer && (request.replyToSnippet || effectiveTopicTitle) && (
             <span
               className="hidden sm:inline-block max-w-[260px] truncate text-[12px]"
               style={{ color: "var(--ink-tertiary)" }}
             >
-              · {request.replyToSnippet}
+              · {request.replyToSnippet || effectiveTopicTitle}
             </span>
           )}
         </div>
@@ -1312,18 +1406,19 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
         </div>
       </header>
 
-      {/* 回复 / 编辑回复上下文条（居中弹窗下清晰展示所属话题与引用摘要） */}
+      {/* 回复 / 编辑回复上下文条（居中弹窗下清晰展示目标作者头像、所属话题与引用摘要） */}
       {!isDrawer &&
         (request.action === "REPLY" || (request.action === "EDIT" && !isEditingOp)) &&
-        (request.replyToPostNumber || request.topicTitle) && (() => {
+        (request.replyToPostNumber || effectiveTopicTitle) && (() => {
           const isFloorReply = request.action === "REPLY" && Boolean(request.replyToPostNumber);
           const replyDisplay =
-            request.replyToDisplayName?.trim() ||
-            (request.replyToUsername ? `@${request.replyToUsername}` : "");
+            effectiveReplyDisplayName?.trim() ||
+            (effectiveReplyUsername ? `@${effectiveReplyUsername}` : "");
+          const hasTargetAvatar = Boolean(effectiveReplyUsername);
           const quoteText = isFloorReply
-            ? (request.replyToSnippet || "").trim() || (request.topicTitle || "")
-            : (request.topicTitle || "");
-          const canExpandQuote = isFloorReply && quoteText.length > 68;
+            ? (request.replyToSnippet || "").trim() || effectiveTopicTitle
+            : effectiveTopicTitle;
+          const canExpandQuote = quoteText.length > 68;
           return (
             <div className="lindo-hairline-b shrink-0 px-5 pb-3 pt-0.5">
               <div
@@ -1348,15 +1443,17 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
               >
                 <div className="flex items-center justify-between gap-2 text-[12px]">
                   <div className="flex min-w-0 items-center gap-1.5">
-                    {isFloorReply && request.replyToUsername ? (
+                    {hasTargetAvatar && (
+                      <AvatarWithFlair
+                        username={effectiveReplyUsername}
+                        avatarTemplate={effectiveAvatarTemplate}
+                        animatedAvatar={effectiveAnimatedAvatar}
+                        sizePx={19}
+                        className="shrink-0"
+                      />
+                    )}
+                    {isFloorReply && effectiveReplyUsername ? (
                       <>
-                        <AvatarWithFlair
-                          username={request.replyToUsername}
-                          avatarTemplate={request.replyToAvatarTemplate || ""}
-                          animatedAvatar={request.replyToAnimatedAvatar}
-                          sizePx={19}
-                          className="shrink-0"
-                        />
                         <span className="shrink-0" style={{ color: "var(--ink-tertiary)" }}>
                           回复
                         </span>
@@ -1381,13 +1478,18 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                         >
                           {request.action === "EDIT" ? "所属话题" : "回复话题"}
                         </span>
-                        {request.topicTitle && (
-                          <span
-                            className="truncate font-semibold"
-                            style={{ color: "var(--ink-primary)" }}
-                          >
-                            {request.topicTitle}
-                          </span>
+                        {replyDisplay && (
+                          <>
+                            <span className="shrink-0" style={{ color: "var(--ink-tertiary)" }}>
+                              ·
+                            </span>
+                            <span
+                              className="truncate font-semibold"
+                              style={{ color: "var(--ink-primary)" }}
+                            >
+                              {replyDisplay}
+                            </span>
+                          </>
                         )}
                       </>
                     )}
@@ -1405,9 +1507,9 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
                     </span>
                   )}
                 </div>
-                {isFloorReply && quoteText && (
+                {quoteText && (
                   <p
-                    className={`mt-1.5 pl-[25px] text-[12.5px] leading-[1.52] ${
+                    className={`mt-1.5 ${hasTargetAvatar ? "pl-[25px]" : ""} text-[12.5px] leading-[1.52] ${
                       replyQuoteExpanded ? "line-clamp-6" : "line-clamp-2"
                     }`}
                     style={{ color: "var(--ink-secondary)" }}

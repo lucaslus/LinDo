@@ -40,14 +40,6 @@ static BRIDGE_LAST_ERROR: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
 fn register_linux_url_protocols_once() {
     PROTOCOL_REGISTERED.get_or_init(|| {
         std::thread::spawn(|| {
-            let system_installed = [
-                "/usr/share/applications/Lindo.desktop",
-                "/usr/share/applications/lindo.desktop",
-                "/usr/share/applications/lindo-desktop.desktop",
-            ]
-            .iter()
-            .any(|p| std::path::Path::new(p).exists());
-
             let Some(data_dir) = dirs::data_local_dir()
                 .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
             else {
@@ -55,6 +47,16 @@ fn register_linux_url_protocols_once() {
             };
             let apps_dir = data_dir.join("applications");
             let local_desktop = apps_dir.join("lindo-url-handler.desktop");
+
+            let system_installed = [
+                "/usr/share/applications/Lindo.desktop",
+                "/usr/share/applications/lindo.desktop",
+                "/usr/share/applications/lindo-desktop.desktop",
+            ]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists())
+                || apps_dir.join("lindo.desktop").exists()
+                || apps_dir.join("Lindo.desktop").exists();
 
             if system_installed {
                 if local_desktop.exists() {
@@ -1258,31 +1260,64 @@ pub async fn native_call(
                 built
             };
 
-            let check_js = r#"(() => {
-  const h = (location && location.hostname) || '';
-  const isChallenge = Boolean(document.querySelector('#challenge-running, #challenge-form, .cf-turnstile, iframe[src*="challenges.cloudflare.com"]'));
-  const hasMarkers = h === 'connect.linux.do' && Boolean(document.querySelector('.tl3-ring, .tl3-bar-item, .tl3-quota-card, .card-title, table'));
-  return JSON.stringify({ host: h, isChallenge, hasMarkers, html: hasMarkers && document.documentElement ? document.documentElement.outerHTML : '' });
-})()"#
-                .to_string();
-
-            let deadline = Instant::now() + Duration::from_secs(8);
+            let deadline = Instant::now() + Duration::from_secs(9);
             let mut extracted = String::new();
+            let mut challenged = false;
+            let mut needs_oauth = false;
+            let mut challenge_ticks = 0u32;
+            let mut clicked_login = false;
             while Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(280)).await;
-                if let Ok(raw) = eval_single_sync(&probe, check_js.clone()).await {
+                let allow_click = if clicked_login { "false" } else { "true" };
+                let check_js = format!(
+                    r#"(() => {{
+  const h = (location && location.hostname) || '';
+  const path = (location && location.pathname) || '';
+  const isChallenge = Boolean(document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')) || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
+  const wf = document.querySelector('iframe[src*="challenges.cloudflare.com"], #turnstile-wrapper iframe, .cf-turnstile iframe');
+  const wr = wf ? wf.getBoundingClientRect() : null;
+  const wh = document.querySelector('#turnstile-wrapper, .cf-turnstile, #challenge-stage > div');
+  const whr = wh ? wh.getBoundingClientRect() : null;
+  const hasWidget = Boolean((wr && wr.width >= 80 && wr.height >= 30) || (whr && whr.width >= 220 && whr.height >= 55));
+  const hasMarkers = h === 'connect.linux.do' && Boolean(document.querySelector('.tl3-ring, .tl3-bar-item, .tl3-quota-card, .card-title, table'));
+  const isOAuthConsent = (h === 'linux.do' || h === 'www.linux.do') && (path.indexOf('/oauth2/') === 0 || path.indexOf('/login') === 0);
+  let autoClicked = false;
+  if ({allow_click} && h === 'connect.linux.do' && !isChallenge && !hasMarkers && document.readyState === 'complete') {{
+    const loginLink = document.querySelector('a[href*="/login"], a[href*="/oauth"], a[href*="/auth"]');
+    if (loginLink) {{ loginLink.click(); autoClicked = true; }}
+  }}
+  return JSON.stringify({{ host: h, isChallenge, hasWidget, isOAuthConsent, autoClicked, hasMarkers, html: hasMarkers && document.documentElement ? document.documentElement.outerHTML : '' }});
+}})()"#
+                );
+                if let Ok(raw) = eval_single_sync(&probe, check_js).await {
                     let inner_str = serde_json::from_str::<String>(raw.trim())
                         .unwrap_or_else(|_| raw.trim().to_string());
                     if let Ok(v) = serde_json::from_str::<Value>(&inner_str) {
-                        if v.get("isChallenge").and_then(|b| b.as_bool()) == Some(true) {
-                            break;
+                        if v.get("autoClicked").and_then(|b| b.as_bool()) == Some(true) {
+                            clicked_login = true;
                         }
                         if v.get("hasMarkers").and_then(|b| b.as_bool()) == Some(true) {
                             let h = v.get("html").and_then(|s| s.as_str()).unwrap_or("");
                             if !h.is_empty() {
                                 extracted = h.to_string();
+                                challenged = false;
                                 break;
                             }
+                        }
+                        if v.get("isOAuthConsent").and_then(|b| b.as_bool()) == Some(true) {
+                            needs_oauth = true;
+                            break;
+                        }
+                        if v.get("isChallenge").and_then(|b| b.as_bool()) == Some(true) {
+                            challenged = true;
+                            challenge_ticks += 1;
+                            let has_widget =
+                                v.get("hasWidget").and_then(|b| b.as_bool()) == Some(true);
+                            if has_widget || challenge_ticks >= 12 {
+                                break;
+                            }
+                        } else {
+                            challenge_ticks = 0;
                         }
                     }
                 }
@@ -1290,7 +1325,7 @@ pub async fn native_call(
             if let Ok(blank) = "about:blank".parse::<Url>() {
                 let _ = probe.navigate(blank);
             }
-            Ok(json!({ "html": extracted }))
+            Ok(json!({ "html": extracted, "challenged": challenged && extracted.is_empty(), "needsOAuth": needs_oauth }))
         }
         "setVerifyMask" => Ok(json!({})),
         _ => Err(format!("Unsupported bridge command: {method}")),

@@ -1233,6 +1233,8 @@ static LindoBrowseHost *gBrowser = nil;
 @property (nonatomic, assign) LindoBridgeReply callback;
 @property (nonatomic, assign) long long reqId;
 @property (nonatomic, assign) BOOL finished;
+@property (nonatomic, assign) NSInteger challengeTicks;
+@property (nonatomic, assign) BOOL clickedLogin;
 - (instancetype)initWithCallback:(LindoBridgeReply)cb reqId:(long long)reqId;
 - (void)start;
 @end
@@ -1245,6 +1247,8 @@ static NSMutableSet<LindoConnectProbe *> *gActiveConnectProbes = nil;
         _callback = cb;
         _reqId = reqId;
         _finished = NO;
+        _challengeTicks = 0;
+        _clickedLogin = NO;
         WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
         cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
         cfg.applicationNameForUserAgent = lindoSafariAppNameForUserAgent();
@@ -1254,43 +1258,75 @@ static NSMutableSet<LindoConnectProbe *> *gActiveConnectProbes = nil;
     return self;
 }
 
-- (void)finishWithHtml:(NSString *)html {
+- (void)finishWithHtml:(NSString *)html challenged:(BOOL)challenged needsOAuth:(BOOL)needsOAuth {
     if (_finished) return;
     _finished = YES;
     [_web stopLoading];
     _web.navigationDelegate = nil;
-    sendReply(_callback, _reqId, @{@"html": html ?: @""}, nil);
+    sendReply(_callback, _reqId, @{
+        @"html": html ?: @"",
+        @"challenged": @(challenged),
+        @"needsOAuth": @(needsOAuth)
+    }, nil);
     [gActiveConnectProbes removeObject:self];
+}
+
+- (void)finishWithHtml:(NSString *)html {
+    [self finishWithHtml:html challenged:NO needsOAuth:NO];
 }
 
 - (void)pollTick:(NSInteger)tick {
     if (_finished) return;
-    if (tick >= 28) {
-        [self finishWithHtml:@""];
+    if (tick >= 32) {
+        [self finishWithHtml:@"" challenged:(self.challengeTicks > 0) needsOAuth:NO];
         return;
     }
-    NSString *js = @"(() => {"
+    NSString *js = [NSString stringWithFormat:@"(() => {"
         "const h = (location && location.hostname) || '';"
-        "const isChallenge = Boolean(document.querySelector('#challenge-running, #challenge-form, .cf-turnstile, iframe[src*=\"challenges.cloudflare.com\"]'));"
+        "const path = (location && location.pathname) || '';"
+        "const isChallenge = Boolean(document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*=\"challenges.cloudflare.com\"]')) || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');"
+        "const wf = document.querySelector('iframe[src*=\"challenges.cloudflare.com\"], #turnstile-wrapper iframe, .cf-turnstile iframe');"
+        "const wr = wf ? wf.getBoundingClientRect() : null;"
+        "const wh = document.querySelector('#turnstile-wrapper, .cf-turnstile, #challenge-stage > div');"
+        "const whr = wh ? wh.getBoundingClientRect() : null;"
+        "const hasWidget = Boolean((wr && wr.width >= 80 && wr.height >= 30) || (whr && whr.width >= 220 && whr.height >= 55));"
         "const hasMarkers = h === 'connect.linux.do' && Boolean(document.querySelector('.tl3-ring, .tl3-bar-item, .tl3-quota-card, .card-title, table'));"
-        "return { host: h, isChallenge, hasMarkers, html: hasMarkers && document.documentElement ? document.documentElement.outerHTML : '' };"
-    "})()";
+        "const isOAuthConsent = (h === 'linux.do' || h === 'www.linux.do') && (path.indexOf('/oauth2/') === 0 || path.indexOf('/login') === 0);"
+        "let autoClicked = false;"
+        "if (%@ && h === 'connect.linux.do' && !isChallenge && !hasMarkers && document.readyState === 'complete') {"
+        "  const loginLink = document.querySelector('a[href*=\"/login\"], a[href*=\"/oauth\"], a[href*=\"/auth\"]');"
+        "  if (loginLink) { loginLink.click(); autoClicked = true; }"
+        "}"
+        "return { host: h, isChallenge, hasWidget, isOAuthConsent, autoClicked, hasMarkers, html: hasMarkers && document.documentElement ? document.documentElement.outerHTML : '' };"
+    "})()", self.clickedLogin ? @"false" : @"true"];
     __weak typeof(self) weakSelf = self;
     [_web evaluateJavaScript:js completionHandler:^(id res, NSError *err) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf || strongSelf.finished) return;
         if (!err && [res isKindOfClass:[NSDictionary class]]) {
             NSDictionary *dict = (NSDictionary *)res;
-            if ([dict[@"isChallenge"] boolValue]) {
-                [strongSelf finishWithHtml:@""];
-                return;
+            if ([dict[@"autoClicked"] boolValue]) {
+                strongSelf.clickedLogin = YES;
             }
             if ([dict[@"hasMarkers"] boolValue]) {
                 NSString *html = [dict[@"html"] isKindOfClass:[NSString class]] ? dict[@"html"] : @"";
                 if (html.length > 0) {
-                    [strongSelf finishWithHtml:html];
+                    [strongSelf finishWithHtml:html challenged:NO needsOAuth:NO];
                     return;
                 }
+            }
+            if ([dict[@"isOAuthConsent"] boolValue]) {
+                [strongSelf finishWithHtml:@"" challenged:NO needsOAuth:YES];
+                return;
+            }
+            if ([dict[@"isChallenge"] boolValue]) {
+                strongSelf.challengeTicks += 1;
+                if ([dict[@"hasWidget"] boolValue] || strongSelf.challengeTicks >= 12) {
+                    [strongSelf finishWithHtml:@"" challenged:YES needsOAuth:NO];
+                    return;
+                }
+            } else {
+                strongSelf.challengeTicks = 0;
             }
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(280 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{

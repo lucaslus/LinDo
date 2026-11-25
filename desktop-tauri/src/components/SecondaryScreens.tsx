@@ -8569,12 +8569,13 @@ export const ExternalLinkSafetyModal: React.FC<{
   );
 };
 
-/* ==================== 原生 Connect 保级与成长面板（1:1 对齐移动端 ConnectTrustLevelSheet） ==================== */
+/* ==================== 原生 Connect 保级与成长面板（1:1 对齐 connect.linux.do 网页端环形/条形/合规卡片布局） ==================== */
 export const ConnectTrustLevelModal: React.FC<{
   username: string;
+  isDark?: boolean;
   onOpenWebConnect: () => void;
   onClose: () => void;
-}> = ({ username, onOpenWebConnect, onClose }) => {
+}> = ({ username, isDark = true, onOpenWebConnect, onClose }) => {
   const [report, setReport] = useState<ConnectTrustLevelReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -8583,7 +8584,7 @@ export const ConnectTrustLevelModal: React.FC<{
     setLoading(true);
     setError(null);
     try {
-      const r = await fetchConnectTrustLevelReport(username);
+      const r = await fetchConnectTrustLevelReport(username, isDark);
       setReport(r);
     } catch (err: any) {
       setError(err?.message || "Connect 数据读取未完成，请稍后重试");
@@ -8593,8 +8594,35 @@ export const ConnectTrustLevelModal: React.FC<{
   };
 
   useEffect(() => {
-    loadReport();
+    void loadReport();
   }, [username]);
+
+  const ringMetrics = useMemo(
+    () => (report?.metrics || []).filter((m) => m.kind === "ring"),
+    [report]
+  );
+  const barMetrics = useMemo(
+    () => (report?.metrics || []).filter((m) => m.kind === "bar"),
+    [report]
+  );
+  const quotaMetrics = useMemo(
+    () => (report?.metrics || []).filter((m) => m.kind === "quota"),
+    [report]
+  );
+  const statusMetrics = useMemo(
+    () => (report?.metrics || []).filter((m) => m.kind === "status"),
+    [report]
+  );
+  const fallbackStatMetrics = useMemo(
+    () =>
+      (report?.metrics || []).filter(
+        (m) => !m.kind || m.kind === "stat"
+      ),
+    [report]
+  );
+  const hasWebStructuredLayout =
+    Boolean(report?.isLiveConnectData) &&
+    (ringMetrics.length > 0 || barMetrics.length > 0 || quotaMetrics.length > 0);
 
   return (
     <div
@@ -8602,14 +8630,17 @@ export const ConnectTrustLevelModal: React.FC<{
       onClick={onClose}
     >
       <div
-        className="flex max-h-[82vh] w-[540px] max-w-full flex-col overflow-hidden rounded-2xl shadow-2xl"
+        className="flex max-h-[86vh] w-[580px] max-w-full flex-col overflow-hidden rounded-2xl shadow-2xl"
         style={{
           backgroundColor: "var(--card-surface)",
           border: "0.5px solid var(--hairline)",
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex h-12 shrink-0 items-center justify-between px-4">
+        <div
+          className="flex h-12 shrink-0 items-center justify-between px-4"
+          style={{ borderBottom: "0.5px solid var(--hairline)" }}
+        >
           <div className="flex items-center gap-2">
             <LinDoIcons.ShieldCheck size={17} style={{ color: "var(--brand-gold)" }} />
             <span className="text-[15px] font-semibold" style={{ color: "var(--ink-primary)" }}>
@@ -8621,7 +8652,7 @@ export const ConnectTrustLevelModal: React.FC<{
             <button
               type="button"
               disabled={loading}
-              onClick={loadReport}
+              onClick={() => void loadReport()}
               title="刷新指标"
               className="lindo-interactive flex h-7 w-7 items-center justify-center rounded-full disabled:opacity-45"
               style={{ color: "var(--ink-secondary)" }}
@@ -8657,17 +8688,30 @@ export const ConnectTrustLevelModal: React.FC<{
 
         <div className="lindo-scroll flex-1 min-h-0 px-5 py-4">
           {loading && !report ? (
-            <div className="space-y-3.5 py-2">
-              <div className="lindo-shimmer h-14 w-full rounded-xl" />
-              {Array.from({ length: 6 }).map((_, idx) => (
-                <div key={idx} className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="lindo-shimmer h-3.5 w-28 rounded" />
-                    <div className="lindo-shimmer h-3.5 w-16 rounded" />
+            <div className="space-y-5 py-2">
+              <div className="space-y-2">
+                <div className="lindo-shimmer h-5 w-40 rounded" />
+                <div className="lindo-shimmer h-3.5 w-52 rounded" />
+              </div>
+              <div className="grid grid-cols-3 gap-4 py-2">
+                {Array.from({ length: 3 }).map((_, idx) => (
+                  <div key={idx} className="flex flex-col items-center gap-2">
+                    <div className="lindo-shimmer h-[84px] w-[84px] rounded-full" />
+                    <div className="lindo-shimmer h-3 w-14 rounded" />
                   </div>
-                  <div className="lindo-shimmer h-1.5 w-full rounded-full" />
-                </div>
-              ))}
+                ))}
+              </div>
+              <div className="space-y-3">
+                {Array.from({ length: 4 }).map((_, idx) => (
+                  <div key={idx} className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="lindo-shimmer h-3.5 w-24 rounded" />
+                      <div className="lindo-shimmer h-3.5 w-14 rounded" />
+                    </div>
+                    <div className="lindo-shimmer h-1.5 w-full rounded-full" />
+                  </div>
+                ))}
+              </div>
             </div>
           ) : error && !report ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -8677,7 +8721,7 @@ export const ConnectTrustLevelModal: React.FC<{
               <div className="mt-3 flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={loadReport}
+                  onClick={() => void loadReport()}
                   className="rounded-full px-4 py-1.5 text-[12.2px] font-semibold cursor-pointer"
                   style={{
                     backgroundColor: "var(--publish-btn-bg)",
@@ -8701,99 +8745,352 @@ export const ConnectTrustLevelModal: React.FC<{
             </div>
           ) : report ? (
             <div>
-              <div
-                className="rounded-xl p-3.5"
-                style={{
-                  backgroundColor: "var(--subtle-surface)",
-                  border: "0.5px solid var(--hairline)",
-                }}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-[14.5px] font-bold" style={{ color: "var(--ink-primary)" }}>
+              {/* 顶部标题栏：与 connect.linux.do 卡片头部 1:1 对齐 */}
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-[17px] font-bold tracking-tight" style={{ color: "var(--ink-primary)" }}>
                     {report.title}
-                  </span>
-                  <span
-                    className="rounded-full px-2.5 py-0.5 text-[11.2px] font-semibold"
-                    style={
-                      report.isLiveConnectData
-                        ? report.isQualified
-                          ? {
-                              backgroundColor: "rgba(16, 185, 129, 0.14)",
-                              color: "#10B981",
-                            }
-                          : {
-                              backgroundColor: "rgba(245, 158, 11, 0.15)",
-                              color: "#F59E0B",
-                            }
-                        : {
-                            backgroundColor: "var(--active-chip-bg)",
-                            color: "var(--active-chip-text)",
-                          }
-                    }
-                  >
-                    {report.statusBadgeText}
-                  </span>
+                  </h3>
+                  <p className="mt-1 text-[12px]" style={{ color: "var(--ink-tertiary)" }}>
+                    {report.subtitle}
+                  </p>
                 </div>
-                <p
-                  className="mt-1.5 text-[12px] leading-relaxed"
-                  style={{ color: "var(--ink-secondary)" }}
+                <span
+                  className="shrink-0 rounded-md px-2.5 py-1 text-[11.5px] font-semibold"
+                  style={
+                    report.isLiveConnectData
+                      ? report.isQualified
+                        ? {
+                            backgroundColor: "rgba(34, 197, 94, 0.16)",
+                            color: "#22C55E",
+                          }
+                        : {
+                            backgroundColor: "rgba(245, 158, 11, 0.16)",
+                            color: "#F59E0B",
+                          }
+                      : {
+                          backgroundColor: "var(--active-chip-bg)",
+                          color: "var(--active-chip-text)",
+                        }
+                  }
                 >
-                  {report.subtitle}
-                </p>
+                  {report.statusBadgeText}
+                </span>
               </div>
 
-              <div className="mt-3 divide-y divide-[var(--hairline)]">
-                {report.metrics.map((m, idx) => (
-                  <div key={`${m.label}_${idx}`} className="py-2.5">
-                    <div className="flex items-center justify-between gap-3">
-                      <span
-                        className="text-[13px] font-medium"
-                        style={{ color: "var(--ink-primary)" }}
-                      >
-                        {m.label}
-                      </span>
-                      <span
-                        className="shrink-0 text-[12.2px] font-semibold tabular-nums"
-                        style={{
-                          color:
-                            report.isLiveConnectData && m.targetValue > 0
-                              ? m.isMet
-                                ? "var(--ink-primary)"
-                                : "#F59E0B"
-                              : "var(--ink-secondary)",
-                        }}
-                      >
-                        {report.isLiveConnectData && m.targetValue > 0
-                          ? `${m.displayCurrent} / ${m.displayTarget}`
-                          : m.displayCurrent}
-                      </span>
-                    </div>
-                    {report.isLiveConnectData && m.targetValue > 0 && (
+              {hasWebStructuredLayout ? (
+                <div className="mt-5 space-y-5">
+                  {/* 1. 活跃程度（三枚圆形环形图） */}
+                  {ringMetrics.length > 0 && (
+                    <div>
                       <div
-                        className="mt-1.5 h-[5px] w-full overflow-hidden rounded-full"
-                        style={{ backgroundColor: "var(--subtle-surface)" }}
+                        className="mb-3 text-[12px] font-medium"
+                        style={{ color: "var(--ink-tertiary)" }}
                       >
-                        <div
-                          className="h-full rounded-full transition-[width] duration-300"
-                          style={{
-                            width: `${Math.round(m.progress * 100)}%`,
-                            backgroundColor: m.isMet ? "var(--brand-gold)" : "#F59E0B",
-                          }}
-                        />
+                        活跃程度
+                      </div>
+                      <div className="grid grid-cols-3 gap-3 py-1">
+                        {ringMetrics.map((m, idx) => {
+                          const radius = 37;
+                          const circumference = 2 * Math.PI * radius;
+                          const dashOffset =
+                            circumference * (1 - Math.max(0, Math.min(1, m.progress)));
+                          const strokeColor = m.isMet ? "#22C55E" : "#F59E0B";
+                          return (
+                            <div
+                              key={`ring_${m.label}_${idx}`}
+                              className="flex flex-col items-center"
+                            >
+                              <div className="relative flex h-[88px] w-[88px] items-center justify-center">
+                                <svg
+                                  viewBox="0 0 88 88"
+                                  className="h-full w-full -rotate-90"
+                                  aria-hidden="true"
+                                >
+                                  <circle
+                                    cx="44"
+                                    cy="44"
+                                    r={radius}
+                                    fill="none"
+                                    stroke="var(--subtle-surface)"
+                                    strokeWidth="6.5"
+                                  />
+                                  <circle
+                                    cx="44"
+                                    cy="44"
+                                    r={radius}
+                                    fill="none"
+                                    stroke={strokeColor}
+                                    strokeWidth="6.5"
+                                    strokeLinecap="round"
+                                    strokeDasharray={circumference}
+                                    strokeDashoffset={dashOffset}
+                                  />
+                                </svg>
+                                <div className="absolute inset-0 flex flex-col items-center justify-center text-center leading-tight">
+                                  <span
+                                    className="text-[13.5px] font-bold tabular-nums"
+                                    style={{ color: strokeColor }}
+                                  >
+                                    {m.displayCurrent}
+                                  </span>
+                                  <span
+                                    className="mt-0.5 text-[10px] tabular-nums"
+                                    style={{ color: "var(--ink-tertiary)" }}
+                                  >
+                                    / {m.displayTarget}
+                                  </span>
+                                </div>
+                              </div>
+                              <span
+                                className="mt-2 text-[12px]"
+                                style={{ color: "var(--ink-secondary)" }}
+                              >
+                                {m.label}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 2. 互动参与（绿色进度条列表） */}
+                  {barMetrics.length > 0 && (
+                    <div>
+                      <div
+                        className="mb-2.5 text-[12px] font-medium"
+                        style={{ color: "var(--ink-tertiary)" }}
+                      >
+                        互动参与
+                      </div>
+                      <div className="space-y-3">
+                        {barMetrics.map((m, idx) => {
+                          const barColor = m.isMet ? "#22C55E" : "#F59E0B";
+                          return (
+                            <div key={`bar_${m.label}_${idx}`}>
+                              <div className="flex items-center justify-between gap-3">
+                                <span
+                                  className="text-[12.8px]"
+                                  style={{ color: "var(--ink-primary)" }}
+                                >
+                                  {m.label}
+                                </span>
+                                <span
+                                  className="shrink-0 text-[12.2px] font-semibold tabular-nums"
+                                  style={{ color: barColor }}
+                                >
+                                  {m.displayCurrent}/{m.displayTarget}
+                                </span>
+                              </div>
+                              <div
+                                className="mt-1.5 h-[6px] w-full overflow-hidden rounded-full"
+                                style={{ backgroundColor: "var(--subtle-surface)" }}
+                              >
+                                <div
+                                  className="h-full rounded-full transition-[width] duration-300"
+                                  style={{
+                                    width: `${Math.round(m.progress * 100)}%`,
+                                    backgroundColor: barColor,
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 3. 合规记录（两列分段配额卡 + 两列禁言/封禁状态卡） */}
+                  {(quotaMetrics.length > 0 || statusMetrics.length > 0) && (
+                    <div>
+                      <div
+                        className="mb-2.5 text-[12px] font-medium"
+                        style={{ color: "var(--ink-tertiary)" }}
+                      >
+                        合规记录
+                      </div>
+
+                      {quotaMetrics.length > 0 && (
+                        <div className="grid grid-cols-2 gap-2.5">
+                          {quotaMetrics.map((m, idx) => {
+                            const slots = Math.max(1, Math.min(10, m.targetValue || 5));
+                            return (
+                              <div
+                                key={`quota_${m.label}_${idx}`}
+                                className="rounded-xl px-3.5 py-3"
+                                style={{
+                                  backgroundColor: "var(--subtle-surface)",
+                                  border: "0.5px solid var(--hairline)",
+                                }}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span
+                                    className="text-[12.5px]"
+                                    style={{ color: "var(--ink-secondary)" }}
+                                  >
+                                    {m.label}
+                                  </span>
+                                  <span
+                                    className="text-[12px] tabular-nums"
+                                    style={{
+                                      color: m.isMet ? "var(--ink-tertiary)" : "#EF4444",
+                                    }}
+                                  >
+                                    {m.displayCurrent} / {m.displayTarget}
+                                  </span>
+                                </div>
+                                <div className="mt-2.5 flex items-center gap-1.5">
+                                  {Array.from({ length: slots }).map((_, sIdx) => {
+                                    const used = sIdx < m.currentValue;
+                                    const bg = used
+                                      ? m.isMet
+                                        ? "#F59E0B"
+                                        : "#EF4444"
+                                      : m.isMet
+                                        ? "rgba(34, 197, 94, 0.28)"
+                                        : "rgba(239, 68, 68, 0.2)";
+                                    return (
+                                      <span
+                                        key={sIdx}
+                                        className="h-[4px] flex-1 rounded-full"
+                                        style={{ backgroundColor: bg }}
+                                      />
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {statusMetrics.length > 0 && (
+                        <div className="mt-2.5 grid grid-cols-2 gap-2.5">
+                          {statusMetrics.map((m, idx) => {
+                            const ok = m.isMet;
+                            const accent = ok ? "#22C55E" : "#EF4444";
+                            return (
+                              <div
+                                key={`status_${m.label}_${idx}`}
+                                className="flex items-center justify-between gap-2.5 rounded-xl px-3.5 py-3"
+                                style={{
+                                  backgroundColor: ok
+                                    ? "rgba(34, 197, 94, 0.08)"
+                                    : "rgba(239, 68, 68, 0.09)",
+                                  border: ok
+                                    ? "1px solid rgba(34, 197, 94, 0.26)"
+                                    : "1px solid rgba(239, 68, 68, 0.30)",
+                                }}
+                              >
+                                <div className="flex min-w-0 items-center gap-2.5">
+                                  <span
+                                    className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full"
+                                    style={{
+                                      backgroundColor: ok
+                                        ? "rgba(34, 197, 94, 0.16)"
+                                        : "rgba(239, 68, 68, 0.18)",
+                                      color: accent,
+                                    }}
+                                  >
+                                    {ok ? (
+                                      <LinDoIcons.Check size={13} />
+                                    ) : (
+                                      <LinDoIcons.Close size={13} />
+                                    )}
+                                  </span>
+                                  <div className="min-w-0">
+                                    <div
+                                      className="truncate text-[12.8px] font-semibold"
+                                      style={{ color: "var(--ink-primary)" }}
+                                    >
+                                      {m.label}
+                                    </div>
+                                    {m.sublabel && (
+                                      <div
+                                        className="text-[11px]"
+                                        style={{ color: "var(--ink-tertiary)" }}
+                                      >
+                                        {m.sublabel}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                <span
+                                  className="shrink-0 text-[14px] font-bold tabular-nums"
+                                  style={{ color: accent }}
+                                >
+                                  {m.displayCurrent}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 4. 底部说明与达标结论（与 connect.linux.do 卡片底部一致） */}
+                  <div
+                    className="pt-2 text-[11.5px] leading-relaxed"
+                    style={{
+                      borderTop: "0.5px solid var(--hairline)",
+                      color: "var(--ink-tertiary)",
+                    }}
+                  >
+                    <div>以上“话题”指主贴，“帖子”指传统意义的回复。</div>
+                    {report.footerSummary && (
+                      <div
+                        className="mt-1 text-[12.8px] font-semibold"
+                        style={{ color: report.isQualified ? "#22C55E" : "#F59E0B" }}
+                      >
+                        {report.footerSummary}
                       </div>
                     )}
                   </div>
-                ))}
-              </div>
-
-              <div
-                className="mt-3 text-[11.5px] leading-relaxed"
-                style={{ color: "var(--ink-tertiary)" }}
-              >
-                {report.isLiveConnectData
-                  ? `实时同步自 connect.linux.do（近 ${report.timePeriodDays} 天滚动周期）· 邮箱、DeepLX Key 与邀请码管理请点击右上角「网页版 Connect」`
-                  : "如需管理社区邮箱、DeepLX API Key、邀请码或完成首次 Connect OAuth 绑定，请点击右上角「网页版 Connect」"}
-              </div>
+                </div>
+              ) : (
+                <div className="mt-3">
+                  <div className="divide-y divide-[var(--hairline)]">
+                    {fallbackStatMetrics.map((m, idx) => (
+                      <div key={`${m.label}_${idx}`} className="py-2.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <span
+                            className="text-[13px] font-medium"
+                            style={{ color: "var(--ink-primary)" }}
+                          >
+                            {m.label}
+                          </span>
+                          <span
+                            className="shrink-0 text-[12.2px] font-semibold tabular-nums"
+                            style={{ color: "var(--ink-secondary)" }}
+                          >
+                            {m.displayCurrent}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between gap-2">
+                    <span className="text-[11.5px]" style={{ color: "var(--ink-tertiary)" }}>
+                      若刚才跳过了安全确认，可点击重新验证同步 100 天滚动保级数据
+                    </span>
+                    <button
+                      type="button"
+                      disabled={loading}
+                      onClick={() => void loadReport()}
+                      className="shrink-0 rounded-full px-3 py-1 text-[11.8px] font-semibold cursor-pointer"
+                      style={{
+                        backgroundColor: "var(--publish-btn-bg)",
+                        color: "var(--publish-btn-fg)",
+                      }}
+                    >
+                      重新同步
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           ) : null}
         </div>

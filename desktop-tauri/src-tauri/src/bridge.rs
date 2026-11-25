@@ -7859,19 +7859,231 @@ impl BridgeEngine {
         Ok(())
     }
 
-    pub async fn fetch_connect_html(&self) -> Result<String, String> {
+    pub async fn fetch_connect_html(&self, app: &AppHandle, is_dark: bool) -> Result<String, String> {
         let initialized = self.inner.lock().unwrap().initialized;
         if !initialized {
             native_call("init", json!({}), 10).await?;
             self.inner.lock().unwrap().initialized = true;
         }
         let _ = self.seed_session_verified(true).await;
-        let res = native_call("fetchConnectHtml", json!({}), 12).await?;
-        Ok(res
+
+        // Stage 1: Offscreen zero-interference probe (waits silently for 0-click PoW & SSO redirects)
+        let res = native_call("fetchConnectHtml", json!({}), 14).await?;
+        let html = res
             .get("html")
             .and_then(|v| v.as_str())
             .unwrap_or("")
-            .to_string())
+            .to_string();
+        if !html.is_empty() {
+            return Ok(html);
+        }
+
+        let challenged = res
+            .get("challenged")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let needs_oauth = res
+            .get("needsOAuth")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !challenged && !needs_oauth {
+            return Ok(String::new());
+        }
+
+        // Stage 2: Escalate onto the shared internal CF shield / OAuth bridge window (`lindo-bridge-host`)
+        self.verify_and_extract_connect_html(app, is_dark, needs_oauth)
+            .await
+    }
+
+    async fn verify_and_extract_connect_html(
+        &self,
+        app: &AppHandle,
+        is_dark: bool,
+        initial_oauth: bool,
+    ) -> Result<String, String> {
+        let _verify_guard = self.verify_lock.lock().await;
+        {
+            let mut rt = self.inner.lock().unwrap();
+            rt.verifying = true;
+            rt.origin_ready = false;
+        }
+
+        let _ = self.seed_session_verified(true).await;
+        let mut mask_visible = !initial_oauth;
+        let _ = native_call(
+            "setVerifyMask",
+            json!({
+                "visible": mask_visible,
+                "dark": is_dark,
+                "message": "正在校验 Connect 安全连接…"
+            }),
+            4,
+        )
+        .await;
+
+        let nav_res = native_call("navigate", json!({ "url": "https://connect.linux.do/" }), 10).await;
+        let mut extracted_html = String::new();
+
+        if nav_res.is_ok() {
+            let mut panel_shown = false;
+            let mut clicked_login = false;
+            let mut challenge_ticks = 0u32;
+            let deadline = Instant::now() + Duration::from_secs(120);
+
+            if initial_oauth {
+                panel_shown = true;
+                let _ = native_call("show", json!({ "dark": is_dark, "login": true }), 8).await;
+            }
+
+            while Instant::now() < deadline {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(240)) => {}
+                    _ = self.verify_event_notify.notified() => {}
+                }
+
+                let Ok(status_obj) = native_call("status", json!({}), 6).await else {
+                    continue;
+                };
+                if status_obj.get("cancelled").and_then(|v| v.as_bool()) == Some(true) {
+                    break;
+                }
+                let native_interactive = status_obj
+                    .get("interactiveRequired")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if let Some(vis) = status_obj.get("maskVisible").and_then(|v| v.as_bool()) {
+                    mask_visible = vis;
+                }
+
+                let allow_click = if clicked_login { "false" } else { "true" };
+                let script = format!(
+                    r#"(() => {{
+                        const h = (location && location.hostname) || '';
+                        const path = (location && location.pathname) || '';
+                        const isChallenge = Boolean(document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]'))
+                            || /^(Just a moment|请稍候|Attention Required|Security Check)/i.test(document.title || '');
+                        const wf = document.querySelector('iframe[src*="challenges.cloudflare.com"], #turnstile-wrapper iframe, .cf-turnstile iframe');
+                        const wr = wf ? wf.getBoundingClientRect() : null;
+                        const wh = document.querySelector('#turnstile-wrapper, .cf-turnstile, #challenge-stage > div');
+                        const whr = wh ? wh.getBoundingClientRect() : null;
+                        const hasWidget = Boolean((wr && wr.width >= 80 && wr.height >= 30) || (whr && whr.width >= 220 && whr.height >= 55));
+                        const hasMarkers = h === 'connect.linux.do' && !isChallenge && Boolean(document.querySelector('.tl3-ring, .tl3-bar-item, .tl3-quota-card, .card-title, table'));
+                        const isOAuthConsent = (h === 'linux.do' || h === 'www.linux.do') && (path.indexOf('/oauth2/') === 0 || path.indexOf('/login') === 0);
+                        let autoClicked = false;
+                        if ({allow_click} && h === 'connect.linux.do' && !isChallenge && !hasMarkers && document.readyState === 'complete') {{
+                            const loginLink = document.querySelector('a[href*="/login"], a[href*="/oauth"], a[href*="/auth"]');
+                            if (loginLink) {{ loginLink.click(); autoClicked = true; }}
+                        }}
+                        return {{
+                            isChallenge,
+                            hasWidget,
+                            isOAuthConsent,
+                            autoClicked,
+                            hasMarkers,
+                            html: hasMarkers && document.documentElement ? document.documentElement.outerHTML : ''
+                        }};
+                    }})()"#
+                );
+
+                if let Ok(probe) = native_call(
+                    "evaluate",
+                    json!({ "isolated": true, "script": script }),
+                    8,
+                )
+                .await
+                {
+                    if probe.get("autoClicked").and_then(|b| b.as_bool()) == Some(true) {
+                        clicked_login = true;
+                    }
+                    if probe.get("hasMarkers").and_then(|b| b.as_bool()) == Some(true) {
+                        let h = probe.get("html").and_then(|s| s.as_str()).unwrap_or("");
+                        if !h.is_empty() {
+                            extracted_html = h.to_string();
+                            break;
+                        }
+                    }
+
+                    let is_oauth =
+                        probe.get("isOAuthConsent").and_then(|b| b.as_bool()) == Some(true);
+                    let is_challenge =
+                        probe.get("isChallenge").and_then(|b| b.as_bool()) == Some(true);
+                    let has_widget =
+                        probe.get("hasWidget").and_then(|b| b.as_bool()) == Some(true);
+
+                    if is_oauth {
+                        if mask_visible {
+                            mask_visible = false;
+                            let _ = native_call(
+                                "setVerifyMask",
+                                json!({ "visible": false, "dark": is_dark }),
+                                4,
+                            )
+                            .await;
+                        }
+                        if !panel_shown {
+                            panel_shown = true;
+                            let _ = native_call(
+                                "show",
+                                json!({ "dark": is_dark, "login": true }),
+                                8,
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
+
+                    if is_challenge {
+                        challenge_ticks += 1;
+                        if (native_interactive || has_widget || challenge_ticks >= 2) && !panel_shown
+                        {
+                            panel_shown = true;
+                            let _ = native_call(
+                                "show",
+                                json!({ "dark": is_dark, "login": false }),
+                                8,
+                            )
+                            .await;
+                        }
+                        let ready_to_reveal =
+                            native_interactive || has_widget || challenge_ticks >= 5;
+                        if ready_to_reveal && mask_visible {
+                            mask_visible = false;
+                            let _ = native_call(
+                                "setVerifyMask",
+                                json!({ "visible": false, "dark": is_dark }),
+                                4,
+                            )
+                            .await;
+                        }
+                    } else {
+                        challenge_ticks = 0;
+                    }
+                }
+            }
+        }
+
+        let _ = native_call("hide", json!({}), 5).await;
+        if !extracted_html.is_empty() {
+            let _ = self.sync_cookies_from_webkit_verified(false, true).await;
+            emit_diag(
+                app,
+                "INFO",
+                "AUTH",
+                "ConnectVerifyPassed",
+                "Connect 安全确认完成，已同步 100 天滚动保级数据",
+                None,
+            );
+        }
+        {
+            let _nav = self.nav_lock.write().await;
+            self.restore_about_origin_context().await;
+        }
+        {
+            let mut rt = self.inner.lock().unwrap();
+            rt.verifying = false;
+            rt.origin_ready = true;
+        }
+        Ok(extracted_html)
     }
 }
 

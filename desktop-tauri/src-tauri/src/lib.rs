@@ -357,8 +357,12 @@ async fn open_in_app_forum_panel(
 }
 
 #[tauri::command]
-async fn fetch_connect_page_html(engine: State<'_, Arc<BridgeEngine>>) -> Result<String, String> {
-    engine.fetch_connect_html().await
+async fn fetch_connect_page_html(
+    app: AppHandle,
+    engine: State<'_, Arc<BridgeEngine>>,
+    is_dark: Option<bool>,
+) -> Result<String, String> {
+    engine.fetch_connect_html(&app, is_dark.unwrap_or(true)).await
 }
 
 #[tauri::command]
@@ -537,12 +541,20 @@ fn extract_release_notes_from_markdown(body: &str) -> Vec<String> {
     for raw_line in body.lines() {
         let trimmed = raw_line.trim();
         let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("download based on your os") || trimmed.contains("按系统选择下载") {
+            break;
+        }
         if trimmed.is_empty()
             || trimmed.starts_with('#')
+            || trimmed.starts_with('|')
+            || trimmed.starts_with('<')
+            || trimmed.starts_with("![")
+            || trimmed.starts_with("[![")
             || trimmed.starts_with("```")
             || trimmed.starts_with("---")
             || trimmed.starts_with("***")
             || lower.contains("full changelog")
+            || trimmed.contains("完整变更记录")
             || lower.contains("what's changed")
             || lower.contains("new contributors")
             || lower.contains("made their first contribution")
@@ -1922,6 +1934,25 @@ mod tests {
             "**Full Changelog**: https://github.com/lucaslus/LinDo/commits/v1.1.0"
         )
         .is_empty());
+
+        let with_os_matrix = "\
+            ### 更新内容\n\n\
+            - 新增 Linux 原生客户端与多发行版打包\n\
+            - 补齐全端相关话题作者头像展示\n\n\
+            ![Downloads](https://img.shields.io/github/downloads/lucaslus/LinDo/v1.1.5/total?logo=github)\n\n\
+            **按系统选择下载（Download based on your OS）：**\n\n\
+            | OS | Download |\n\
+            | :--- | :--- |\n\
+            | **Android** | [![APK-ARMv8](https://img.shields.io/badge/APK-ARMv8-2ea043)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/lindo-1.1.5-build105.apk) |\n\n\
+            **完整变更记录**: [v1.1.4...v1.1.5](https://github.com/lucaslus/LinDo/compare/v1.1.4...v1.1.5)\n\
+        ";
+        assert_eq!(
+            extract_release_notes_from_markdown(with_os_matrix),
+            vec![
+                "新增 Linux 原生客户端与多发行版打包".to_string(),
+                "补齐全端相关话题作者头像展示".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

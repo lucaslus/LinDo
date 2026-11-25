@@ -6733,7 +6733,7 @@ internal fun CommunityHomeFeedPane(
                             )
                         }
 
-                        // 右侧「宽松 / 紧凑」展示形式切换（统一 16dp IconS）
+                        // 右侧「宽松 / 紧凑」展示形式切换（统一 16dp IconS，不额外着色高亮）
                         Box(
                             modifier = Modifier
                                 .size(width = 24.dp, height = toolbarHeight)
@@ -6745,7 +6745,7 @@ internal fun CommunityHomeFeedPane(
                                 imageVector = if (isCompact) LinDoIcons.LayoutCompact else LinDoIcons.LayoutCards,
                                 contentDescription = LinDoFeedCopy.TOGGLE_FEED_LAYOUT_DESC.text,
                                 modifier = Modifier.size(LinDoTokens.IconS),
-                                tint = if (isCompact) palette.activeChipText else palette.inkSecondary
+                                tint = palette.inkSecondary
                             )
                         }
                     }
@@ -10494,7 +10494,7 @@ internal fun CommunityTopicReaderPane(
             if (targetFloorNum != null && targetFloorNum > 1) {
                 posts.firstOrNull { it.postNumber == targetFloorNum }
             } else {
-                posts.firstOrNull { it.postNumber == 1 } ?: posts.firstOrNull()
+                posts.firstOrNull { it.postNumber == 1 }
             }
         }
         val effectiveTopicTitle = detail?.title ?: summary.title
@@ -10502,27 +10502,34 @@ internal fun CommunityTopicReaderPane(
             val postBodyText = targetPost?.let { postPreviewText(it.cookedHtml) }.orEmpty()
             postBodyText.ifBlank { if (targetFloorNum == null) effectiveTopicTitle else "" }
         }
+        val summaryHasRealOp = op.username.isNotBlank() && (op.username != "linuxdo" || op.avatarTemplate.isNotBlank())
         val replyAvatarUrl = if (targetFloorNum != null && targetFloorNum > 1) {
             targetPost?.avatarTemplate
         } else {
-            targetPost?.avatarTemplate ?: op.avatarTemplate
+            targetPost?.avatarTemplate?.takeIf { it.isNotBlank() }
+                ?: detail?.originalPosterAvatarTemplate?.takeIf { it.isNotBlank() }
+                ?: op.avatarTemplate.takeIf { it.isNotBlank() }
         }
         val replyAnimatedAvatar = if (targetFloorNum != null && targetFloorNum > 1) {
             targetPost?.animatedAvatar
         } else {
-            targetPost?.animatedAvatar ?: op.animatedAvatar
+            targetPost?.animatedAvatar
+                ?: detail?.originalPosterAnimatedAvatar
+                ?: op.animatedAvatar
         }
         val replyDisplayName = if (targetFloorNum != null && targetFloorNum > 1) {
             targetPost?.displayName?.ifBlank { targetPost.username } ?: replyTargetUsername
         } else {
             targetPost?.displayName?.ifBlank { targetPost.username }
-                ?: op.name?.takeIf { it.isNotBlank() }
-                ?: op.username
+                ?: detail?.originalPosterDisplayName?.takeIf { it.isNotBlank() }
+                ?: (if (summaryHasRealOp) op.name?.takeIf { it.isNotBlank() } ?: op.username else null)
         }
         val resolvedReplyUsername = if (targetFloorNum != null && targetFloorNum > 1) {
             replyTargetUsername ?: targetPost?.username
         } else {
-            targetPost?.username?.ifBlank { op.username } ?: op.username
+            targetPost?.username?.takeIf { it.isNotBlank() }
+                ?: detail?.originalPosterUsername?.takeIf { it.isNotBlank() }
+                ?: (if (summaryHasRealOp) op.username else null)
         }
 
         TopicReplyComposerSheet(

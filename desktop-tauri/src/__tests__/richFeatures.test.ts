@@ -10,7 +10,11 @@ import {
   highlightFindMatches,
 } from "../components/ReaderEnhancements";
 import { buildAuthorFeedbackPayload, LINDO_AUTHOR_USERNAME } from "../components/SecondaryScreens";
-import { buildDiscourseSearchQuery, parseSuggestedTopicsFromTopicDetail } from "../lib/api";
+import {
+  buildDiscourseSearchQuery,
+  parseConnectHtml,
+  parseSuggestedTopicsFromTopicDetail,
+} from "../lib/api";
 
 describe("markdownPreview — full GFM + Discourse + Obsidian syntax", () => {
   it("renders Screenshot 2 list directly followed by GFM table without blank line", () => {
@@ -279,5 +283,62 @@ describe("ReaderEnhancements helpers & search query builder", () => {
     expect(parsed[1].originalPoster.avatarTemplate).toBe(
       "/user_avatar/linux.do/trinity/{size}/9_2.png"
     );
+  });
+
+  it("parses connect.linux.do rings, bars, quota slots, and 6-month silence/ban status cards", () => {
+    const html = `
+      <h2 class="card-title">信任级别 3 的要求</h2>
+      <div class="card-subtitle">过去 100 天内的数据</div>
+      <span class="badge">已达到</span>
+      <div class="tl3-ring">
+        <div class="tl3-ring-circle met" style="--val: 78; --max: 50">
+          <span class="tl3-ring-value"><span class="tl3-ring-current">78</span><span class="tl3-ring-target">/ 50</span></span>
+        </div>
+        <div class="tl3-ring-label">访问天数</div>
+      </div>
+      <div class="tl3-bar-item">
+        <div class="tl3-bar-header"><span class="tl3-bar-label">回复话题</span><span class="tl3-bar-nums met">257/10</span></div>
+        <div class="tl3-bar-track"><div class="tl3-bar-fill met" style="--val: 257; --max: 10"></div></div>
+      </div>
+      <div class="tl3-quota-card met">
+        <div class="tl3-quota-header"><span class="tl3-quota-label">被举报帖子</span><span class="tl3-quota-nums">0 / 5</span></div>
+      </div>
+      <div class="tl3-status-card met">
+        <div class="tl3-status-info"><div>被禁言</div><div>过去 6 个月</div></div>
+        <div class="tl3-status-val">0</div>
+      </div>
+      <div class="tl3-status-card met">
+        <div class="tl3-status-info"><div>被封禁</div><div>过去 6 个月</div></div>
+        <div class="tl3-status-val">0</div>
+      </div>
+      <p>以上“话题”指主贴，“帖子”指传统意义的回复。</p>
+      <p>已达到信任级别 3 要求，请保持。</p>
+    `;
+    const report = parseConnectHtml(html, "jedilus");
+    expect(report).not.toBeNull();
+    expect(report?.subtitle).toBe("@jedilus · 过去 100 天内的数据");
+    expect(report?.isQualified).toBe(true);
+    expect(report?.footerSummary).toBe("已达到信任级别 3 要求，请保持。");
+
+    const ring = report?.metrics.find((m) => m.label === "访问天数");
+    expect(ring?.kind).toBe("ring");
+    expect(ring?.currentValue).toBe(78);
+
+    const bar = report?.metrics.find((m) => m.label === "回复话题");
+    expect(bar?.kind).toBe("bar");
+    expect(bar?.currentValue).toBe(257);
+
+    const quota = report?.metrics.find((m) => m.label === "被举报帖子");
+    expect(quota?.kind).toBe("quota");
+    expect(quota?.targetValue).toBe(5);
+
+    const silence = report?.metrics.find((m) => m.label === "被禁言");
+    expect(silence?.kind).toBe("status");
+    expect(silence?.currentValue).toBe(0);
+    expect(silence?.sublabel).toBe("过去 6 个月");
+
+    const ban = report?.metrics.find((m) => m.label === "被封禁");
+    expect(ban?.kind).toBe("status");
+    expect(ban?.currentValue).toBe(0);
   });
 });

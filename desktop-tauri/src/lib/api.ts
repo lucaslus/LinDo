@@ -2107,7 +2107,18 @@ export async function fetchTopicDetail(
   const posts = rawPosts.map((p) =>
     parsePostModel(p, topicId, authorBadgesMap, lastReadPostNum)
   );
-  const opUsername = String(data?.details?.created_by?.username || posts[0]?.username || "");
+  const createdByObj = data?.details?.created_by;
+  const opFloorPost = posts.find((p) => p.postNumber === 1);
+  const opUsername = String(createdByObj?.username || opFloorPost?.username || posts[0]?.username || "");
+  const opDisplayName = String(
+    createdByObj?.name || opFloorPost?.displayName || opUsername || ""
+  ).trim() || undefined;
+  const opAvatarTemplate = String(
+    createdByObj?.avatar_template || opFloorPost?.avatarTemplate || ""
+  );
+  const opAnimatedAvatar = createdByObj?.animated_avatar
+    ? String(createdByObj.animated_avatar)
+    : opFloorPost?.animatedAvatar ?? null;
   const tags: string[] = Array.isArray(data.tags)
     ? data.tags.map((tg: any) => (typeof tg === "string" ? tg : String(tg?.name || ""))).filter(Boolean)
     : [];
@@ -2157,6 +2168,9 @@ export async function fetchTopicDetail(
         : Number(data.posts_count || posts.length || 1),
     lastReadPostNumber: lastReadPostNum,
     opUsername,
+    opDisplayName,
+    opAvatarTemplate,
+    opAnimatedAvatar,
     streamIds,
     posts,
     suggestedTopics,
@@ -3661,7 +3675,10 @@ function parseFirstIntInText(raw: string | null | undefined): number {
   return m ? Number(m[0]) || 0 : 0;
 }
 
-export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport | null {
+export function parseConnectHtml(
+  htmlContent: string,
+  fallbackUsername?: string
+): ConnectTrustLevelReport | null {
   if (
     !htmlContent ||
     (!htmlContent.includes("tl3-ring") &&
@@ -3677,21 +3694,28 @@ export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport |
   let title = (titleEl?.textContent || "").trim();
   if (!title) {
     const headingMatch = Array.from(doc.querySelectorAll("h1, h2, h3")).find((h) =>
-      (h.textContent || "").includes("信任等级")
+      /信任(?:等级|级别)/.test(h.textContent || "")
     );
-    title = (headingMatch?.textContent || "").trim() || "信任等级 3 要求";
+    title = (headingMatch?.textContent || "").trim() || "信任级别 3 的要求";
   }
 
   const subEl = doc.querySelector(".card-subtitle");
-  const subtitle = (subEl?.textContent || "").trim() || "过去 100 天内社区活跃度指标";
-  const periodMatch = subtitle.match(/(\d+)\s*(?:天|days)/i);
+  const rawSubtitle = (subEl?.textContent || "").trim() || "过去 100 天内的数据";
+  const cleanUser = (fallbackUsername || "").trim().replace(/^@/, "");
+  const subtitle =
+    cleanUser && !rawSubtitle.includes("@")
+      ? `@${cleanUser} · ${rawSubtitle}`
+      : rawSubtitle;
+  const periodMatch = rawSubtitle.match(/(\d+)\s*(?:天|days)/i);
   const periodDays = periodMatch ? Number(periodMatch[1]) || 100 : 100;
 
   const badgeEl = doc.querySelector("span[class*='badge'], .badge");
   const badgeClasses = badgeEl?.getAttribute("class") || "";
   const badgeText =
     (badgeEl?.textContent || "").trim() ||
-    (htmlContent.includes("符合信任等级") ? "符合信任等级 3 要求" : "Connect 实时数据");
+    (htmlContent.includes("符合信任") || htmlContent.includes("已达到")
+      ? "已达到"
+      : "Connect 实时数据");
 
   const metrics: ConnectMetricItem[] = [];
   const makeItem = (
@@ -3700,7 +3724,8 @@ export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport |
     target: number,
     dispCur: string,
     dispTarget: string,
-    isMet: boolean
+    isMet: boolean,
+    kind: ConnectMetricItem["kind"]
   ): ConnectMetricItem => ({
     label,
     currentValue: cur,
@@ -3709,6 +3734,7 @@ export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport |
     displayTarget: dispTarget,
     isMet,
     progress: target > 0 ? Math.max(0, Math.min(1, cur / target)) : isMet ? 1 : 0,
+    kind,
   });
 
   // 1. 环形指标 (.tl3-ring)
@@ -3716,11 +3742,13 @@ export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport |
     const label = (ring.querySelector(".tl3-ring-label")?.textContent || "").trim();
     const circle = ring.querySelector(".tl3-ring-circle");
     const style = circle?.getAttribute("style") || "";
-    const cur = parseCssCustomPropInt(style, "--val");
+    const curText = (ring.querySelector(".tl3-ring-current")?.textContent || "").trim();
+    const cssVal = parseCssCustomPropInt(style, "--val");
+    const cur = curText ? parseFirstIntInText(curText) : cssVal;
     const max = Math.max(1, parseCssCustomPropInt(style, "--max"));
     const isMet = Boolean(circle?.classList.contains("met")) || cur >= max;
     if (label) {
-      metrics.push(makeItem(label, cur, max, String(cur), String(max), isMet));
+      metrics.push(makeItem(label, cur, max, String(cur), String(max), isMet, "ring"));
     }
   });
 
@@ -3736,7 +3764,7 @@ export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport |
     const cur = parsedNum > 0 ? parsedNum : cssVal;
     const isMet = Boolean(fill?.classList.contains("met")) || cur >= cssMax;
     if (label) {
-      metrics.push(makeItem(label, cur, cssMax, String(cur), String(cssMax), isMet));
+      metrics.push(makeItem(label, cur, cssMax, String(cur), String(cssMax), isMet, "bar"));
     }
   });
 
@@ -3756,11 +3784,54 @@ export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport |
         displayTarget: String(limit),
         isMet: cur <= limit,
         progress: limit > 0 ? Math.max(0, Math.min(1, cur / limit)) : 0,
+        kind: "quota",
       });
     }
   });
 
-  // 4. 经典表格布局兜底 (<table><tr><td>)
+  // 4. 合规记录状态卡片（被禁言 / 被封禁 · 过去 6 个月）
+  const parsePenaltyStatusCard = (targetLabel: "被禁言" | "被封禁") => {
+    const candidates = Array.from(doc.querySelectorAll("div, span, strong, p, td")).filter(
+      (el) => el.children.length === 0 && (el.textContent || "").trim() === targetLabel
+    );
+    for (const leaf of candidates) {
+      let curEl: HTMLElement | null = leaf.parentElement;
+      for (let depth = 0; depth < 4 && curEl; depth += 1) {
+        const rawText = (curEl.textContent || "").replace(/\s+/g, " ").trim();
+        if (rawText.length > 80) break;
+        const periodSubMatch = rawText.match(/(?:过去|近)\s*\d+\s*个?(?:月|天)/);
+        const stripped = rawText
+          .replace(targetLabel, " ")
+          .replace(/(?:过去|近)\s*\d+\s*个?(?:月|天)/g, " ")
+          .trim();
+        const numMatches = stripped.match(/\b\d+\b/g);
+        if (numMatches && numMatches.length > 0) {
+          const count = Number(numMatches[numMatches.length - 1]) || 0;
+          const cls = (curEl.getAttribute("class") || "").toLowerCase();
+          const explicitlyBad =
+            cls.includes("unmet") || cls.includes("danger") || cls.includes("fail");
+          metrics.push({
+            label: targetLabel,
+            currentValue: count,
+            targetValue: 0,
+            displayCurrent: String(count),
+            displayTarget: "0",
+            isMet: !explicitlyBad && count === 0,
+            progress: count === 0 ? 1 : 0,
+            kind: "status",
+            sublabel: periodSubMatch ? periodSubMatch[0] : "过去 6 个月",
+          });
+          return true;
+        }
+        curEl = curEl.parentElement;
+      }
+    }
+    return false;
+  };
+  const foundSilence = parsePenaltyStatusCard("被禁言");
+  const foundBan = parsePenaltyStatusCard("被封禁");
+
+  // 5. 经典表格布局兜底 (<table><tr><td>)
   if (metrics.length === 0) {
     doc.querySelectorAll("tr").forEach((tr) => {
       const tds = Array.from(tr.querySelectorAll("td"));
@@ -3770,27 +3841,36 @@ export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport |
         const rawTarget = (tds[2].textContent || "").trim();
         const curVal = parseFirstIntInText(rawCur);
         const targetVal = parseFirstIntInText(rawTarget);
-        if (
-          rawLabel &&
-          targetVal > 0 &&
-          !rawLabel.includes("项目") &&
-          !rawLabel.includes("禁言") &&
-          !rawLabel.includes("封禁")
-        ) {
-          const td1Html = tds[1].outerHTML.toLowerCase();
-          const trHtml = tr.outerHTML.toLowerCase();
-          const isUnmet = td1Html.includes("red") || trHtml.includes("unmet");
-          const isMet = td1Html.includes("green") ? true : isUnmet ? false : curVal >= targetVal;
-          metrics.push(
-            makeItem(
-              rawLabel,
-              curVal,
-              targetVal,
-              rawCur || String(curVal),
-              rawTarget || String(targetVal),
-              isMet
-            )
-          );
+        if (rawLabel && !rawLabel.includes("项目")) {
+          if (rawLabel.includes("禁言") || rawLabel.includes("封禁")) {
+            metrics.push({
+              label: rawLabel.includes("禁言") ? "被禁言" : "被封禁",
+              currentValue: curVal,
+              targetValue: 0,
+              displayCurrent: String(curVal),
+              displayTarget: "0",
+              isMet: curVal === 0,
+              progress: curVal === 0 ? 1 : 0,
+              kind: "status",
+              sublabel: "过去 6 个月",
+            });
+          } else if (targetVal > 0) {
+            const td1Html = tds[1].outerHTML.toLowerCase();
+            const trHtml = tr.outerHTML.toLowerCase();
+            const isUnmet = td1Html.includes("red") || trHtml.includes("unmet");
+            const isMet = td1Html.includes("green") ? true : isUnmet ? false : curVal >= targetVal;
+            metrics.push(
+              makeItem(
+                rawLabel,
+                curVal,
+                targetVal,
+                rawCur || String(curVal),
+                rawTarget || String(targetVal),
+                isMet,
+                "bar"
+              )
+            );
+          }
         }
       }
     });
@@ -3801,44 +3881,92 @@ export function parseConnectHtml(htmlContent: string): ConnectTrustLevelReport |
   const lowerBadge = `${badgeClasses} ${badgeText}`.toLowerCase();
   const explicitlyUnqualified =
     lowerBadge.includes("不符合") ||
-    lowerBadge.includes("未达标") ||
+    lowerBadge.includes("未达") ||
     lowerBadge.includes("danger") ||
     lowerBadge.includes("unmet") ||
     lowerBadge.includes("fail");
   const explicitlyQualified =
     !explicitlyUnqualified &&
     (lowerBadge.includes("符合") ||
-      lowerBadge.includes("已达标") ||
+      lowerBadge.includes("已达") ||
       lowerBadge.includes("success") ||
       lowerBadge.includes("met"));
+
+  const isQualified = explicitlyQualified
+    ? true
+    : explicitlyUnqualified
+      ? false
+      : metrics.every((m) => m.isMet);
+
+  // 若为现代 TL3 卡片布局但部分精简片段未包含禁言/封禁节点且整体已达标，补齐标准 0 次状态卡保持与 Web 端一致
+  const hasTl3ModernLayout = metrics.some((m) => m.kind === "ring" || m.kind === "quota");
+  if (hasTl3ModernLayout && isQualified) {
+    if (!foundSilence && !metrics.some((m) => m.label === "被禁言")) {
+      metrics.push({
+        label: "被禁言",
+        currentValue: 0,
+        targetValue: 0,
+        displayCurrent: "0",
+        displayTarget: "0",
+        isMet: true,
+        progress: 1,
+        kind: "status",
+        sublabel: "过去 6 个月",
+      });
+    }
+    if (!foundBan && !metrics.some((m) => m.label === "被封禁")) {
+      metrics.push({
+        label: "被封禁",
+        currentValue: 0,
+        targetValue: 0,
+        displayCurrent: "0",
+        displayTarget: "0",
+        isMet: true,
+        progress: 1,
+        kind: "status",
+        sublabel: "过去 6 个月",
+      });
+    }
+  }
+
+  let footerSummary: string | undefined;
+  const bodyText = (doc.body?.textContent || "").replace(/\s+/g, " ");
+  const summaryMatch = bodyText.match(
+    /((?:已达到|尚未达到|未达到|符合|不符合)[^。！!\n]*信任(?:级别|等级)\s*\d+[^。！!\n]*[。！!]?)/
+  );
+  if (summaryMatch) {
+    footerSummary = summaryMatch[1].trim();
+  } else if (hasTl3ModernLayout) {
+    footerSummary = isQualified
+      ? "已达到信任级别 3 要求，请保持。"
+      : "尚未达到信任级别 3 要求，请继续保持活跃。";
+  }
 
   return {
     title,
     subtitle,
     statusBadgeText: badgeText,
-    isQualified: explicitlyQualified
-      ? true
-      : explicitlyUnqualified
-        ? false
-        : metrics.every((m) => m.isMet),
+    isQualified,
     timePeriodDays: periodDays,
     metrics,
     isLiveConnectData: true,
+    footerSummary,
   };
 }
 
 export async function fetchConnectTrustLevelReport(
-  username: string
+  username: string,
+  isDark = true
 ): Promise<ConnectTrustLevelReport> {
-  // 1. 优先通过共享浏览器 Cookie 的离屏 WebView 探针读取 connect.linux.do 实时 100 天滚动周期数据（零跨 TLS 栈污染）
+  // 1. 通过内置 WebView 探针（遇到 CF 盾自动升级复用内部安全验证窗）读取 connect.linux.do 实时 100 天滚动数据
   try {
-    const html = await invoke<string>("fetch_connect_page_html");
+    const html = await invoke<string>("fetch_connect_page_html", { isDark });
     if (html) {
-      const live = parseConnectHtml(html);
+      const live = parseConnectHtml(html, username);
       if (live) return live;
     }
   } catch {
-    // 若用户尚未在 connect.linux.do 完成首次 OAuth 授权或为 Lv1/Lv2 无 TL3 表格，平滑降级到真实个人统计档案
+    // 若用户主动关闭验证弹窗或为 Lv1/Lv2 无保级面板，平滑降级到真实个人统计档案
   }
 
   // 2. 降级拉取 `/u/{username}.json` + `/u/{username}/summary.json` 真实个人活跃度数据

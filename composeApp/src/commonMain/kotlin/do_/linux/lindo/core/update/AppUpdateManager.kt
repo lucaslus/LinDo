@@ -586,13 +586,22 @@ object AppUpdateManager {
     internal fun extractNotesFromMarkdown(body: String): List<String> =
         body.lineSequence()
             .map { it.trim() }
+            .takeWhile { line ->
+                !line.contains("Download based on your OS", ignoreCase = true) &&
+                    !line.contains("按系统选择下载")
+            }
             .filter { line ->
                 line.isNotEmpty() &&
                     !line.startsWith("#") &&
+                    !line.startsWith("|") &&
+                    !line.startsWith("<") &&
+                    !line.startsWith("![") &&
+                    !line.startsWith("[![") &&
                     !line.startsWith("```") &&
                     !line.startsWith("---") &&
                     !line.startsWith("***") &&
                     !line.contains("Full Changelog", ignoreCase = true) &&
+                    !line.contains("完整变更记录") &&
                     !line.contains("What's Changed", ignoreCase = true) &&
                     !line.contains("New Contributors", ignoreCase = true) &&
                     !line.contains("made their first contribution", ignoreCase = true)

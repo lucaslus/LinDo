@@ -7247,10 +7247,25 @@ object LinuxDoRepository {
             )
         }.orEmpty()
 
+        val createdByObj = detailsObj?.get("created_by") as? JsonObject
+        val opFloorPost = posts.firstOrNull { it.postNumber == 1 }
+        val resolvedOpUsername = createdByObj?.get("username")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: opFloorPost?.username?.takeIf { it.isNotBlank() }
+        val resolvedOpDisplayName = createdByObj?.get("name")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: opFloorPost?.displayName?.takeIf { it.isNotBlank() }
+            ?: resolvedOpUsername
+        val resolvedOpAvatarTemplate = createdByObj?.get("avatar_template")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: opFloorPost?.avatarTemplate?.takeIf { it.isNotBlank() }
+        val resolvedOpAnimatedAvatar = createdByObj?.get("animated_avatar")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: opFloorPost?.animatedAvatar?.takeIf { it.isNotBlank() }
+
         return TopicDetailModel(
             id = id,
             title = title,
-            originalPosterUsername = detailsObj?.get("created_by")?.let { (it as? JsonObject)?.get("username")?.jsonPrimitive?.contentOrNull },
+            originalPosterUsername = resolvedOpUsername,
+            originalPosterDisplayName = resolvedOpDisplayName,
+            originalPosterAvatarTemplate = resolvedOpAvatarTemplate,
+            originalPosterAnimatedAvatar = resolvedOpAnimatedAvatar,
             categoryId = categoryId,
             categoryName = catName,
             categoryColorHex = catColor,

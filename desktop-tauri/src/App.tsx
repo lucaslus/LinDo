@@ -408,28 +408,80 @@ export const App: React.FC = () => {
 
   const launchOrAppendComposer = useCallback((req: ComposerLaunchRequest) => {
     setComposerReq((prev) => {
+      let enriched = req;
+      if ((req.action === "REPLY" || req.action === "EDIT") && req.topicId) {
+        const matchDetail =
+          activeDetailRef.current?.id === req.topicId
+            ? activeDetailRef.current
+            : msgDetailRef.current?.id === req.topicId
+              ? msgDetailRef.current
+              : null;
+        const matchSummary =
+          activeSummaryRef.current?.id === req.topicId
+            ? activeSummaryRef.current
+            : msgSummaryRef.current?.id === req.topicId
+              ? msgSummaryRef.current
+              : null;
+        const opPost = matchDetail?.posts.find((p) => p.postNumber === 1);
+        const fallbackUsername =
+          opPost?.username ||
+          matchDetail?.opUsername ||
+          (matchSummary?.originalPoster.avatarTemplate ? matchSummary.originalPoster.username : "");
+        const fallbackDisplayName =
+          opPost?.displayName ||
+          matchDetail?.opDisplayName ||
+          matchSummary?.originalPoster.name ||
+          fallbackUsername;
+        const fallbackAvatar =
+          opPost?.avatarTemplate ||
+          matchDetail?.opAvatarTemplate ||
+          matchSummary?.originalPoster.avatarTemplate ||
+          "";
+        const fallbackAnim =
+          opPost?.animatedAvatar ??
+          matchDetail?.opAnimatedAvatar ??
+          matchSummary?.originalPoster.animatedAvatar ??
+          null;
+        enriched = {
+          ...req,
+          topicTitle:
+            req.topicTitle || matchDetail?.title || matchSummary?.title || req.initialTitle,
+          replyToUsername: req.replyToUsername || fallbackUsername || undefined,
+          replyToDisplayName: req.replyToDisplayName || fallbackDisplayName || undefined,
+          replyToAvatarTemplate: req.replyToAvatarTemplate || fallbackAvatar || undefined,
+          replyToAnimatedAvatar:
+            req.replyToAnimatedAvatar !== undefined ? req.replyToAnimatedAvatar : fallbackAnim,
+        };
+      }
       if (
         prev &&
         prev.action === "REPLY" &&
-        req.action === "REPLY" &&
+        enriched.action === "REPLY" &&
         prev.topicId &&
-        prev.topicId === req.topicId
+        prev.topicId === enriched.topicId
       ) {
-        if (req.initialRaw) {
+        if (enriched.initialRaw) {
           setComposerAppendQuote({
-            text: req.initialRaw,
+            text: enriched.initialRaw,
             nonce: Date.now() + Math.random(),
           });
         }
         return {
           ...prev,
-          replyToPostNumber: req.replyToPostNumber ?? prev.replyToPostNumber,
-          replyToUsername: req.replyToUsername ?? prev.replyToUsername,
-          replyToSnippet: req.replyToSnippet ?? prev.replyToSnippet,
+          topicTitle: enriched.topicTitle ?? prev.topicTitle,
+          replyToPostNumber: enriched.replyToPostNumber ?? prev.replyToPostNumber,
+          replyToUsername: enriched.replyToUsername ?? prev.replyToUsername,
+          replyToDisplayName: enriched.replyToDisplayName ?? prev.replyToDisplayName,
+          replyToAvatarTemplate: enriched.replyToAvatarTemplate ?? prev.replyToAvatarTemplate,
+          replyToAnimatedAvatar:
+            enriched.replyToAnimatedAvatar !== undefined
+              ? enriched.replyToAnimatedAvatar
+              : prev.replyToAnimatedAvatar,
+          replyToSnippet: enriched.replyToSnippet ?? prev.replyToSnippet,
         };
       }
       setComposerAppendQuote(null);
-      return req;
+      return enriched;
     });
   }, []);
 
@@ -3011,6 +3063,7 @@ export const App: React.FC = () => {
       {showConnectModal && currentUser && (
         <ConnectTrustLevelModal
           username={currentUser.username}
+          isDark={isDark}
           onOpenWebConnect={() => {
             openInAppForumPanel("https://connect.linux.do/", isDark).catch(() =>
               openUrl("https://connect.linux.do/")

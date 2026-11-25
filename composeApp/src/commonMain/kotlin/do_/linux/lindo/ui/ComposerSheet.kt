@@ -1030,7 +1030,7 @@ internal fun ComposerSheet(
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
-                                            if (floor != null && name != null) {
+                                            if (name != null) {
                                                 GoogleAccountRingAvatar(
                                                     letter = name,
                                                     username = draft.replyToUsername ?: name,
@@ -1045,7 +1045,8 @@ internal fun ComposerSheet(
                                                     floor != null && name != null -> LinDoReaderCopy.REPLY_TARGET_USER_FLOOR.format(name, floor)
                                                     floor == 1 -> LinDoComposerCopy.REPLY_OP.text
                                                     floor != null -> LinDoComposerCopy.REPLY_FLOOR_NUMBER.format(floor)
-                                                    else -> "回复话题"
+                                                    name != null -> "${LinDoComposerCopy.HEADER_REPLY_TOPIC.text} · $name"
+                                                    else -> LinDoComposerCopy.HEADER_REPLY_TOPIC.text
                                                 },
                                                 color = palette.inkSecondary,
                                                 fontWeight = FontWeight.Medium,
@@ -1071,7 +1072,7 @@ internal fun ComposerSheet(
                                                 lineHeight = 19.sp,
                                                 maxLines = if (replyContextExpanded) 6 else 2,
                                                 overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.padding(start = if (floor != null && name != null) 25.dp else 0.dp)
+                                                modifier = Modifier.padding(start = if (name != null) 25.dp else 0.dp)
                                             )
                                         }
                                     }

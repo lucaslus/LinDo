@@ -419,6 +419,9 @@ export interface TopicDetailModel {
   highestPostNumber?: number | null;
   lastReadPostNumber?: number | null;
   opUsername: string;
+  opDisplayName?: string;
+  opAvatarTemplate?: string;
+  opAnimatedAvatar?: string | null;
   streamIds: number[];
   posts: PostItemModel[];
   suggestedTopics?: TopicSummary[];
@@ -437,6 +440,8 @@ export interface ConnectMetricItem {
   displayTarget: string;
   isMet: boolean;
   progress: number;
+  kind?: "ring" | "bar" | "quota" | "status" | "stat";
+  sublabel?: string;
 }
 
 export interface ConnectTrustLevelReport {
@@ -447,6 +452,7 @@ export interface ConnectTrustLevelReport {
   timePeriodDays: number;
   metrics: ConnectMetricItem[];
   isLiveConnectData: boolean;
+  footerSummary?: string;
 }
 
 export interface NotificationItem {

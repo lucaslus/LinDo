@@ -1,9 +1,28 @@
 # LinDo
 
-面向 [LINUX DO](https://linux.do) 社区打造的第三方开源跨平台客户端，提供 **Android 原生版**（Kotlin + Compose Multiplatform）与 **macOS / Windows 轻量桌面版**（Tauri 2 + Rust + React）。
+面向 [LINUX DO](https://linux.do) 社区打造的第三方开源跨平台客户端，提供 **Android 原生版**（Kotlin + Compose Multiplatform）与 **macOS / Windows / Linux 原生桌面版**（Tauri 2 + Rust + React）。
 
 - **官方网站与文档**：[https://lindo.app](https://lindo.app)（文档见 `/docs`，安全说明见 `/docs/security`）
-- **安装包下载**：[GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)（支持 Android `.apk`、macOS Apple Silicon / Intel `.dmg`、Windows `-setup.exe` / `.msi`）
+- **安装包下载**：[GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)（支持 Android `.apk`、macOS Apple Silicon / Intel `.dmg`、Windows `-setup.exe` / `.msi`、Linux `AppImage` / `.deb` / `.rpm`）
+
+---
+
+## 📦 下载安装
+
+<!-- LINDO_DOWNLOAD_MATRIX_START -->
+[![Latest Release](https://img.shields.io/github/v/release/lucaslus/LinDo?logo=github&label=latest&color=F59E0B)](https://github.com/lucaslus/LinDo/releases/latest) [![Total Downloads](https://img.shields.io/github/downloads/lucaslus/LinDo/total?logo=github&label=downloads&color=2ea043)](https://github.com/lucaslus/LinDo/releases)
+
+当前最新正式版：**`v1.1.4`**（点击对应系统徽章即可直接下载安装包，完整校验文件见 [GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)）：
+
+| OS | Download |
+| :--- | :--- |
+| **Android** | [![APK-ARMv8](https://img.shields.io/badge/APK-ARMv8-2ea043?logo=android&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/lindo-1.1.4-build104.apk) |
+| **Windows** | [![Setup-x64](https://img.shields.io/badge/Setup-x64-0078D4)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/Lindo-1.1.4-windows-x64-setup.exe)<br/>[![MSI-x64](https://img.shields.io/badge/MSI-x64-4B9CD3)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/Lindo-1.1.4-windows-x64.msi) |
+| **macOS** | [![DMG-Apple Silicon](https://img.shields.io/badge/DMG-Apple_Silicon-181717?logo=apple&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/Lindo-1.1.4-macos-arm64.dmg)<br/>[![DMG-Intel X64](https://img.shields.io/badge/DMG-Intel_X64-0071C5?logo=apple&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/Lindo-1.1.4-macos-x64.dmg) |
+| **Linux** | [![AppImage-x64](https://img.shields.io/badge/AppImage-x64-D94625?logo=linux&logoColor=white)](https://github.com/lucaslus/LinDo/releases/latest)<br/>[![DebPackage-x64](https://img.shields.io/badge/DebPackage-x64-E95420?logo=debian&logoColor=white)](https://github.com/lucaslus/LinDo/releases/latest)<br/>[![RpmPackage-x64](https://img.shields.io/badge/RpmPackage-x64-D97706?logo=redhat&logoColor=white)](https://github.com/lucaslus/LinDo/releases/latest) |
+<!-- LINDO_DOWNLOAD_MATRIX_END -->
+
+> Arch Linux / Omarchy 用户也可直接使用仓库内的 [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD) 本地打包安装。
 
 ---
 
@@ -47,14 +66,14 @@ LinDo **100% 开源**，非常欢迎各位佬友参与共建：
 | 目录 | 平台与职责 | 技术栈 |
 | --- | --- | --- |
 | [`composeApp/`](composeApp) | Android 原生客户端（及共享业务/测试集） | Kotlin Multiplatform + Compose Multiplatform |
-| [`desktop-tauri/`](desktop-tauri) | macOS（Apple Silicon / Intel）与 Windows 桌面客户端 | Tauri 2 + Rust + React + TypeScript |
+| [`desktop-tauri/`](desktop-tauri) | macOS（Apple Silicon / Intel）、Windows 与 Linux 桌面客户端 | Tauri 2 + Rust + React + TypeScript |
 | [`website/`](website) | 官方网站与在线文档站 | Next.js 16 + Nextra 4 + Tailwind CSS v4 |
 
 ---
 
 ## 🛠️ 开发者构建与调试指南
 
-### 1. 桌面端（Tauri 2：macOS / Windows）
+### 1. 桌面端（Tauri 2：macOS / Windows / Linux）
 
 需要 Node.js 22+、pnpm 10+ 与 Rust stable 工具链：
 

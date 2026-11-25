@@ -353,6 +353,38 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [currentVisibleFloor, setCurrentVisibleFloor] = useState(1);
 
+  const opFloorPost = useMemo(
+    () => detail?.posts.find((p) => p.postNumber === 1) ?? null,
+    [detail?.posts]
+  );
+  const resolvedTopicOp = useMemo(() => {
+    const summaryOp = summary?.originalPoster;
+    const summaryHasRealOp = Boolean(
+      summaryOp?.username && (summaryOp.username !== "linuxdo" || summaryOp.avatarTemplate)
+    );
+    const username =
+      opFloorPost?.username ||
+      detail?.opUsername ||
+      (summaryHasRealOp ? summaryOp?.username : "") ||
+      "";
+    const displayName =
+      opFloorPost?.displayName ||
+      detail?.opDisplayName ||
+      (summaryHasRealOp ? summaryOp?.name : undefined) ||
+      username;
+    const avatarTemplate =
+      opFloorPost?.avatarTemplate ||
+      detail?.opAvatarTemplate ||
+      (summaryHasRealOp ? summaryOp?.avatarTemplate : "") ||
+      "";
+    const animatedAvatar =
+      opFloorPost?.animatedAvatar ??
+      detail?.opAnimatedAvatar ??
+      (summaryHasRealOp ? summaryOp?.animatedAvatar : null) ??
+      null;
+    return { username, displayName, avatarTemplate, animatedAvatar };
+  }, [opFloorPost, detail?.opUsername, detail?.opDisplayName, detail?.opAvatarTemplate, detail?.opAnimatedAvatar, summary?.originalPoster]);
+
   const clearFloorFlash = useCallback(() => {
     if (flashTimerRef.current) {
       clearTimeout(flashTimerRef.current);
@@ -4308,6 +4340,10 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             action: "REPLY",
                             topicId: summary.id,
                             topicTitle: detail.title || summary.title,
+                            replyToUsername: resolvedTopicOp.username || undefined,
+                            replyToDisplayName: resolvedTopicOp.displayName || undefined,
+                            replyToAvatarTemplate: resolvedTopicOp.avatarTemplate || undefined,
+                            replyToAnimatedAvatar: resolvedTopicOp.animatedAvatar,
                           });
                         }}
                         className="font-medium opacity-90 transition-opacity hover:opacity-100 hover:underline cursor-pointer"
@@ -4560,6 +4596,10 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                 action: "REPLY",
                 topicId: summary.id,
                 topicTitle: detail?.title || summary.title,
+                replyToUsername: resolvedTopicOp.username || undefined,
+                replyToDisplayName: resolvedTopicOp.displayName || undefined,
+                replyToAvatarTemplate: resolvedTopicOp.avatarTemplate || undefined,
+                replyToAnimatedAvatar: resolvedTopicOp.animatedAvatar,
               });
             }}
             className="pointer-events-auto flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-full px-4 text-[13px] transition-colors cursor-pointer disabled:opacity-55"

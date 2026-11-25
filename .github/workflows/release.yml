@@ -417,7 +417,7 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Generate SHA256SUMS.txt & upload to GitHub Release
+      - name: Generate Release Notes, latest.json & SHA256SUMS.txt, then publish Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -427,18 +427,29 @@ jobs:
         run: |
           TARGET_TAG="${INPUT_TAG:-$REF_NAME}"
           PREV_TAG=$(git tag --list 'v*' --sort=-version:refname | grep -Fxv "$TARGET_TAG" | head -n1 || true)
+          RAW_NOTES_FILE="${RUNNER_TEMP}/raw-notes.md"
           NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
           if [ -n "$PREV_TAG" ] && git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
             git log "${PREV_TAG}..HEAD" --no-merges --pretty=format:"- %s" \
-              | grep -Ev '^- chore\(release\):' \
-              | head -n 8 > "$NOTES_FILE" || true
+              | grep -Ev '^- (chore\(release\)|docs\(readme\)):' \
+              | head -n 8 > "$RAW_NOTES_FILE" || true
           else
             git log -n 6 --no-merges --pretty=format:"- %s" \
-              | grep -Ev '^- chore\(release\):' > "$NOTES_FILE" || true
+              | grep -Ev '^- (chore\(release\)|docs\(readme\)):' > "$RAW_NOTES_FILE" || true
           fi
-          if [ ! -s "$NOTES_FILE" ]; then
-            echo "- 常规体验优化与问题修复" > "$NOTES_FILE"
+          if [ ! -s "$RAW_NOTES_FILE" ]; then
+            echo "- 常规体验优化与问题修复" > "$RAW_NOTES_FILE"
           fi
+
+          python3 scripts/render_download_matrix.py \
+            --mode release \
+            --repo "$REPO" \
+            --tag "$TARGET_TAG" \
+            --prev-tag "$PREV_TAG" \
+            --assets-dir release-assets \
+            --raw-notes-file "$RAW_NOTES_FILE" \
+            --notes-out "$NOTES_FILE" \
+            --manifest-out release-assets/latest.json
 
           cd release-assets
           sha256sum * > ../SHA256SUMS.txt
@@ -458,4 +469,32 @@ jobs:
               $PRE_FLAG
           else
             gh release upload "$TARGET_TAG" * --repo "$REPO" --clobber
+            gh release edit "$TARGET_TAG" \
+              --repo "$REPO" \
+              --title "Lindo ${TARGET_TAG}" \
+              --notes-file "$NOTES_FILE"
+          fi
+
+      - name: Auto-sync homepage README.md download matrix to latest formal Release
+        if: ${{ github.event.inputs.prerelease != 'true' && !contains(github.event.inputs.release_tag || github.ref_name, '-') }}
+        env:
+          REPO: ${{ github.repository }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TARGET_TAG="${INPUT_TAG:-$REF_NAME}"
+          git fetch origin main
+          git checkout -B readme-sync origin/main
+          python3 scripts/render_download_matrix.py \
+            --mode update-readme \
+            --repo "$REPO" \
+            --tag "$TARGET_TAG" \
+            --assets-dir release-assets \
+            --readme README.md
+          if ! git diff --quiet README.md; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "docs(readme): update latest download links to ${TARGET_TAG} [skip ci]"
+            git push origin HEAD:main
           fi
