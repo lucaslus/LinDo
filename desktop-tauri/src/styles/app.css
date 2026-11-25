@@ -69,6 +69,13 @@ html[data-platform="windows"] {
   --font-weight-extrabold: 700;
 }
 
+html[data-platform="linux"] {
+  --font-sans: "Inter", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "WenQuanYi Micro Hei", system-ui, sans-serif;
+  --font-weight-semibold: 500;
+  --font-weight-bold: 700;
+  --font-weight-extrabold: 700;
+}
+
 html,
 body,
 #root {

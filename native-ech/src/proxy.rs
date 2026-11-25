@@ -52,18 +52,24 @@ pub struct GatewayServer {
 }
 
 impl GatewayServer {
-    pub async fn start(
+    pub fn start_on_runtime(
+        rt: &tokio::runtime::Handle,
         ca: Arc<CaAuthority>,
         doh: Arc<DohResolver>,
         upstream: Arc<UpstreamPool>,
     ) -> Result<Self, String> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
             .map_err(|e| format!("bind 127.0.0.1:0: {e}"))?;
-        let listen_port = listener
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("set_nonblocking: {e}"))?;
+        let listen_port = std_listener
             .local_addr()
             .map_err(|e| format!("local_addr: {e}"))?
             .port();
+        let _enter = rt.enter();
+        let listener = TcpListener::from_std(std_listener)
+            .map_err(|e| format!("TcpListener::from_std: {e}"))?;
         let (tx, mut rx) = oneshot::channel::<()>();
         let route_mode = Arc::new(RwLock::new(GatewayRouteMode::EchDirect));
 
@@ -72,7 +78,7 @@ impl GatewayServer {
         let upstream_clone = Arc::clone(&upstream);
         let mode_clone = Arc::clone(&route_mode);
 
-        tokio::spawn(async move {
+        rt.spawn(async move {
             loop {
                 tokio::select! {
                     _ = &mut rx => {
@@ -110,6 +116,14 @@ impl GatewayServer {
             route_mode,
             shutdown_tx: Some(tx),
         })
+    }
+
+    pub async fn start(
+        ca: Arc<CaAuthority>,
+        doh: Arc<DohResolver>,
+        upstream: Arc<UpstreamPool>,
+    ) -> Result<Self, String> {
+        Self::start_on_runtime(&tokio::runtime::Handle::current(), ca, doh, upstream)
     }
 
     pub fn set_route_mode(&self, mode: GatewayRouteMode) {

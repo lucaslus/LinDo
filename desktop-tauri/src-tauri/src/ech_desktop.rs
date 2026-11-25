@@ -317,16 +317,73 @@ pub fn detect_net_env() -> NetEnv {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn probe_linux_route_iface() -> String {
+    let Ok(out) = std::process::Command::new("ip")
+        .args(["-o", "route", "get", "104.18.10.118"])
+        .output()
+    else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    for win in tokens.windows(2) {
+        if win[0] == "dev" {
+            return win[1].to_string();
+        }
+    }
+    String::new()
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_linux_tun_iface_name(iface: &str) -> bool {
+    let lower = iface.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    lower.starts_with("tun")
+        || lower.starts_with("utun")
+        || lower.starts_with("flclash")
+        || lower.starts_with("mihomo")
+        || lower.starts_with("meta")
+        || lower.starts_with("clash")
+        || lower.starts_with("singtun")
+        || lower.starts_with("nekoray")
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn detect_net_env() -> NetEnv {
     let local_ip = probe_default_route_ipv4();
-    let tun_active = is_fake_or_tun_ip(&local_ip);
+    let env_proxy_raw = std::env::var("HTTPS_PROXY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("https_proxy").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| std::env::var("HTTP_PROXY").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| std::env::var("http_proxy").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_default();
+    let http_proxy = parse_http_proxy_addr(&env_proxy_raw);
+    let sys_proxy = http_proxy.is_some();
+
+    #[cfg(target_os = "linux")]
+    let route_iface = probe_linux_route_iface();
+    #[cfg(not(target_os = "linux"))]
+    let route_iface = String::new();
+
+    #[cfg(target_os = "linux")]
+    let iface_is_tun = is_linux_tun_iface_name(&route_iface);
+    #[cfg(not(target_os = "linux"))]
+    let iface_is_tun = false;
+
+    let tun_active = is_fake_or_tun_ip(&local_ip) || iface_is_tun;
     NetEnv {
         local_ip,
-        sys_proxy: false,
-        http_proxy: None,
+        sys_proxy,
+        http_proxy,
         tun_active,
-        route_iface: String::new(),
+        route_iface,
     }
 }
 
@@ -416,14 +473,20 @@ fn is_platform_supported() -> bool {
     {
         unsafe { lindo_macos_supports_wk_proxy() == 1 }
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         true
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false
     }
+}
+
+#[cfg(target_os = "linux")]
+pub fn ensure_linux_ech_reconciled(initial_mode: &str) {
+    let mode = EchRoutingMode::from_pref(initial_mode);
+    let _snap = reconcile_with_mode(mode);
 }
 
 #[cfg(target_os = "windows")]
@@ -452,8 +515,12 @@ pub fn windows_webview_proxy_args(_initial_mode: &str) -> Option<(String, std::p
 }
 
 pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
-    let _guard = reconcile_mutex().lock().unwrap();
-    let prev_mode = last_snapshot_lock().lock().unwrap().mode.clone();
+    let _guard = reconcile_mutex().lock().unwrap_or_else(|e| e.into_inner());
+    let prev_mode = last_snapshot_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .mode
+        .clone();
     let mode_changed = !prev_mode.is_empty() && prev_mode != mode.as_str();
     let prev_gw_route = lindo_ech::current_gateway_route_mode();
     let had_running_gateway = lindo_ech::current_gateway_port() > 0;
@@ -485,7 +552,7 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
     }
     let mut last_err = String::new();
 
-    if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
         if supported && should_ech {
             if lindo_ech::current_gateway_port() == 0 {
                 match ensure_ca_material()
@@ -506,13 +573,16 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
                     lindo_ech::rotate_sticky_ip();
                     lindo_ech::notify_network_changed();
                 }
+                let port = lindo_ech::current_gateway_port();
                 #[cfg(target_os = "macos")]
-                {
-                    let port = lindo_ech::current_gateway_port();
-                    unsafe {
-                        lindo_macos_set_webkit_proxy(port);
-                    }
+                unsafe {
+                    lindo_macos_set_webkit_proxy(port);
                 }
+                #[cfg(target_os = "linux")]
+                crate::linux_webview_bridge::set_webkit_proxy_port(port);
+            } else {
+                #[cfg(target_os = "linux")]
+                crate::linux_webview_bridge::set_webkit_proxy_port(0);
             }
         } else if supported {
             if lindo_ech::current_gateway_port() > 0 {
@@ -526,6 +596,8 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
             unsafe {
                 lindo_macos_set_webkit_proxy(0);
             }
+            #[cfg(target_os = "linux")]
+            crate::linux_webview_bridge::set_webkit_proxy_port(0);
             if lindo_ech::current_gateway_port() > 0 {
                 let seq = STOP_SEQ.fetch_add(1, Ordering::AcqRel) + 1;
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -877,5 +949,17 @@ mod tests {
             format_status_subtitle(true, EchRoutingMode::EchPriority, true, &env, false, "104.16.132.229"),
             "已开启直连 (en0 · 固定边缘 104.16.132.229)"
         );
+    }
+
+    #[test]
+    fn test_linux_tun_iface_detection_ignores_split_tunnel_wireguard() {
+        assert!(is_linux_tun_iface_name("FlClash"));
+        assert!(is_linux_tun_iface_name("mihomo0"));
+        assert!(is_linux_tun_iface_name("tun0"));
+        assert!(is_linux_tun_iface_name("singtun0"));
+        assert!(!is_linux_tun_iface_name("wt0"));
+        assert!(!is_linux_tun_iface_name("wlan0"));
+        assert!(!is_linux_tun_iface_name("enp8s0"));
+        assert!(!is_linux_tun_iface_name(""));
     }
 }

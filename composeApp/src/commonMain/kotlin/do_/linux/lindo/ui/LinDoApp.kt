@@ -10128,6 +10128,16 @@ internal fun CommunityTopicReaderPane(
                                     .padding(horizontal = 12.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                SmartAvatar(
+                                    username = item.originalPoster.username,
+                                    avatarTemplate = item.originalPoster.avatarTemplate,
+                                    animatedAvatar = item.originalPoster.animatedAvatar,
+                                    primaryGroupName = item.originalPoster.primaryGroupName,
+                                    flair = item.originalPoster.flair,
+                                    size = 28.dp,
+                                    enableAnimations = false
+                                )
+                                Spacer(Modifier.width(10.dp))
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Text(
                                         text = item.title,

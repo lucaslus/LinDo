@@ -10,7 +10,7 @@ import {
   highlightFindMatches,
 } from "../components/ReaderEnhancements";
 import { buildAuthorFeedbackPayload, LINDO_AUTHOR_USERNAME } from "../components/SecondaryScreens";
-import { buildDiscourseSearchQuery } from "../lib/api";
+import { buildDiscourseSearchQuery, parseSuggestedTopicsFromTopicDetail } from "../lib/api";
 
 describe("markdownPreview — full GFM + Discourse + Obsidian syntax", () => {
   it("renders Screenshot 2 list directly followed by GFM table without blank line", () => {
@@ -210,5 +210,74 @@ describe("ReaderEnhancements helpers & search query builder", () => {
     });
     expect(plain.title).toBe("[Lindo PC] 已有前缀不重复添加");
     expect(plain.raw).toBe("建议增加快捷键");
+  });
+
+  it("extracts original poster avatars and flair for suggested/related topics across Discourse schemas", () => {
+    const parsed = parseSuggestedTopicsFromTopicDetail(
+      {
+        id: 100,
+        users: [
+          {
+            id: 42,
+            username: "trinity",
+            name: "Trinity",
+            avatar_template: "/user_avatar/linux.do/trinity/{size}/9_2.png",
+          },
+        ],
+        suggested_topics: [
+          {
+            id: 201,
+            title: "嵌入式 user 结构体的相关话题",
+            posts_count: 15,
+            views: 320,
+            posters: [
+              {
+                extras: "latest",
+                description: "最新发帖人",
+                user: {
+                  id: 99,
+                  username: "morpheus",
+                  avatar_template: "/user_avatar/linux.do/morpheus/{size}/2_2.png",
+                },
+              },
+              {
+                extras: null,
+                description: "原始发帖人",
+                user: {
+                  id: 88,
+                  username: "neo",
+                  name: "Thomas Anderson",
+                  avatar_template: "/user_avatar/linux.do/neo/{size}/1_2.png",
+                  flair_name: "trust_level_3",
+                  flair_url: "fa-shield",
+                },
+              },
+            ],
+          },
+          {
+            id: 202,
+            title: "顶层 users 字典映射的相关话题",
+            posts_count: 4,
+            posters: [{ description: "Original Poster", user_id: 42 }],
+          },
+        ],
+      },
+      100
+    );
+
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0].originalPoster.userId).toBe(88);
+    expect(parsed[0].originalPoster.username).toBe("neo");
+    expect(parsed[0].originalPoster.name).toBe("Thomas Anderson");
+    expect(parsed[0].originalPoster.avatarTemplate).toBe(
+      "/user_avatar/linux.do/neo/{size}/1_2.png"
+    );
+    expect(parsed[0].originalPoster.flair?.name).toBe("trust_level_3");
+
+    expect(parsed[1].originalPoster.userId).toBe(42);
+    expect(parsed[1].originalPoster.username).toBe("trinity");
+    expect(parsed[1].originalPoster.avatarTemplate).toBe(
+      "/user_avatar/linux.do/trinity/{size}/9_2.png"
+    );
   });
 });

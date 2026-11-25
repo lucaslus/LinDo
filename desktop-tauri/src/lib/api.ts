@@ -1913,6 +1913,141 @@ export function putCachedTopicDetail(detail: TopicDetailModel): void {
   }
 }
 
+export function parseSuggestedTopicsFromTopicDetail(
+  data: any,
+  currentTopicId: number,
+  fallbackPosts: PostItemModel[] = []
+): TopicSummary[] {
+  const rawSuggested: any[] =
+    Array.isArray(data?.suggested_topics) && data.suggested_topics.length > 0
+      ? data.suggested_topics
+      : Array.isArray(data?.related_topics)
+        ? data.related_topics
+        : [];
+  if (rawSuggested.length === 0) return [];
+
+  const userById = new Map<number, any>();
+  const userByUsername = new Map<string, any>();
+  const indexUserObj = (u: any) => {
+    if (!u || typeof u !== "object") return;
+    const uid = Number(u.id || 0);
+    const uname = String(u.username || "").trim();
+    if (uid > 0) {
+      const prev = userById.get(uid);
+      if (!prev || (!prev.avatar_template && u.avatar_template)) {
+        userById.set(uid, u);
+      }
+    }
+    if (uname) {
+      const key = uname.toLowerCase();
+      const prev = userByUsername.get(key);
+      if (!prev || (!prev.avatar_template && u.avatar_template)) {
+        userByUsername.set(key, u);
+      }
+    }
+  };
+
+  for (const list of [data?.users, data?.suggested_users, data?.details?.participants]) {
+    if (Array.isArray(list)) {
+      for (const u of list) indexUserObj(u);
+    }
+  }
+  indexUserObj(data?.details?.created_by);
+  indexUserObj(data?.details?.last_poster);
+  for (const p of fallbackPosts) {
+    indexUserObj({
+      id: p.userId,
+      username: p.username,
+      name: p.displayName,
+      avatar_template: p.avatarTemplate,
+      animated_avatar: p.animatedAvatar,
+      primary_group_name: p.primaryGroupName,
+    });
+  }
+
+  const selfId = Number(data?.id || currentTopicId);
+  return rawSuggested
+    .filter((st: any) => Number(st?.id || 0) > 0 && Number(st?.id) !== selfId)
+    .slice(0, 6)
+    .map((st: any) => {
+      const sCatId = st.category_id ? Number(st.category_id) : undefined;
+      const sCatMeta = findCategoryMeta(sCatId);
+      const sTags: string[] = Array.isArray(st.tags)
+        ? st.tags
+            .map((tg: any) => (typeof tg === "string" ? tg : String(tg?.name || "")))
+            .filter(Boolean)
+        : [];
+      const posters: any[] = Array.isArray(st.posters) ? st.posters : [];
+      for (const p of posters) {
+        if (p?.user && typeof p.user === "object") {
+          indexUserObj(p.user);
+        }
+      }
+      const opEntry =
+        posters.find((p: any) =>
+          /original poster|原始|creator/i.test(String(p?.description || "") + " " + String(p?.extras || ""))
+        ) ??
+        posters[0] ??
+        null;
+
+      const resolvePosterUser = (entry: any): any => {
+        if (!entry) return null;
+        if (entry.user && typeof entry.user === "object") return entry.user;
+        if (entry.user_id != null) return userById.get(Number(entry.user_id)) ?? null;
+        return null;
+      };
+
+      let opUser = resolvePosterUser(opEntry);
+      if (!opUser) {
+        for (const p of posters) {
+          const candidate = resolvePosterUser(p);
+          if (candidate) {
+            opUser = candidate;
+            break;
+          }
+        }
+      }
+      if (!opUser && st?.user && typeof st.user === "object") {
+        opUser = st.user;
+      }
+      if (!opUser && st?.last_poster_username) {
+        opUser = userByUsername.get(String(st.last_poster_username).toLowerCase()) ?? null;
+      }
+
+      return {
+        id: Number(st.id),
+        title: stripHtmlTags(String(st.title || st.fancy_title || `话题 #${st.id}`)),
+        slug: String(st.slug || "topic"),
+        categoryId: sCatId,
+        categoryName: sCatMeta?.displayName || (sCatId ? CANONICAL_NAME_BY_ID.get(sCatId) : undefined),
+        categoryColorHex: sCatMeta?.colorHex,
+        tags: sTags,
+        postsCount: Number(st.posts_count || 1),
+        replyCount: Math.max(0, Number(st.reply_count ?? Number(st.posts_count || 1) - 1)),
+        views: Number(st.views || 0),
+        likeCount: Number(st.like_count || 0),
+        highestPostNumber: Number(st.highest_post_number || st.posts_count || 1),
+        unreadPosts: Number(st.unread_posts || 0),
+        unseen: Boolean(st.unseen),
+        pinned: Boolean(st.pinned),
+        closed: Boolean(st.closed),
+        archived: Boolean(st.archived),
+        bookmarked: Boolean(st.bookmarked),
+        createdAt: String(st.created_at || ""),
+        lastPostedAt: String(st.last_posted_at || st.bumped_at || st.created_at || ""),
+        originalPoster: {
+          userId: Number(opUser?.id ?? opEntry?.user_id ?? 0),
+          username: String(opUser?.username || st.last_poster_username || "linuxdo"),
+          name: opUser?.name ? String(opUser.name) : undefined,
+          avatarTemplate: String(opUser?.avatar_template || st.avatar_template || ""),
+          animatedAvatar: opUser?.animated_avatar ? String(opUser.animated_avatar) : null,
+          primaryGroupName: opUser?.primary_group_name ? String(opUser.primary_group_name) : null,
+          flair: opUser ? parseFlairFromObj(opUser) : null,
+        },
+      };
+    });
+}
+
 export async function fetchTopicDetail(
   topicId: number,
   opts: {
@@ -1980,49 +2115,11 @@ export async function fetchTopicDetail(
     ? Number(data.accepted_answer.post_number)
     : posts.find((p) => p.acceptedAnswer)?.postNumber ?? null;
 
-  const rawSuggested: any[] = Array.isArray(data?.suggested_topics) && data.suggested_topics.length > 0
-    ? data.suggested_topics
-    : Array.isArray(data?.related_topics)
-      ? data.related_topics
-      : [];
-  const suggestedTopics: TopicSummary[] = rawSuggested
-    .filter((st: any) => Number(st?.id || 0) > 0 && Number(st?.id) !== Number(data.id || topicId))
-    .slice(0, 6)
-    .map((st: any) => {
-      const sCatId = st.category_id ? Number(st.category_id) : undefined;
-      const sCatMeta = findCategoryMeta(sCatId);
-      const sTags: string[] = Array.isArray(st.tags)
-        ? st.tags.map((tg: any) => (typeof tg === "string" ? tg : String(tg?.name || ""))).filter(Boolean)
-        : [];
-      const firstPoster = Array.isArray(st.posters) ? st.posters[0] : null;
-      return {
-        id: Number(st.id),
-        title: stripHtmlTags(String(st.title || st.fancy_title || `话题 #${st.id}`)),
-        slug: String(st.slug || "topic"),
-        categoryId: sCatId,
-        categoryName: sCatMeta?.displayName || (sCatId ? CANONICAL_NAME_BY_ID.get(sCatId) : undefined),
-        categoryColorHex: sCatMeta?.colorHex,
-        tags: sTags,
-        postsCount: Number(st.posts_count || 1),
-        replyCount: Math.max(0, Number(st.reply_count ?? (Number(st.posts_count || 1) - 1))),
-        views: Number(st.views || 0),
-        likeCount: Number(st.like_count || 0),
-        highestPostNumber: Number(st.highest_post_number || st.posts_count || 1),
-        unreadPosts: Number(st.unread_posts || 0),
-        unseen: Boolean(st.unseen),
-        pinned: Boolean(st.pinned),
-        closed: Boolean(st.closed),
-        archived: Boolean(st.archived),
-        bookmarked: Boolean(st.bookmarked),
-        createdAt: String(st.created_at || ""),
-        lastPostedAt: String(st.last_posted_at || st.bumped_at || st.created_at || ""),
-        originalPoster: {
-          userId: Number(firstPoster?.user_id || 0),
-          username: String(st.last_poster_username || "linuxdo"),
-          avatarTemplate: "",
-        },
-      };
-    });
+  const suggestedTopics: TopicSummary[] = parseSuggestedTopicsFromTopicDetail(
+    data,
+    topicId,
+    posts
+  );
 
   const rawAllowedUsers: any[] = Array.isArray(data?.details?.allowed_users)
     ? data.details.allowed_users

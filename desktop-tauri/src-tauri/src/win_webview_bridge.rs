@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "macos"))]
+#![cfg(target_os = "windows")]
 
 use cookie::time::Duration as CookieDuration;
 use cookie::Cookie;
@@ -59,7 +59,6 @@ fn is_forum_host(host: Option<&str>) -> bool {
     lower == "linux.do" || lower.ends_with(".linux.do")
 }
 
-#[cfg(target_os = "windows")]
 fn register_windows_url_protocols_once() {
     PROTOCOL_REGISTERED.get_or_init(|| {
         let Ok(exe_path) = std::env::current_exe() else {
@@ -89,11 +88,6 @@ fn register_windows_url_protocols_once() {
                 .status();
         }
     });
-}
-
-#[cfg(not(target_os = "windows"))]
-fn register_windows_url_protocols_once() {
-    let _ = PROTOCOL_REGISTERED.set(());
 }
 
 fn ensure_bridge_window(app: &AppHandle) -> Result<WebviewWindow, String> {

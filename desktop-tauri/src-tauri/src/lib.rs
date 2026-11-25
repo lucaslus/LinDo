@@ -2,8 +2,11 @@ pub mod bridge;
 pub mod crypto_rsa;
 pub mod ech_desktop;
 pub mod legacy;
+#[cfg(target_os = "linux")]
+pub mod linux_webview_bridge;
 pub mod net_policy;
-#[cfg(not(target_os = "macos"))]
+pub mod platform_bridge;
+#[cfg(target_os = "windows")]
 pub mod win_webview_bridge;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STD, Engine as _};
@@ -28,7 +31,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, RunEvent, State, Theme, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
-static EXPLICIT_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+pub(crate) static EXPLICIT_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static DROPPED_FILE_ALLOWLIST: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
 
 fn dropped_allowlist() -> &'static Mutex<HashMap<PathBuf, Instant>> {
@@ -676,6 +679,7 @@ fn parse_github_release_for_desktop_with_sums(
     let mut notes = extract_release_notes_from_markdown(body_md);
 
     let is_windows = target_os.eq_ignore_ascii_case("windows");
+    let is_linux = target_os.eq_ignore_ascii_case("linux");
 
     if let Some(assets) = release.get("assets").and_then(|v| v.as_array()) {
         for asset in assets {
@@ -722,12 +726,44 @@ fn parse_github_release_for_desktop_with_sums(
                 continue;
             }
 
-            // macOS asset matching (exclude Windows/Android assets)
+            if is_linux {
+                let matches_linux_arch = if arch == "arm64" {
+                    name.contains("arm64") || name.contains("aarch64")
+                } else {
+                    name.contains("x86_64") || name.contains("x64") || name.contains("amd64")
+                };
+                if !matches_linux_arch {
+                    continue;
+                }
+                if (name.ends_with(".pkg.tar.zst") || name.ends_with(".appimage"))
+                    && zip_url.is_empty()
+                {
+                    zip_url = dl_url.to_string();
+                    if !digest.is_empty() {
+                        sha256 = digest;
+                    }
+                } else if (name.ends_with(".deb")
+                    || (name.contains("linux") && name.ends_with(".tar.gz")))
+                    && dmg_url.is_empty()
+                {
+                    dmg_url = dl_url.to_string();
+                    if !digest.is_empty() {
+                        fallback_sha256 = digest;
+                    }
+                }
+                continue;
+            }
+
+            // macOS asset matching (exclude Windows/Linux/Android assets)
             if name.contains("windows")
                 || name.contains("win-")
+                || name.contains("linux")
                 || name.ends_with(".exe")
                 || name.ends_with(".msi")
                 || name.ends_with(".apk")
+                || name.ends_with(".deb")
+                || name.ends_with(".appimage")
+                || name.ends_with(".pkg.tar.zst")
             {
                 continue;
             }
@@ -772,6 +808,8 @@ fn parse_github_release_for_desktop_with_sums(
         }
         let (zip_key, dmg_key, sha_key) = if is_windows {
             ("winSetupUrl", "winMsiUrl", "winSetupSha256")
+        } else if is_linux {
+            ("linuxPkgUrl", "linuxDebUrl", "linuxPkgSha256")
         } else if arch == "x64" {
             ("x64ZipUrl", "x64DmgUrl", "x64ZipSha256")
         } else {
@@ -843,6 +881,8 @@ fn parse_github_release_for_desktop_with_sums(
 
     let arch_tag = if is_windows {
         format!("windows-{arch}")
+    } else if is_linux {
+        format!("linux-{arch}")
     } else {
         arch.to_string()
     };
@@ -931,6 +971,8 @@ async fn check_app_update() -> Result<DesktopUpdateInfo, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let target_os = if cfg!(target_os = "windows") {
         "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
     } else {
         "macos"
     };
@@ -961,6 +1003,8 @@ async fn check_app_update() -> Result<DesktopUpdateInfo, String> {
     if http_code == 404 {
         let arch_tag = if target_os == "windows" {
             format!("windows-{arch}")
+        } else if target_os == "linux" {
+            format!("linux-{arch}")
         } else {
             arch.to_string()
         };
@@ -1166,6 +1210,14 @@ async fn download_and_install_update(
         "Lindo-update-setup.exe"
     } else if lower_url.ends_with(".msi") {
         "Lindo-update.msi"
+    } else if lower_url.ends_with(".pkg.tar.zst") {
+        "Lindo-update.pkg.tar.zst"
+    } else if lower_url.ends_with(".appimage") {
+        "Lindo-update.AppImage"
+    } else if lower_url.ends_with(".deb") {
+        "Lindo-update.deb"
+    } else if lower_url.ends_with(".tar.gz") {
+        "Lindo-update.tar.gz"
     } else if lower_url.ends_with(".zip") {
         "Lindo-update.zip"
     } else {
@@ -1351,9 +1403,62 @@ async fn download_and_install_update(
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = app.opener().open_url(&target_url, None::<&str>);
-        Ok("opened_browser".to_string())
+        let dest_path = if let Some(dl_dir) = dirs::download_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+        {
+            let _ = std::fs::create_dir_all(&dl_dir);
+            let out_name = target_url
+                .split('?')
+                .next()
+                .unwrap_or(&target_url)
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(pkg_filename);
+            let out_path = dl_dir.join(out_name);
+            if std::fs::copy(&pkg_path, &out_path).is_ok() {
+                out_path
+            } else {
+                pkg_path.clone()
+            }
+        } else {
+            pkg_path.clone()
+        };
+        #[cfg(unix)]
+        if lower_url.ends_with(".appimage") {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&dest_path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(&dest_path, perms);
+            }
+        }
+        let _ = app.emit(
+            "lindo://update-progress",
+            UpdateProgressEvent {
+                stage: "done".to_string(),
+                downloaded_bytes,
+                total_bytes: downloaded_bytes,
+                percent: 100,
+                message: format!("已下载并校验完成：{}", dest_path.display()),
+            },
+        );
+        let _ = app.opener().reveal_item_in_dir(&dest_path);
+        Ok("downloaded_linux_package".to_string())
     }
+}
+
+fn terminate_app_cleanly(app: &AppHandle) {
+    EXPLICIT_QUIT_REQUESTED.store(true, Ordering::SeqCst);
+    lindo_ech::stop_gateway();
+    app.exit(0);
+    #[cfg(target_os = "linux")]
+    std::process::exit(0);
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    terminate_app_cleanly(&app);
 }
 
 fn focus_main_window(app: &AppHandle) {
@@ -1386,7 +1491,15 @@ pub fn run() {
                     let app_clone = app.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Some(eng) = app_clone.try_state::<Arc<BridgeEngine>>() {
-                            let _ = eng.handle_auth_redirect(&app_clone, &arg).await;
+                            #[cfg(target_os = "linux")]
+                            if let Err(err) = eng.handle_auth_redirect(&app_clone, &arg).await {
+                                let _ = app_clone.emit("lindo://auth-completing", false);
+                                let _ = app_clone.emit("lindo://auth-notice", err);
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                let _ = eng.handle_auth_redirect(&app_clone, &arg).await;
+                            }
                         }
                     });
                 }
@@ -1446,8 +1559,13 @@ pub fn run() {
                             let _ = app.emit("lindo://tray-command", "refresh");
                         }
                         "quit_app" => {
-                            EXPLICIT_QUIT_REQUESTED.store(true, Ordering::SeqCst);
-                            app.exit(0);
+                            #[cfg(target_os = "linux")]
+                            terminate_app_cleanly(app);
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                EXPLICIT_QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                                app.exit(0);
+                            }
                         }
                         _ => {}
                     })
@@ -1495,8 +1613,11 @@ pub fn run() {
                         record_os_dropped_paths(paths);
                     }
                     WindowEvent::CloseRequested { api, .. } => {
-                        if !EXPLICIT_QUIT_REQUESTED.load(Ordering::SeqCst) {
-                            // Keep app running in background (Tray / Dock) across macOS, Windows & Linux
+                        if platform_bridge::CAPS.close_main_exits_app {
+                            let _ = api;
+                            terminate_app_cleanly(window.app_handle());
+                        } else if !EXPLICIT_QUIT_REQUESTED.load(Ordering::SeqCst) {
+                            // Keep app running in background (Tray / Dock) on macOS & Windows
                             api.prevent_close();
                             #[cfg(target_os = "macos")]
                             if window.is_fullscreen().unwrap_or(false) {
@@ -1545,7 +1666,8 @@ pub fn run() {
             download_and_install_update,
             get_diag_runtime_snapshot,
             get_ech_status,
-            export_diagnostic_log
+            export_diagnostic_log,
+            quit_app
         ]);
 
     let app = builder
@@ -1651,6 +1773,42 @@ mod tests {
         assert_eq!(
             win.sha256,
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
+
+        // Linux must never falsely match macOS/Windows assets when a release has no Linux package
+        let linux_none = parse_github_release_for_desktop(&rel, None, "1.0.38", "linux", "x64");
+        assert!(!linux_none.has_update);
+        assert_eq!(linux_none.arch, "linux-x64");
+        assert!(linux_none.zip_url.is_empty());
+
+        let rel_with_linux = serde_json::json!({
+            "tag_name": "v1.1.5",
+            "published_at": "2026-11-25T12:00:00Z",
+            "body": "- Linux Arch & AppImage 原生支持",
+            "assets": [
+                {
+                    "name": "Lindo-1.1.5-macos-arm64.zip",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-macos-arm64.zip"
+                },
+                {
+                    "name": "lindo-1.1.5-1-x86_64.pkg.tar.zst",
+                    "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.5/lindo-1.1.5-1-x86_64.pkg.tar.zst"
+                },
+                {
+                    "name": "Lindo-1.1.5-linux-amd64.deb",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-amd64.deb"
+                }
+            ]
+        });
+        let linux_pkg = parse_github_release_for_desktop(&rel_with_linux, None, "1.1.4", "linux", "x64");
+        assert!(linux_pkg.has_update);
+        assert_eq!(linux_pkg.arch, "linux-x64");
+        assert!(linux_pkg.zip_url.ends_with("lindo-1.1.5-1-x86_64.pkg.tar.zst"));
+        assert!(linux_pkg.dmg_url.ends_with("Lindo-1.1.5-linux-amd64.deb"));
+        assert_eq!(
+            linux_pkg.sha256,
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         );
     }
 

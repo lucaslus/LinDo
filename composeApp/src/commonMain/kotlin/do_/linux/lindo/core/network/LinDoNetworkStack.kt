@@ -7126,6 +7126,54 @@ object LinuxDoRepository {
             ?: smallActionArchived
             ?: summaryFallback?.archived
             ?: false
+        val suggestedUsersById = mutableMapOf<Int, TopicUser>()
+        val suggestedUsersByName = mutableMapOf<String, TopicUser>()
+        fun parseAndIndexSuggestedUser(uObj: JsonObject?): TopicUser? {
+            if (uObj == null) return null
+            val uid = uObj["id"]?.jsonPrimitive?.intOrNull ?: 0
+            val uname = uObj["username"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            if (uid <= 0 && uname.isEmpty()) return null
+            val resolvedName = uname.ifEmpty { "user_$uid" }
+            val tu = TopicUser(
+                id = uid,
+                username = resolvedName,
+                name = uObj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
+                avatarTemplate = uObj["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                animatedAvatar = uObj["animated_avatar"]?.jsonPrimitive?.contentOrNull,
+                primaryGroupName = uObj["primary_group_name"]?.jsonPrimitive?.contentOrNull,
+                flairName = uObj["flair_name"]?.jsonPrimitive?.contentOrNull,
+                flairUrl = uObj["flair_url"]?.jsonPrimitive?.contentOrNull,
+                flairBgColor = uObj["flair_bg_color"]?.jsonPrimitive?.contentOrNull,
+                flairColor = uObj["flair_color"]?.jsonPrimitive?.contentOrNull,
+                flairGroupId = uObj["flair_group_id"]?.jsonPrimitive?.intOrNull,
+                trustLevel = uObj["trust_level"]?.jsonPrimitive?.intOrNull ?: 1,
+                admin = uObj["admin"]?.jsonPrimitive?.booleanOrNull ?: false,
+                moderator = uObj["moderator"]?.jsonPrimitive?.booleanOrNull ?: false
+            )
+            cacheTopicUserVisuals(tu)
+            if (uid > 0) {
+                val prev = suggestedUsersById[uid]
+                if (prev == null || (prev.avatarTemplate.isBlank() && tu.avatarTemplate.isNotBlank())) {
+                    suggestedUsersById[uid] = tu
+                }
+            }
+            val lower = resolvedName.lowercase()
+            val prevByName = suggestedUsersByName[lower]
+            if (prevByName == null || (prevByName.avatarTemplate.isBlank() && tu.avatarTemplate.isNotBlank())) {
+                suggestedUsersByName[lower] = tu
+            }
+            return tu
+        }
+        listOf(
+            root["users"] as? JsonArray,
+            root["suggested_users"] as? JsonArray,
+            detailsObj?.get("participants") as? JsonArray
+        ).forEach { arr ->
+            arr?.forEach { uElem -> parseAndIndexSuggestedUser(uElem as? JsonObject) }
+        }
+        parseAndIndexSuggestedUser(detailsObj?.get("created_by") as? JsonObject)
+        parseAndIndexSuggestedUser(detailsObj?.get("last_poster") as? JsonObject)
+
         val suggestedRaw = (root["suggested_topics"] as? JsonArray)?.takeIf { it.isNotEmpty() }
             ?: (root["related_topics"] as? JsonArray)
         val suggestedTopics = suggestedRaw?.mapNotNull { elem ->
@@ -7135,6 +7183,35 @@ object LinuxDoRepository {
             val stCatId = st["category_id"]?.jsonPrimitive?.intOrNull ?: 4
             val (stCatName, stCatColor) = resolveCategoryMeta(stCatId)
             val stPostsCount = st["posts_count"]?.jsonPrimitive?.intOrNull ?: 1
+            val posterEntries = (st["posters"] as? JsonArray)?.mapNotNull { pElem ->
+                val pObj = pElem as? JsonObject ?: return@mapNotNull null
+                val desc = listOfNotNull(
+                    pObj["description"]?.jsonPrimitive?.contentOrNull,
+                    pObj["extras"]?.jsonPrimitive?.contentOrNull
+                ).joinToString(" ")
+                val resolvedUser = parseAndIndexSuggestedUser(pObj["user"] as? JsonObject)
+                    ?: pObj["user_id"]?.jsonPrimitive?.intOrNull?.let { suggestedUsersById[it] }
+                    ?: return@mapNotNull null
+                desc to resolvedUser
+            }.orEmpty()
+            val lastPosterUname = st["last_poster_username"]?.jsonPrimitive?.contentOrNull
+            val opUser = posterEntries.firstOrNull { (desc, _) ->
+                desc.contains("Original Poster", ignoreCase = true) ||
+                    desc.contains("原始") ||
+                    desc.contains("Creator", ignoreCase = true)
+            }?.second
+                ?: posterEntries.firstOrNull()?.second
+                ?: parseAndIndexSuggestedUser(st["user"] as? JsonObject)
+                ?: topicOpCache[stId]
+                ?: lastPosterUname?.let { suggestedUsersByName[it.lowercase()] }
+                ?: TopicUser(
+                    id = 0,
+                    username = lastPosterUname ?: "linuxdo",
+                    avatarTemplate = st["avatar_template"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                )
+            if (opUser.username != "linuxdo" && opUser.avatarTemplate.isNotBlank()) {
+                putBounded(topicOpCache, stId, opUser)
+            }
             TopicSummary(
                 id = stId,
                 title = stTitle,
@@ -7153,10 +7230,7 @@ object LinuxDoRepository {
                         ?: st["bumped_at"]?.jsonPrimitive?.contentOrNull
                         ?: st["created_at"]?.jsonPrimitive?.contentOrNull
                 ),
-                originalPoster = TopicUser(
-                    id = 0,
-                    username = st["last_poster_username"]?.jsonPrimitive?.contentOrNull ?: "linuxdo"
-                )
+                originalPoster = opUser
             )
         }.orEmpty().take(6)
 

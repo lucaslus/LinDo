@@ -102,9 +102,11 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
   onTriggerVerify,
 }) => {
   const isDrawer = presentation === "drawer";
-  const isWindows =
-    typeof document !== "undefined" && document.documentElement.dataset.platform === "windows";
-  const submitShortcutLabel = isWindows ? "Ctrl+Enter" : "⌘+Enter";
+  const isNonMac =
+    typeof document !== "undefined" &&
+    (document.documentElement.dataset.platform === "windows" ||
+      document.documentElement.dataset.platform === "linux");
+  const submitShortcutLabel = isNonMac ? "Ctrl+Enter" : "⌘+Enter";
   const isNewTopic = request.action === "NEW_TOPIC";
   const isEditingOp = request.action === "EDIT" && request.postNumber === 1;
   const hasMetaControls = isNewTopic || isEditingOp;
@@ -2030,7 +2032,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title={isWindows ? "插入链接或引用帖子 (Ctrl+K)" : "插入链接或引用帖子 (⌘+K)"}
+              title={isNonMac ? "插入链接或引用帖子 (Ctrl+K)" : "插入链接或引用帖子 (⌘+K)"}
               onClick={() => setActivePicker((p) => (p === "LINK" ? "NONE" : "LINK"))}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: activePicker === "LINK" ? "var(--brand-gold)" : "var(--ink-secondary)" }}
@@ -2039,7 +2041,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title={isWindows ? "粗体 (Ctrl+B)" : "粗体 (⌘+B)"}
+              title={isNonMac ? "粗体 (Ctrl+B)" : "粗体 (⌘+B)"}
               onClick={() => insertAroundSelection("**", "**", "粗体文字")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
@@ -2048,7 +2050,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title={isWindows ? "斜体 (Ctrl+I)" : "斜体 (⌘+I)"}
+              title={isNonMac ? "斜体 (Ctrl+I)" : "斜体 (⌘+I)"}
               onClick={() => insertAroundSelection("*", "*", "斜体文字")}
               className="lindo-interactive flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ color: "var(--ink-secondary)" }}
@@ -2075,7 +2077,7 @@ export const ComposerModal: React.FC<ComposerModalProps> = ({
             </button>
             <button
               type="button"
-              title={isWindows ? "代码 / 代码块 (Ctrl+E)" : "代码 / 代码块 (⌘+E)"}
+              title={isNonMac ? "代码 / 代码块 (Ctrl+E)" : "代码 / 代码块 (⌘+E)"}
               onClick={() => {
                 const el = bodyTextareaRef.current;
                 const sel =

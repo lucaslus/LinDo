@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LinDoIcons } from "./components/LinDoIcons";
@@ -1602,6 +1603,11 @@ export const App: React.FC = () => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isImeComposingEvent(e)) return;
       const mod = e.metaKey || e.ctrlKey;
+      if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "q" && platform === "linux") {
+        e.preventDefault();
+        invoke("quit_app").catch(() => {});
+        return;
+      }
       if (mod && e.key === "\\" && inMainApp && isWideLayout && (currentTab === "HOME" || currentTab === "MESSAGES")) {
         e.preventDefault();
         toggleFeedCollapse();
@@ -1678,6 +1684,7 @@ export const App: React.FC = () => {
     showAuthModal,
     isWideLayout,
     toggleFeedCollapse,
+    platform,
   ]);
 
   const handlePrimaryWebLogin = useCallback(async () => {

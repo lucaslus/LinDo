@@ -128,6 +128,14 @@ pub fn start_gateway(
         old.server.stop();
     }
 
+    #[cfg(target_os = "linux")]
+    let server = GatewayServer::start_on_runtime(
+        rt.handle(),
+        Arc::clone(&ca),
+        Arc::clone(&doh),
+        Arc::clone(&upstream),
+    )?;
+    #[cfg(not(target_os = "linux"))]
     let server = rt.block_on(GatewayServer::start(
         Arc::clone(&ca),
         Arc::clone(&doh),
@@ -247,6 +255,19 @@ pub fn current_ca_spki_sha256() -> String {
     ca_opt
         .and_then(|ca| ca.spki_sha256_base64().ok())
         .unwrap_or_default()
+}
+
+/// Returns the PEM-encoded leaf certificate cached/minted by the active ECH gateway's `CaAuthority`
+/// for `host` (if `should_mitm_host(host)` holds), allowing WebKitGTK (`allow_tls_certificate_for_host`)
+/// to pin the exact leaf certificate per host without trusting a global Root CA.
+pub fn mint_active_gateway_leaf_pem(host: &str) -> Option<String> {
+    if !proxy::should_mitm_host(host) {
+        return None;
+    }
+    let ca = gateway_lock().lock().as_ref().map(|g| Arc::clone(&g.ca))?;
+    let leaf = ca.leaf_for_host(host).ok()?;
+    let pem_bytes = leaf.cert.to_pem().ok()?;
+    String::from_utf8(pem_bytes).ok()
 }
 
 pub fn current_gateway_port() -> u16 {
@@ -1998,5 +2019,18 @@ mod tests {
         assert_eq!(doh.cached_sticky_ip_sync(), Some(ip_backup));
 
         server.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_start_gateway_from_inside_tokio_worker_does_not_panic() {
+        let _serial = global_test_lock().lock().await;
+        let (cert_pem, key_pem) = ca::generate_root_ca_pem().unwrap();
+        let port = start_gateway(&cert_pem, &key_pem, 0, false)
+            .expect("start_gateway inside async Tokio worker must not panic on nested block_on");
+        assert!(port > 0);
+        let leaf_pem = mint_active_gateway_leaf_pem("linux.do")
+            .expect("active gateway must mint cached leaf PEM for linux.do");
+        assert!(leaf_pem.contains("BEGIN CERTIFICATE"));
+        stop_gateway();
     }
 }

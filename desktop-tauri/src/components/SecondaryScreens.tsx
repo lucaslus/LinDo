@@ -2526,10 +2526,12 @@ const AuthorFeedbackModal: React.FC<{
   bodyRef.current = body;
   const uploadSeqRef = useRef(0);
 
-  const isWindows =
-    typeof document !== "undefined" && document.documentElement.dataset.platform === "windows";
-  const platformLabel = isWindows ? "Windows" : "macOS";
-  const submitShortcut = isWindows ? "Ctrl+Enter" : "⌘+Enter";
+  const platformCode =
+    typeof document !== "undefined" ? document.documentElement.dataset.platform : "macos";
+  const isNonMac = platformCode === "windows" || platformCode === "linux";
+  const platformLabel =
+    platformCode === "windows" ? "Windows" : platformCode === "linux" ? "Linux" : "macOS";
+  const submitShortcut = isNonMac ? "Ctrl+Enter" : "⌘+Enter";
   const isAuthorSelf =
     Boolean(currentUsername) &&
     currentUsername!.toLowerCase() === LINDO_AUTHOR_USERNAME.toLowerCase();
@@ -2845,7 +2847,7 @@ const AuthorFeedbackModal: React.FC<{
               void handleSubmit();
             }
           }}
-          placeholder={`详细描述复现步骤、现象或建议（支持直接 ${isWindows ? "Ctrl+V" : "⌘+V"} 粘贴截图上传，${submitShortcut} 发送）`}
+          placeholder={`详细描述复现步骤、现象或建议（支持直接 ${isNonMac ? "Ctrl+V" : "⌘+V"} 粘贴截图上传，${submitShortcut} 发送）`}
           className="lindo-scroll flex-1 min-h-0 resize-none bg-transparent px-5 py-3.5 text-[14px] leading-[1.68] outline-none select-text"
           style={{ color: "var(--ink-body)" }}
         />

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Lindo
+GenericName=Linux.do Client
+Comment=Linux.do 社区原生桌面客户端
+Exec=lindo %u
+Icon=lindo
+Terminal=false
+Categories=Network;Chat;
+Keywords=linuxdo;discourse;forum;lindo;
+StartupWMClass=lindo
+MimeType=x-scheme-handler/discourse;x-scheme-handler/lindo;x-scheme-handler/fluxdo;

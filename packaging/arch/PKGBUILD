@@ -1,0 +1,58 @@
+# Maintainer: Lucas <https://github.com/lucaslus/LinDo>
+pkgname=lindo
+pkgver=1.1.4
+pkgrel=1
+pkgdesc="Linux.do 社区原生桌面客户端（内置 BoringSSL ECH 与无感安全验证）"
+arch=('x86_64' 'aarch64')
+url="https://github.com/lucaslus/LinDo"
+license=('MIT')
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'glib2'
+  'libsoup3'
+  'libayatana-appindicator'
+  'hicolor-icon-theme'
+)
+makedepends=('cargo' 'nodejs')
+options=('!lto' '!debug')
+
+_repo_root="${LINDO_REPO_ROOT:-$(cd "${startdir}/../.." && pwd)}"
+
+build() {
+  local bin_path="${_repo_root}/desktop-tauri/src-tauri/target/release/lindo-desktop"
+  if [[ -x "${bin_path}" && "${LINDO_SKIP_REBUILD:-0}" == "1" ]]; then
+    return 0
+  fi
+  cd "${_repo_root}/desktop-tauri"
+  if command -v pnpm >/dev/null 2>&1 && pnpm --version >/dev/null 2>&1; then
+    pnpm install --frozen-lockfile
+    ./node_modules/.bin/tauri build --no-bundle
+  else
+    local shim_dir="${srcdir}/_pnpm_shim"
+    mkdir -p "${shim_dir}"
+    printf '#!/bin/sh\nexec npx --yes pnpm@9 "$@"\n' > "${shim_dir}/pnpm"
+    chmod +x "${shim_dir}/pnpm"
+    PATH="${shim_dir}:${PATH}" "${shim_dir}/pnpm" install --frozen-lockfile
+    PATH="${shim_dir}:${PATH}" ./node_modules/.bin/tauri build --no-bundle
+  fi
+}
+
+package() {
+  install -Dm755 "${_repo_root}/desktop-tauri/src-tauri/target/release/lindo-desktop" \
+    "${pkgdir}/usr/bin/lindo"
+  install -Dm644 "${_repo_root}/packaging/arch/lindo.desktop" \
+    "${pkgdir}/usr/share/applications/lindo.desktop"
+  install -Dm644 "${_repo_root}/desktop-tauri/src-tauri/icons/32x32.png" \
+    "${pkgdir}/usr/share/icons/hicolor/32x32/apps/lindo.png"
+  install -Dm644 "${_repo_root}/desktop-tauri/src-tauri/icons/128x128.png" \
+    "${pkgdir}/usr/share/icons/hicolor/128x128/apps/lindo.png"
+  install -Dm644 "${_repo_root}/desktop-tauri/src-tauri/icons/128x128@2x.png" \
+    "${pkgdir}/usr/share/icons/hicolor/256x256/apps/lindo.png"
+  install -Dm644 "${_repo_root}/desktop-tauri/src-tauri/icons/icon.png" \
+    "${pkgdir}/usr/share/icons/hicolor/512x512/apps/lindo.png"
+  if [[ -f "${_repo_root}/LICENSE" ]]; then
+    install -Dm644 "${_repo_root}/LICENSE" \
+      "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  fi
+}

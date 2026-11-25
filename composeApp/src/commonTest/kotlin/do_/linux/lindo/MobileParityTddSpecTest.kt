@@ -305,7 +305,24 @@ class MobileParityTddSpecTest {
                         ]
                       },
                       "suggested_topics": [
-                        {"id": 3155999, "title": "相关实测贴", "posts_count": 12, "category_id": 4}
+                        {
+                          "id": 3155999,
+                          "title": "相关实测贴",
+                          "posts_count": 12,
+                          "category_id": 4,
+                          "posters": [
+                            {
+                              "description": "Original Poster",
+                              "user": {
+                                "id": 88,
+                                "username": "neo",
+                                "name": "Thomas Anderson",
+                                "avatar_template": "/user_avatar/linux.do/neo/{size}/1_2.png",
+                                "flair_name": "trust_level_3"
+                              }
+                            }
+                          ]
+                        }
                       ]
                     }
                 """.trimIndent()
@@ -319,6 +336,13 @@ class MobileParityTddSpecTest {
             assertTrue(capturedUrl.contains("filter=summary"), "Expected filter=summary query param, got: $capturedUrl")
             assertTrue(freshSummary.hasSummary)
             assertEquals(1, freshSummary.suggestedTopics.size)
+            assertEquals(88, freshSummary.suggestedTopics.first().originalPoster.id)
+            assertEquals("neo", freshSummary.suggestedTopics.first().originalPoster.username)
+            assertEquals(
+                "/user_avatar/linux.do/neo/{size}/1_2.png",
+                freshSummary.suggestedTopics.first().originalPoster.avatarTemplate
+            )
+            assertEquals("trust_level_3", freshSummary.suggestedTopics.first().originalPoster.flair.name)
             assertEquals(3, freshSummary.posts.first().version)
             assertTrue(freshSummary.posts.first().canViewEditHistory)
 

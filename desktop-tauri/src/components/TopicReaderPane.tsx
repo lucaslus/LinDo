@@ -4426,8 +4426,18 @@ export const TopicReaderPane: React.FC<TopicReaderPaneProps> = ({
                             onClick={() =>
                               onNavigateTopicLink(st.id, 1, st.title, visibleFloorRef.current)
                             }
-                            className="lindo-interactive flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left cursor-pointer"
+                            className="lindo-interactive flex w-full items-center justify-between gap-2.5 rounded-lg px-2.5 py-2 text-left cursor-pointer"
                           >
+                            <div className="shrink-0">
+                              <AvatarWithFlair
+                                username={st.originalPoster.username}
+                                avatarTemplate={st.originalPoster.avatarTemplate}
+                                animatedAvatar={st.originalPoster.animatedAvatar}
+                                primaryGroupName={st.originalPoster.primaryGroupName}
+                                flair={st.originalPoster.flair}
+                                sizePx={28}
+                              />
+                            </div>
                             <div className="min-w-0 flex-1">
                               <div
                                 className="truncate text-[13.2px] font-medium"
