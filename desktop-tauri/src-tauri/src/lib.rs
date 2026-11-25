@@ -743,6 +743,7 @@ fn parse_github_release_for_desktop_with_sums(
                         sha256 = digest;
                     }
                 } else if (name.ends_with(".deb")
+                    || name.ends_with(".rpm")
                     || (name.contains("linux") && name.ends_with(".tar.gz")))
                     && dmg_url.is_empty()
                 {
@@ -762,6 +763,7 @@ fn parse_github_release_for_desktop_with_sums(
                 || name.ends_with(".msi")
                 || name.ends_with(".apk")
                 || name.ends_with(".deb")
+                || name.ends_with(".rpm")
                 || name.ends_with(".appimage")
                 || name.ends_with(".pkg.tar.zst")
             {
@@ -789,12 +791,12 @@ fn parse_github_release_for_desktop_with_sums(
         }
     }
 
-    if is_windows && zip_url.is_empty() && !dmg_url.is_empty() {
+    if (is_windows || is_linux) && zip_url.is_empty() && !dmg_url.is_empty() {
         zip_url = dmg_url.clone();
         if sha256.is_empty() && !fallback_sha256.is_empty() {
             sha256 = fallback_sha256;
         }
-    } else if !is_windows && zip_url.is_empty() && !fallback_sha256.is_empty() {
+    } else if !(is_windows || is_linux) && zip_url.is_empty() && !fallback_sha256.is_empty() {
         sha256 = fallback_sha256;
     }
 
@@ -1216,6 +1218,8 @@ async fn download_and_install_update(
         "Lindo-update.AppImage"
     } else if lower_url.ends_with(".deb") {
         "Lindo-update.deb"
+    } else if lower_url.ends_with(".rpm") {
+        "Lindo-update.rpm"
     } else if lower_url.ends_with(".tar.gz") {
         "Lindo-update.tar.gz"
     } else if lower_url.ends_with(".zip") {
@@ -1810,6 +1814,39 @@ mod tests {
             linux_pkg.sha256,
             "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         );
+
+        let rel_ci_linux = serde_json::json!({
+            "tag_name": "v1.1.5",
+            "published_at": "2026-11-25T12:00:00Z",
+            "body": "- Linux Ubuntu/Debian/Fedora/AppImage 多发行版打包",
+            "assets": [
+                {
+                    "name": "Lindo-1.1.5-linux-x86_64.AppImage",
+                    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-x86_64.AppImage"
+                },
+                {
+                    "name": "Lindo-1.1.5-linux-amd64.deb",
+                    "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-amd64.deb"
+                },
+                {
+                    "name": "Lindo-1.1.5-linux-x86_64.rpm",
+                    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                    "browser_download_url": "https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-x86_64.rpm"
+                }
+            ]
+        });
+        let linux_ci = parse_github_release_for_desktop(&rel_ci_linux, None, "1.1.4", "linux", "x64");
+        assert!(linux_ci.has_update);
+        assert!(linux_ci.zip_url.ends_with("Lindo-1.1.5-linux-x86_64.AppImage"));
+        assert!(linux_ci.dmg_url.ends_with("Lindo-1.1.5-linux-amd64.deb"));
+        assert_eq!(
+            linux_ci.sha256,
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        let mac_ignores_linux = parse_github_release_for_desktop(&rel_ci_linux, None, "1.1.4", "macos", "x64");
+        assert!(!mac_ignores_linux.has_update);
     }
 
     #[test]

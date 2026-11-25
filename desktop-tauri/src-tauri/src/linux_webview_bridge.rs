@@ -33,8 +33,81 @@ static BRIDGE_ORIGIN_404: AtomicBool = AtomicBool::new(false);
 static BRIDGE_INTERACTIVE: AtomicBool = AtomicBool::new(false);
 static EVAL_SEQ: AtomicU64 = AtomicU64::new(1);
 static RELOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
+static PROTOCOL_REGISTERED: OnceLock<()> = OnceLock::new();
 static CACHED_BRIDGE_UA: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
 static BRIDGE_LAST_ERROR: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
+
+fn register_linux_url_protocols_once() {
+    PROTOCOL_REGISTERED.get_or_init(|| {
+        std::thread::spawn(|| {
+            let system_installed = [
+                "/usr/share/applications/Lindo.desktop",
+                "/usr/share/applications/lindo.desktop",
+                "/usr/share/applications/lindo-desktop.desktop",
+            ]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists());
+
+            let Some(data_dir) = dirs::data_local_dir()
+                .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
+            else {
+                return;
+            };
+            let apps_dir = data_dir.join("applications");
+            let local_desktop = apps_dir.join("lindo-url-handler.desktop");
+
+            if system_installed {
+                if local_desktop.exists() {
+                    let _ = std::fs::remove_file(&local_desktop);
+                    let _ = std::process::Command::new("update-desktop-database")
+                        .arg("-q")
+                        .arg(&apps_dir)
+                        .status();
+                }
+                return;
+            }
+
+            let exe_path = std::env::var_os("APPIMAGE")
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.exists())
+                .or_else(|| std::env::current_exe().ok());
+            let Some(exe) = exe_path else {
+                return;
+            };
+            let Some(exe_str) = exe.to_str() else {
+                return;
+            };
+            if std::fs::create_dir_all(&apps_dir).is_err() {
+                return;
+            }
+            let escaped_exec = exe_str.replace('\\', "\\\\").replace('"', "\\\"");
+            let content = format!(
+                "[Desktop Entry]\n\
+                 Type=Application\n\
+                 Name=Lindo\n\
+                 Exec=\"{escaped_exec}\" %u\n\
+                 Terminal=false\n\
+                 NoDisplay=true\n\
+                 MimeType=x-scheme-handler/discourse;x-scheme-handler/lindo;x-scheme-handler/fluxdo;\n"
+            );
+            if std::fs::write(&local_desktop, content).is_ok() {
+                let _ = std::process::Command::new("xdg-mime")
+                    .args([
+                        "default",
+                        "lindo-url-handler.desktop",
+                        "x-scheme-handler/discourse",
+                        "x-scheme-handler/lindo",
+                        "x-scheme-handler/fluxdo",
+                    ])
+                    .status();
+                let _ = std::process::Command::new("update-desktop-database")
+                    .arg("-q")
+                    .arg(&apps_dir)
+                    .status();
+            }
+        });
+    });
+}
 
 fn bridge_last_error() -> &'static std::sync::Mutex<String> {
     BRIDGE_LAST_ERROR.get_or_init(|| std::sync::Mutex::new(String::new()))
@@ -862,6 +935,7 @@ pub async fn native_call(
             }))
         }
         "setDockBadge" => {
+            register_linux_url_protocols_once();
             let label = params.get("label").and_then(|v| v.as_str()).unwrap_or("");
             if let Some(main_win) = app.get_webview_window("main") {
                 let title = if label.is_empty() {

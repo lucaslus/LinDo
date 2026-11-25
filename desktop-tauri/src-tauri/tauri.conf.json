@@ -32,11 +32,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "msi", "nsis"],
+    "targets": ["app", "msi", "nsis", "deb", "rpm", "appimage"],
+    "category": "SocialNetworking",
+    "shortDescription": "Linux.do 社区原生桌面客户端",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
@@ -48,6 +51,18 @@
     "windows": {
       "wix": {
         "upgradeCode": "9a4e7c31-62b8-4d95-b7f2-8c1e3409a520"
+      }
+    },
+    "linux": {
+      "deb": {
+        "section": "net",
+        "recommends": ["libayatana-appindicator3-1"],
+        "desktopTemplate": "linux/lindo.desktop.hbs",
+        "postInstallScript": "linux/postinst.sh"
+      },
+      "rpm": {
+        "desktopTemplate": "linux/lindo.desktop.hbs",
+        "postInstallScript": "linux/postinst.sh"
       }
     }
   }
