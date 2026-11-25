@@ -12,14 +12,14 @@
 <!-- LINDO_DOWNLOAD_MATRIX_START -->
 [![Latest Release](https://img.shields.io/github/v/release/lucaslus/LinDo?logo=github&label=latest&color=F59E0B)](https://github.com/lucaslus/LinDo/releases/latest) [![Total Downloads](https://img.shields.io/github/downloads/lucaslus/LinDo/total?logo=github&label=downloads&color=2ea043)](https://github.com/lucaslus/LinDo/releases)
 
-当前最新正式版：**`v1.1.4`**（点击对应系统徽章即可直接下载安装包，完整校验文件见 [GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)）：
+当前最新正式版：**`v1.1.5`**（点击对应系统徽章即可直接下载安装包，完整校验文件见 [GitHub Releases](https://github.com/lucaslus/LinDo/releases/latest)）：
 
 | OS | Download |
 | :--- | :--- |
-| **Android** | [![APK-ARMv8](https://img.shields.io/badge/APK-ARMv8-2ea043?logo=android&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/lindo-1.1.4-build104.apk) |
-| **Windows** | [![Setup-x64](https://img.shields.io/badge/Setup-x64-0078D4)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/Lindo-1.1.4-windows-x64-setup.exe)<br/>[![MSI-x64](https://img.shields.io/badge/MSI-x64-4B9CD3)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/Lindo-1.1.4-windows-x64.msi) |
-| **macOS** | [![DMG-Apple Silicon](https://img.shields.io/badge/DMG-Apple_Silicon-181717?logo=apple&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/Lindo-1.1.4-macos-arm64.dmg)<br/>[![DMG-Intel X64](https://img.shields.io/badge/DMG-Intel_X64-0071C5?logo=apple&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.4/Lindo-1.1.4-macos-x64.dmg) |
-| **Linux** | [![AppImage-x64](https://img.shields.io/badge/AppImage-x64-D94625?logo=linux&logoColor=white)](https://github.com/lucaslus/LinDo/releases/latest)<br/>[![DebPackage-x64](https://img.shields.io/badge/DebPackage-x64-E95420?logo=debian&logoColor=white)](https://github.com/lucaslus/LinDo/releases/latest)<br/>[![RpmPackage-x64](https://img.shields.io/badge/RpmPackage-x64-D97706?logo=redhat&logoColor=white)](https://github.com/lucaslus/LinDo/releases/latest) |
+| **Android** | [![APK-ARMv8](https://img.shields.io/badge/APK-ARMv8-2ea043?logo=android&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/lindo-1.1.5-build105.apk) |
+| **Windows** | [![Setup-x64](https://img.shields.io/badge/Setup-x64-0078D4)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-windows-x64-setup.exe)<br/>[![MSI-x64](https://img.shields.io/badge/MSI-x64-4B9CD3)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-windows-x64.msi) |
+| **macOS** | [![DMG-Apple Silicon](https://img.shields.io/badge/DMG-Apple_Silicon-181717?logo=apple&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-macos-arm64.dmg)<br/>[![DMG-Intel X64](https://img.shields.io/badge/DMG-Intel_X64-0071C5?logo=apple&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-macos-x64.dmg) |
+| **Linux** | [![AppImage-x64](https://img.shields.io/badge/AppImage-x64-D94625?logo=linux&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-x86_64.AppImage)<br/>[![DebPackage-x64](https://img.shields.io/badge/DebPackage-x64-E95420?logo=debian&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-amd64.deb)<br/>[![RpmPackage-x64](https://img.shields.io/badge/RpmPackage-x64-D97706?logo=redhat&logoColor=white)](https://github.com/lucaslus/LinDo/releases/download/v1.1.5/Lindo-1.1.5-linux-x86_64.rpm) |
 <!-- LINDO_DOWNLOAD_MATRIX_END -->
 
 > Arch Linux / Omarchy 用户也可直接使用仓库内的 [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD) 本地打包安装。
