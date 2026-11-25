@@ -54,6 +54,52 @@ data class EchRuntimeSnapshot(
     val lastError: String = ""
 )
 
+data class EchRouteDecision(
+    val shouldRun: Boolean,
+    val bypassVpn: Boolean,
+    val yielded: Boolean
+)
+
+/**
+ * Pure routing decision for the native BoringSSL ECH gateway:
+ * - `SMART_AUTO`: yields to active proxy/VPN by default, UNLESS that proxy/VPN tunnel is confirmed
+ *   unreachable (e.g., local AdGuard fake-VPN or dead proxy hitting DNS poison / TCP reset), in which
+ *   case it automatically falls back to ECH (binding physical NIC if permitted, or tunneling encrypted
+ *   DoH + TLS 1.3 ECH IP literals cleanly through the local TUN).
+ */
+fun decideEchGatewayRoute(
+    mode: EchRoutingMode,
+    vpnNow: Boolean,
+    hasSysProxy: Boolean,
+    canBindPhys: Boolean,
+    proxyTunnelUnreachable: Boolean = false
+): EchRouteDecision = when (mode) {
+    EchRoutingMode.SYSTEM_DEFAULT -> EchRouteDecision(
+        shouldRun = false,
+        bypassVpn = false,
+        yielded = false
+    )
+    EchRoutingMode.SMART_AUTO -> {
+        val hasProxyOrVpn = vpnNow || hasSysProxy
+        if (!hasProxyOrVpn) {
+            EchRouteDecision(shouldRun = true, bypassVpn = false, yielded = false)
+        } else if (proxyTunnelUnreachable) {
+            EchRouteDecision(
+                shouldRun = true,
+                bypassVpn = vpnNow && canBindPhys,
+                yielded = false
+            )
+        } else {
+            EchRouteDecision(shouldRun = false, bypassVpn = false, yielded = false)
+        }
+    }
+    EchRoutingMode.ECH_PRIORITY -> when {
+        !vpnNow -> EchRouteDecision(shouldRun = true, bypassVpn = false, yielded = false)
+        canBindPhys -> EchRouteDecision(shouldRun = true, bypassVpn = true, yielded = false)
+        else -> EchRouteDecision(shouldRun = false, bypassVpn = false, yielded = true)
+    }
+}
+
 object EchRoutingPolicy {
     var mode by mutableStateOf(EchRoutingMode.SMART_AUTO)
         private set

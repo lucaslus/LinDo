@@ -425,7 +425,10 @@ pub async fn native_call(
     );
     var iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], #turnstile-wrapper iframe, .cf-turnstile iframe');
     var rect = iframe ? iframe.getBoundingClientRect() : null;
-    var hasInteractiveWidget = !!(rect && rect.width >= 80 && rect.height >= 30);
+    var host = document.querySelector('#turnstile-wrapper, .cf-turnstile, #challenge-stage > div');
+    var hostRect = host ? host.getBoundingClientRect() : null;
+    var hasInteractiveWidget = !!(rect && rect.width >= 80 && rect.height >= 30)
+      || !!(hostRect && hostRect.width >= 220 && hostRect.height >= 55);
     var interactive = !!window.__lindoWinInteractiveBegin || hasInteractiveWidget;
     return JSON.stringify({ ua: navigator.userAgent || '', loading: loading, origin404: origin404, interactive: interactive });
   } catch (_) {

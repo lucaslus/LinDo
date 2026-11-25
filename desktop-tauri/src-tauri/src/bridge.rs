@@ -522,6 +522,16 @@ extern "C" fn on_native_bridge_reply(request: i64, raw: *const c_char) {
                     }
                 });
             }
+        } else if parsed
+            .get("value")
+            .and_then(|v| v.get("cfVerifyEvent"))
+            .is_some()
+        {
+            if let Some(app) = GLOBAL_APP_HANDLE.get() {
+                if let Some(engine) = app.try_state::<Arc<BridgeEngine>>() {
+                    engine.verify_event_notify.notify_waiters();
+                }
+            }
         }
         return;
     }
@@ -686,6 +696,7 @@ pub struct BridgeEngine {
     bg_challenge_tracker: StdMutex<BackgroundChallengeTracker>,
     media_cache: StdMutex<MediaCacheState>,
     media_inflight: StdMutex<HashMap<String, Arc<Notify>>>,
+    verify_event_notify: Notify,
 }
 
 struct FgRequestGuard<'a>(&'a AtomicUsize);
@@ -1016,6 +1027,7 @@ impl BridgeEngine {
             bg_challenge_tracker: StdMutex::new(BackgroundChallengeTracker::default()),
             media_cache: StdMutex::new(MediaCacheState::default()),
             media_inflight: StdMutex::new(HashMap::new()),
+            verify_event_notify: Notify::new(),
         })
     }
 
@@ -1131,6 +1143,9 @@ impl BridgeEngine {
             .ech_routing_mode
             .clone();
         let mode = crate::ech_desktop::EchRoutingMode::from_pref(&mode_pref);
+        if mode == crate::ech_desktop::EchRoutingMode::SmartAuto {
+            let _ = crate::ech_desktop::note_proxy_tunnel_unreachable();
+        }
         crate::ech_desktop::notify_network_route_changed();
         crate::ech_desktop::rotate_sticky_ip();
         let ech_snap = crate::ech_desktop::reconcile_with_mode(mode);
@@ -1630,6 +1645,44 @@ impl BridgeEngine {
     /// and waits for the NEW `/about` document to actually commit (guarded by `window.__lindoLeavingNonce`)
     /// before returning so immediate POST/GET replays never match the outgoing document or blindly mark a broken page ready.
     async fn restore_about_origin_context(&self) {
+        // Fast path: if the bridge WebView is ALREADY committed on a clean non-challenged `https://linux.do`
+        // document (e.g., `/challenge` 404 HTML right after passing Turnstile), reuse it in-place (<5ms)
+        // without navigating to `/about`!
+        let already_clean_origin = native_call(
+            "evaluate",
+            json!({
+                "isolated": true,
+                "script": r#"(() => {
+                    if (location.origin !== 'https://linux.do') return false;
+                    if (document.readyState === 'loading') return false;
+                    const lowerTitle = (document.title || '').toLowerCase();
+                    const explicitChallenge = !!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')
+                        || /^(just a moment|请稍候|attention required|security check|something went wrong|access denied)/i.test(lowerTitle);
+                    return !explicitChallenge;
+                })()"#
+            }),
+            3,
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+        if already_clean_origin {
+            let _ = native_call(
+                "evaluate",
+                json!({
+                    "script": "(() => { const tok = document.querySelector('meta[name=\"csrf-token\"]')?.content || null; if (tok) { window.__lindoCsrf = tok; window.__lindoIgnoreDomCsrf = false; } window.__lindoCsrfCooldownUntil = 0; try { if (window.MessageBus && typeof window.MessageBus.stop === 'function') window.MessageBus.stop(); } catch (_) {} return true; })()"
+                }),
+                3,
+            )
+            .await;
+            let mut rt = self.inner.lock().unwrap();
+            rt.origin_ready = true;
+            rt.bootstrap_challenged = false;
+            return;
+        }
+
         let nonce = self.next_nav_nonce();
         self.stamp_leaving_nonce(&nonce).await;
         let _ = native_call("navigate", json!({ "url": "https://linux.do/about" }), 6).await;
@@ -1982,10 +2035,18 @@ impl BridgeEngine {
         if had_challenged_before_verify {
             *saw_interactive_or_challenge = true;
         }
-        // Snapshot incumbent clearance (NEVER purge valid cf_clearance before loading /challenge!)
+        // Snapshot incumbent clearance (preserve healthy unchallenged cf_clearance, but pre-purge
+        // clearances already proven challenged so `/challenge` does not waste a stale-404 double reload!)
         let mut stale_cf: std::collections::HashSet<String> =
             self.browser_cf_clearances().await.into_iter().collect();
         let mut stale_purged_once = false;
+        if had_challenged_before_verify {
+            let purged = self.purge_cf_clearance_for_reverify().await;
+            for p in purged {
+                stale_cf.insert(p);
+            }
+            stale_purged_once = true;
+        }
 
         // Drain any in-flight `evaluate()` fetches cleanly BEFORE navigating away from `/about` to `/challenge`!
         {
@@ -2041,10 +2102,11 @@ impl BridgeEngine {
                 break;
             }
 
-            // Sleep 220ms OR wake up instantaneously if a foreground caller escalates `Silent -> Proactive/Blocking/Manual`!
+            // Sleep 220ms OR wake up instantaneously on native `interactive` / `origin404` push or foreground escalation!
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(220)) => {}
                 _ = escalate_notify.notified() => {}
+                _ = self.verify_event_notify.notified() => {}
             }
 
             let cur_pres = VerifyPresentation::from_u8(presentation.load(Ordering::SeqCst));
@@ -2579,7 +2641,7 @@ impl BridgeEngine {
                 continue;
             }
 
-            let needed_rounds = if has_fresh_cf && (is_origin_404 || ready) { 1 } else { 2 };
+            let needed_rounds = if native_origin_404 || has_fresh_cf || ready { 1 } else { 2 };
             if quiet_rounds < needed_rounds {
                 continue;
             }
@@ -2700,6 +2762,10 @@ impl BridgeEngine {
                 self.commit_authenticated_user(app, profile);
             }
 
+            // Hide verification panel IMMEDIATELY (<16ms) before cookie disk sync so there is zero post-click lag!
+            if panel_shown {
+                let _ = native_call("hide", json!({}), 5).await;
+            }
             if ticket_verified {
                 self.cf_authority.lock().unwrap().mark_rotation_open();
             }
@@ -3865,7 +3931,7 @@ impl BridgeEngine {
                             }
                             let _ = native_call(
                                 "evaluate",
-                                json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                                json!({ "script": "(() => { window.__lindoCsrfCooldownUntil = 0; window.__lindoCsrfPromise = null; return true; })()" }),
                                 4,
                             )
                             .await;
@@ -3931,7 +3997,7 @@ impl BridgeEngine {
                                 }
                                 let _ = native_call(
                                     "evaluate",
-                                    json!({ "script": "(() => { window.__lindoCsrf = null; window.__lindoIgnoreDomCsrf = true; return true; })()" }),
+                                    json!({ "script": "(() => { window.__lindoCsrfCooldownUntil = 0; window.__lindoCsrfPromise = null; return true; })()" }),
                                     4,
                                 )
                                 .await;
@@ -5402,6 +5468,13 @@ impl BridgeEngine {
             std::collections::HashSet::new()
         };
         let mut stale_purged_once = false;
+        if had_challenged_before_verify {
+            let purged = self.purge_cf_clearance_for_reverify().await;
+            for p in purged {
+                stale_cf.insert(p);
+            }
+            stale_purged_once = true;
+        }
 
         let mut mask_visible = false;
         if !login && !is_otp_flow {
@@ -5443,7 +5516,10 @@ impl BridgeEngine {
 
         while Instant::now() < deadline {
             let poll_sleep = if requested_login { 500 } else { 220 };
-            tokio::time::sleep(Duration::from_millis(poll_sleep)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(poll_sleep)) => {}
+                _ = self.verify_event_notify.notified() => {}
+            }
 
             let status_obj = native_call("status", json!({}), 6).await?;
             let user_cancelled = status_obj.get("cancelled").and_then(|v| v.as_bool()) == Some(true);
@@ -5854,7 +5930,7 @@ impl BridgeEngine {
                     continue;
                 }
 
-                let needed_rounds = if has_fresh_cf && (is_origin_404 || ready) { 1 } else { 2 };
+                let needed_rounds = if native_origin_404 || has_fresh_cf || ready { 1 } else { 2 };
                 if quiet_rounds < needed_rounds {
                     continue;
                 }
@@ -5961,6 +6037,8 @@ impl BridgeEngine {
                     self.commit_authenticated_user(app, profile);
                 }
 
+                // Hide verification panel IMMEDIATELY (<16ms) before cookie disk sync & context restore!
+                let _ = native_call("hide", json!({}), 5).await;
                 if ticket_verified {
                     self.cf_authority.lock().unwrap().mark_rotation_open();
                 }
@@ -5978,9 +6056,7 @@ impl BridgeEngine {
                     rt.challenge_429_streak = 0;
                     rt.cf_attention_notified = false;
                 }
-                let _ = native_call("hide", json!({}), 5).await;
-                // Restore clean `/about` origin document and WAIT for commit before returning `Ok(true)`
-                // so an immediate POST/GET replay never collides with the `/about` navigation and aborts with `Load failed`!
+                // Restore clean origin context (in-place <5ms when `/challenge` 404 is already on `https://linux.do`)
                 {
                     let _nav = self.nav_lock.write().await;
                     self.restore_about_origin_context().await;

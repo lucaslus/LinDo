@@ -33,7 +33,32 @@ pub type BoxRespBody = BoxBody<Bytes, hyper::Error>;
 pub const H2_POOL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 pub const UPSTREAM_TCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(3500);
 pub const UPSTREAM_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(4000);
+pub const HEDGED_TLS_BACKUP_DELAY: Duration = Duration::from_millis(1500);
 pub const UPSTREAM_GET_HEADER_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Validates that `bytes` is a syntactically well-formed RFC 9849 `ECHConfigList` (`0xfe0d`),
+/// rejecting empty slices and BoringSSL's 5-byte `[0xfe, 0x0d, 0xff, 0xff, 0xff]` syntax-error placeholder.
+pub fn is_valid_ech_config_list(bytes: &[u8]) -> bool {
+    if bytes.len() < 6 {
+        return false;
+    }
+    let list_len = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+    if list_len == 0 || list_len + 2 != bytes.len() {
+        return false;
+    }
+    let first_ver = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let first_len = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+    first_ver == 0xfe0d && first_len > 0 && 4 + first_len <= list_len
+}
+
+fn is_ech_rejected_error(err: &boring2::ssl::Error) -> bool {
+    err.ssl_error().is_some_and(|stack| {
+        stack
+            .errors()
+            .iter()
+            .any(|e| e.reason() == Some("ECH_REJECTED"))
+    })
+}
 
 fn empty_req_body() -> BoxReqBody {
     http_body_util::Empty::<Bytes>::new()
@@ -369,14 +394,31 @@ impl UpstreamPool {
         if alpn.as_slice() == b"h2" {
             let io = TokioIo::new(conn.tls);
             let mut h2_builder = http2::Builder::new(TokioExecutor::new());
-            h2_builder
-                .timer(TokioTimer::new())
-                .initial_stream_window_size(6_291_456)
-                .initial_connection_window_size(15_728_640)
-                .header_table_size(65_536)
-                .max_header_list_size(262_144)
-                .keep_alive_interval(Duration::from_secs(25))
-                .keep_alive_timeout(Duration::from_secs(10));
+            #[cfg(target_os = "macos")]
+            {
+                h2_builder
+                    .timer(TokioTimer::new())
+                    .max_frame_size(None)
+                    .initial_stream_window_size(2_097_152)
+                    .initial_connection_window_size(10_551_296)
+                    .max_concurrent_streams(100)
+                    .keep_alive_interval(Duration::from_secs(25))
+                    .keep_alive_timeout(Duration::from_secs(10))
+                    .keep_alive_while_idle(true);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                h2_builder
+                    .timer(TokioTimer::new())
+                    .max_frame_size(None)
+                    .initial_stream_window_size(6_291_456)
+                    .initial_connection_window_size(15_728_640)
+                    .header_table_size(65_536)
+                    .max_header_list_size(262_144)
+                    .keep_alive_interval(Duration::from_secs(25))
+                    .keep_alive_timeout(Duration::from_secs(10))
+                    .keep_alive_while_idle(true);
+            }
 
             let (mut sender, driver) = h2_builder
                 .handshake::<_, BoxReqBody>(io)
@@ -429,6 +471,80 @@ impl UpstreamPool {
                     Err("http1 send timeout".to_string())
                 }
             }
+        }
+    }
+
+    fn map_dial_addr(&self, addr: SocketAddr) -> SocketAddr {
+        #[cfg(test)]
+        {
+            if let (Some(ref map), IpAddr::V4(v4)) = (&self.test_ip_port_map, addr.ip()) {
+                return map.get(&v4).copied().unwrap_or(addr);
+            }
+        }
+        addr
+    }
+
+    async fn connect_single_tls_ech(
+        &self,
+        host: &str,
+        dial_addr: SocketAddr,
+        ech_list: &[u8],
+        tls_handshake_timeout: Duration,
+    ) -> Result<EstablishedTls, SingleHandshakeError> {
+        let net_gen = net_bind::network_gen();
+        let (tcp, _bound) = net_bind::connect_tcp(dial_addr, UPSTREAM_TCP_CONNECT_TIMEOUT)
+            .await
+            .map_err(|e| SingleHandshakeError::Tcp(e.to_string()))?;
+
+        let mut cfg = self
+            .connector
+            .configure()
+            .map_err(|e| SingleHandshakeError::Tls(format!("connector configure: {e}")))?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = cfg.add_application_settings(b"h2");
+            cfg.set_alps_use_new_codepoint(true);
+        }
+        if !ech_list.is_empty() {
+            cfg.set_ech_config_list(ech_list)
+                .map_err(|e| SingleHandshakeError::Tls(format!("set_ech_config_list: {e}")))?;
+        } else {
+            cfg.set_enable_ech_grease(true);
+        }
+
+        let ssl = cfg
+            .into_ssl(host)
+            .map_err(|e| SingleHandshakeError::Tls(format!("into_ssl({host}): {e}")))?;
+        let mut tls = SslStream::new(ssl, tcp)
+            .map_err(|e| SingleHandshakeError::Tls(format!("ssl stream: {e}")))?;
+
+        match timeout(tls_handshake_timeout, Pin::new(&mut tls).connect()).await {
+            Ok(Ok(())) => {
+                let accepted = tls.ssl().ech_accepted();
+                LAST_ECH_ACCEPTED.store(accepted, Ordering::Relaxed);
+                if accepted {
+                    ECH_HANDSHAKE_COUNT.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(EstablishedTls {
+                    tls,
+                    network_gen: net_gen,
+                })
+            }
+            Ok(Err(err)) => {
+                // CRITICAL: BoringSSL asserts / returns a 5-byte syntax-error placeholder if
+                // `SSL_get0_ech_retry_configs` is called for anything other than `SSL_R_ECH_REJECTED`.
+                if is_ech_rejected_error(&err) && tls.ssl().get_ech_name_override().is_some() {
+                    if let Some(retry) = tls.ssl().get_ech_retry_configs() {
+                        if is_valid_ech_config_list(retry) {
+                            return Err(SingleHandshakeError::EchRejected {
+                                retry_configs: retry.to_vec(),
+                            });
+                        }
+                    }
+                }
+                Err(SingleHandshakeError::Tls(err.to_string()))
+            }
+            Err(_) => Err(SingleHandshakeError::TlsTimeout),
         }
     }
 
@@ -485,119 +601,116 @@ impl UpstreamPool {
         };
 
         for attempt in 0..2 {
-            let net_gen = net_bind::network_gen();
-            let dial_addr = {
-                #[cfg(test)]
-                {
-                    if let (Some(ref map), IpAddr::V4(v4)) = (&self.test_ip_port_map, target_addr.ip()) {
-                        map.get(&v4).copied().unwrap_or(target_addr)
-                    } else {
-                        target_addr
-                    }
+            let dial_addr = self.map_dial_addr(target_addr);
+            let hedged_backup_ip = if attempt == 0
+                && self.test_override.is_none()
+                && tls_handshake_timeout >= Duration::from_millis(2000)
+            {
+                if let IpAddr::V4(primary_v4) = target_addr.ip() {
+                    self.doh.peek_alternate_sticky_ip(primary_v4).await
+                } else {
+                    None
                 }
-                #[cfg(not(test))]
-                {
-                    target_addr
-                }
+            } else {
+                None
             };
 
-            let (tcp, _bound) = match net_bind::connect_tcp(dial_addr, UPSTREAM_TCP_CONNECT_TIMEOUT).await {
-                Ok(pair) => pair,
+            let outcome = if let Some(backup_v4) = hedged_backup_ip {
+                let backup_dial = self.map_dial_addr(SocketAddr::new(IpAddr::V4(backup_v4), 443));
+                let ech_ref = ech_list.as_slice();
+                let mut primary_fut = Box::pin(self.connect_single_tls_ech(
+                    host,
+                    dial_addr,
+                    ech_ref,
+                    tls_handshake_timeout,
+                ));
+                tokio::select! {
+                    primary_res = &mut primary_fut => primary_res,
+                    _ = tokio::time::sleep(HEDGED_TLS_BACKUP_DELAY) => {
+                        // Primary stalled >= 1.5s: race ongoing primary against backup Anycast IP
+                        let mut backup_fut = Box::pin(self.connect_single_tls_ech(
+                            host,
+                            backup_dial,
+                            ech_ref,
+                            tls_handshake_timeout,
+                        ));
+                        tokio::select! {
+                            primary_res = &mut primary_fut => match primary_res {
+                                Ok(conn) => Ok(conn),
+                                Err(primary_err) => match backup_fut.await {
+                                    Ok(conn) => {
+                                        self.doh.promote_sticky_ip(backup_v4).await;
+                                        Ok(conn)
+                                    }
+                                    Err(_) => Err(primary_err),
+                                },
+                            },
+                            backup_res = &mut backup_fut => match backup_res {
+                                Ok(conn) => {
+                                    self.doh.promote_sticky_ip(backup_v4).await;
+                                    Ok(conn)
+                                }
+                                Err(_) => primary_fut.await,
+                            },
+                        }
+                    }
+                }
+            } else {
+                self.connect_single_tls_ech(host, dial_addr, &ech_list, tls_handshake_timeout)
+                    .await
+            };
+
+            match outcome {
+                Ok(conn) => return Ok(conn),
+                Err(SingleHandshakeError::EchRejected { retry_configs }) if attempt == 0 => {
+                    if self.test_override.is_none() {
+                        self.doh
+                            .update_ech_retry_configs(retry_configs.clone())
+                            .await;
+                    }
+                    ech_list = retry_configs;
+                    continue;
+                }
                 Err(err) => {
-                    if self.test_override.is_none() {
-                        if attempt == 0 && !os_fallback_addrs.is_empty() {
+                    if attempt == 0 && self.test_override.is_none() {
+                        if !os_fallback_addrs.is_empty() {
                             target_addr = os_fallback_addrs.remove(0);
                             continue;
                         }
                         if let IpAddr::V4(old_v4) = target_addr.ip() {
                             if let Some(next_ip) = self.doh.rotate_sticky_ip(old_v4).await {
-                                if attempt == 0 {
-                                    target_addr = SocketAddr::new(IpAddr::V4(next_ip), 443);
-                                    continue;
-                                }
+                                target_addr = SocketAddr::new(IpAddr::V4(next_ip), 443);
+                                continue;
                             }
                         }
                     }
-                    return Err(format!("upstream tcp connect {target_addr}: {err}"));
-                }
-            };
-
-            let mut cfg = self
-                .connector
-                .configure()
-                .map_err(|e| format!("connector configure: {e}"))?;
-            let _ = cfg.add_application_settings(b"h2");
-            if !ech_list.is_empty() {
-                cfg.set_ech_config_list(&ech_list)
-                    .map_err(|e| format!("set_ech_config_list: {e}"))?;
-            }
-
-            let ssl = cfg
-                .into_ssl(host)
-                .map_err(|e| format!("into_ssl({host}): {e}"))?;
-            let mut tls = SslStream::new(ssl, tcp).map_err(|e| format!("ssl stream: {e}"))?;
-
-            match timeout(tls_handshake_timeout, Pin::new(&mut tls).connect()).await {
-                Ok(Ok(())) => {
-                    let accepted = tls.ssl().ech_accepted();
-                    LAST_ECH_ACCEPTED.store(accepted, Ordering::Relaxed);
-                    if accepted {
-                        ECH_HANDSHAKE_COUNT.fetch_add(1, Ordering::Relaxed);
-                    }
-                    return Ok(EstablishedTls {
-                        tls,
-                        network_gen: net_gen,
+                    return Err(match err {
+                        SingleHandshakeError::Tcp(e) => {
+                            format!("upstream tcp connect {target_addr}: {e}")
+                        }
+                        SingleHandshakeError::EchRejected { .. } => {
+                            format!("upstream boringssl ECH rejected for {host}")
+                        }
+                        SingleHandshakeError::Tls(e) => {
+                            format!("upstream boringssl connect {host}: {e}")
+                        }
+                        SingleHandshakeError::TlsTimeout => {
+                            format!("upstream tls handshake timeout for {host}")
+                        }
                     });
-                }
-                Ok(Err(err)) => {
-                    if attempt == 0 {
-                        if let Some(retry) = tls.ssl().get_ech_retry_configs() {
-                            let retry_vec = retry.to_vec();
-                            if self.test_override.is_none() {
-                                self.doh.update_ech_retry_configs(retry_vec.clone()).await;
-                            }
-                            ech_list = retry_vec;
-                            continue;
-                        }
-                    }
-                    if self.test_override.is_none() {
-                        if attempt == 0 && !os_fallback_addrs.is_empty() {
-                            target_addr = os_fallback_addrs.remove(0);
-                            continue;
-                        }
-                        if let IpAddr::V4(old_v4) = target_addr.ip() {
-                            if let Some(next_ip) = self.doh.rotate_sticky_ip(old_v4).await {
-                                if attempt == 0 {
-                                    target_addr = SocketAddr::new(IpAddr::V4(next_ip), 443);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                    return Err(format!("upstream boringssl connect {host}: {err}"));
-                }
-                Err(_) => {
-                    if self.test_override.is_none() {
-                        if attempt == 0 && !os_fallback_addrs.is_empty() {
-                            target_addr = os_fallback_addrs.remove(0);
-                            continue;
-                        }
-                        if let IpAddr::V4(old_v4) = target_addr.ip() {
-                            if let Some(next_ip) = self.doh.rotate_sticky_ip(old_v4).await {
-                                if attempt == 0 {
-                                    target_addr = SocketAddr::new(IpAddr::V4(next_ip), 443);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                    return Err(format!("upstream tls handshake timeout for {host}"));
                 }
             }
         }
 
         Err(format!("upstream ECH connect exhausted retries for {host}"))
     }
+}
+
+enum SingleHandshakeError {
+    Tcp(String),
+    EchRejected { retry_configs: Vec<u8> },
+    Tls(String),
+    TlsTimeout,
 }
 
 struct EstablishedTls {
@@ -627,30 +740,62 @@ fn build_chromium_connector_builder(
         .map_err(|e| format!("set_verify_cert_store: {e}"))?;
 
     builder.set_grease_enabled(true);
-    builder.set_permute_extensions(true);
+    builder.enable_ocsp_stapling();
+    builder.enable_signed_cert_timestamps();
     let _ = builder.set_min_proto_version(Some(SslVersion::TLS1_2));
     let _ = builder.set_max_proto_version(Some(SslVersion::TLS1_3));
 
-    // Prefer PQ hybrid X25519MLKEM768 first to match Chrome 131+ ClientHello, fallback cleanly.
-    if builder
-        .set_curves_list("X25519MLKEM768:X25519:P-256:P-384")
-        .is_err()
+    #[cfg(target_os = "macos")]
     {
-        let _ = builder.set_curves_list("X25519:P-256:P-384");
+        // Safari / WKWebView TLS profile: fixed extension order (no permutation), P-521 included, 17+ Safari ciphers.
+        builder.set_permute_extensions(false);
+        if builder
+            .set_curves_list("X25519MLKEM768:X25519:P-256:P-384:P-521")
+            .is_err()
+        {
+            let _ = builder.set_curves_list("X25519:P-256:P-384:P-521");
+        }
+        let _ = builder.set_cipher_list(
+            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:\
+             ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:\
+             ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305:\
+             ECDHE-ECDSA-AES256-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA:ECDHE-RSA-AES128-SHA:\
+             AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA:AES128-SHA",
+        );
+        let _ = builder.set_sigalgs_list(
+            "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
+             ecdsa_secp384r1_sha384:ecdsa_secp521r1_sha512:\
+             rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha384:rsa_pkcs1_sha512",
+        );
     }
 
-    let _ = builder.set_cipher_list(
-        "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:\
-         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
-         ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
-         ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305",
-    );
-    let _ = builder.set_sigalgs_list(
-        "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
-         ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:\
-         rsa_pss_rsae_sha512:rsa_pkcs1_sha512",
-    );
-    let _ = builder.add_certificate_compression_algorithm(BrotliCertDecompressor);
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Chromium (Android System WebView / Windows WebView2) TLS profile:
+        // extension permutation + PQ X25519MLKEM768 + full 15-cipher suite (`t13d1516h2`).
+        builder.set_permute_extensions(true);
+        if builder
+            .set_curves_list("X25519MLKEM768:X25519:P-256:P-384")
+            .is_err()
+        {
+            let _ = builder.set_curves_list("X25519:P-256:P-384");
+        }
+        let _ = builder.set_cipher_list(
+            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:\
+             ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
+             ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
+             ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
+             ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:\
+             AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA",
+        );
+        let _ = builder.set_sigalgs_list(
+            "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
+             ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:\
+             rsa_pss_rsae_sha512:rsa_pkcs1_sha512",
+        );
+        let _ = builder.add_certificate_compression_algorithm(BrotliCertDecompressor);
+    }
+
     let _ = builder.set_alpn_protos(b"\x02h2\x08http/1.1");
 
     Ok(builder)

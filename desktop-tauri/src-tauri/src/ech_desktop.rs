@@ -109,9 +109,15 @@ extern "C" {
 
 static STOP_SEQ: AtomicU64 = AtomicU64::new(0);
 static DESIRED_ECH: AtomicBool = AtomicBool::new(false);
+static PROXY_TUNNEL_UNREACHABLE: AtomicBool = AtomicBool::new(false);
+static LAST_ENV_SIGNATURE: OnceLock<Mutex<String>> = OnceLock::new();
 static LAST_SNAPSHOT: OnceLock<Mutex<EchDesktopSnapshot>> = OnceLock::new();
 static CA_MATERIAL_CACHE: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 static RECONCILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn last_env_sig_lock() -> &'static Mutex<String> {
+    LAST_ENV_SIGNATURE.get_or_init(|| Mutex::new(String::new()))
+}
 
 fn last_snapshot_lock() -> &'static Mutex<EchDesktopSnapshot> {
     LAST_SNAPSHOT.get_or_init(|| Mutex::new(EchDesktopSnapshot::default()))
@@ -325,13 +331,24 @@ pub fn detect_net_env() -> NetEnv {
 }
 
 pub fn decide_should_use_ech(mode: EchRoutingMode, env: &NetEnv) -> (bool, bool) {
+    decide_should_use_ech_with_fallback(mode, env, false)
+}
+
+pub fn decide_should_use_ech_with_fallback(
+    mode: EchRoutingMode,
+    env: &NetEnv,
+    proxy_tunnel_unreachable: bool,
+) -> (bool, bool) {
     match mode {
         EchRoutingMode::SystemDefault => (false, false),
         EchRoutingMode::SmartAuto => {
-            if env.has_proxy_or_vpn() {
-                (false, false)
-            } else {
+            if !env.has_proxy_or_vpn() {
                 (true, false)
+            } else if proxy_tunnel_unreachable && !env.tun_active {
+                // Dead local HTTP proxy or fake proxy rule under SmartAuto: automatically fall back to local ECH
+                (true, false)
+            } else {
+                (false, false)
             }
         }
         EchRoutingMode::EchPriority => {
@@ -341,6 +358,17 @@ pub fn decide_should_use_ech(mode: EchRoutingMode, env: &NetEnv) -> (bool, bool)
                 (true, false)
             }
         }
+    }
+}
+
+/// Marks the detected system proxy as unreachable under `SmartAuto` so the next reconcile
+/// automatically falls back to direct ECH (reset automatically on mode or network signature change).
+pub fn note_proxy_tunnel_unreachable() -> bool {
+    let env = detect_net_env();
+    if env.sys_proxy && !env.tun_active {
+        !PROXY_TUNNEL_UNREACHABLE.swap(true, Ordering::AcqRel)
+    } else {
+        false
     }
 }
 
@@ -431,9 +459,21 @@ pub fn reconcile_with_mode(mode: EchRoutingMode) -> EchDesktopSnapshot {
     let had_running_gateway = lindo_ech::current_gateway_port() > 0;
 
     let env = detect_net_env();
+    let cur_sig = env.signature();
+    {
+        let mut sig_guard = last_env_sig_lock().lock().unwrap();
+        if *sig_guard != cur_sig || mode_changed {
+            *sig_guard = cur_sig;
+            PROXY_TUNNEL_UNREACHABLE.store(false, Ordering::Release);
+        }
+    }
     let supported = is_platform_supported();
     let (mut should_ech, vpn_yielded) = if supported {
-        decide_should_use_ech(mode, &env)
+        decide_should_use_ech_with_fallback(
+            mode,
+            &env,
+            PROXY_TUNNEL_UNREACHABLE.load(Ordering::Acquire),
+        )
     } else {
         (false, false)
     };
@@ -807,6 +847,16 @@ mod tests {
         assert_eq!(
             EchRoutingMode::from_pref("direct_only"),
             EchRoutingMode::EchPriority
+        );
+
+        // Unreachable local HTTP proxy under SmartAuto promotes to direct ECH, whereas global TUN still yields
+        assert_eq!(
+            decide_should_use_ech_with_fallback(EchRoutingMode::SmartAuto, &sys_proxy_env, true),
+            (true, false)
+        );
+        assert_eq!(
+            decide_should_use_ech_with_fallback(EchRoutingMode::SmartAuto, &tun_env, true),
+            (false, false)
         );
     }
 

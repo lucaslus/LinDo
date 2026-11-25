@@ -21,6 +21,7 @@ import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
 import do_.linux.lindo.core.network.EchRoutingMode
 import do_.linux.lindo.core.network.EchRoutingPolicy
 import do_.linux.lindo.core.network.EchRuntimeSnapshot
+import do_.linux.lindo.core.network.decideEchGatewayRoute
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -88,6 +89,7 @@ object EchGatewayManager {
     private var currentMode: EchRoutingMode = EchRoutingMode.SMART_AUTO
     private var lastAppliedMode: EchRoutingMode? = null
     private var vpnActive: Boolean = false
+    private var proxyTunnelUnreachable: Boolean = false
     private var vpnLockdownYielded: Boolean = false
     private var activeGatewayPort: Int = 0
     private var lastAppliedPort: Int = 0
@@ -169,6 +171,37 @@ object EchGatewayManager {
         }
     }
 
+    /**
+     * Called when `SMART_AUTO` yielded to an active VPN/proxy (e.g., AdGuard local filtering VPN
+     * or a dead proxy) and direct WebView requests hit confirmed DNS poison / TCP blackhole.
+     * Automatically promotes `SMART_AUTO` onto ECH for the current VPN session; returns `true`
+     * if ECH fallback was newly armed.
+     */
+    fun noteProxyTunnelUnreachable(): Boolean {
+        if (!initialized.get() || !NativeEchBridge.loaded) return false
+        val armed = synchronized(stateLock) {
+            val hasSysProxy = isSystemHttpProxySet()
+            if (currentMode == EchRoutingMode.SMART_AUTO && (vpnActive || hasSysProxy) && !proxyTunnelUnreachable) {
+                proxyTunnelUnreachable = true
+                true
+            } else {
+                false
+            }
+        }
+        if (armed) {
+            LinDoDiagnosticLogger.warn(
+                DiagnosticCategory.NETWORK,
+                "EchGateway",
+                "SMART_AUTO detected unreachable/local VPN tunnel; automatically promoting to ECH direct fallback"
+            )
+            reconcileExecutor.execute {
+                runCatching { reconcileInternal(forceModeRefresh = true) }
+            }
+            scheduleDelayedStatusRefresh()
+        }
+        return armed
+    }
+
     fun consumeRouteStackFlip(): Boolean = routeStackFlipped.getAndSet(false)
 
     fun hasPendingProxyOverride(): Boolean = pendingProxyDeferred?.isCompleted == false
@@ -247,6 +280,7 @@ object EchGatewayManager {
             .putString(PREF_KEY_MODE, nextMode.prefValue)
             .apply()
         val changed = synchronized(stateLock) {
+            proxyTunnelUnreachable = false
             if (currentMode == nextMode) {
                 false
             } else {
@@ -326,12 +360,16 @@ object EchGatewayManager {
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 val isVpn = caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || detectVpnForApp(cm)
                 synchronized(stateLock) {
+                    if (vpnActive != isVpn) {
+                        proxyTunnelUnreachable = false
+                    }
                     vpnActive = isVpn
                 }
                 reconcileAsyncIfChanged()
             }
 
             override fun onLost(network: Network) {
+                synchronized(stateLock) { proxyTunnelUnreachable = false }
                 seedInitialNetworkSnapshot()
                 reconcileAsyncIfChanged()
             }
@@ -345,6 +383,7 @@ object EchGatewayManager {
             .build()
         val vCb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                synchronized(stateLock) { proxyTunnelUnreachable = false }
                 seedInitialNetworkSnapshot()
                 reconcileAsyncIfChanged()
             }
@@ -355,6 +394,7 @@ object EchGatewayManager {
             }
 
             override fun onLost(network: Network) {
+                synchronized(stateLock) { proxyTunnelUnreachable = false }
                 seedInitialNetworkSnapshot()
                 reconcileAsyncIfChanged()
             }
@@ -435,23 +475,24 @@ object EchGatewayManager {
         val (mode, vpnNow, bestPhys) = synchronized(stateLock) {
             Triple(currentMode, vpnActive, bestPhysicalLocked())
         }
+        val tunnelFallback = synchronized(stateLock) { proxyTunnelUnreachable }
         val hasSysProxy = isSystemHttpProxySet()
-        val hasProxyOrVpn = vpnNow || hasSysProxy
         val physHandle = bestPhys?.handle ?: 0L
-        val canBindPhys = mode == EchRoutingMode.ECH_PRIORITY &&
+        val needPhysProbe = (mode == EchRoutingMode.ECH_PRIORITY && vpnNow) ||
+            (mode == EchRoutingMode.SMART_AUTO && vpnNow && tunnelFallback)
+        val canBindPhys = needPhysProbe &&
             physHandle != 0L &&
             NativeEchBridge.nativeCanBindNetwork(physHandle)
-        val (shouldRun, bypassVpn, yielded) = when (mode) {
-            EchRoutingMode.SYSTEM_DEFAULT -> Triple(false, false, false)
-            EchRoutingMode.SMART_AUTO ->
-                if (hasProxyOrVpn) Triple(false, false, false)
-                else Triple(true, false, false)
-            EchRoutingMode.ECH_PRIORITY -> when {
-                !vpnNow -> Triple(true, false, false)
-                canBindPhys -> Triple(true, true, false)
-                else -> Triple(false, false, true)
-            }
-        }
+        val routeDecision = decideEchGatewayRoute(
+            mode = mode,
+            vpnNow = vpnNow,
+            hasSysProxy = hasSysProxy,
+            canBindPhys = canBindPhys,
+            proxyTunnelUnreachable = tunnelFallback
+        )
+        val shouldRun = routeDecision.shouldRun
+        val bypassVpn = routeDecision.bypassVpn
+        val yielded = routeDecision.yielded
         val (prevYielded, prevMode) = synchronized(stateLock) {
             val pYield = vpnLockdownYielded
             val pMode = lastAppliedMode

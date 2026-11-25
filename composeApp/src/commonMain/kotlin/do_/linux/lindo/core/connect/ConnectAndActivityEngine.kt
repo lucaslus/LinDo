@@ -173,7 +173,8 @@ object ScreenTrackEngine {
     const val STATUS_SITE_VERIFICATION_REQUIRED = -403
     private const val PAUSE_UNLESS_SCROLLED_MS = 3 * 60 * 1000L
     private const val MAX_TRACKING_TIME_PER_POST_MS = 6 * 60 * 1000
-    private const val FLUSH_INTERVAL_MS = 15_000L
+    // 对齐官方 Discourse screen-track.js FLUSH_INTERVAL = 60000ms（新读楼层仍通过 hasUnreadRush 在 1s 即时上报），降低后台写请求触发 CF 风控概率
+    private const val FLUSH_INTERVAL_MS = 60_000L
     private const val MAX_TOPIC_RETRIES = 3
     private const val MAX_TRACKED_READ_POSTS = 2_000
     private val BACKOFF_DELAYS_MS = longArrayOf(5_000L, 10_000L, 20_000L, 40_000L)

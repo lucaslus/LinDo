@@ -1286,11 +1286,10 @@ class MainActivity : ComponentActivity() {
                 initialUrl = initialUrl,
                 openedClearance = openedClearance,
                 onDismiss = {
-                    // 关闭内置网页（如完成站点验证后点关闭）前同步刷盘最新 cf_clearance / 会话 Cookie，确保紧随其后的自动重刷立即生效
+                    // 关闭内置网页前先从内存 CookieMonster (<0.2ms) 同步最新票据，磁盘落盘异步移交专用线程，零主线程阻塞
                     NetworkRecoveryPolicy.androidVerifying = false
                     runCatching {
                         val cm = MainActivity.currentWebViewCookieManager()
-                        cm.flush()
                         val latestCookies = cm.getCookie("https://linux.do").orEmpty()
                         val latestClearance = getCookieValue(latestCookies, "cf_clearance")
                         val rotated = !latestClearance.isNullOrBlank() && latestClearance != openedClearance
@@ -1307,15 +1306,17 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
-                        persistSessionToDisk()
+                        activityScope.launch(cookieIoDispatcher) {
+                            runCatching { cm.flush() }
+                            persistSessionToDisk()
+                        }
                     }
                     onDismiss()
                 },
                 onLoginSuccess = {
                     NetworkRecoveryPolicy.androidVerifying = false
                     val cm = MainActivity.currentWebViewCookieManager()
-                    runCatching { cm.flush() }
-                    val latestCookies = cm.getCookie("https://linux.do").orEmpty()
+                    val latestCookies = runCatching { cm.getCookie("https://linux.do").orEmpty() }.getOrDefault("")
                     if (latestCookies.isNotBlank()) {
                         CookieSentinel.syncFromAuthoritativeBrowserCookieString(latestCookies, verified = true)
                     }
@@ -1323,15 +1324,15 @@ class MainActivity : ComponentActivity() {
                     val freshCsrf = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
                     runOnUiThread {
                         apiWebView?.evaluateJavascript(
-                            "window.__lindoCsrf = $freshCsrf || null; window.__lindoCsrfPromise = null; window.__lindoIgnoreDomCsrf = true;",
+                            "window.__lindoCsrf = $freshCsrf || window.__lindoCsrf || null; window.__lindoCsrfPromise = null;",
                             null
                         )
                     }
-                    activityScope.launch {
+                    activityScope.launch(cookieIoDispatcher) {
+                        runCatching { cm.flush() }
                         runCatching { ensureAuthCookiesInWebKit(cm) }
                         persistSessionToDisk()
                     }
-                    persistSessionToDisk()
                     onLoginSuccess()
                 },
                 onLaunchFileChooser = ::launchWebFileChooser
@@ -2190,20 +2191,28 @@ class MainActivity : ComponentActivity() {
         if (isFinishing || isDestroyed) return
         val wvSnapshot = apiWebView ?: return
         val freshCsrf = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
-        if (!forceReload && !apiWebViewBootstrapChallenged && apiWebViewOriginHealthy) {
+        if (!forceReload && apiWebViewOriginHealthy) {
+            apiWebViewBootstrapChallenged = false
             withContext(Dispatchers.Main) {
-                if (apiWebView === wvSnapshot) {
+                if (apiWebView === wvSnapshot &&
+                    do_.linux.lindo.core.network.AndroidWebViewBridgeContract.isValidLinuxDoDocumentUrl(wvSnapshot.url)
+                ) {
+                    wvSnapshot.evaluateJavascript(installBinaryBridgeHelperJs, null)
                     wvSnapshot.evaluateJavascript(
-                        "window.__lindoCsrf = $freshCsrf || null; window.__lindoCsrfPromise = null;",
+                        "window.__lindoCsrf = $freshCsrf || window.__lindoCsrf || null; window.__lindoCsrfPromise = null;",
                         null
                     )
+                    return@withContext
                 }
             }
-            return
+            if (apiWebViewOriginHealthy) return
         }
         apiWebViewNavMutex.withLock {
             if (isFinishing || isDestroyed) return@withLock
-            if (!forceReload && !apiWebViewBootstrapChallenged && apiWebViewOriginHealthy) return@withLock
+            if (!forceReload && apiWebViewOriginHealthy) {
+                apiWebViewBootstrapChallenged = false
+                return@withLock
+            }
             val drainDeadline = System.currentTimeMillis() + 1_200L
             while (System.currentTimeMillis() < drainDeadline &&
                 (pendingHttpCallbacks.isNotEmpty() || pendingBinaryCallbacks.isNotEmpty())
@@ -2487,6 +2496,8 @@ class MainActivity : ComponentActivity() {
             val originLanded = java.util.concurrent.atomic.AtomicBoolean(false)
             val originLandedAtMs = java.util.concurrent.atomic.AtomicLong(0L)
             val mainFrameFailed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val jsConsoleWidgetReady = java.util.concurrent.atomic.AtomicBoolean(false)
+            val probeWakeSignal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
             var staleClearancePurgedOnce = false
             var interactiveWidgetReady = false
             var widgetFirstSeenAtMs = 0L
@@ -2496,6 +2507,10 @@ class MainActivity : ComponentActivity() {
                 val compactFrameJs = buildVerificationCompactFrameJs(isDark = AppAppearance.dark)
                 runOnCookieIo {
                     val cm = MainActivity.currentWebViewCookieManager()
+                    if (previousWasChallenged) {
+                        purgeCfCookiesInWebKit(cm)
+                        staleClearancePurgedOnce = true
+                    }
                     ensureAuthCookiesInWebKit(cm)
                 }
                 val created = withContext(Dispatchers.Main) {
@@ -2518,9 +2533,30 @@ class MainActivity : ComponentActivity() {
                         }
                         cm.setAcceptCookie(true)
                         cm.setAcceptThirdPartyCookies(this, true)
+                        if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                            runCatching {
+                                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
+                                    this,
+                                    compactFrameJs,
+                                    setOf("https://linux.do")
+                                )
+                            }
+                        }
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                                val msg = consoleMessage?.message().orEmpty()
+                                if (msg == "__lindo_cf_widget_ready__") {
+                                    jsConsoleWidgetReady.set(true)
+                                    probeWakeSignal.trySend(Unit)
+                                    return true
+                                }
+                                return super.onConsoleMessage(consoleMessage)
+                            }
+                        }
                         webViewClient = object : WebViewClient() {
                             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                                 mainFrameFailed.set(true)
+                                probeWakeSignal.trySend(Unit)
                                 if (tempWv === view) tempWv = null
                                 releaseNativeWebView(view, rendererGone = true)
                                 return true
@@ -2528,10 +2564,12 @@ class MainActivity : ComponentActivity() {
                             override fun onPageCommitVisible(view: WebView?, url: String?) {
                                 super.onPageCommitVisible(view, url)
                                 view?.evaluateJavascript(compactFrameJs, null)
+                                probeWakeSignal.trySend(Unit)
                             }
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
                                 view?.evaluateJavascript(compactFrameJs, null)
+                                probeWakeSignal.trySend(Unit)
                             }
                             override fun onReceivedError(
                                 view: WebView?,
@@ -2539,7 +2577,10 @@ class MainActivity : ComponentActivity() {
                                 error: android.webkit.WebResourceError?
                             ) {
                                 super.onReceivedError(view, request, error)
-                                if (request?.isForMainFrame == true) mainFrameFailed.set(true)
+                                if (request?.isForMainFrame == true) {
+                                    mainFrameFailed.set(true)
+                                    probeWakeSignal.trySend(Unit)
+                                }
                             }
                             override fun onReceivedHttpError(
                                 view: WebView?,
@@ -2551,6 +2592,7 @@ class MainActivity : ComponentActivity() {
                                     val status = errorResponse?.statusCode ?: 0
                                     if (status in setOf(502, 504)) {
                                         mainFrameFailed.set(true)
+                                        probeWakeSignal.trySend(Unit)
                                     } else if (request.url?.host.equals("linux.do", ignoreCase = true) &&
                                         request.url?.path?.startsWith("/challenge") == true &&
                                         status == 404 &&
@@ -2562,6 +2604,7 @@ class MainActivity : ComponentActivity() {
                                         // 抵达源站 /challenge 轻量 404 = 已穿过 Cloudflare WAF
                                         originLandedAtMs.compareAndSet(0L, System.currentTimeMillis())
                                         originLanded.set(true)
+                                        probeWakeSignal.trySend(Unit)
                                     }
                                 }
                             }
@@ -2601,7 +2644,7 @@ class MainActivity : ComponentActivity() {
 
                 var cfErrorRecoveries = 0
                 while (true) {
-                    delay(200L)
+                    withTimeoutOrNull(200L) { probeWakeSignal.receive() }
                     val now = System.currentTimeMillis()
                     val fgJoinedAt = silentForegroundJoinedAtMs.get()
                     effectiveTrigger = if (isForegroundCaller || fgJoinedAt > 0L) {
@@ -2709,7 +2752,8 @@ class MainActivity : ComponentActivity() {
                             return@withContext do_.linux.lindo.core.network.SilentProbeSignal.PASSED
                         }
 
-                        val jsInteractive = parsed?.optBoolean("interactive") == true ||
+                        val jsInteractive = jsConsoleWidgetReady.get() ||
+                            parsed?.optBoolean("interactive") == true ||
                             decodeJsStringResult(evalJs(wv, "window.__lindoTurnstileInteractiveBegin === true ? '1' : '0'")) == "1"
                         val hasWidget = parsed?.optBoolean("widget") == true
                         if (hasWidget) {
@@ -3188,7 +3232,11 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     val echActive = do_.linux.lindo.core.network.EchRoutingPolicy.snapshot.active
+                    val promotedFakeVpnToEch = !echActive &&
+                        !isBackground &&
+                        do_.linux.lindo.ech.EchGatewayManager.noteProxyTunnelUnreachable()
                     val shouldRotate = !echActive &&
+                        !promotedFakeVpnToEch &&
                         !isBackground &&
                         activeValidatedNetworkHandle != 0L &&
                         !LinuxDoRepository.isRateLimitedNow() &&
@@ -3198,7 +3246,14 @@ class MainActivity : ComponentActivity() {
                         isMultiProfileSupported() &&
                         do_.linux.lindo.core.network.NetworkPolicyEngine.timeoutBlackholeDetector.recordConnectTimeout("kotlin_timeout")
                     activityScope.launch {
-                        if (shouldRotate) {
+                        if (promotedFakeVpnToEch) {
+                            do_.linux.lindo.ech.EchGatewayManager.awaitReconcileAndProxyReady()
+                            rebuildApiWebView(
+                                reason = "smart_auto_vpn_fallback_ech",
+                                force = true,
+                                expectedGeneration = observedGen
+                            )
+                        } else if (shouldRotate) {
                             rotateWebViewNetworkProfile(
                                 reason = "confirmed_connect_blackhole",
                                 expectedGeneration = observedGen
@@ -3250,14 +3305,19 @@ class MainActivity : ComponentActivity() {
                 if (do_.linux.lindo.core.network.NetworkPolicyEngine.timeoutBlackholeDetector.recordConnectTimeout(diagPhase)) {
                     val echActive = do_.linux.lindo.core.network.EchRoutingPolicy.snapshot.active
                     val hasInFlightFgWrite = pendingHttpMeta.values.any { !it.isBackground && !it.isRead }
-                    if (echActive) {
-                        // ECH 激活时严禁切入 lindo_net_* Profile，仅旋转 Sticky IP + 重建 apiWebView
+                    val promotedFakeVpnToEch = !echActive &&
+                        do_.linux.lindo.ech.EchGatewayManager.noteProxyTunnelUnreachable()
+                    if (echActive || promotedFakeVpnToEch) {
+                        // ECH 激活或假 VPN 自动升舱 ECH 时：不切 lindo_net_* Profile，等待 ECH 代理就绪并重建 apiWebView
                         if (hasInFlightFgWrite) {
                             pendingTransportRecycleOnNextUse = true
                         } else {
                             activityScope.launch {
+                                if (promotedFakeVpnToEch) {
+                                    do_.linux.lindo.ech.EchGatewayManager.awaitReconcileAndProxyReady()
+                                }
                                 rebuildApiWebView(
-                                    reason = "ech_connect_blackhole_recycle",
+                                    reason = if (promotedFakeVpnToEch) "smart_auto_vpn_fallback_ech" else "ech_connect_blackhole_recycle",
                                     force = true,
                                     expectedGeneration = observedGen
                                 )
@@ -3623,9 +3683,10 @@ class MainActivity : ComponentActivity() {
     private suspend fun executeMultipartUploadViaWebViewBridge(
         fileName: String,
         mimeType: String,
-        rawBytes: ByteArray
+        rawBytes: ByteArray,
+        allowSilentChallengeRetry: Boolean = true
     ): Pair<Int, String>? {
-        if (LinuxDoRepository.shouldPauseForSiteVerification("https://linux.do/uploads.json")) {
+        if (NetworkRecoveryPolicy.verifying && LinuxDoRepository.shouldPauseForSiteVerification("https://linux.do/uploads.json")) {
             return 403 to "${CF_MITIGATED_CHALLENGE_PREFIX}<html>需要完成站点验证</html>"
         }
         if (LinuxDoRepository.isRateLimitedNow()) return 429 to """{"errors":["请求较频繁，请稍后再试"]}"""
@@ -3908,7 +3969,30 @@ class MainActivity : ComponentActivity() {
                 lastCookieFlushEpochMs = System.currentTimeMillis()
             }
             runCatching { cm?.flush() }
-            return if (response?.first == REBUILD_ABORTED_STATUS) null else response
+            if (response?.first == REBUILD_ABORTED_STATUS) return null
+            val isUploadChallenged = response != null &&
+                (response.first in setOf(403, 503) ||
+                    (response.first == 429 && response.second.startsWith(CF_MITIGATED_CHALLENGE_PREFIX))) &&
+                do_.linux.lindo.core.network.looksLikeCloudflareChallenge(response.second)
+            if (allowSilentChallengeRetry && isUploadChallenged) {
+                val staleCf = CookieSentinel.resolveWinningCookies(targetHost = "linux.do")["cf_clearance"]?.value
+                CfClearanceAuthority.noteChallenged(staleCf)
+                if (silentRevalidateChallenge(
+                        previousClearance = staleCf,
+                        trigger = do_.linux.lindo.core.network.SilentVerifyTrigger.FOREGROUND,
+                        reason = "foreground_write:POST /uploads.json",
+                        isForegroundWrite = true
+                    )
+                ) {
+                    return executeMultipartUploadViaWebViewBridge(
+                        fileName = fileName,
+                        mimeType = mimeType,
+                        rawBytes = rawBytes,
+                        allowSilentChallengeRetry = false
+                    )
+                }
+            }
+            return response
         } finally {
             pendingUploadPayloads.remove(reqId)
             pendingHttpCallbacks.remove(reqId)
@@ -3995,9 +4079,15 @@ class MainActivity : ComponentActivity() {
     private fun restoreSessionFromDisk() {
         runCatching {
             // 始终使用与系统 WebView 100% 原生一致的 User-Agent（不删改 "; wv"），
-            // 确保与底层 Sec-CH-UA Client Hints 及 cf_clearance 签名完全吻合
+            // 确保与底层 Sec-CH-UA Client Hints 及 cf_clearance 签名完全吻合；
+            // 若系统 Android System WebView 发生升级导致 UA 变化，立即异步清理绑定旧 UA 的失效 cf_clearance。
             val nativeUa = WebSettings.getDefaultUserAgent(this)
+            val previousPersistedUa = prefs.getString("user_agent", null)
             UserApiKeyAuthManager.customUserAgent = nativeUa
+            val uaUpgraded = !previousPersistedUa.isNullOrBlank() && previousPersistedUa != nativeUa
+            if (uaUpgraded) {
+                prefs.edit().putString("user_agent", nativeUa).apply()
+            }
 
             val savedClientId = prefs.getString("client_id", null)
             if (!savedClientId.isNullOrBlank()) {
@@ -4058,6 +4148,16 @@ class MainActivity : ComponentActivity() {
 
             val cookieManager = MainActivity.currentWebViewCookieManager()
             cookieManager.setAcceptCookie(true)
+            if (uaUpgraded) {
+                LinDoDiagnosticLogger.info(
+                    DiagnosticCategory.AUTH,
+                    "WebViewUaUpgrade",
+                    "System WebView UA updated; purging stale UA-bound CF cookies"
+                )
+                activityScope.launch {
+                    runCatching { purgeCfCookiesInWebKit(cookieManager) }
+                }
+            }
             // 始终以原生 Chromium WebKit SQLite CookieJar 为权威源（原生保留真实过期时间与 SameSite/HttpOnly 属性）；
             // 严禁从 SharedPreferences 反写 cf_clearance / __cf_bm / _cfuvid（会丢失原始属性或注入已过期挑战票据），
             // 仅当存在已保存有效 `_t` 会话且 WebKit 意外丢失 `_t` 时才回填 host-only 会话 Cookie。
@@ -4284,14 +4384,7 @@ class MainActivity : ComponentActivity() {
 
     internal suspend fun purgeCfCookiesInWebKit(cookieManager: CookieManager) =
         withContext(cookieIoDispatcher) {
-            suspend fun expire(origin: String, cookieStr: String) = withTimeoutOrNull(2_000L) {
-                suspendCancellableCoroutine<Unit> { cont ->
-                    cookieManager.setCookie(origin, cookieStr) {
-                        if (cont.isActive) cont.resume(Unit)
-                    }
-                }
-            }
-            val cfCookieNames = listOf(
+            val cfCookieNames = setOf(
                 "cf_clearance",
                 "__cf_bm",
                 "_cfuvid",
@@ -4299,26 +4392,60 @@ class MainActivity : ComponentActivity() {
                 "cf_chl_rc_ni",
                 "cf_chl_rc_m"
             )
+            val jobs = ArrayList<Pair<String, String>>(160)
             for (origin in listOf("https://linux.do", "https://www.linux.do")) {
                 for (name in cfCookieNames) {
-                    expire(origin, "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
-                    expire(origin, "$name=; Max-Age=0; Path=/; Secure")
-                    expire(origin, "$name=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=None; Partitioned")
-                    expire(origin, "$name=; Max-Age=0; Path=/; Secure; SameSite=None; Partitioned")
-                    expire(origin, "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly")
-                    expire(origin, "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly")
-                    expire(origin, "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure")
-                    expire(origin, "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly; SameSite=None; Partitioned")
-                    expire(origin, "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; SameSite=None; Partitioned")
+                    jobs += origin to "$name=; Max-Age=0; Path=/; Secure; HttpOnly"
+                    jobs += origin to "$name=; Max-Age=0; Path=/; Secure"
+                    jobs += origin to "$name=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=None; Partitioned"
+                    jobs += origin to "$name=; Max-Age=0; Path=/; Secure; SameSite=None; Partitioned"
+                    jobs += origin to "$name=; Max-Age=0; Domain=linux.do; Path=/; Secure; HttpOnly"
+                    jobs += origin to "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly"
+                    jobs += origin to "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure"
+                    jobs += origin to "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; HttpOnly; SameSite=None; Partitioned"
+                    jobs += origin to "$name=; Max-Age=0; Domain=.linux.do; Path=/; Secure; SameSite=None; Partitioned"
                 }
             }
             for (name in cfCookieNames) {
-                expire("https://challenges.cloudflare.com", "$name=; Max-Age=0; Path=/; Secure; HttpOnly")
-                expire("https://challenges.cloudflare.com", "$name=; Max-Age=0; Path=/; Secure")
-                expire("https://challenges.cloudflare.com", "$name=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=None; Partitioned")
-                expire("https://challenges.cloudflare.com", "$name=; Max-Age=0; Path=/; Secure; SameSite=None; Partitioned")
-                expire("https://challenges.cloudflare.com", "$name=; Max-Age=0; Domain=.cloudflare.com; Path=/; Secure; HttpOnly")
-                expire("https://challenges.cloudflare.com", "$name=; Max-Age=0; Domain=.cloudflare.com; Path=/; Secure; SameSite=None; Partitioned")
+                jobs += "https://challenges.cloudflare.com" to "$name=; Max-Age=0; Path=/; Secure; HttpOnly"
+                jobs += "https://challenges.cloudflare.com" to "$name=; Max-Age=0; Path=/; Secure"
+                jobs += "https://challenges.cloudflare.com" to "$name=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=None; Partitioned"
+                jobs += "https://challenges.cloudflare.com" to "$name=; Max-Age=0; Path=/; Secure; SameSite=None; Partitioned"
+                jobs += "https://challenges.cloudflare.com" to "$name=; Max-Age=0; Domain=.cloudflare.com; Path=/; Secure; HttpOnly"
+                jobs += "https://challenges.cloudflare.com" to "$name=; Max-Age=0; Domain=.cloudflare.com; Path=/; Secure; SameSite=None; Partitioned"
+            }
+            if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.GET_COOKIE_INFO)) {
+                for (origin in listOf("https://linux.do", "https://challenges.cloudflare.com")) {
+                    val infos = runCatching {
+                        androidx.webkit.CookieManagerCompat.getCookieInfo(cookieManager, origin)
+                    }.getOrDefault(emptyList())
+                    for (rawSetCookie in infos) {
+                        val firstPart = rawSetCookie.substringBefore(';').trim()
+                        val cName = firstPart.substringBefore('=').trim()
+                        if (cName in cfCookieNames) {
+                            val attrs = rawSetCookie.substringAfter(';', "").trim()
+                            jobs += origin to if (attrs.isNotEmpty()) {
+                                "$cName=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; $attrs"
+                            } else {
+                                "$cName=; Max-Age=0; Path=/; Secure"
+                            }
+                        }
+                    }
+                }
+            }
+            if (jobs.isNotEmpty()) {
+                withTimeoutOrNull(2_500L) {
+                    suspendCancellableCoroutine<Unit> { cont ->
+                        val remaining = java.util.concurrent.atomic.AtomicInteger(jobs.size)
+                        for ((origin, spec) in jobs) {
+                            cookieManager.setCookie(origin, spec) {
+                                if (remaining.decrementAndGet() == 0 && cont.isActive) {
+                                    cont.resume(Unit)
+                                }
+                            }
+                        }
+                    }
+                }
             }
             runCatching { cookieManager.flush() }
             for (cfName in cfCookieNames) {
@@ -4916,6 +5043,24 @@ private fun buildVerificationCompactFrameJs(isDark: Boolean): String {
     return """
         (function() {
           try {
+            var emitReady = (typeof console !== 'undefined' && console.debug) ? console.debug.bind(console) : function() {};
+            var notifiedWidget = false;
+            var signalWidgetReady = function() {
+              window.__lindoTurnstileInteractiveBegin = true;
+              if (!notifiedWidget) {
+                notifiedWidget = true;
+                try { emitReady('__lindo_cf_widget_ready__'); } catch (_) {}
+              }
+            };
+            var checkChallengeDom = function() {
+              try {
+                if (document.querySelector('#challenge-stage, .cf-turnstile, #turnstile-wrapper, iframe[src*="challenges.cloudflare.com"]')) {
+                  signalWidgetReady();
+                  return true;
+                }
+              } catch (_) {}
+              return false;
+            };
             if (!window.__lindoTurnstileInteractiveHook) {
               window.__lindoTurnstileInteractiveHook = true;
               window.__lindoTurnstileInteractiveBegin = false;
@@ -4924,10 +5069,20 @@ private fun buildVerificationCompactFrameJs(isDark: Boolean): String {
                   var d = ev && ev.data;
                   var s = typeof d === 'string' ? d : (d && typeof d === 'object' ? JSON.stringify(d) : '');
                   if (s && (s.indexOf('interactiveBegin') !== -1 || s.indexOf('interactive-begin') !== -1)) {
-                    window.__lindoTurnstileInteractiveBegin = true;
+                    signalWidgetReady();
                   }
                 } catch (_) {}
               }, true);
+              if (!checkChallengeDom() && typeof MutationObserver !== 'undefined' && document.documentElement) {
+                var mo = new MutationObserver(function() {
+                  if (checkChallengeDom()) {
+                    try { mo.disconnect(); } catch (_) {}
+                  }
+                });
+                mo.observe(document.documentElement, { childList: true, subtree: true });
+              }
+            } else {
+              checkChallengeDom();
             }
             if (!window.__lindoCompactVerifyMaskInstalled) {
               window.__lindoCompactVerifyMaskInstalled = true;
@@ -5086,9 +5241,7 @@ private fun AndroidWebLoginModal(
         completed = true
         NetworkRecoveryPolicy.androidVerifying = false
         val cm = MainActivity.currentWebViewCookieManager()
-        runCatching { cm.flush() }
-        MainActivity.mirrorActiveCookiesToDefaultProfile()
-        val latestAfterVerify = cm.getCookie("https://linux.do").orEmpty()
+        val latestAfterVerify = runCatching { cm.getCookie("https://linux.do").orEmpty() }.getOrDefault("")
         val latestCf = getCookieValue(latestAfterVerify, "cf_clearance")
         val ticketOutcome = CfClearanceAuthority.evaluateVerifyOutcome(
             freshClearance = latestCf,
@@ -5120,33 +5273,38 @@ private fun AndroidWebLoginModal(
         }
         LinuxDoRepository.clearChallengeCooldown()
         do_.linux.lindo.core.network.NetworkPolicyEngine.clearVerifyAttentionAndSnooze()
-        UserApiKeyAuthManager.persistSessionQuietly()
-        val hasCfAfterVerify = !getCookieValue(latestAfterVerify, "cf_clearance").isNullOrBlank()
+        val hasCfAfterVerify = !latestCf.isNullOrBlank()
         LinDoDiagnosticLogger.info(
             DiagnosticCategory.AUTH,
             "SiteVerify",
             "Cloudflare verification completed (hasCf=$hasCfAfterVerify, origin404=$challengeOrigin404Reached, profile=${MainActivity.currentProfileName()}, handoff=$usedHandoffWebView)"
         )
         val act = MainActivity.activeInstance
-        if (act != null && act.apiWebViewBootstrapChallenged) {
+        act?.apiWebView?.let { wv ->
+            val freshCsrfQuoted = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
+            wv.evaluateJavascript(
+                "window.__lindoCsrf = $freshCsrfQuoted || window.__lindoCsrf || null; window.__lindoCsrfPromise = null;",
+                null
+            )
+        }
+        if (act != null) {
             act.activityScope.launch {
-                act.refreshApiWebViewOriginAfterVerify()
-                withContext(Dispatchers.Main) {
-                    onLoginSuccess()
+                withContext(MainActivity.cookieIoDispatcher) {
+                    runCatching { cm.flush() }
+                    MainActivity.mirrorActiveCookiesToDefaultProfile()
+                    UserApiKeyAuthManager.persistSessionQuietly()
                 }
+                act.refreshApiWebViewOriginAfterVerify()
                 LinuxDoRepository.drainPendingNotificationReadsAsync()
             }
         } else {
-            act?.apiWebView?.let { wv ->
-                val freshCsrfQuoted = JSONObject.quote(LinuxDoRepository.getCachedCsrfToken().orEmpty())
-                wv.evaluateJavascript(
-                    "window.__lindoCsrf = $freshCsrfQuoted || null; window.__lindoCsrfPromise = null;",
-                    null
-                )
-            }
+            runCatching { cm.flush() }
+            MainActivity.mirrorActiveCookiesToDefaultProfile()
+            UserApiKeyAuthManager.persistSessionQuietly()
             LinuxDoRepository.drainPendingNotificationReadsAsync()
-            onLoginSuccess()
         }
+        // 立即通知关闭弹窗（<16ms 秒关），Cookie 落盘与 apiWebView 同步均已在后台并行进行
+        onLoginSuccess()
     }
 
     fun handleUserDismiss() {
@@ -5454,6 +5612,12 @@ private fun AndroidWebLoginModal(
             // 已从静默验证原位交接同一 WebView 实例：零二次重载，直接探测并展示交互框！
             tryExtractSessionAndComplete(wv)
         } else {
+            if (isVerificationFlow && openedWasChallenged && !staleClearancePurgedInModal) {
+                staleClearancePurgedInModal = true
+                runCatching {
+                    MainActivity.activeInstance?.purgeCfCookiesInWebKit(MainActivity.currentWebViewCookieManager())
+                }
+            }
             wv.loadUrl(initialUrl)
         }
     }
@@ -5714,12 +5878,35 @@ private fun AndroidWebLoginModal(
                             val cookieManager = MainActivity.currentWebViewCookieManager()
                             cookieManager.setAcceptCookie(true)
                             cookieManager.setAcceptThirdPartyCookies(this, true)
-                            cookieManager.flush()
+                            if (isVerificationFlow &&
+                                handedOff == null &&
+                                androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)
+                            ) {
+                                runCatching {
+                                    androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
+                                        this,
+                                        buildVerificationCompactFrameJs(isDark),
+                                        setOf("https://linux.do")
+                                    )
+                                }
+                            }
 
                             webChromeClient = object : WebChromeClient() {
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                     if (view === webViewRef) pageProgress = newProgress
                                 }
+                                override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                                    val msg = consoleMessage?.message().orEmpty()
+                                    if (isVerificationFlow && msg == "__lindo_cf_widget_ready__" && viewOrSelfMatches()) {
+                                        challengeWidgetMounted = true
+                                        showVerifyChannelRepairHint = false
+                                        verificationNavigatingAway = false
+                                        interactiveChallengeActive = true
+                                        return true
+                                    }
+                                    return super.onConsoleMessage(consoleMessage)
+                                }
+                                private fun viewOrSelfMatches(): Boolean = !completed && webViewRef != null
                                 override fun onShowFileChooser(
                                     webView: WebView?,
                                     filePathCallback: ValueCallback<Array<Uri>>?,
@@ -5878,7 +6065,27 @@ private fun AndroidWebLoginModal(
                                         ) {
                                             challengeOrigin404Reached = true
                                             interactiveChallengeActive = false
-                                            tryExtractSessionAndComplete(view, isPageFinished = true)
+                                            val rawNow = runCatching {
+                                                MainActivity.currentWebViewCookieManager().getCookie("https://linux.do").orEmpty()
+                                            }.getOrDefault("")
+                                            val latestCf = getCookieValue(rawNow, "cf_clearance")
+                                            val outcome = CfClearanceAuthority.evaluateVerifyOutcome(
+                                                freshClearance = latestCf,
+                                                previousClearance = openedClearance,
+                                                previousWasChallenged = openedWasChallenged
+                                            )
+                                            if (!latestCf.isNullOrBlank() &&
+                                                (outcome == do_.linux.lindo.core.network.VerifyTicketOutcome.ROTATED ||
+                                                    outcome == do_.linux.lindo.core.network.VerifyTicketOutcome.EXISTING_VALID)
+                                            ) {
+                                                // 新 cf_clearance 已落入 CookieMonster：收到非质询 404 响应头瞬间即终止 HTML 渲染并秒关弹窗 (<16ms)
+                                                runCatching { view?.stopLoading() }
+                                                completeSiteVerification()
+                                            } else if (outcome == do_.linux.lindo.core.network.VerifyTicketOutcome.STALE_UNCHALLENGED_404 &&
+                                                !staleClearancePurgedInModal
+                                            ) {
+                                                tryExtractSessionAndComplete(view, isPageFinished = true)
+                                            }
                                         }
                                     }
                                 }

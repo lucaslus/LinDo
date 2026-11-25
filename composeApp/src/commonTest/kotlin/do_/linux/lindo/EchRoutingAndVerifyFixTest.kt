@@ -1,15 +1,18 @@
 package do_.linux.lindo
 
+import do_.linux.lindo.core.connect.ScreenTrackEngine
 import do_.linux.lindo.core.diagnostics.LinDoDiagnosticLogger
 import do_.linux.lindo.core.network.CF_MITIGATED_CHALLENGE_PREFIX
 import do_.linux.lindo.core.network.CfClearanceAuthority
 import do_.linux.lindo.core.network.CookieSentinel
+import do_.linux.lindo.core.network.EchRouteDecision
 import do_.linux.lindo.core.network.EchRoutingMode
 import do_.linux.lindo.core.network.EchRoutingPolicy
 import do_.linux.lindo.core.network.EchRuntimeSnapshot
 import do_.linux.lindo.core.network.LinuxDoRepository
 import do_.linux.lindo.core.network.NetworkPolicyEngine
 import do_.linux.lindo.core.network.UserApiKeyAuthManager
+import do_.linux.lindo.core.network.decideEchGatewayRoute
 import do_.linux.lindo.core.network.looksLikeCloudflareChallenge
 import do_.linux.lindo.core.network.webVerificationProbeScript
 import kotlinx.coroutines.test.runTest
@@ -207,5 +210,123 @@ class EchRoutingAndVerifyFixTest {
         val prefixed = "${CF_MITIGATED_CHALLENGE_PREFIX}<html><head><title>Just a moment...</title></head></html>"
         assertTrue(looksLikeCloudflareChallenge(prefixed))
         assertTrue(looksLikeCloudflareChallenge("<html><head><title>Something went wrong</title></head></html>"))
+    }
+
+    @Test
+    fun smartAutoYieldsToHealthyVpnAndAutomaticallyPromotesToEchOnFakeOrDeadVpn() {
+        // Healthy VPN under SMART_AUTO yields cleanly
+        assertEquals(
+            EchRouteDecision(shouldRun = false, bypassVpn = false, yielded = false),
+            decideEchGatewayRoute(
+                mode = EchRoutingMode.SMART_AUTO,
+                vpnNow = true,
+                hasSysProxy = false,
+                canBindPhys = true,
+                proxyTunnelUnreachable = false
+            )
+        )
+        // Fake/local VPN (e.g. AdGuard) with bypass allowed -> SMART_AUTO promotes to ECH + physical NIC bind
+        assertEquals(
+            EchRouteDecision(shouldRun = true, bypassVpn = true, yielded = false),
+            decideEchGatewayRoute(
+                mode = EchRoutingMode.SMART_AUTO,
+                vpnNow = true,
+                hasSysProxy = false,
+                canBindPhys = true,
+                proxyTunnelUnreachable = true
+            )
+        )
+        // Fake/local VPN with lockdown (`canBindPhys = false`) -> SMART_AUTO still promotes to ECH over encrypted IP literals
+        assertEquals(
+            EchRouteDecision(shouldRun = true, bypassVpn = false, yielded = false),
+            decideEchGatewayRoute(
+                mode = EchRoutingMode.SMART_AUTO,
+                vpnNow = true,
+                hasSysProxy = false,
+                canBindPhys = false,
+                proxyTunnelUnreachable = true
+            )
+        )
+        // SYSTEM_DEFAULT never activates ECH even if proxy is unreachable
+        assertEquals(
+            EchRouteDecision(shouldRun = false, bypassVpn = false, yielded = false),
+            decideEchGatewayRoute(
+                mode = EchRoutingMode.SYSTEM_DEFAULT,
+                vpnNow = true,
+                hasSysProxy = true,
+                canBindPhys = true,
+                proxyTunnelUnreachable = true
+            )
+        )
+    }
+
+    @Test
+    fun screenTrackEngineKeeps1sUnreadRushWhilePacingSteadyStateFlushesTo60s() {
+        ScreenTrackEngine.resetForTest()
+        try {
+            val t0 = 10_000L
+            ScreenTrackEngine.onTopicEntered(topicId = 77001, initialVisiblePosts = setOf(1, 2), nowMs = t0)
+            // First unread floors flush immediately at 1.2s via hasUnreadRush
+            val rushBatch = ScreenTrackEngine.tick(nowMs = t0 + 1_200L)
+            kotlin.test.assertNotNull(rushBatch, "Unread floors must still flush at ~1s via hasUnreadRush")
+
+            // Continued dwell on ALREADY-read floors must NOT flush at 15s or 45s (aligned to 60s official interval)
+            var now = t0 + 1_200L
+            for (sec in 1..45) {
+                now += 1_000L
+                ScreenTrackEngine.onUserScrolled(now)
+                kotlin.test.assertNull(
+                    ScreenTrackEngine.tick(nowMs = now),
+                    "Steady-state dwell on already-seen floors should not flush at ${sec}s (< 60s)"
+                )
+            }
+            // At 60s total accumulated dwell, steady-state batch flushes cleanly
+            var flushedAt60s = false
+            for (sec in 46..61) {
+                now += 1_000L
+                ScreenTrackEngine.onUserScrolled(now)
+                if (ScreenTrackEngine.tick(nowMs = now) != null) {
+                    flushedAt60s = true
+                    break
+                }
+            }
+            assertTrue(flushedAt60s, "Steady-state dwell must flush once 60s interval is reached")
+        } finally {
+            ScreenTrackEngine.resetForTest()
+        }
+    }
+
+    @Test
+    fun cookieSentinelPreservesPreviousRotatedTTokenForOneShotFallbackAndProtectsWebViewUa() {
+        val gen = UserApiKeyAuthManager.sessionGeneration
+        CookieSentinel.ingestRawCookieString("_t=token_v1_good", domain = "linux.do", hostOnly = true)
+        CookieSentinel.ingestRawCookieString("_t=token_v2_half_rotated", domain = "linux.do", hostOnly = true)
+
+        assertEquals(
+            "token_v1_good",
+            CookieSentinel.consumeFallbackTToken(expectedGeneration = gen, failedCurrentT = "token_v2_half_rotated")
+        )
+        // Single-shot consumption prevents infinite fallback loops
+        kotlin.test.assertNull(
+            CookieSentinel.consumeFallbackTToken(expectedGeneration = gen, failedCurrentT = "token_v2_half_rotated")
+        )
+
+        // Explicit logout / clearAuthCookiesOnly wipes any fallback token
+        CookieSentinel.ingestRawCookieString("_t=token_a", domain = "linux.do", hostOnly = true)
+        CookieSentinel.ingestRawCookieString("_t=token_b", domain = "linux.do", hostOnly = true)
+        CookieSentinel.clearAuthCookiesOnly()
+        kotlin.test.assertNull(
+            CookieSentinel.consumeFallbackTToken(expectedGeneration = gen, failedCurrentT = "token_b")
+        )
+
+        // Native WebView UA must not be overwritten by pasted desktop cURL UA
+        val nativeWebViewUa = "Mozilla/5.0 (Linux; Android 16; SM-S9380 Build/BP2A; wv) AppleWebKit/537.36 Chrome/157.0.8103.50 Mobile Safari/537.36"
+        UserApiKeyAuthManager.customUserAgent = nativeWebViewUa
+        UserApiKeyAuthManager.requireBrowserTransportOnly = true
+        val imported = LinuxDoRepository.importCloudflareClearanceInput(
+            "curl 'https://linux.do/' -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' -H 'cookie: cf_clearance=test_cf_123'"
+        )
+        assertTrue(imported)
+        assertEquals(nativeWebViewUa, UserApiKeyAuthManager.customUserAgent)
     }
 }

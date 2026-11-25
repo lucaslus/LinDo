@@ -316,16 +316,50 @@ impl DohResolver {
         }
     }
 
-    /// Updates cached `ech_config_list` after an ECH retry-config response or rotates sticky IP
-    /// if the current sticky Cloudflare IP failed TCP/TLS handshake or returned Edge 1034.
+    /// Updates cached `ech_config_list` after an authenticated ECH retry-config response.
+    /// Rejects empty or malformed byte sequences (including BoringSSL's 5-byte syntax-error placeholder)
+    /// so `ech_cache` can never be poisoned.
     pub async fn update_ech_retry_configs(&self, retry_configs: Vec<u8>) {
-        if retry_configs.is_empty() {
+        if !crate::tls_upstream::is_valid_ech_config_list(&retry_configs) {
             return;
         }
         let mut guard = self.ech_cache.lock().await;
         if let Some(ref mut cached) = *guard {
             cached.ech_config_list = retry_configs;
             cached.fetched_at = Instant::now();
+        }
+    }
+
+    /// Returns a distinct backup Cloudflare Anycast IPv4 candidate (preferring non-degraded IPs)
+    /// for hedged concurrent TLS handshakes when the primary IP stalls after TCP connect.
+    pub async fn peek_alternate_sticky_ip(&self, primary_ip: Ipv4Addr) -> Option<Ipv4Addr> {
+        let avoided = *self.avoid_sticky_ip.lock();
+        let guard = self.ech_cache.lock().await;
+        let cached = guard.as_ref()?;
+        cached
+            .candidates
+            .iter()
+            .copied()
+            .find(|&ip| ip != primary_ip && Some(ip) != avoided)
+            .or_else(|| {
+                cached
+                    .candidates
+                    .iter()
+                    .copied()
+                    .find(|&ip| ip != primary_ip)
+            })
+    }
+
+    /// Promotes a faster backup Cloudflare Anycast IP to `sticky_ip` when a hedged backup handshake wins.
+    pub async fn promote_sticky_ip(&self, winner_ip: Ipv4Addr) {
+        let mut guard = self.ech_cache.lock().await;
+        if let Some(ref mut cached) = *guard {
+            let prev = cached.sticky_ip;
+            if prev != winner_ip {
+                *self.avoid_sticky_ip.lock() = Some(prev);
+                cached.sticky_ip = winner_ip;
+                *self.last_sticky_ip.lock() = Some((cached.network_gen, winner_ip));
+            }
         }
     }
 
@@ -499,24 +533,42 @@ impl DohResolver {
     }
 
     async fn query_first(&self, domain: &str, qtype: u16) -> Result<ParsedDnsResponse, String> {
-        let query = build_dns_query(domain, qtype);
+        let query: Arc<[u8]> = Arc::from(build_dns_query(domain, qtype).into_boxed_slice());
+        let waves: [&[DohUpstream]; 2] = [
+            // Wave 1: race diverse primary resolvers (AliDNS + DNSPod + Cloudflare) concurrently
+            &[DOH_UPSTREAMS[0], DOH_UPSTREAMS[2], DOH_UPSTREAMS[4]],
+            // Wave 2: fallback secondary resolvers only if all primaries fail
+            &[DOH_UPSTREAMS[1], DOH_UPSTREAMS[3], DOH_UPSTREAMS[5]],
+        ];
         let mut last_err = String::from("no DoH upstream succeeded");
-        for upstream in DOH_UPSTREAMS {
-            match self
-                .query_single_upstream(*upstream, &query, domain, qtype)
-                .await
-            {
-                Ok(parsed) => {
-                    if (qtype == QTYPE_A && !parsed.ipv4.is_empty())
-                        || (qtype == QTYPE_HTTPS
-                            && (!parsed.ech_configs.is_empty() || !parsed.ipv4_hints.is_empty()))
-                    {
-                        return Ok(parsed);
+        for wave in waves {
+            let mut set = JoinSet::new();
+            for &upstream in wave {
+                let tls_connector = Arc::clone(&self.tls_connector);
+                let q = Arc::clone(&query);
+                set.spawn(async move {
+                    let res = query_single_upstream_with_connector(&tls_connector, upstream, &q).await;
+                    (upstream, res)
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                let Ok((upstream, res)) = joined else {
+                    continue;
+                };
+                match res {
+                    Ok(parsed) => {
+                        if (qtype == QTYPE_A && !parsed.ipv4.is_empty())
+                            || (qtype == QTYPE_HTTPS
+                                && (!parsed.ech_configs.is_empty() || !parsed.ipv4_hints.is_empty()))
+                        {
+                            set.abort_all();
+                            return Ok(parsed);
+                        }
+                        last_err = format!("{} returned empty answers for {domain}", upstream.ip);
                     }
-                    last_err = format!("{} returned empty answers for {domain}", upstream.ip);
-                }
-                Err(err) => {
-                    last_err = format!("{}: {err}", upstream.ip);
+                    Err(err) => {
+                        last_err = format!("{}: {err}", upstream.ip);
+                    }
                 }
             }
         }
@@ -530,66 +582,73 @@ impl DohResolver {
         _domain: &str,
         _qtype: u16,
     ) -> Result<ParsedDnsResponse, String> {
-        let addr = SocketAddr::new(IpAddr::V4(upstream.ip), 443);
-        let (tcp, _) = net_bind::connect_tcp(addr, Duration::from_millis(2500))
-            .await
-            .map_err(|e| format!("tcp connect: {e}"))?;
+        query_single_upstream_with_connector(&self.tls_connector, upstream, dns_wire).await
+    }
+}
 
-        let ssl = self
-            .tls_connector
-            .configure()
-            .map_err(|e| format!("ssl configure: {e}"))?
-            .into_ssl(upstream.sni)
-            .map_err(|e| format!("ssl sni: {e}"))?;
-        let mut tls = SslStream::new(ssl, tcp).map_err(|e| format!("ssl wrap: {e}"))?;
-        timeout(Duration::from_millis(3000), Pin::new(&mut tls).connect())
-            .await
-            .map_err(|_| "doh tls timeout".to_string())?
-            .map_err(|e| format!("doh tls handshake: {e}"))?;
-
-        let req = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            upstream.path,
-            upstream.sni,
-            dns_wire.len()
-        );
-        tls.write_all(req.as_bytes())
-            .await
-            .map_err(|e| format!("doh write hdr: {e}"))?;
-        tls.write_all(dns_wire)
-            .await
-            .map_err(|e| format!("doh write body: {e}"))?;
-        tls.flush()
-            .await
-            .map_err(|e| format!("doh flush: {e}"))?;
-
-        let mut buf = Vec::with_capacity(2048);
-        let read_res = timeout(Duration::from_millis(3000), async {
-            let mut tmp = [0u8; 2048];
-            loop {
-                match tls.read(&mut tmp).await {
-                    Ok(0) => break Ok(()),
-                    Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        if buf.len() > 65_536 {
-                            break Ok(());
-                        }
-                    }
-                    Err(e) => break Err(e),
-                }
-            }
-        })
+async fn query_single_upstream_with_connector(
+    tls_connector: &SslConnector,
+    upstream: DohUpstream,
+    dns_wire: &[u8],
+) -> Result<ParsedDnsResponse, String> {
+    let addr = SocketAddr::new(IpAddr::V4(upstream.ip), 443);
+    let (tcp, _) = net_bind::connect_tcp(addr, Duration::from_millis(2500))
         .await
-        .map_err(|_| "doh read timeout".to_string())?;
-        if let Err(e) = read_res {
-            if buf.is_empty() {
-                return Err(format!("doh read error: {e}"));
+        .map_err(|e| format!("tcp connect: {e}"))?;
+
+    let ssl = tls_connector
+        .configure()
+        .map_err(|e| format!("ssl configure: {e}"))?
+        .into_ssl(upstream.sni)
+        .map_err(|e| format!("ssl sni: {e}"))?;
+    let mut tls = SslStream::new(ssl, tcp).map_err(|e| format!("ssl wrap: {e}"))?;
+    timeout(Duration::from_millis(3000), Pin::new(&mut tls).connect())
+        .await
+        .map_err(|_| "doh tls timeout".to_string())?
+        .map_err(|e| format!("doh tls handshake: {e}"))?;
+
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        upstream.path,
+        upstream.sni,
+        dns_wire.len()
+    );
+    tls.write_all(req.as_bytes())
+        .await
+        .map_err(|e| format!("doh write hdr: {e}"))?;
+    tls.write_all(dns_wire)
+        .await
+        .map_err(|e| format!("doh write body: {e}"))?;
+    tls.flush()
+        .await
+        .map_err(|e| format!("doh flush: {e}"))?;
+
+    let mut buf = Vec::with_capacity(2048);
+    let read_res = timeout(Duration::from_millis(3000), async {
+        let mut tmp = [0u8; 2048];
+        loop {
+            match tls.read(&mut tmp).await {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.len() > 65_536 {
+                        break Ok(());
+                    }
+                }
+                Err(e) => break Err(e),
             }
         }
-
-        let decoded = extract_http1_body(&buf)?;
-        parse_dns_response(&decoded)
+    })
+    .await
+    .map_err(|_| "doh read timeout".to_string())?;
+    if let Err(e) = read_res {
+        if buf.is_empty() {
+            return Err(format!("doh read error: {e}"));
+        }
     }
+
+    let decoded = extract_http1_body(&buf)?;
+    parse_dns_response(&decoded)
 }
 
 async fn race_fastest_cf_ip(candidates: &[Ipv4Addr]) -> Option<Ipv4Addr> {

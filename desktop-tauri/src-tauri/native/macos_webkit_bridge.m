@@ -487,16 +487,35 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
 
         NSString *cfLifecycleJs =
             @"(function(){"
+             "  var sentInteractive=false;"
              "  function post(ev){try{window.webkit.messageHandlers.lindoCf.postMessage(ev);}catch(_){}}"
+             "  function postInteractiveOnce(){if(!sentInteractive){sentInteractive=true;post('interactive');}}"
+             "  function checkDom(){"
+             "    try{"
+             "      if(location.origin==='https://linux.do'&&location.pathname.indexOf('/challenge')===0&&document.querySelector('#challenge-stage, .cf-turnstile, #turnstile-wrapper, iframe[src*=\"challenges.cloudflare.com\"]')){"
+             "        postInteractiveOnce();"
+             "        return true;"
+             "      }"
+             "    }catch(_){}"
+             "    return false;"
+             "  }"
              "  window.addEventListener('message',function(e){"
              "    try{"
              "      var d=e&&e.data;"
              "      if(typeof d==='string'&&d.charAt(0)==='{'){d=JSON.parse(d);}"
              "      if(d&&d.source==='cloudflare-challenge'&&(d.event==='interactiveBegin'||d.event==='interactiveTimeout')){"
-             "        post('interactive');"
+             "        postInteractiveOnce();"
              "      }"
              "    }catch(_){}"
              "  },false);"
+             "  if(!checkDom()&&typeof MutationObserver!=='undefined'){"
+             "    var attachMo=function(){"
+             "      if(checkDom()||!document.documentElement)return;"
+             "      var mo=new MutationObserver(function(){if(checkDom()){try{mo.disconnect();}catch(_){}}});"
+             "      mo.observe(document.documentElement,{childList:true,subtree:true});"
+             "    };"
+             "    if(document.documentElement){attachMo();}else{document.addEventListener('DOMContentLoaded',attachMo,{once:true});}"
+             "  }"
              "  function onLeave(){"
              "    if(location.origin==='https://linux.do'&&location.pathname.indexOf('/challenge')===0){"
              "      post('unloading');"
@@ -544,6 +563,9 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
         self.userReloading = NO;
         if (!self.loginModeState && _panel && _panel.isVisible && !self.challengeOriginReached) {
             [self setVerifyMask:NO dark:self.maskDarkState message:@""];
+        }
+        if (gEventReply) {
+            sendReply(gEventReply, 0, @{ @"cfVerifyEvent": @"interactive" }, nil);
         }
     } else if ([eventName isEqualToString:@"unloading"]) {
         if (!self.loginModeState && !self.userReloading) {
@@ -956,6 +978,9 @@ static NSDictionary *lindoReadLocalMediaFile(NSString *path, NSUInteger maxBytes
             } else if ([path hasPrefix:@"/challenge"] && (http.statusCode == 404 || (http.statusCode >= 200 && http.statusCode < 400))) {
                 self.challengeOriginReached = YES;
                 [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
+                if (gEventReply) {
+                    sendReply(gEventReply, 0, @{ @"cfVerifyEvent": @"origin404" }, nil);
+                }
             } else if (http.statusCode == 200 || http.statusCode == 404) {
                 [self setVerifyMask:YES dark:self.maskDarkState message:@"已通过，正在继续…"];
             } else if (http.statusCode >= 500) {

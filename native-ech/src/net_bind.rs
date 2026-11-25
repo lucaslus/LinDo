@@ -187,5 +187,9 @@ async fn connect_with_handle(
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tcp connect timeout"))??;
     let _ = stream.set_nodelay(true);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(10));
+    let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
     Ok((stream, bound))
 }

@@ -1813,4 +1813,190 @@ mod tests {
 
         server.stop();
     }
+
+    #[tokio::test]
+    async fn test_ech_config_validator_rejects_boringssl_placeholder_and_protects_doh_cache() {
+        let _serial = global_test_lock().lock().await;
+        let valid_ech_list = base64::engine::general_purpose::STANDARD
+            .decode("AD7+DQA6AAAgACC7Lynj4wV+BBnVL8X0QRh3b422HOpP33YHm5NgbFpiSAAIAAEAAQABAAMAB2VjaC5jb20AAA==")
+            .unwrap();
+        let boringssl_poison_placeholder = [0xfe_u8, 0x0d, 0xff, 0xff, 0xff];
+
+        assert!(tls_upstream::is_valid_ech_config_list(&valid_ech_list));
+        assert!(!tls_upstream::is_valid_ech_config_list(&[]));
+        assert!(!tls_upstream::is_valid_ech_config_list(&boringssl_poison_placeholder));
+        assert!(!tls_upstream::is_valid_ech_config_list(&valid_ech_list[..10]));
+
+        let ip1 = Ipv4Addr::new(104, 18, 10, 118);
+        let ip2 = Ipv4Addr::new(172, 66, 166, 61);
+        let doh = DohResolver::new().unwrap();
+        doh.seed_ech_cache_for_test(valid_ech_list.clone(), vec![ip1, ip2]).await;
+
+        // Poison placeholder or empty slice MUST NEVER overwrite cached `ech_config_list`!
+        doh.update_ech_retry_configs(boringssl_poison_placeholder.to_vec()).await;
+        doh.update_ech_retry_configs(Vec::new()).await;
+        let (cached_list, cached_ip) = doh.get_ech_and_sticky_ip().await.unwrap();
+        assert_eq!(cached_list, valid_ech_list);
+        assert_eq!(cached_ip, ip1);
+    }
+
+    #[tokio::test]
+    async fn test_hedged_backup_tls_handshake_wins_when_primary_stalls() {
+        let _serial = global_test_lock().lock().await;
+        let ech_cfg = base64::engine::general_purpose::STANDARD
+            .decode("/g0AOgAAIAAguy8p4+MFfgQZ1S/F9EEYd2+NthzqT992B5uTYGxaYkgACAABAAEAAQADAAdlY2guY29tAAA=")
+            .unwrap();
+        let ech_key = base64::engine::general_purpose::STANDARD
+            .decode("nx3rjPVWNbMfaatuM+8AnorXKBktqxI3lEvHfD+pH4I=")
+            .unwrap();
+        let ech_list = base64::engine::general_purpose::STANDARD
+            .decode("AD7+DQA6AAAgACC7Lynj4wV+BBnVL8X0QRh3b422HOpP33YHm5NgbFpiSAAIAAEAAQABAAMAB2VjaC5jb20AAA==")
+            .unwrap();
+
+        let (up_ca_pem, up_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let up_ca = CaAuthority::from_pem(&up_ca_pem, &up_ca_key).unwrap();
+        let up_leaf = up_ca.leaf_for_host("linux.do").unwrap();
+
+        let mut up_acc_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).unwrap();
+        up_acc_builder.set_certificate(&up_leaf.cert).unwrap();
+        up_acc_builder.set_private_key(&up_leaf.key).unwrap();
+        up_acc_builder.set_alpn_select_callback(|_, protos| {
+            let mut p = 0usize;
+            while p < protos.len() {
+                let l = protos[p] as usize;
+                p += 1;
+                if p + l <= protos.len() && &protos[p..p + l] == b"h2" {
+                    return Ok(&protos[p..p + l]);
+                }
+                p += l;
+            }
+            Err(boring2::ssl::AlpnError::NOACK)
+        });
+        let up_acceptor = Arc::new(up_acc_builder.build());
+        unsafe {
+            boring_sys2::init();
+            let hpke_key = boring_sys2::EVP_HPKE_KEY_new();
+            assert_eq!(
+                boring_sys2::EVP_HPKE_KEY_init(
+                    hpke_key,
+                    boring_sys2::EVP_hpke_x25519_hkdf_sha256(),
+                    ech_key.as_ptr(),
+                    ech_key.len(),
+                ),
+                1
+            );
+            let ech_keys = boring_sys2::SSL_ECH_KEYS_new();
+            assert_eq!(
+                boring_sys2::SSL_ECH_KEYS_add(ech_keys, 1, ech_cfg.as_ptr(), ech_cfg.len(), hpke_key),
+                1
+            );
+            assert_eq!(
+                boring_sys2::SSL_CTX_set1_ech_keys(up_acceptor.context().as_ptr() as *mut _, ech_keys),
+                1
+            );
+            boring_sys2::SSL_ECH_KEYS_free(ech_keys);
+            boring_sys2::EVP_HPKE_KEY_free(hpke_key);
+        }
+
+        // Primary listener accepts TCP immediately (0ms) and blackholes TLS ServerHello for 10s!
+        let l_stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_addr = l_stalled.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((_tcp, _)) = l_stalled.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    drop(_tcp);
+                });
+            }
+        });
+
+        // Backup listener serves healthy ECH + HTTP/2 immediately!
+        let l_backup = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backup_addr = l_backup.local_addr().unwrap();
+        let acc_clone = Arc::clone(&up_acceptor);
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = l_backup.accept().await {
+                let acc = Arc::clone(&acc_clone);
+                tokio::spawn(async move {
+                    let ssl = Ssl::new(acc.context()).unwrap();
+                    let mut tls = SslStream::new(ssl, tcp).unwrap();
+                    if Pin::new(&mut tls).accept().await.is_ok() {
+                        let svc = hyper::service::service_fn(|_req: hyper::Request<hyper::body::Incoming>| async move {
+                            Ok::<_, std::convert::Infallible>(hyper::Response::new(
+                                http_body_util::Full::new(bytes::Bytes::from_static(b"hedged-backup-ok")),
+                            ))
+                        });
+                        let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                            .serve_connection(hyper_util::rt::TokioIo::new(tls), svc)
+                            .await;
+                    }
+                });
+            }
+        });
+
+        let ip_primary = Ipv4Addr::new(104, 18, 10, 118);
+        let ip_backup = Ipv4Addr::new(172, 66, 166, 61);
+        let doh = DohResolver::new().unwrap();
+        doh.seed_ech_cache_for_test(ech_list, vec![ip_primary, ip_backup]).await;
+
+        let mut ip_map = std::collections::HashMap::new();
+        ip_map.insert(ip_primary, stalled_addr);
+        ip_map.insert(ip_backup, backup_addr);
+
+        let up_ca_x509 = boring2::x509::X509::from_pem(up_ca_pem.as_bytes()).unwrap();
+        let upstream = UpstreamPool::new_for_doh_rotation_test(
+            Arc::clone(&doh),
+            &up_ca_x509,
+            ip_map,
+            std::time::Duration::from_secs(4),
+        )
+        .unwrap();
+
+        let (gw_ca_pem, gw_ca_key) = ca::generate_root_ca_pem().unwrap();
+        let gw_ca = CaAuthority::from_pem(&gw_ca_pem, &gw_ca_key).unwrap();
+        let gw_ca_cert = boring2::x509::X509::from_pem(gw_ca_pem.as_bytes()).unwrap();
+        let mut server = GatewayServer::start(gw_ca, Arc::clone(&doh), upstream)
+            .await
+            .unwrap();
+        let proxy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server.listen_port);
+
+        let t0 = std::time::Instant::now();
+        let mut cli_tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        cli_tcp
+            .write_all(b"CONNECT linux.do:443 HTTP/1.1\r\nHost: linux.do:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut conn_resp = [0u8; 64];
+        let _ = cli_tcp.read(&mut conn_resp).await.unwrap();
+
+        let mut b = SslConnector::builder(SslMethod::tls_client()).unwrap();
+        b.set_verify(SslVerifyMode::PEER);
+        let mut s = X509StoreBuilder::new().unwrap();
+        s.add_cert(gw_ca_cert).unwrap();
+        b.set_verify_cert_store(s.build()).unwrap();
+        let _ = b.set_alpn_protos(b"\x08http/1.1");
+        let ssl = b.build().configure().unwrap().into_ssl("linux.do").unwrap();
+        let mut cli_tls = SslStream::new(ssl, cli_tcp).unwrap();
+        Pin::new(&mut cli_tls).connect().await.unwrap();
+
+        cli_tls
+            .write_all(b"GET /hedged HTTP/1.1\r\nHost: linux.do\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        cli_tls.read_to_end(&mut resp).await.unwrap();
+        let elapsed = t0.elapsed();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(
+            text.contains("200 OK") && text.contains("hedged-backup-ok"),
+            "expected hedged backup to serve response, got: {text}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(2900),
+            "expected 1.5s hedged backup handshake to beat 4.0s primary timeout, took {elapsed:?}"
+        );
+        assert_eq!(doh.cached_sticky_ip_sync(), Some(ip_backup));
+
+        server.stop();
+    }
 }

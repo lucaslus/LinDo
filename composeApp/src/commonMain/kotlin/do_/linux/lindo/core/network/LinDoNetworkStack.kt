@@ -136,14 +136,40 @@ object CookieSentinel {
     private val sessionRefreshMutex = Mutex()
     @Volatile
     private var lastObservedWinningT: String = ""
+    @Volatile
+    private var previousValidTToken: String = ""
+    @Volatile
+    private var previousValidTGeneration: Long = -1L
 
     private fun notifyIfAuthCookieChanged() {
         val currentT = resolveWinningCookies(targetHost = "linux.do")["_t"]?.value
             ?.takeUnless { it == "demo_session_token" }
             .orEmpty()
-        if (currentT != lastObservedWinningT) {
+        val prevT = lastObservedWinningT
+        if (currentT != prevT) {
+            if (prevT.isNotBlank() && currentT.isNotBlank()) {
+                previousValidTToken = prevT
+                previousValidTGeneration = UserApiKeyAuthManager.sessionGeneration
+            }
             lastObservedWinningT = currentT
             UserApiKeyAuthManager.bumpAuthStateTick()
+        }
+    }
+
+    /**
+     * 当 `_t` 轮换中途偶发落盘半截/旧连接重放导致新 `_t` 被判未登录时，消费同一会话代数内的上一枚有效 `_t` 兜底重试一次。
+     */
+    @Synchronized
+    fun consumeFallbackTToken(expectedGeneration: Long, failedCurrentT: String?): String? {
+        val candidate = previousValidTToken
+        previousValidTToken = ""
+        val gen = previousValidTGeneration
+        previousValidTGeneration = -1L
+        return candidate.takeIf {
+            it.isNotBlank() &&
+                it != "demo_session_token" &&
+                gen == expectedGeneration &&
+                it != failedCurrentT
         }
     }
 
@@ -436,6 +462,9 @@ object CookieSentinel {
     @Synchronized
     fun clear() {
         store.clear()
+        previousValidTToken = ""
+        previousValidTGeneration = -1L
+        lastObservedWinningT = ""
         CfClearanceAuthority.reset()
         notifyIfAuthCookieChanged()
     }
@@ -443,6 +472,9 @@ object CookieSentinel {
     @Synchronized
     fun clearAll() {
         store.clear()
+        previousValidTToken = ""
+        previousValidTGeneration = -1L
+        lastObservedWinningT = ""
         CfClearanceAuthority.reset()
         notifyIfAuthCookieChanged()
     }
@@ -452,6 +484,9 @@ object CookieSentinel {
      */
     @Synchronized
     fun clearAuthCookiesOnly() {
+        previousValidTToken = ""
+        previousValidTGeneration = -1L
+        lastObservedWinningT = ""
         val keysToRemove = store.keys.filter { it.name !in cfTrustCookieNames }
         keysToRemove.forEach { store.remove(it) }
         notifyIfAuthCookieChanged()
@@ -1812,7 +1847,8 @@ object LinuxDoRepository {
             }
         }
 
-        if (!parsed.userAgent.isNullOrBlank()) {
+        val allowCustomUaOverride = !UserApiKeyAuthManager.requireBrowserTransportOnly
+        if (!parsed.userAgent.isNullOrBlank() && allowCustomUaOverride) {
             UserApiKeyAuthManager.customUserAgent = parsed.userAgent
         }
         CookieSentinel.clearAuthCookiesOnly()
@@ -1862,8 +1898,11 @@ object LinuxDoRepository {
         if (trimmed.isEmpty()) return false
         val parsed = parsePastedAuthOrCurlInput(trimmed)
         var ingestedAny = false
+        val allowCustomUaOverride = !UserApiKeyAuthManager.requireBrowserTransportOnly
         if (!parsed.userAgent.isNullOrBlank()) {
-            UserApiKeyAuthManager.customUserAgent = parsed.userAgent
+            if (allowCustomUaOverride) {
+                UserApiKeyAuthManager.customUserAgent = parsed.userAgent
+            }
             ingestedAny = true
         }
         val effectiveCookieHeader = when {
@@ -3039,13 +3078,14 @@ object LinuxDoRepository {
             isForegroundRequest -> RequestPriority.NORMAL
             else -> RequestPriority.LOW
         }
-        val gatePermit = if (!isSilentTiming && !explicitAuthExchange) {
-            NetworkPolicyEngine.priorityGate.acquire(reqPriority)
+        val gatePermit = if (!explicitAuthExchange) {
+            NetworkPolicyEngine.priorityGate.acquire(if (isSilentTiming) RequestPriority.LOW else reqPriority)
         } else null
         try {
-            if (!isSilentTiming && !explicitAuthExchange) {
-                val pacerDelayMs = NetworkPolicyEngine.apiTokenBucket.reserveDelayMs()
-                if (pacerDelayMs > 0L && !deadline.isExpired()) {
+            if (!explicitAuthExchange) {
+                val pacerCost = if (isSilentTiming) 0.5 else 1.0
+                val pacerDelayMs = NetworkPolicyEngine.apiTokenBucket.reserveDelayMs(cost = pacerCost)
+                if (pacerDelayMs > 0L && !deadline.isExpired() && (!isSilentTiming || deadline.remainingMs() > 1_500L)) {
                     kotlinx.coroutines.delay(pacerDelayMs.coerceAtMost(deadline.remainingMs()))
                 }
             }
@@ -4382,8 +4422,34 @@ object LinuxDoRepository {
                         if (initialToken.isNullOrBlank() && !initialApiKey.isNullOrBlank()) {
                             return@withContext UserApiKeyAuthManager.fullProfileCache
                         }
-                        UserApiKeyAuthManager.handleServerAuthInvalidated()
-                        return@withContext null
+                        // 若会话刚刚发生过 _t 轮换但新令牌未生效，消费上一枚已知有效 _t 兜底复核一次，杜绝瞬态轮换分叉导致误退登
+                        val fallbackT = CookieSentinel.consumeFallbackTToken(
+                            expectedGeneration = generation,
+                            failedCurrentT = initialToken
+                        )
+                        if (!fallbackT.isNullOrBlank() && generation == UserApiKeyAuthManager.sessionGeneration) {
+                            CookieSentinel.ingestRawCookieString("_t=$fallbackT", domain = "linux.do", hostOnly = true)
+                            syncCookieHeaderPairsToPlatform("_t=$fallbackT")
+                            runCatching { UserApiKeyAuthManager.onPrepareManualRecovery?.invoke() }
+                            val fallbackRes = executeHttp(
+                                url = "https://linux.do/session/current.json",
+                                extraHeaders = headers,
+                                preserveFailure = true
+                            )
+                            if (fallbackRes != null &&
+                                fallbackRes.first in 200..299 &&
+                                !looksLikeCloudflareChallenge(fallbackRes.second) &&
+                                !isConfirmedDiscourseUnauthenticatedSessionResponse(fallbackRes.first, fallbackRes.second)
+                            ) {
+                                sessionRes = fallbackRes
+                            } else {
+                                UserApiKeyAuthManager.handleServerAuthInvalidated()
+                                return@withContext null
+                            }
+                        } else {
+                            UserApiKeyAuthManager.handleServerAuthInvalidated()
+                            return@withContext null
+                        }
                     }
                     DiscourseSessionPage.Unknown -> return@withContext UserApiKeyAuthManager.fullProfileCache
                 }
